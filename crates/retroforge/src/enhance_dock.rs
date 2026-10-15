@@ -94,6 +94,8 @@ pub struct EnhanceCtx<'a> {
     /// Whether a GPU compositor exists at all. Without one there is
     /// nothing to render the map with, and saying so beats an empty pane.
     pub has_compositor: bool,
+    /// Ticket W30-08: each governed chip's live status, from the last frame.
+    pub governors: crate::clock_governor::GovernorReport,
 }
 
 /// What the user did, for `crate::app` to act on.
@@ -342,6 +344,20 @@ pub fn apply_toggle(
         // Ticket W30-01: the app's `sync_superfx_overclock` reads the
         // setting every frame, so no dedicated action is needed.
         "superfx_overclock" => ctx_settings.superfx_overclock = enabled,
+        // Ticket W30-08: likewise read every frame by `sync_clocks`. The
+        // NES row reads on at 1+ lines, so switching it on starts at a
+        // moderate amount.
+        "cpu_overclock" => ctx_settings.cpu_overclock = enabled,
+        "sa1_overclock" => ctx_settings.sa1_overclock = enabled,
+        "nes_extra_lines" => {
+            ctx_settings.nes_extra_lines = if !enabled {
+                0
+            } else if ctx_settings.nes_extra_lines == 0 {
+                crate::game_settings::NES_EXTRA_LINES_ON
+            } else {
+                ctx_settings.nes_extra_lines
+            };
+        }
         // Ticket W30-07: likewise read every frame by `sync_run_ahead`. The
         // row reads on at 1 or 2 frames, so switching it on starts at 1.
         "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
@@ -593,6 +609,47 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
             });
             ui.label("Some games run faster than intended at higher speeds.");
         }
+        // Ticket W30-08: each clock's ceiling, mode and live status, and the
+        // NES line count, right under their toggles.
+        if row.enabled {
+            match row.id {
+                "cpu_overclock" => {
+                    if crate::overclock_ui::clock_controls(
+                        ui,
+                        &mut ctx.settings.cpu_overclock_pct,
+                        &mut ctx.settings.cpu_overclock_mode,
+                        ctx.facts.cpu_max,
+                        ctx.governors.cpu.as_ref(),
+                        None,
+                    ) {
+                        actions.settings_changed = true;
+                    }
+                }
+                "sa1_overclock" => {
+                    if crate::overclock_ui::clock_controls(
+                        ui,
+                        &mut ctx.settings.sa1_overclock_pct,
+                        &mut ctx.settings.sa1_overclock_mode,
+                        ctx.facts.sa1_max,
+                        ctx.governors.sa1.as_ref(),
+                        None,
+                    ) {
+                        actions.settings_changed = true;
+                    }
+                }
+                "nes_extra_lines" => {
+                    if crate::overclock_ui::nes_lines_controls(
+                        ui,
+                        &mut ctx.settings.nes_extra_lines,
+                        ctx.facts.nes_lines_max,
+                        None,
+                    ) {
+                        actions.settings_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
         // Ticket W30-07: how many frames ahead, right under its toggle.
         if row.id == "run_ahead" && row.enabled && run_ahead_picker(ui, &mut ctx.settings.run_ahead)
         {
@@ -798,4 +855,33 @@ fn draw_viewport_outline(ui: &egui::Ui, image: egui::Rect, ctx: &EnhanceCtx<'_>)
         egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
         egui::StrokeKind::Inside,
     );
+}
+
+#[cfg(test)]
+mod overclock_toggle_tests {
+    use super::*;
+    use crate::game_settings::{GameSettings, NES_EXTRA_LINES_ON};
+
+    /// Ticket W30-08: the three rows' switches write their settings; the
+    /// NES row reads as on at 1+ lines, so switching it on starts at a
+    /// moderate amount and keeps a slider value already chosen.
+    #[test]
+    fn the_overclock_switches_write_their_settings() {
+        let mut s = GameSettings::default();
+        let mut actions = EnhanceActions::default();
+        apply_toggle(&mut s, "cpu_overclock", true, &mut actions);
+        apply_toggle(&mut s, "sa1_overclock", true, &mut actions);
+        assert!(s.cpu_overclock && s.sa1_overclock);
+        apply_toggle(&mut s, "cpu_overclock", false, &mut actions);
+        assert!(!s.cpu_overclock && s.sa1_overclock);
+
+        apply_toggle(&mut s, "nes_extra_lines", true, &mut actions);
+        assert_eq!(s.nes_extra_lines, NES_EXTRA_LINES_ON);
+        s.nes_extra_lines = 100;
+        apply_toggle(&mut s, "nes_extra_lines", true, &mut actions);
+        assert_eq!(s.nes_extra_lines, 100, "an existing amount is kept");
+        apply_toggle(&mut s, "nes_extra_lines", false, &mut actions);
+        assert_eq!(s.nes_extra_lines, 0);
+        assert!(actions.settings_changed);
+    }
 }

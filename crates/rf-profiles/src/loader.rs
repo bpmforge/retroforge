@@ -142,6 +142,34 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
             return Err(ProfileError::OverclockSuperfxMaxInvalid(max));
         }
     }
+    // Ticket W30-08: the CPU/SA-1 ceilings, the NES line cap, the tick
+    // counter's WRAM address and the target rate.
+    if let Some(oc) = profile.overclock.as_ref() {
+        let bad = |key, value: u32, valid| ProfileError::OverclockInvalid { key, value, valid };
+        for (key, max) in [("cpu_max", oc.cpu_max), ("sa1_max", oc.sa1_max)] {
+            if let Some(v) = max {
+                if !(100..=400).contains(&v) || v % 100 != 0 {
+                    return Err(bad(key, u32::from(v), "100..=400 in steps of 100"));
+                }
+            }
+        }
+        if let Some(v) = oc.nes_extra_lines_max.filter(|v| *v > 240) {
+            return Err(bad("nes_extra_lines_max", u32::from(v), "0..=240"));
+        }
+        if let Some(v) = oc
+            .tick_counter
+            .filter(|v| !(0x7E_0000..=0x7F_FFFF).contains(v))
+        {
+            return Err(bad(
+                "tick_counter",
+                v,
+                "a WRAM address, 0x7E0000..=0x7FFFFF",
+            ));
+        }
+        if let Some(v) = oc.target_tick_hz.filter(|v| !(1..=60).contains(v)) {
+            return Err(bad("target_tick_hz", v, "1..=60"));
+        }
+    }
 
     Ok(LoadOutcome { profile, warnings })
 }
@@ -390,6 +418,47 @@ mod tests {
             assert!(matches!(err, ProfileError::OverclockSuperfxMaxInvalid(v) if v == bad));
             assert!(err.to_string().contains("[overclock].superfx_max"));
         }
+    }
+
+    /// Ticket W30-08: the governor's keys load when valid and are rejected,
+    /// naming the key, when out of range.
+    #[test]
+    fn overclock_governor_keys_are_validated() {
+        let ok = format!(
+            "{VALID}\n[overclock]\ncpu_max = 300\nsa1_max = 400\nnes_extra_lines_max = 240\n\
+             tick_counter = 0x7E0012\ntarget_tick_hz = 30\n"
+        );
+        let oc = load_str(&ok).expect("valid").profile.overclock.unwrap();
+        assert_eq!(
+            (oc.cpu_max, oc.sa1_max, oc.nes_extra_lines_max),
+            (Some(300), Some(400), Some(240))
+        );
+        assert_eq!(
+            (oc.tick_counter, oc.target_tick_hz),
+            (Some(0x7E0012), Some(30))
+        );
+        for (key, bad) in [
+            ("cpu_max", "0"),
+            ("cpu_max", "250"),
+            ("cpu_max", "500"),
+            ("sa1_max", "50"),
+            ("sa1_max", "800"),
+            ("nes_extra_lines_max", "241"),
+            ("tick_counter", "0x7DFFFF"),
+            ("tick_counter", "0x800000"),
+            ("tick_counter", "0x0012"),
+            ("target_tick_hz", "0"),
+            ("target_tick_hz", "61"),
+        ] {
+            let text = format!("{VALID}\n[overclock]\n{key} = {bad}\n");
+            let err = load_str(&text).expect_err("invalid value must be rejected");
+            assert!(
+                err.to_string().contains(&format!("[overclock].{key}")),
+                "{key} = {bad}: {err}"
+            );
+        }
+        let edge = format!("{VALID}\n[overclock]\ntick_counter = 0x7FFFFF\n");
+        assert!(load_str(&edge).is_ok());
     }
 
     /// A minimal `[atmosphere]` table (`plane` only) also loads clean —

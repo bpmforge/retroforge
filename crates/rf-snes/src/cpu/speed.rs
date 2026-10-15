@@ -116,6 +116,30 @@ pub struct AccessCost<'a> {
     /// "accesses that happened to be free" — nothing is free here, so a
     /// zero cost with a non-zero count would be a bug.
     pub accesses: u64,
+    /// Number of those accesses that were writes (ticket W30-08: the idle
+    /// observer's "no store in the loop" test). A count only; it changes
+    /// nothing about cost or behaviour.
+    pub writes: u64,
+    /// Ticket W30-08: how many accesses touched the APU I/O ports. The
+    /// CPU overclock leaves an instruction that does so at its full
+    /// master-cycle cost (see [`is_apu_port`]).
+    pub apu_port_accesses: u64,
+}
+
+/// Ticket W30-08: whether `addr` is one of the APU I/O ports.
+///
+/// fullsnes ("SNES APU Ports"): the four ports are at `$2140-$2143` and
+/// "the APU I/O ports mirror across `$2140-$217F`", in the system banks
+/// `$00-$3F` / `$80-$BF`. The CPU-to-SPC700 handshake is a timing contract
+/// between two processors that run on the same master clock; the CPU
+/// overclock speeds up only one of them, so an instruction that talks to
+/// the other is priced at the real clock. Without this, Contra III's boot
+/// handshake (a `CMP $2140 / BNE` spin) hung at a 200% CPU clock.
+#[must_use]
+pub fn is_apu_port(addr: u32) -> bool {
+    let bank = (addr >> 16) as u8;
+    let offset = (addr & 0xFFFF) as u16;
+    (bank & 0x40 == 0) && (0x2140..=0x217F).contains(&offset)
 }
 
 impl<'a> AccessCost<'a> {
@@ -125,10 +149,15 @@ impl<'a> AccessCost<'a> {
             fast_rom,
             master_cycles: 0,
             accesses: 0,
+            writes: 0,
+            apu_port_accesses: 0,
         }
     }
 
     fn charge(&mut self, addr: u32) {
+        if is_apu_port(addr) {
+            self.apu_port_accesses += 1;
+        }
         self.master_cycles += u64::from(access_cycles(addr, self.fast_rom));
         self.accesses += 1;
     }
@@ -142,6 +171,7 @@ impl CpuBus for AccessCost<'_> {
 
     fn write(&mut self, addr: u32, value: u8) {
         self.charge(addr);
+        self.writes += 1;
         self.inner.write(addr, value);
     }
 

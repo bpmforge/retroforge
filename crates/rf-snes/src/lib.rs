@@ -12,6 +12,7 @@ pub mod debug;
 pub mod dma;
 pub mod dsp1;
 pub mod gsu;
+pub mod idle;
 pub mod mapping;
 pub mod obc1;
 pub mod ppu;

@@ -715,6 +715,19 @@ pub struct RetroForgeApp {
     hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
     superfx_cart: bool,
     superfx_cap: Option<u16>,
+    /// Ticket W30-08: the CPU / SA-1 clock policies and NES extra-line count
+    /// last sent to the core (`None` = nothing yet for this core), whether
+    /// the loaded cartridge has an SA-1, the matched profile's caps
+    /// (`[overclock].cpu_max` / `sa1_max` / `nes_extra_lines_max`), and the
+    /// governors' status from the last frame.
+    cpu_clock_sent: Option<crate::clock_governor::ClockPolicy>,
+    sa1_clock_sent: Option<crate::clock_governor::ClockPolicy>,
+    nes_lines_sent: Option<u16>,
+    sa1_cart: bool,
+    cpu_cap: Option<u16>,
+    sa1_cap: Option<u16>,
+    nes_lines_cap: Option<u16>,
+    governors: crate::clock_governor::GovernorReport,
     /// Ticket W20-13: rewind — the ring status from the last frame, whether
     /// the key is held (and whether the game was running before), and a
     /// counter pacing steps.
@@ -1579,6 +1592,14 @@ impl RetroForgeApp {
             hd_mode7_sent: None,
             superfx_cart: false,
             superfx_cap: None,
+            cpu_clock_sent: None,
+            sa1_clock_sent: None,
+            nes_lines_sent: None,
+            sa1_cart: false,
+            cpu_cap: None,
+            sa1_cap: None,
+            nes_lines_cap: None,
+            governors: crate::clock_governor::GovernorReport::default(),
             loading_active: None,
             rewind_status: None,
             rewinding: false,
@@ -3623,6 +3644,19 @@ impl RetroForgeApp {
                 if matches!(header.coprocessor, rf_cart::Coprocessor::SuperFx { .. })
         );
         self.superfx_cap = None;
+        // Ticket W30-08: a new core starts at stock clocks.
+        self.cpu_clock_sent = None;
+        self.sa1_clock_sent = None;
+        self.nes_lines_sent = None;
+        self.sa1_cart = matches!(
+            rf_cart::Cartridge::load(&bytes),
+            Ok(rf_cart::Cartridge::Snes { header, .. })
+                if matches!(header.coprocessor, rf_cart::Coprocessor::Sa1(_))
+        );
+        self.cpu_cap = None;
+        self.sa1_cap = None;
+        self.nes_lines_cap = None;
+        self.governors = crate::clock_governor::GovernorReport::default();
         self.thumb_gameplay_taken = false;
         self.window_fitted = false;
         // A new game: the profile builder and its finder were the last
@@ -4127,6 +4161,7 @@ impl RetroForgeApp {
                 crate::play_view::visible_rows(msg.height, msg.last_scanline),
             ));
             self.rewind_status = msg.rewind;
+            self.governors = msg.governors;
             self.loading_active.clone_from(&msg.loading);
             // Ticket W11-02: the probe's bytes become a live camera. The
             // `read` closure is a lookup into what the CORE peeked, not a
@@ -4668,6 +4703,14 @@ impl RetroForgeApp {
             // needs), on a GPU, while the pass keeps within its budget.
             superfx: self.superfx_cart,
             superfx_max: self.superfx_cap.unwrap_or(800),
+            snes: self.console_label == "SNES",
+            nes: self.console_label == "NES",
+            sa1: self.sa1_cart,
+            cpu_max: self.cpu_cap.unwrap_or(crate::game_settings::CLOCK_PCT_MAX),
+            sa1_max: self.sa1_cap.unwrap_or(crate::game_settings::CLOCK_PCT_MAX),
+            nes_lines_max: self
+                .nes_lines_cap
+                .unwrap_or(crate::game_settings::NES_EXTRA_LINES_MAX),
             fog_rendered: self.atmosphere_pin.is_some()
                 && self.gpu.is_some()
                 && self.fog_budget.is_enabled()
@@ -8062,6 +8105,42 @@ impl RetroForgeApp {
                         .color(tokens.warn),
                     );
                 }
+                // Ticket W30-08: each clock's ceiling, mode and live status,
+                // and the NES line count.
+                if row.enabled {
+                    let facts = self.game_facts();
+                    let governors = self.governors;
+                    let settings = &mut self.current_game_settings;
+                    let muted = Some(tokens.muted);
+                    let changed = match row.id {
+                        "cpu_overclock" => crate::overclock_ui::clock_controls(
+                            ui,
+                            &mut settings.cpu_overclock_pct,
+                            &mut settings.cpu_overclock_mode,
+                            facts.cpu_max,
+                            governors.cpu.as_ref(),
+                            muted,
+                        ),
+                        "sa1_overclock" => crate::overclock_ui::clock_controls(
+                            ui,
+                            &mut settings.sa1_overclock_pct,
+                            &mut settings.sa1_overclock_mode,
+                            facts.sa1_max,
+                            governors.sa1.as_ref(),
+                            muted,
+                        ),
+                        "nes_extra_lines" => crate::overclock_ui::nes_lines_controls(
+                            ui,
+                            &mut settings.nes_extra_lines,
+                            facts.nes_lines_max,
+                            muted,
+                        ),
+                        _ => false,
+                    };
+                    if changed {
+                        actions.settings_changed = true;
+                    }
+                }
                 // Ticket W30-07: how many frames ahead.
                 if row.id == "run_ahead"
                     && row.enabled
@@ -10323,6 +10402,18 @@ impl RetroForgeApp {
         self.superfx_cap = matched
             .as_ref()
             .and_then(|(p, _)| p.overclock.as_ref()?.superfx_max);
+        // Ticket W30-08: the other `[overclock]` caps, and the governor's
+        // tick signal.
+        let overclock = matched.as_ref().and_then(|(p, _)| p.overclock.clone());
+        self.cpu_cap = overclock.as_ref().and_then(|o| o.cpu_max);
+        self.sa1_cap = overclock.as_ref().and_then(|o| o.sa1_max);
+        self.nes_lines_cap = overclock.as_ref().and_then(|o| o.nes_extra_lines_max);
+        self.send_command(CoreCommand::SetClockSignal(
+            crate::clock_governor::ClockSignal {
+                tick_counter: overclock.as_ref().and_then(|o| o.tick_counter),
+                target_hz: overclock.as_ref().and_then(|o| o.target_tick_hz),
+            },
+        ));
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -11861,6 +11952,7 @@ impl RetroForgeApp {
     ) {
         self.mode7_seen = true;
         let msg = core_thread::FrameMsg {
+            governors: crate::clock_governor::GovernorReport::default(),
             loading: None,
             paced: true,
             rewind: None,
@@ -13902,6 +13994,7 @@ impl RetroForgeApp {
                     map_texture: self.ultrawide_texture.as_ref(),
                     fm13_message: self.fm13_message.as_deref(),
                     has_compositor: self.compositor.is_some(),
+                    governors: self.governors,
                 };
                 actions = self.enhance.ui(ui, &mut view);
             });
@@ -14006,6 +14099,66 @@ impl RetroForgeApp {
         if self.superfx_sent != Some(want) {
             self.send_command(CoreCommand::SetGsuOverclock(want));
             self.superfx_sent = Some(want);
+        }
+    }
+
+    /// Ticket W30-08: keep the core's CPU and SA-1 clock policies and the NES
+    /// extra-line count matching the rows' EFFECTIVE state (Enhanced mode,
+    /// the right console or chip, toggle on), capped by the matched
+    /// profile's `[overclock]` keys; sends only on a change. The slider is
+    /// the governor's ceiling (Governed, the default) or the fixed speed.
+    fn sync_clocks(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let facts = self.game_facts();
+        let rows = crate::enhance_ui::feature_rows(&self.current_game_settings, &facts);
+        let effective = |id: &str| rows.iter().any(|r| r.id == id && r.effective());
+        let s = &self.current_game_settings;
+        let policy = |on: bool, pct: u16, mode: crate::game_settings::OverclockMode, cap: u16| {
+            use crate::clock_governor::ClockPolicy;
+            use crate::game_settings::OverclockMode;
+            let ceiling = pct.min(cap).max(100);
+            match (on, mode) {
+                (false, _) => ClockPolicy::Off,
+                (true, OverclockMode::Governed) => ClockPolicy::Governed { ceiling },
+                (true, OverclockMode::Fixed) => ClockPolicy::Fixed(ceiling),
+            }
+        };
+        let cpu = policy(
+            effective("cpu_overclock"),
+            s.cpu_overclock_pct,
+            s.cpu_overclock_mode,
+            facts.cpu_max,
+        );
+        let sa1 = policy(
+            effective("sa1_overclock"),
+            s.sa1_overclock_pct,
+            s.sa1_overclock_mode,
+            facts.sa1_max,
+        );
+        let lines = if effective("nes_extra_lines") {
+            s.nes_extra_lines.min(facts.nes_lines_max)
+        } else {
+            0
+        };
+        if self.cpu_clock_sent != Some(cpu) {
+            self.send_command(CoreCommand::SetClockPolicy(
+                crate::clock_governor::ClockChip::Cpu,
+                cpu,
+            ));
+            self.cpu_clock_sent = Some(cpu);
+        }
+        if self.sa1_clock_sent != Some(sa1) {
+            self.send_command(CoreCommand::SetClockPolicy(
+                crate::clock_governor::ClockChip::Sa1,
+                sa1,
+            ));
+            self.sa1_clock_sent = Some(sa1);
+        }
+        if self.nes_lines_sent != Some(lines) {
+            self.send_command(CoreCommand::SetNesExtraLines(lines));
+            self.nes_lines_sent = Some(lines);
         }
     }
 
@@ -14913,6 +15066,7 @@ impl eframe::App for RetroForgeApp {
         self.poll_recording(&ctx);
         self.sync_loading(&ctx);
         self.sync_superfx_overclock();
+        self.sync_clocks();
         self.sync_hd_mode7();
         self.sync_run_ahead();
         // Ticket W14-02: adopt a background library scan the moment it

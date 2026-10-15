@@ -72,6 +72,14 @@ pub enum ProfileError {
     /// `[overclock].superfx_max` was outside `100..=800` or not a multiple
     /// of 100 (ticket W30-01).
     OverclockSuperfxMaxInvalid(u16),
+    /// Another `[overclock]` key (`cpu_max`, `sa1_max`,
+    /// `nes_extra_lines_max`, `tick_counter`, `target_tick_hz`) was out of
+    /// range (ticket W30-08). `valid` describes what it accepts.
+    OverclockInvalid {
+        key: &'static str,
+        value: u32,
+        valid: &'static str,
+    },
 }
 
 impl fmt::Display for ProfileError {
@@ -121,6 +129,10 @@ impl fmt::Display for ProfileError {
             ProfileError::OverclockSuperfxMaxInvalid(v) => write!(
                 f,
                 "`[overclock].superfx_max` = {v} is invalid (valid: 100..=800 in steps of 100)"
+            ),
+            ProfileError::OverclockInvalid { key, value, valid } => write!(
+                f,
+                "`[overclock].{key}` = {value} (0x{value:X}) is invalid (valid: {valid})"
             ),
             ProfileError::AtmosphereInvalidTint(v) => write!(
                 f,

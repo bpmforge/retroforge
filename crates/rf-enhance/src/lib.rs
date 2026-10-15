@@ -29,6 +29,7 @@ pub mod scene_graph;
 pub mod scene_identity;
 pub mod scene_tracker;
 pub mod scroll_tracker;
+pub mod speed_governor;
 pub mod sprite_historian;
 pub mod stitcher;
 pub mod trust;

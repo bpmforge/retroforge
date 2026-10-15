@@ -42,6 +42,13 @@ pub fn describe(id: &str) -> &'static str {
         "superfx_overclock" => {
             "Runs the Super FX chip faster, so 3D games draw more frames. Some games speed up too \u{2014} turn it off if one does."
         }
+        "cpu_overclock" => {
+            "Removes slowdown by giving the main processor more speed only when the game needs it."
+        }
+        "sa1_overclock" => {
+            "Removes slowdown by giving the SA-1 chip more speed only when the game needs it."
+        }
+        "nes_extra_lines" => "Removes slowdown by giving the processor extra time between frames.",
         _ => "An enhancement.",
     }
 }
@@ -58,6 +65,9 @@ pub fn works_on_any_game(id: &str) -> bool {
             | "deflicker"
             | "mode7_ground"
             | "superfx_overclock"
+            | "cpu_overclock"
+            | "sa1_overclock"
+            | "nes_extra_lines"
             | "run_ahead"
             | "hd_mode7"
             | "hd2d_lens"
@@ -88,6 +98,9 @@ pub const fn player_name(id: &str) -> &'static str {
         b"diorama" => "3D diorama",
         b"mode7_ground" => "Mode 7 in 3D",
         b"superfx_overclock" => "Faster Super FX",
+        b"cpu_overclock" => "Faster CPU",
+        b"sa1_overclock" => "Faster SA-1 chip",
+        b"nes_extra_lines" => "Less slowdown",
         b"run_ahead" => "Less input lag",
         b"hd_mode7" => "Sharper Mode 7",
         b"hd2d_lens" => "Lens and lighting",
