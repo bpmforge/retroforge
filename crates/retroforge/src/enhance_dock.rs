@@ -342,6 +342,9 @@ pub fn apply_toggle(
         // Ticket W30-01: the app's `sync_superfx_overclock` reads the
         // setting every frame, so no dedicated action is needed.
         "superfx_overclock" => ctx_settings.superfx_overclock = enabled,
+        // Ticket W30-07: likewise read every frame by `sync_run_ahead`. The
+        // row reads on at 1 or 2 frames, so switching it on starts at 1.
+        "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
         // Ticket W30-04: the row reads on when any effect is, so its own
@@ -373,6 +376,23 @@ pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Asp
                 && *aspect != choice
             {
                 *aspect = choice;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// Ticket W30-07: the run-ahead choice (1 or 2 frames) as a pair of
+/// selectable labels. `true` when the choice changed. Shared by the Enhance
+/// workspace and the Enhancements cards so the two cannot drift.
+pub fn run_ahead_picker(ui: &mut egui::Ui, frames: &mut u8) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Frames ahead");
+        for (choice, label) in [(1u8, "1 frame"), (2, "2 frames")] {
+            if ui.selectable_label(*frames == choice, label).clicked() && *frames != choice {
+                *frames = choice;
                 changed = true;
             }
         }
@@ -572,6 +592,11 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 }
             });
             ui.label("Some games run faster than intended at higher speeds.");
+        }
+        // Ticket W30-07: how many frames ahead, right under its toggle.
+        if row.id == "run_ahead" && row.enabled && run_ahead_picker(ui, &mut ctx.settings.run_ahead)
+        {
+            actions.settings_changed = true;
         }
         // Ticket W30-04: the lens options, whenever the row can act (so a
         // player can tick the first effect, which is what turns it on).

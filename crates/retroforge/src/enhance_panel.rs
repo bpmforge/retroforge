@@ -36,6 +36,9 @@ pub fn describe(id: &str) -> &'static str {
         "hd2d_lens" => {
             "Adds a soft glow, a miniature-model focus blur, day and night light, and rain or snow."
         }
+        "run_ahead" => {
+            "Hides 1-2 frames of the game's own input lag by showing a frame from slightly ahead."
+        }
         "superfx_overclock" => {
             "Runs the Super FX chip faster, so 3D games draw more frames. Some games speed up too \u{2014} turn it off if one does."
         }
@@ -55,6 +58,7 @@ pub fn works_on_any_game(id: &str) -> bool {
             | "deflicker"
             | "mode7_ground"
             | "superfx_overclock"
+            | "run_ahead"
             | "hd_mode7"
             | "hd2d_lens"
     )
@@ -84,6 +88,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"diorama" => "3D diorama",
         b"mode7_ground" => "Mode 7 in 3D",
         b"superfx_overclock" => "Faster Super FX",
+        b"run_ahead" => "Less input lag",
         b"hd_mode7" => "Sharper Mode 7",
         b"hd2d_lens" => "Lens and lighting",
         _ => "Enhancement",

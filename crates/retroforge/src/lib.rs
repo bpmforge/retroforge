@@ -68,6 +68,7 @@ pub mod quick_menu;
 pub mod recording;
 pub mod reveal;
 pub mod rom_open;
+pub mod run_ahead;
 pub mod save_state;
 pub mod script_panel;
 pub mod settings;

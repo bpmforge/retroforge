@@ -590,6 +590,14 @@ pub enum CoreCommand {
     /// Enhanced-only "HD Mode 7" row is effective. Turns the frame sink's
     /// BG1 mask capture on and off with it.
     SetHdMode7(Option<rf_snes::ppu::hd_mode7::HdMode7Options>),
+    /// Ticket W30-07: run-ahead, in frames (0 = off, 1 or 2; larger values
+    /// are clamped). Presentation only: the real machine, its audio and
+    /// every observer of it advance exactly as with it off, and only the
+    /// picture sent to the UI is taken from the speculative frames
+    /// (`crate::run_ahead`). Skipped, frame by frame, whenever something is
+    /// observing execution. The shell sends non-zero only while the
+    /// Enhanced-only "Run-ahead" row is effective.
+    SetRunAhead(u8),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -1010,17 +1018,44 @@ fn display_rgba(
     rgba
 }
 
-struct FanoutSink<'a> {
-    frame: &'a mut rf_renderer::FrameBuffer,
+/// Ticket W30-02: composite the HD Mode 7 layer over `display` (the frame
+/// as it will be shown). Reads the PPU, so it runs on the core thread, right
+/// after the frame it describes. Shared by the real frame and (W30-07) the
+/// speculative one so the two cannot drift.
+pub(crate) fn hd_mode7_frame(
+    stepper: &EmuStepper,
+    sink: &rf_renderer::FrameBuffer,
+    display: &[u8],
+) -> Option<Box<HdMode7Frame>> {
+    let layer = stepper.render_hd_mode7(sink.width())?;
+    let scale = layer.width / sink.width();
+    let mask = sink.mode7_mask()?;
+    Some(Box::new(HdMode7Frame {
+        rgba: rf_renderer::hd_layer::composite_hd_layer(
+            display,
+            sink.width(),
+            sink.height(),
+            mask,
+            &layer.rgba,
+            scale,
+        ),
+        width: sink.width(),
+        height: sink.height(),
+        scale,
+    }))
+}
+
+pub(crate) struct FanoutSink<'a> {
+    pub(crate) frame: &'a mut rf_renderer::FrameBuffer,
     /// `None` when layer extraction is off (ticket W3-03a) — the split is
     /// simply not performed, rather than performed into a buffer nobody
     /// reads.
-    layers: Option<&'a mut rf_renderer::LayeredFrame>,
-    bundle: &'a mut rf_core_api::FrameBundleBuilder,
+    pub(crate) layers: Option<&'a mut rf_renderer::LayeredFrame>,
+    pub(crate) bundle: &'a mut rf_core_api::FrameBundleBuilder,
     /// Ticket W2-05: the audio path. `None` when the chain could not be
     /// built at all, which is not fatal — a silent emulator is far better
     /// than one that refuses to start because a machine has no sound card.
-    audio: Option<&'a mut crate::audio_out::AudioOut>,
+    pub(crate) audio: Option<&'a mut crate::audio_out::AudioOut>,
     /// Ticket W11-01: the dropped-sprite overlay, captured as PIXELS
     /// rather than only painted into `frame`.
     ///
@@ -1032,7 +1067,7 @@ struct FanoutSink<'a> {
     /// from reconstructed indices would silently erase an overlay the
     /// user had also switched on. Capturing the overlay lets it be
     /// re-composited instead of quietly dropped.
-    overlay: Option<&'a mut Vec<rf_core_api::OverlayPixel>>,
+    pub(crate) overlay: Option<&'a mut Vec<rf_core_api::OverlayPixel>>,
 }
 
 impl rf_core_api::CoreSink for FanoutSink<'_> {
@@ -1212,6 +1247,12 @@ fn core_thread_main(
     let mut loading: Option<rf_enhance::loading::FastForward> = None;
     let mut loading_unpaced: Option<String> = None;
     let mut user_pacing = true;
+    // Ticket W30-07: run-ahead frames asked for (0 = off), its scratch
+    // buffers, and whether memory watchpoints are armed (a watchpoint
+    // observes execution, so speculation steps aside for it).
+    let mut run_ahead: u8 = 0;
+    let mut speculator = crate::run_ahead::Speculator::new();
+    let mut watches_armed = false;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
     // (see the `pending_frames` check at the send site below) since the
     // last time it logged about it, and when that last log happened.
@@ -1284,6 +1325,9 @@ fn core_thread_main(
                 CoreCommand::SetHdMode7(options) => {
                     stepper.set_hd_mode7(options);
                     sink.set_mode7_mask_capture(options.is_some());
+                }
+                CoreCommand::SetRunAhead(frames) => {
+                    run_ahead = frames.min(crate::run_ahead::MAX_RUN_AHEAD);
                 }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
@@ -1388,6 +1432,7 @@ fn core_thread_main(
                     // UI already knows how many it sent and what
                     // `MAX_WATCHES` is, so it reports the overflow without
                     // a round trip.
+                    watches_armed = !watches.is_empty();
                     let _ = stepper.set_watches(&watches);
                 }
                 CoreCommand::RequestCanvasSnapshot => {
@@ -1568,9 +1613,13 @@ fn core_thread_main(
                 }
             }
         }
+        // One sample of the held keys serves the real frame and (W30-07) the
+        // speculative ones, so run-ahead assumes the player keeps holding
+        // exactly what they hold now.
+        let frame_input = input.load();
         let ran = match trace.as_mut() {
             None => stepper.tick_running_with_input(
-                input.load(),
+                frame_input,
                 &mut FanoutSink {
                     frame: &mut sink,
                     layers: layers_enabled.then_some(&mut layers),
@@ -1585,7 +1634,7 @@ fn core_thread_main(
                 } else {
                     let wants_cpu = producer.wants(rf_debugger::trace::TraceKind::Cpu);
                     let advanced = stepper.latch_and_advance_frame_traced(
-                        input.load(),
+                        frame_input,
                         &mut FanoutSink {
                             frame: &mut sink,
                             layers: layers_enabled.then_some(&mut layers),
@@ -1788,23 +1837,7 @@ fn core_thread_main(
             // Ticket W30-02: composite the HD Mode 7 layer over `display`
             // (the frame as it will be shown), on this thread because only
             // it may read the PPU.
-            let hd_mode7_frame = stepper.render_hd_mode7(sink.width()).and_then(|layer| {
-                let scale = layer.width / sink.width();
-                let mask = sink.mode7_mask()?;
-                Some(Box::new(HdMode7Frame {
-                    rgba: rf_renderer::hd_layer::composite_hd_layer(
-                        &display,
-                        sink.width(),
-                        sink.height(),
-                        mask,
-                        &layer.rgba,
-                        scale,
-                    ),
-                    width: sink.width(),
-                    height: sink.height(),
-                    scale,
-                }))
-            });
+            let hd_mode7_frame = hd_mode7_frame(&stepper, &sink, &display);
             // Ticket W11-14: read the layer map BEFORE the bundle is
             // handed off — it is moved by `publish`, and the mask is a
             // cheap projection of it rather than a second copy of the
@@ -1830,7 +1863,7 @@ fn core_thread_main(
                 _ => None,
             });
             bundle_writer.publish(bundle);
-            let msg = FrameMsg {
+            let mut msg = FrameMsg {
                 loading: loading_unpaced.clone(),
                 paced: pacer.is_enabled(),
                 rewind: rewind.as_ref().map(|ring| RewindStatus {
@@ -1922,6 +1955,42 @@ fn core_thread_main(
                 mode7: mode7_event.map(Box::new),
                 canvas_frame: canvas_accum.frame_position(),
             };
+            // Ticket W30-07: swap the picture for one from `run_ahead` frames
+            // later. Last on purpose: every other field above was read from
+            // the real machine, and `speculate` only ever READS it (the
+            // frames run on a shadow machine), so nothing here can reach the
+            // real timeline. Steps aside whenever something observes
+            // execution or the picture's companions would disagree with it:
+            // a trace, memory watchpoints, a paused/stepped/rewound frame, a
+            // loading or user fast-forward, the debugger's layer and
+            // audio-scope captures, an HD pack or the Upscale Studio capture,
+            // and de-flicker (its history must only see real frames).
+            if run_ahead > 0
+                && ran
+                && !stepped
+                && trace.is_none()
+                && !watches_armed
+                && loading_unpaced.is_none()
+                && pacer.is_enabled()
+                && !layers_enabled
+                && !audio_capture
+                && !hd_capture
+                && !studio_capture
+                && !historian.enabled()
+            {
+                if let Some(spec) = speculator.run(
+                    &stepper,
+                    &rom,
+                    frame_input,
+                    run_ahead,
+                    (msg.width, msg.height),
+                    overlay_capture.is_some(),
+                ) {
+                    msg.rgba = spec.rgba;
+                    msg.line_palettes = spec.line_palettes;
+                    msg.hd_mode7 = spec.hd_mode7;
+                }
+            }
             if publish_frame(
                 &frame_tx,
                 &pending_frames,

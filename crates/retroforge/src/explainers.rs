@@ -54,6 +54,13 @@ pub fn long_text(id: &str) -> &'static str {
              frames are drawn. Unlike the other options it changes the simulation, so some \
              games also run faster than intended; it is off until you turn it on."
         }
+        "run_ahead" => {
+            "Many games take a frame or two to react to a button press. This quietly plays \
+             the game one or two frames further ahead, with your buttons held as they are, and \
+             shows you that picture, then rewinds those frames so the real game carries on \
+             exactly as before. Sound and saves come from the real game. It costs extra \
+             processor time every frame, and it is not used while you are debugging."
+        }
         "hd_mode7" => {
             "Mode 7 floors are drawn one sample per screen pixel, so racetracks and world \
              maps look blocky up close. This re-runs the console's own Mode 7 maths at a \
@@ -247,6 +254,26 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
             painter.rect_filled(band, egui::CornerRadius::same(2), faint);
             painter.circle_filled(band.center(), 5.0, accent);
             painter.circle_filled(band.center(), 10.0, accent.gamma_multiply(0.25));
+        }
+        "run_ahead" => {
+            // A row of frames: the real ones in the faint colour, and the
+            // picture shown reaching one frame past the latest real one.
+            let n = 5;
+            let w = r.width() / n as f32;
+            let y = r.center().y;
+            for i in 0..n {
+                let cell = egui::Rect::from_min_size(
+                    egui::pos2(r.left() + w * i as f32 + 3.0, y - 9.0),
+                    egui::vec2(w - 6.0, 18.0),
+                );
+                let shown = i == n - 1;
+                painter.rect_filled(
+                    cell,
+                    egui::CornerRadius::same(2),
+                    if shown { accent } else { faint },
+                );
+            }
+            painter.hline(r.left()..=r.right(), y + 18.0, thin);
         }
         "hd_mode7" => {
             // The same floor sampled coarsely (left) and finely (right).

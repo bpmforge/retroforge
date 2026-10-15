@@ -708,6 +708,8 @@ pub struct RetroForgeApp {
     /// (`None` = nothing yet for this core), whether the loaded cartridge
     /// has a Super FX, and the matched profile's `[overclock].superfx_max`.
     superfx_sent: Option<u16>,
+    /// Ticket W30-07: the run-ahead frames last sent to the core.
+    run_ahead_sent: Option<u8>,
     /// Ticket W30-02: the HD Mode 7 options last sent to the core
     /// (outer `None` = nothing sent yet for this core).
     hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
@@ -1573,6 +1575,7 @@ impl RetroForgeApp {
             loading_waits: Vec::new(),
             loading_sent: None,
             superfx_sent: None,
+            run_ahead_sent: None,
             hd_mode7_sent: None,
             superfx_cart: false,
             superfx_cap: None,
@@ -3612,6 +3615,7 @@ impl RetroForgeApp {
         );
         self.loading_sent = None;
         self.superfx_sent = None;
+        self.run_ahead_sent = None;
         self.hd_mode7_sent = None;
         self.superfx_cart = matches!(
             rf_cart::Cartridge::load(&bytes),
@@ -8057,6 +8061,16 @@ impl RetroForgeApp {
                         ))
                         .color(tokens.warn),
                     );
+                }
+                // Ticket W30-07: how many frames ahead.
+                if row.id == "run_ahead"
+                    && row.enabled
+                    && crate::enhance_dock::run_ahead_picker(
+                        ui,
+                        &mut self.current_game_settings.run_ahead,
+                    )
+                {
+                    actions.settings_changed = true;
                 }
                 // Ticket W30-03: the widescreen aspect.
                 if row.id == "widescreen_decoded"
@@ -13995,6 +14009,30 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W30-07: keep the core's run-ahead matching the row's
+    /// EFFECTIVE state (Enhanced mode, toggle on), sending 0 otherwise;
+    /// sends only on a change.
+    fn sync_run_ahead(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        // Not while a replay is being recorded: a take is made on the real
+        // timeline's own picture, with nothing borrowed from the future.
+        let want = if self.recorder.is_none()
+            && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .any(|r| r.id == "run_ahead" && r.effective())
+        {
+            self.current_game_settings.run_ahead
+        } else {
+            0
+        };
+        if self.run_ahead_sent != Some(want) {
+            self.send_command(CoreCommand::SetRunAhead(want));
+            self.run_ahead_sent = Some(want);
+        }
+    }
+
     /// Ticket W30-02: keep the core's HD Mode 7 matching the row's
     /// EFFECTIVE state (Enhanced mode, Mode 7 seen, toggle on), with the
     /// saved options; sends only on a change. An HD pack wins over it, so
@@ -14876,6 +14914,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_loading(&ctx);
         self.sync_superfx_overclock();
         self.sync_hd_mode7();
+        self.sync_run_ahead();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);
