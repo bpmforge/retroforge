@@ -2197,13 +2197,20 @@ impl GsuState {
             }
 
             // --- FROM Rn (prefix) / MOVES Rd,Rs (if B set) --------------
+            // fullsnes "2d Bs MOVES Rd,Rs": the WITH byte names the
+            // DESTINATION and this byte the SOURCE -- the opposite of
+            // "2s 1d MOVE Rd,Rs" above. Ticket W30-00: this arm used to copy
+            // the other way (Rn = WITH-reg), which zeroed Star Fox's span
+            // length before its `LOOP`/`PLOT` fill (WITH R12; FROM R3 was
+            // R3 = R12 = 0), so every fill ran 65536 pixels along one row
+            // and no polygon was ever drawn.
             0xB0..=0xBF => {
                 let n = op & 0x0F;
                 if self.regs.b_flag {
-                    let v = self.regs.reg(self.regs.sreg);
+                    let v = self.regs.reg(n);
                     self.regs.set_ov(v & 0x0080 != 0); // fullsnes "OV=bit7"
                     self.regs.set_zs(v);
-                    self.regs.commit_to(n, v);
+                    self.regs.commit_to(self.regs.dreg, v);
                     self.regs.reset_prefix_state();
                     2
                 } else {
@@ -2427,15 +2434,15 @@ mod exec_tests {
 
     #[test]
     fn mov_move_moves_ibt_iwt() {
-        // WITH R3; MOVE R2,R3 (0x23,0x12); WITH R2; MOVES R5,R2 (0x22,0xB5);
+        // WITH R3; MOVE R2,R3 (0x23,0x12); WITH R5; MOVES R5,R2 (0x25,0xB2);
         // IBT R4,#-2 (0xA4,0xFE); IWT R6,#1234h (0xF6,0x34,0x12).
-        let (mut g, rom) = program(&[0x23, 0x12, 0x22, 0xB5, 0xA4, 0xFE, 0xF6, 0x34, 0x12]);
+        let (mut g, rom) = program(&[0x23, 0x12, 0x25, 0xB2, 0xA4, 0xFE, 0xF6, 0x34, 0x12]);
         g.regs.regs[3] = 0x1234;
         g.regs.regs[2] = 0x8000; // bit7 set, for MOVES's OV=bit7 check
         step_n(&mut g, &rom, 2); // WITH R3; MOVE R2,R3
         assert_eq!(g.regs.reg(2), 0x1234);
         assert!(!g.regs.b_flag, "MOVE resets prefix state");
-        step_n(&mut g, &rom, 2); // WITH R2; MOVES R5,R2
+        step_n(&mut g, &rom, 2); // WITH R5; MOVES R5,R2 (R5 = R2)
         assert_eq!(g.regs.reg(5), 0x1234); // R2 was overwritten above
         assert!(!g.regs.ov_flag(), "bit7 of 0x1234 is 0");
         step_n(&mut g, &rom, 1); // IBT R4,#-2
