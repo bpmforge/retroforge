@@ -35,3 +35,10 @@ entity_overlay = false
 [overclock]
 # Found by observation 2026-10-15 (W30-00 probe): a WRAM byte that steps once per game tick — ~3/s, 5-6/s, 8-9/s at GSU 100/200/400% before the W30-00 fix, ~18/s at 100% after it.
 tick_counter = 0x7E15BD
+# W30-01d (2026-10-15, observation): in the attract demo at 100% the light 3D
+# scenes hold a flat 30 ticks/s (60/2, the game's own frame limiter) and heavy
+# flight drops to 15-20; menus/2D scenes count every frame (60). The governor
+# target is that unslowed 3D rate, so it only ever lifts slowdown back toward
+# 30 and never past it. A learned target picked 30 or 60 depending on what
+# was on screen, which is why it is pinned here.
+target_tick_hz = 30
