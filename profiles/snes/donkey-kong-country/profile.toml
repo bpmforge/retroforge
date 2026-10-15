@@ -4,6 +4,8 @@
 # cited from community maps (each row's `source`) and, where the
 # census reached play, watched there (each row's notes say which).
 # No camera: the census did not find one for this game yet.
+# 2026-10-15 (D-021): RAM rows that cited a game disassembly were removed;
+# they return only when found by observation in play.
 
 [meta]
 profile_version = "0.1"
@@ -33,34 +35,3 @@ label = "level"
 notes = "Current level id. Watched in play on this dump: 0, changed 0 times over 1179 frames."
 source = "https://datacrystal.tcrf.net/wiki/Donkey_Kong_Country_(SNES)/RAM_map"
 
-[[memory_map]]
-addr = 0x7E0575
-len = 2
-type = "u16"
-label = "lives"
-notes = "Current life count. Watched in play on this dump: 0, changed 0 times over 1179 frames."
-source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
-
-[[memory_map]]
-addr = 0x7E057B
-len = 2
-type = "u16"
-label = "bananas"
-notes = "Current banana count. Watched in play on this dump: 0, changed 0 times over 1179 frames."
-source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
-
-[[memory_map]]
-addr = 0x7E057F
-len = 2
-type = "u16"
-label = "kong_letters"
-notes = "Collected K-O-N-G letters. Watched in play on this dump: 0, changed 0 times over 1179 frames."
-source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
-
-[[memory_map]]
-addr = 0x7E056F
-len = 2
-type = "u16"
-label = "character"
-notes = "Current Kong. Watched in play on this dump: 0, changed 0 times over 1179 frames."
-source = "https://github.com/Yoshifanatic1/Donkey-Kong-Country-1-Disassembly/blob/main/DKC1/RAM_Map_DKC1.asm"
