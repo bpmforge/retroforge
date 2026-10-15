@@ -19,6 +19,7 @@
 mod catch_up;
 mod controller;
 mod events;
+mod extra_lines;
 mod integration;
 mod memory_map;
 mod mmc3_irq;

@@ -1287,6 +1287,13 @@ pub struct Sa1State {
     /// letting the debt grow across many held frames would turn the first
     /// catch-up loop after a long wait into an unbounded one.
     pub credit: u64,
+    /// Ticket W30-08: SA-1 instructions run since the cartridge loaded —
+    /// a diagnostic for the overclock probes, like the GSU's
+    /// `instructions_executed`. Not saved.
+    pub instructions_executed: u64,
+    /// Ticket W30-08: the read-only idle observer for the SA-1 CPU (see
+    /// [`crate::idle`]). Not saved, never read by the simulation.
+    pub idle: crate::idle::IdleTracker,
 }
 
 impl Sa1State {
@@ -1300,6 +1307,8 @@ impl Sa1State {
             cpu: crate::cpu::Cpu::new(),
             booted: false,
             credit: 0,
+            instructions_executed: 0,
+            idle: crate::idle::IdleTracker::default(),
         }
     }
 
@@ -1380,6 +1389,8 @@ impl Sa1State {
             self.cpu.interrupt_to_vector(&mut bus, vector);
         }
 
+        let was_waiting = self.cpu.stopped && self.cpu.wai;
+        let start_pc = (self.cpu.pbr, self.cpu.pc);
         let result = self.cpu.step(&mut bus);
         let cost = if bus.cycles == 0 && self.cpu.stopped {
             // A halted SA-1 still burns clock, the same reasoning
@@ -1389,6 +1400,18 @@ impl Sa1State {
         } else {
             bus.cycles
         };
+        if result.is_ok() {
+            self.idle.observe(
+                start_pc,
+                (self.cpu.pbr, self.cpu.pc),
+                cost,
+                bus.writes,
+                was_waiting || (self.cpu.stopped && self.cpu.wai),
+            );
+            if !(bus.cycles == 0 && self.cpu.stopped) {
+                self.instructions_executed += 1;
+            }
+        }
         result.map(|()| cost)
     }
 }
@@ -1411,6 +1434,9 @@ pub struct Sa1Bus<'a> {
     /// directly rather than as a separate wrapper type since `Sa1Bus`
     /// already owns every field a cost function would need.
     cycles: u64,
+    /// Bus writes this instruction made (ticket W30-08: the idle
+    /// observer's "no store in the loop" test). A count only.
+    writes: u64,
     /// This step's SNES-side ROM/BW-RAM contention (ticket W17-04) — see
     /// [`Self::access_cost`].
     rom_contended: bool,
@@ -1434,6 +1460,7 @@ impl<'a> Sa1Bus<'a> {
             bwram,
             board,
             cycles: 0,
+            writes: 0,
             rom_contended,
             bwram_contended,
         }
@@ -1539,6 +1566,7 @@ impl CpuBus for Sa1Bus<'_> {
     fn write(&mut self, addr: u32, value: u8) {
         let target = self.target(addr);
         self.cycles += self.access_cost(target);
+        self.writes += 1;
         match target {
             // Ticket W17-03: `$222A` CIWP gates the SA-1 side's own I-RAM
             // writes (fullsnes "...Memory Control"). Reset value `$00`

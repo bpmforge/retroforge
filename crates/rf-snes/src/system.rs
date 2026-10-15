@@ -10,6 +10,60 @@
 //! crash**", so the failure has to arrive as a `Result` from the entry
 //! point a front-end actually calls, which is here rather than three
 //! layers down.
+//!
+//! ## CPU overclock (ticket W30-08)
+//!
+//! `SnesSystem::cpu_clock_multiplier` gives the 65816 `m` times the
+//! instructions per frame **without changing anything else about the
+//! frame**: the frame rate, the S-DSP/SPC700 pace (so audio pitch and
+//! sample count), the PPU raster, the H/V IRQ timers, the NMI/IRQ edges,
+//! DMA and HDMA all stay on the console's real master clock.
+//!
+//! ### The approach: scale what an instruction costs the rest of the machine
+//!
+//! [`SnesSystem::step`] prices an instruction in master cycles (`spent`:
+//! its bus accesses at 6/8/12 cycles each plus its internal cycles) and
+//! then hands that one number to everything downstream: the master-cycle
+//! count, the APU's debt, the raster (`Timing::advance`) and the
+//! coprocessors' credit. The overclock changes exactly one thing, the
+//! number those consumers see: `spent / m`, with the division's remainder
+//! carried to the next instruction (6, 8 and 12 are not all divisible by
+//! 3 or 4, and dropping the remainder would silently lose clock). The CPU
+//! executes the same instructions with the same bus effects; the machine
+//! around it simply advances less per instruction, so within one frame of
+//! master time the CPU runs `m` times as many. DMA/HDMA cycles, charged
+//! separately, are not scaled — a transfer takes as long as it always did.
+//!
+//! Three details follow from "everything keys off the master clock":
+//!
+//! - A **halted** CPU (`WAI`/`STP`) is charged its flat one-cycle step
+//!   unscaled: waiting is wall-clock time, not computation, and the idle
+//!   observer's cycle counts stay in real console cycles.
+//! - The **math unit** is clocked by the CPU clock (fullsnes "SNES Maths
+//!   Multiply/Divide": waits are counted in CPU cycles "no matter if the CPU
+//!   Clock is 3.5MHz or 2.6MHz"), and still receives the instruction's
+//!   true cycle count. A multiply therefore finishes in the same number of
+//!   instructions as before, so a game's wait-N-NOPs idiom stays correct.
+//! - The **SA-1 and Super FX** keep their own multipliers; their credit is
+//!   the scaled master time (`scaled + dma`), so a faster 65816 does not
+//!   starve them: per master second they still run what they always did.
+//!
+//! ### Why not the other candidate: extra CPU-only time in vblank
+//!
+//! The NES trick (`rf-nes`'s extra vblank lines) works because the NES
+//! reads its PPU through a few registers and does its VRAM work in the
+//! first lines of vblank. On the SNES the vblank window is precisely when
+//! games DMA to VRAM/OAM/CGRAM — a longer vblank changes what fits in it
+//! and when `$4212`'s vblank bit falls — and the S-CPU's own bus
+//! (`$4210`/`$4212` polling, HDMA, auto-joypad read, the NMI handler's
+//! timing) is tied to the real raster in far more ways. Scaling the
+//! instruction clock keeps every one of those events at its real master
+//! time and needs no new notion of "time the machine does not see".
+//!
+//! At `m == 1` the code path is the pre-W30-08 one (`scaled == spent`, the
+//! remainder untouched), pinned by a state-hash test. The setting is not
+//! saved: restoring a state at `m > 1` drops at most `m - 1` master cycles
+//! of raster phase, which is irrelevant for a mode that is not Accuracy.
 
 use rf_cart::{CartError, Cartridge, SnesMapMode};
 
@@ -47,6 +101,22 @@ pub struct SnesSystem {
     /// multiples only, so the credit stays an exact integer and a save/
     /// load round trip cannot lose a fractional remainder.
     pub gsu_clock_multiplier: u64,
+    /// Ticket W30-08: the SA-1's credit multiplier, exactly like
+    /// [`Self::gsu_clock_multiplier`] — `1` is the cartridge's own 10.74
+    /// MHz clock. Whole multiples only, never saved.
+    pub sa1_clock_multiplier: u64,
+    /// Ticket W30-08: the 65816's clock multiplier — `1` is the console's
+    /// own speed. Not machine state (never saved). See the module doc's
+    /// "CPU overclock" section for what it does and does not move.
+    pub cpu_clock_multiplier: u64,
+    /// Ticket W30-08: master cycles (in `1/cpu_clock_multiplier` units)
+    /// the scaled instruction clock has carried over, so a multiplier that
+    /// does not divide an instruction's cost loses no time. Always `0` at
+    /// multiplier `1`.
+    cpu_overclock_remainder: u64,
+    /// Ticket W30-08: the read-only idle observer for the S-CPU — see
+    /// [`crate::idle`]. Not saved, never read by the simulation.
+    pub idle: crate::idle::IdleTracker,
 }
 
 impl SnesSystem {
@@ -103,6 +173,10 @@ impl SnesSystem {
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
             gsu_clock_multiplier: 1,
+            sa1_clock_multiplier: 1,
+            cpu_clock_multiplier: 1,
+            cpu_overclock_remainder: 0,
+            idle: crate::idle::IdleTracker::default(),
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -234,6 +308,10 @@ impl SnesSystem {
             last_instr_accesses: 0,
             last_instr_master_cycles: 0,
             gsu_clock_multiplier: 1,
+            sa1_clock_multiplier: 1,
+            cpu_clock_multiplier: 1,
+            cpu_overclock_remainder: 0,
+            idle: crate::idle::IdleTracker::default(),
         };
         system.reset();
         system
@@ -254,6 +332,11 @@ impl SnesSystem {
         self.master_cycles = 0;
         self.pending_nmi = false;
         self.nmi_hold = false;
+        self.cpu_overclock_remainder = 0;
+        self.idle.clear();
+        if let Some(sa1) = self.bus.sa1.as_mut() {
+            sa1.idle.clear();
+        }
         self.bus.timing = crate::timing::Timing::new();
     }
 
@@ -280,6 +363,9 @@ impl SnesSystem {
         // since `stopped` is already `true` by the time this line reads
         // it.
         let was_halted = self.cpu.stopped;
+        // Ticket W30-08: for the idle observer only.
+        let was_waiting = self.cpu.stopped && self.cpu.wai;
+        let start_pc = (self.cpu.pbr, self.cpu.pc);
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
@@ -323,9 +409,32 @@ impl SnesSystem {
         } else {
             counting.master_cycles + internal
         };
-        self.master_cycles += spent;
+        let writes = counting.writes;
         self.last_instr_accesses = counting.accesses;
+        // The instruction's own cost at the console's real clock, whatever
+        // the CPU multiplier: this is what the probes measure.
         self.last_instr_master_cycles = spent;
+        // Ticket W30-08: the time the REST of the machine sees pass for this
+        // instruction. At multiplier 1 (and for a halted step, which is
+        // waiting rather than computing) it is `spent`; at m it is
+        // `spent / m`, with the remainder carried so no time is lost.
+        let scaled = if was_halted || self.cpu_clock_multiplier <= 1 {
+            spent
+        } else {
+            let total = self.cpu_overclock_remainder + spent;
+            self.cpu_overclock_remainder = total % self.cpu_clock_multiplier;
+            total / self.cpu_clock_multiplier
+        };
+        // Ticket W30-08: the idle observer, fed values already computed, in
+        // master-clock cycles (`scaled`), so idle time is real console time.
+        self.idle.observe(
+            start_pc,
+            (self.cpu.pbr, self.cpu.pc),
+            scaled,
+            writes,
+            was_waiting || (self.cpu.stopped && self.cpu.wai),
+        );
+        self.master_cycles += scaled;
 
         // The math unit is "clocked by the CPU Clock" (fullsnes "SNES
         // Maths Multiply/Divide": "one needs the same amount of 'wait'
@@ -354,7 +463,7 @@ impl SnesSystem {
         // (ticket W14-09; EMULATION_CORES.md §1, catch-up to the master
         // cycle). It is never a free-running thread, but it was never
         // meant to run only while the CPU stares at a port either.
-        self.bus.apu_debt += spent;
+        self.bus.apu_debt += scaled;
         let dma_cycles = self.bus.service_dma();
         self.master_cycles += dma_cycles;
         self.bus.apu_debt += dma_cycles;
@@ -378,7 +487,7 @@ impl SnesSystem {
         let events = self
             .bus
             .timing
-            .advance(spent + dma_cycles, auto_joypad, |dot, line| {
+            .advance(scaled + dma_cycles, auto_joypad, |dot, line| {
                 timer.matches(irq_mode, dot, line)
             });
 
@@ -392,6 +501,10 @@ impl SnesSystem {
             // Ticket W13-02c: the lane view shows THIS frame, so the
             // record resets where HDMA itself re-initialises.
             self.bus.clear_hdma_lanes();
+            self.idle.frame_boundary();
+            if let Some(sa1) = self.bus.sa1.as_mut() {
+                sa1.idle.frame_boundary();
+            }
             self.bus.hdma_init();
             // Ticket W14-31: swap the just-elapsed frame's per-line
             // records into `completed_*` rather than wiping them — a
@@ -592,7 +705,7 @@ impl SnesSystem {
         // raster above advances by) rather than running it on its own,
         // unsynchronised loop. Credit never accumulates while Reset is
         // held — see `Sa1State::credit`'s doc — so this loop's iteration
-        // count is bounded by `(spent + dma_cycles) / 2` (the cheapest
+        // count is bounded by `(spent + dma_cycles) * sa1_clock_multiplier / 2` (the cheapest
         // possible SA-1 access cost), which proves it terminates without
         // an artificial cap (law 8): `cost` is always at least 2 UNLESS
         // Wait holds the core (`Sa1State::step` then returns 0 having done
@@ -602,7 +715,7 @@ impl SnesSystem {
         // is exactly the memory-bomb shape law 8 warns about, so the Wait
         // check runs every pass, before the loop would ever see a second
         // zero-cost iteration.
-        let master_this_step = spent + dma_cycles;
+        let master_this_step = scaled + dma_cycles;
         // Disjoint field borrows (`bus.rom` alongside `bus.sa1`), not a
         // clone of a multi-megabyte ROM every instruction.
         let dot = self.bus.timing.dot();
@@ -626,7 +739,9 @@ impl SnesSystem {
             if sa1.regs.sa1_reset_asserted() {
                 sa1.credit = 0;
             } else {
-                sa1.credit += master_this_step;
+                // Ticket W30-08: the overclock multiplies the credit, like the
+                // GSU's below; the timer above stays on the real master clock.
+                sa1.credit += master_this_step * self.sa1_clock_multiplier;
                 while sa1.credit > 0 {
                     match sa1.step(&bus.rom, rom_contended, bwram_contended) {
                         Ok(cost) => sa1.credit = sa1.credit.saturating_sub(cost),

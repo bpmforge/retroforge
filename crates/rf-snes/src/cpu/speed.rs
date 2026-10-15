@@ -116,6 +116,10 @@ pub struct AccessCost<'a> {
     /// "accesses that happened to be free" — nothing is free here, so a
     /// zero cost with a non-zero count would be a bug.
     pub accesses: u64,
+    /// Number of those accesses that were writes (ticket W30-08: the idle
+    /// observer's "no store in the loop" test). A count only; it changes
+    /// nothing about cost or behaviour.
+    pub writes: u64,
 }
 
 impl<'a> AccessCost<'a> {
@@ -125,6 +129,7 @@ impl<'a> AccessCost<'a> {
             fast_rom,
             master_cycles: 0,
             accesses: 0,
+            writes: 0,
         }
     }
 
@@ -142,6 +147,7 @@ impl CpuBus for AccessCost<'_> {
 
     fn write(&mut self, addr: u32, value: u8) {
         self.charge(addr);
+        self.writes += 1;
         self.inner.write(addr, value);
     }
 

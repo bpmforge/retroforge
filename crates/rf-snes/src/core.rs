@@ -59,6 +59,15 @@ pub const GSU_OVERCLOCK_DEFAULT: u16 = 100;
 /// Ticket W30-01: the highest Super FX overclock offered, 8x.
 pub const GSU_OVERCLOCK_MAX: u16 = 800;
 
+/// Ticket W30-08: the SA-1's own clock, i.e. no overclock.
+pub const SA1_OVERCLOCK_DEFAULT: u16 = 100;
+/// Ticket W30-08: the highest SA-1 overclock offered, 4x.
+pub const SA1_OVERCLOCK_MAX: u16 = 400;
+/// Ticket W30-08: the console's own 65816 speed, i.e. no overclock.
+pub const CPU_OVERCLOCK_DEFAULT: u16 = 100;
+/// Ticket W30-08: the highest 65816 overclock offered, 4x.
+pub const CPU_OVERCLOCK_MAX: u16 = 400;
+
 pub struct SnesCore {
     system: SnesSystem,
     config: CoreConfig,
@@ -94,6 +103,11 @@ pub struct SnesCore {
     /// the system; `step` pushes it down every time, so there is one place
     /// the two can disagree and it is corrected before any GSU code runs.
     gsu_overclock_percent: u16,
+    /// Ticket W30-08: the SA-1 overclock, held here for the same reason as
+    /// [`Self::gsu_overclock_percent`].
+    sa1_overclock_percent: u16,
+    /// Ticket W30-08: the 65816 overclock, likewise.
+    cpu_overclock_percent: u16,
     /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
     /// stream every core hands `CoreSink::audio`.
     audio: AudioConverter,
@@ -154,6 +168,8 @@ impl SnesCore {
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
             gsu_overclock_percent: GSU_OVERCLOCK_DEFAULT,
+            sa1_overclock_percent: SA1_OVERCLOCK_DEFAULT,
+            cpu_overclock_percent: CPU_OVERCLOCK_DEFAULT,
             audio: AudioConverter::default(),
         })
     }
@@ -203,6 +219,84 @@ impl SnesCore {
     #[must_use]
     pub fn has_gsu(&self) -> bool {
         self.system.bus.gsu.is_some()
+    }
+
+    /// Ticket W30-08: run the SA-1 at `percent` of its own clock.
+    ///
+    /// The same contract as [`Self::set_gsu_overclock`] — rounded down to a
+    /// whole multiple of 100 and clamped to
+    /// [`SA1_OVERCLOCK_DEFAULT`]`..=`[`SA1_OVERCLOCK_MAX`] — and the same
+    /// signature, so a shell-side speed governor can drive the Super FX,
+    /// the SA-1 and the 65816 ([`Self::set_cpu_overclock`]) through one
+    /// path. The SA-1's credit is scaled; its timer (a hardware clock) and
+    /// everything on the SNES side are not. A cartridge without an SA-1
+    /// ignores it. Returns the value actually in force.
+    pub fn set_sa1_overclock(&mut self, percent: u16) -> u16 {
+        self.sa1_overclock_percent =
+            (percent / 100 * 100).clamp(SA1_OVERCLOCK_DEFAULT, SA1_OVERCLOCK_MAX);
+        self.sa1_overclock_percent
+    }
+
+    /// The SA-1 overclock in force, in percent (100 is off).
+    #[must_use]
+    pub fn sa1_overclock(&self) -> u16 {
+        self.sa1_overclock_percent
+    }
+
+    /// Whether the loaded cartridge carries an SA-1, i.e. whether
+    /// [`Self::set_sa1_overclock`] can do anything.
+    #[must_use]
+    pub fn has_sa1(&self) -> bool {
+        self.system.bus.sa1.is_some()
+    }
+
+    /// Ticket W30-08: run the 65816 at `percent` of the console's speed.
+    ///
+    /// Same contract and signature as [`Self::set_gsu_overclock`]
+    /// (`100..=`[`CPU_OVERCLOCK_MAX`], steps of 100). The frame rate, the
+    /// audio rate, the picture's timing, DMA/HDMA and the timers do not
+    /// change — only how many instructions the CPU gets in that time; see
+    /// the "CPU overclock" section of [`crate::system`]. Returns the value
+    /// actually in force.
+    pub fn set_cpu_overclock(&mut self, percent: u16) -> u16 {
+        self.cpu_overclock_percent =
+            (percent / 100 * 100).clamp(CPU_OVERCLOCK_DEFAULT, CPU_OVERCLOCK_MAX);
+        self.cpu_overclock_percent
+    }
+
+    /// The 65816 overclock in force, in percent (100 is off).
+    #[must_use]
+    pub fn cpu_overclock(&self) -> u16 {
+        self.cpu_overclock_percent
+    }
+
+    /// Ticket W30-08: did the 65816 reach an idle wait during the last
+    /// completed frame — a `WAI`, or a tight no-write polling loop? A game
+    /// that finishes its frame's work early idles every frame; one that
+    /// overran (slowdown) did not. A **heuristic observer**: see
+    /// [`crate::idle`] for the exact rule, what fools it, and why reading
+    /// it cannot change the emulation (it is `&self`, not saved, and fed
+    /// values the step had already computed).
+    #[must_use]
+    pub fn frame_idle(&self) -> bool {
+        self.system.idle.frame_idle()
+    }
+
+    /// Master cycles the 65816 spent idle in the last completed frame
+    /// (real console cycles, whatever the CPU multiplier).
+    #[must_use]
+    pub fn frame_idle_cycles(&self) -> u64 {
+        self.system.idle.frame_idle_cycles()
+    }
+
+    /// [`Self::frame_idle`] for the SA-1's own CPU (`false` without one).
+    #[must_use]
+    pub fn sa1_frame_idle(&self) -> bool {
+        self.system
+            .bus
+            .sa1
+            .as_ref()
+            .is_some_and(|s| s.idle.frame_idle())
     }
 
     /// The width this core is currently emitting.
@@ -402,6 +496,8 @@ impl EmulatorCore for SnesCore {
             self.pushed_watches = self.config.watches;
         }
         self.system.gsu_clock_multiplier = u64::from(self.gsu_overclock_percent / 100);
+        self.system.sa1_clock_multiplier = u64::from(self.sa1_overclock_percent / 100);
+        self.system.cpu_clock_multiplier = u64::from(self.cpu_overclock_percent / 100);
         let start_frame = self.system.bus.timing.frame;
         let mut instructions = 0u64;
         let frame_complete;

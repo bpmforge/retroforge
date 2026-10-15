@@ -175,6 +175,12 @@ impl NesBus {
             // a missing prediction costs a missed skip and never a wrong
             // dot (see `NesBus::catch_up_ppu_dots`).
             inert_recheck_in: _,
+            // Ticket W30-08: machine settings and the pause they drive
+            // (`NesBus::set_extra_vblank_lines`), not state — like
+            // `accuracy_mode`, they describe how a session is run.
+            extra_vblank_lines: _,
+            extra_cycles_left: _,
+            extra_done_frame: _,
             last_joy_read_cycle,
             last_joy_bit,
             nmi_level_latch,
@@ -203,6 +209,10 @@ impl NesBus {
 
     fn load_bus(&mut self, inp: &mut StateIn<'_>) -> Result<(), StateError> {
         self.master_cycle = inp.u64()?;
+        // Ticket W30-08: a pause in progress belongs to the run that was
+        // replaced, not to the restored machine.
+        self.extra_cycles_left = 0;
+        self.extra_done_frame = u64::MAX;
         self.open_bus = inp.u8()?;
         for index in 0..self.controllers.len() {
             self.controllers[index].load_state(inp)?;

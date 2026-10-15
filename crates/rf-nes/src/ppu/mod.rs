@@ -1545,6 +1545,21 @@ impl Ppu {
         }
     }
 
+    /// Ticket W30-08: whether the next CPU cycle is the last one before the
+    /// pre-render line (scanline 260, dot 338 or later).
+    ///
+    /// nesdev.org/wiki/PPU_frame_timing: the vblank flag is set at scanline
+    /// 241 dot 1 and cleared at the pre-render line's (261) dot 1, so line
+    /// 260 is the last line the flag is still readable as set. A CPU cycle
+    /// is three dots, so whatever phase the CPU/PPU alignment has, exactly
+    /// one cycle starts at dot 338, 339 or 340 of line 260 and none of its
+    /// dots has reached the pre-render line yet — which is the one place the
+    /// extra-vblank-lines pause (`NesBus::set_extra_vblank_lines`) can be
+    /// inserted without the PPU timeline having moved on.
+    pub(crate) fn at_end_of_vblank(&self) -> bool {
+        self.scanline == PRERENDER_SCANLINE - 1 && self.dot >= DOTS_PER_SCANLINE - 3
+    }
+
     /// Total frames completed since construction (see `frame_count`'s
     /// field doc) — [`crate::system::NesBus::frame_count`] forwards this.
     pub fn frame_count(&self) -> u64 {

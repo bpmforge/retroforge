@@ -111,6 +111,20 @@ impl NesCore {
         self.cycle_budget = budget;
     }
 
+    /// Ticket W30-08: run `lines` extra scanlines of CPU-only time every
+    /// frame (`0..=240`, default `0` = off). See
+    /// [`NesBus::set_extra_vblank_lines`] for what is and is not frozen.
+    /// Returns the value in force.
+    pub fn set_extra_vblank_lines(&mut self, lines: u16) -> u16 {
+        self.bus.set_extra_vblank_lines(lines)
+    }
+
+    /// The extra vblank lines in force (`0` is off).
+    #[must_use]
+    pub fn extra_vblank_lines(&self) -> u16 {
+        self.bus.extra_vblank_lines()
+    }
+
     /// Borrow the CPU, for the state serializer and the nestest-shaped
     /// trace formatter, which need the private bookkeeping fields too.
     ///
@@ -160,6 +174,8 @@ impl EmulatorCore for NesCore {
     fn load(&mut self, cart: CartImage<'_>) -> Result<(), CoreError> {
         let mut bus = NesBus::from_ines_bytes(cart.rom)
             .map_err(|e| CoreError::InvalidImage(format!("{e:?}")))?;
+        // A machine setting, not cartridge state: it survives a reload.
+        bus.set_extra_vblank_lines(self.bus.extra_vblank_lines());
         self.cpu = Cpu::power_on(&mut bus);
         self.bus = bus;
         Ok(())

@@ -203,6 +203,14 @@ pub struct NesBus {
     /// `crate::apu`'s module doc for the full clocking contract, and this
     /// method for the DMC memory-reader handshake that rides with it.
     apu: Apu,
+    /// Ticket W30-08: extra scanlines of CPU-only time per frame — see
+    /// [`NesBus::set_extra_vblank_lines`]. A machine setting, never saved.
+    extra_vblank_lines: u16,
+    /// CPU cycles of the current frame's extra time still to run.
+    extra_cycles_left: u32,
+    /// `Ppu::frame_count` of the frame the extra time was last inserted
+    /// into, so it runs once per frame. `u64::MAX` before the first.
+    extra_done_frame: u64,
 }
 
 impl NesBus {
@@ -411,6 +419,9 @@ impl NesBus {
             last_joy_bit: [0; 2],
             nmi_level_latch: false,
             apu: Apu::new(),
+            extra_vblank_lines: 0,
+            extra_cycles_left: 0,
+            extra_done_frame: u64::MAX,
         }
     }
 
@@ -1092,7 +1103,103 @@ impl NesBus {
         self.ppu.set_mirroring(self.mapper.mirroring());
     }
 
+    /// The most extra scanlines [`Self::set_extra_vblank_lines`] accepts:
+    /// one whole extra frame's worth of visible lines. Ticket W30-08.
+    pub const EXTRA_VBLANK_LINES_MAX: u16 = 240;
+
+    /// Ticket W30-08: give the CPU `lines` extra scanlines of time every
+    /// frame, with the rest of the machine standing still. Clamped to
+    /// `0..=`[`Self::EXTRA_VBLANK_LINES_MAX`]; returns the value in force.
+    ///
+    /// `0` (the default) leaves [`Self::tick_master`] exactly as it was —
+    /// the guard at its top is one compare, and the hardware-accurate body
+    /// below it is untouched, so a machine that never calls this is
+    /// byte-identical to one built before the setting existed (tests pin
+    /// that). It is an opt-in Enhanced-mode machine setting, not state: it
+    /// is not in save states, and a load drops any pause in progress.
+    ///
+    /// ## What happens during the extra time
+    ///
+    /// Once per frame, when the PPU is one CPU cycle short of the pre-render
+    /// line ([`Ppu::at_end_of_vblank`]: the last vblank line, so the vblank
+    /// flag and the frame's NMI — taken at line 241 — are long since done),
+    /// the bus runs `ceil(lines * 341 / 3)` more CPU cycles (a line is 341
+    /// PPU dots, three dots per CPU cycle: nesdev.org/wiki/PPU_frame_timing)
+    /// in which **only the CPU moves**:
+    ///
+    /// - The PPU does not tick: no rendering, no fetches, no new vblank edge
+    ///   or NMI, no frame boundary. The game's view of its own frame (NMI
+    ///   count, `$2002`, sprite-0, scroll) is exactly as without the setting,
+    ///   so frame-locked logic still runs once per frame — it just has more
+    ///   instructions between two frames, which is what removes slowdown.
+    /// - The APU does not tick: its sample generator, frame counter and
+    ///   channel timers are driven by CPU cycles (nesdev.org/wiki/APU), so
+    ///   letting them run would raise pitch and tempo by the overclock
+    ///   ratio. Frozen, the samples produced per frame, and every audible
+    ///   period, are unchanged.
+    /// - Cartridge cycle counters (`Mapper::tick_cpu_cycles`: FME-7, VRC IRQ
+    ///   timers) are frozen too, so an IRQ aimed at a point in the frame is
+    ///   still aimed there.
+    /// - Mapper scanline IRQs driven by PPU A12 (MMC3, nesdev.org/wiki/MMC3)
+    ///   see no spurious edges: A12 rises when the PPU fetches sprite
+    ///   patterns, and no PPU fetch happens. CPU-side `$2006`/`$2007`
+    ///   accesses still toggle A12 as they always do (they are bus accesses,
+    ///   not dots) and are drained at the next real PPU dot.
+    ///
+    /// ## Known hazards (why the card says "some games may glitch")
+    ///
+    /// A game that writes `$2000` bit 7 while the vblank flag is set takes a
+    /// second NMI immediately (nesdev.org/wiki/NMI); the flag stays set for
+    /// the whole pause. A game that polls `$2002` for the end of vblank sees
+    /// the pre-render dot arrive later in CPU time. A game that times a
+    /// loop against the raster (a cycle-counted delay) is exact only while
+    /// the extra time is not inside the delay.
+    pub fn set_extra_vblank_lines(&mut self, lines: u16) -> u16 {
+        self.extra_vblank_lines = lines.min(Self::EXTRA_VBLANK_LINES_MAX);
+        self.extra_vblank_lines
+    }
+
+    /// The extra vblank lines in force (`0` is off).
+    #[must_use]
+    pub fn extra_vblank_lines(&self) -> u16 {
+        self.extra_vblank_lines
+    }
+
+    /// The single clock entry point: the hot path is the unchanged
+    /// hardware body when the setting is off.
+    #[inline]
     fn tick_master(&mut self, cycles: u32) {
+        if self.extra_vblank_lines == 0 && self.extra_cycles_left == 0 {
+            self.tick_master_machine(cycles);
+        } else {
+            self.tick_master_extra(cycles);
+        }
+    }
+
+    /// [`Self::tick_master`] with extra vblank time enabled: per CPU cycle,
+    /// either run the pause (CPU clock only) or one ordinary machine cycle.
+    /// `cycles` bounds the loop (law 8).
+    fn tick_master_extra(&mut self, cycles: u32) {
+        for _ in 0..cycles {
+            if self.extra_cycles_left == 0
+                && self.extra_vblank_lines != 0
+                && self.extra_done_frame != self.ppu.frame_count()
+                && self.ppu.at_end_of_vblank()
+            {
+                self.extra_done_frame = self.ppu.frame_count();
+                // A line is 341 dots, a CPU cycle 3: round up to whole cycles.
+                self.extra_cycles_left = (u32::from(self.extra_vblank_lines) * 341).div_ceil(3);
+            }
+            if self.extra_cycles_left > 0 {
+                self.extra_cycles_left -= 1;
+                self.master_cycle += 1;
+            } else {
+                self.tick_master_machine(1);
+            }
+        }
+    }
+
+    fn tick_master_machine(&mut self, cycles: u32) {
         self.master_cycle += cycles as u64;
         // Ticket W14-14: cycle-counting mapper IRQs (FME-7, RAMBO-1's
         // cycle mode) advance here, and a rising IRQ queues the same

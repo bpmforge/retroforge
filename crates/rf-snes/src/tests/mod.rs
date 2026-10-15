@@ -23,6 +23,7 @@ mod dsp1_dma;
 mod hd_mode7;
 mod hdma;
 mod mapping;
+mod overclock;
 mod ppu;
 mod regs;
 mod sdd1_dma;
