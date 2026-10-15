@@ -85,6 +85,14 @@ pub fn long_text(id: &str) -> &'static str {
              exactly as before. Sound and saves come from the real game. It costs extra \
              processor time every frame, and it is not used while you are debugging."
         }
+        "snes_interpolation" => {
+            "The SNES sound chip plays each recorded sound back at the pitch it needs by \
+             blending neighbouring samples with a soft filter, which is part of how the \
+             console sounds. This swaps that filter, for what you hear only, for Cubic \
+             (smoothest), Linear, or None (raw, crunchy steps). Echo and everything the \
+             game can read stay exactly as the console has them, and it is off until you \
+             turn it on."
+        }
         "hd_mode7" => {
             "Mode 7 floors are drawn one sample per screen pixel, so racetracks and world \
              maps look blocky up close. This re-runs the console's own Mode 7 maths at a \
@@ -314,6 +322,23 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                 );
             }
             painter.hline(r.left()..=r.right(), y + 18.0, thin);
+        }
+        "snes_interpolation" => {
+            // A stepped waveform (the raw samples) and a smooth curve.
+            let n = 16;
+            let w = r.width() / n as f32;
+            let mid = r.center().y;
+            let amp = r.height() * 0.3;
+            let level = |i: usize| ((i as f32 / n as f32) * std::f32::consts::TAU).sin() * amp;
+            for i in 0..n {
+                let x = r.left() + w * i as f32;
+                painter.hline(x..=x + w, mid - level(i / 4 * 4), thin);
+            }
+            let pts: Vec<egui::Pos2> = (0..=n)
+                .map(|i| egui::pos2(r.left() + w * i as f32, mid - level(i)))
+                .collect();
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, accent)));
+            let _ = faint;
         }
         "hd_mode7" => {
             // The same floor sampled coarsely (left) and finely (right).

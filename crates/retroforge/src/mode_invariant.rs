@@ -107,6 +107,19 @@ pub const CORPUS: &[CorpusEntry] = &[
             }));
         },
     },
+    // Ticket W30-09: audio interpolation is presentation only -- the echo,
+    // registers and every saved byte keep the hardware Gaussian values --
+    // so choosing a filter must leave the machine and picture identical.
+    // (This ROM is silent; the DSP-level test in `rf-snes` proves the same
+    // with a voice playing and the echo running.)
+    CorpusEntry {
+        name: "w30-09-snes-audio-interpolation",
+        rom: mode7_floor_rom,
+        frames: 20,
+        enable_enhancement: |s| {
+            s.set_snes_interpolation(rf_snes::apu::dsp::Interpolation::Cubic);
+        },
+    },
 ];
 
 const INES_MAGIC: [u8; 4] = [0x4E, 0x45, 0x53, 0x1A]; // "NES\x1A"

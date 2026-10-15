@@ -35,7 +35,7 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Error as CpalError, SampleFormat, StreamConfig};
 
-use crate::ring::{self, RingConsumer};
+use crate::ring::{self, spread, RingConsumer, RING_CHANNELS};
 
 /// Anything that can go wrong opening or starting a device.
 #[derive(Debug)]
@@ -62,6 +62,9 @@ impl std::fmt::Display for DeviceError {
 }
 
 impl std::error::Error for DeviceError {}
+
+/// Frames the callback converts per pass (~85 ms at 48 kHz).
+const SCRATCH_FRAMES: usize = 4096;
 
 /// A running output stream plus the counters the app reads.
 ///
@@ -93,10 +96,13 @@ pub fn output_device_names() -> Vec<String> {
 impl AudioDevice {
     /// Open the default output device and start streaming from `consumer`.
     ///
-    /// The core's mono stream is duplicated across however many channels
-    /// the device wants: a mono core into a stereo device is the common
-    /// case, and duplicating is the only correct answer for it (panning a
-    /// mono NES would be a colourisation, not a fidelity choice).
+    /// The ring carries INTERLEAVED STEREO frames (ticket W30-09); a mono
+    /// core's stream is written as `L == R`. The device gets left and
+    /// right on its first two channels, the average on any further ones,
+    /// and the average alone on a mono device. A mono core into a stereo
+    /// device is therefore still the same sample on both sides —
+    /// duplicating is the only correct answer for it (panning a mono NES
+    /// would be a colourisation, not a fidelity choice).
     ///
     /// # Errors
     /// Returns [`DeviceError`] if there is no output device, the backend
@@ -150,22 +156,26 @@ impl AudioDevice {
 
         let stream = match sample_format {
             SampleFormat::F32 => {
-                let mut scratch = vec![0i16; 4096];
+                let mut scratch = vec![0i16; SCRATCH_FRAMES * RING_CHANNELS];
                 device.build_output_stream(
                     config,
                     move |out: &mut [f32], _| {
                         let frames = out.len() / channels as usize;
-                        let want = frames.min(scratch.len());
-                        let got = ring::pop_samples(&mut consumer, &mut scratch[..want]);
-                        counter.fetch_add((want - got) as u64, Ordering::Relaxed);
-                        for (frame, sample) in out
+                        let want = frames.min(SCRATCH_FRAMES);
+                        let got = ring::pop_frames(
+                            &mut consumer,
+                            &mut scratch[..want * RING_CHANNELS],
+                            RING_CHANNELS,
+                        );
+                        counter.fetch_add(
+                            ((want * RING_CHANNELS - got) / RING_CHANNELS) as u64,
+                            Ordering::Relaxed,
+                        );
+                        for (frame, lr) in out
                             .chunks_mut(channels as usize)
-                            .zip(scratch[..want].iter().copied())
+                            .zip(scratch[..want * RING_CHANNELS].chunks_exact(RING_CHANNELS))
                         {
-                            let value = f32::from(sample) / f32::from(i16::MAX);
-                            for slot in frame {
-                                *slot = value;
-                            }
+                            spread(frame, lr[0], lr[1], |s| f32::from(s) / f32::from(i16::MAX));
                         }
                     },
                     err_fn,
@@ -173,21 +183,26 @@ impl AudioDevice {
                 )
             }
             SampleFormat::I16 => {
-                let mut scratch = vec![0i16; 4096];
+                let mut scratch = vec![0i16; SCRATCH_FRAMES * RING_CHANNELS];
                 device.build_output_stream(
                     config,
                     move |out: &mut [i16], _| {
                         let frames = out.len() / channels as usize;
-                        let want = frames.min(scratch.len());
-                        let got = ring::pop_samples(&mut consumer, &mut scratch[..want]);
-                        counter.fetch_add((want - got) as u64, Ordering::Relaxed);
-                        for (frame, sample) in out
+                        let want = frames.min(SCRATCH_FRAMES);
+                        let got = ring::pop_frames(
+                            &mut consumer,
+                            &mut scratch[..want * RING_CHANNELS],
+                            RING_CHANNELS,
+                        );
+                        counter.fetch_add(
+                            ((want * RING_CHANNELS - got) / RING_CHANNELS) as u64,
+                            Ordering::Relaxed,
+                        );
+                        for (frame, lr) in out
                             .chunks_mut(channels as usize)
-                            .zip(scratch[..want].iter().copied())
+                            .zip(scratch[..want * RING_CHANNELS].chunks_exact(RING_CHANNELS))
                         {
-                            for slot in frame {
-                                *slot = sample;
-                            }
+                            spread(frame, lr[0], lr[1], |s| s);
                         }
                     },
                     err_fn,
@@ -224,14 +239,14 @@ impl AudioDevice {
         self.sample_rate
     }
 
-    /// The device's channel count. The core's mono stream is duplicated
-    /// across all of them.
+    /// The device's channel count. The ring's stereo frames are spread
+    /// across them (see [`AudioDevice::open`]).
     #[must_use]
     pub fn channels(&self) -> u16 {
         self.channels
     }
 
-    /// Total samples the callback had to fill with silence because the ring
+    /// Total frames the callback had to fill with silence because the ring
     /// was empty — the soak test's pass/fail quantity.
     #[must_use]
     pub fn underrun_samples(&self) -> u64 {

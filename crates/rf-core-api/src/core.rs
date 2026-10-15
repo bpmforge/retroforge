@@ -159,6 +159,36 @@ pub trait CoreSink {
     /// A block of interleaved audio samples produced since the last call.
     fn audio(&mut self, samples: &[i16]);
 
+    /// Ticket W30-09: whether this sink wants a core's audio as stereo
+    /// frames ([`Self::audio_stereo`]) rather than the mono stream
+    /// ([`Self::audio`]).
+    ///
+    /// Defaulted to `false`, and a core that has stereo to give (the SNES)
+    /// takes its unchanged mono path when this is `false`, so every
+    /// existing sink hears byte-for-byte what it heard before. Mono and
+    /// stereo are NOT interchangeable by averaging afterwards: the mono
+    /// path truncates `(l + r) / 2` at the core's own sample rate and
+    /// resamples that, and resampling each channel and averaging truncates
+    /// in the other order and can differ by one LSB. A sink that WRAPS
+    /// another must forward this together with [`Self::audio_stereo`].
+    fn wants_stereo(&self) -> bool {
+        false
+    }
+
+    /// Ticket W30-09: a block of stereo frames `[left, right]` at the same
+    /// rate as [`Self::audio`], produced since the last call. Only called
+    /// when [`Self::wants_stereo`] is `true`.
+    ///
+    /// The default downmixes `(l + r) / 2` and forwards to
+    /// [`Self::audio`], so a sink that never opted in still hears sound.
+    fn audio_stereo(&mut self, frames: &[[i16; 2]]) {
+        let mono: Vec<i16> = frames
+            .iter()
+            .map(|f| ((i32::from(f[0]) + i32::from(f[1])) / 2) as i16)
+            .collect();
+        self.audio(&mono);
+    }
+
     /// A subscribed event fired. Callers must check the relevant
     /// [`crate::EventMask`] bit before constructing `ev` — see
     /// [`crate::EventMask`] (FR-CORE-006).

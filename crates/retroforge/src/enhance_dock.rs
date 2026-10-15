@@ -363,6 +363,8 @@ pub fn apply_toggle(
         "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
+        // Ticket W30-09: likewise read every frame by `sync_snes_interpolation`.
+        "snes_interpolation" => ctx_settings.snes_interpolation = enabled,
         // Ticket W30-04: the row reads on when any effect is, so its own
         // switch turns the whole set on (a starting look) or off. The app
         // reads the settings every frame; no command exists to send.
@@ -411,6 +413,29 @@ pub fn run_ahead_picker(ui: &mut egui::Ui, frames: &mut u8) -> bool {
                 *frames = choice;
                 changed = true;
             }
+        }
+    });
+    changed
+}
+
+/// Ticket W30-09: the audio-interpolation filter choice (cubic, linear or
+/// none), under its toggle. `true` when it changed. Shared by the Enhance
+/// workspace and the Enhancements cards like [`diorama_controls`].
+pub fn interpolation_controls(
+    ui: &mut egui::Ui,
+    s: &mut crate::game_settings::GameSettings,
+) -> bool {
+    use rf_snes::apu::dsp::Interpolation;
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (mode, label) in [
+            (Interpolation::Cubic, "Cubic"),
+            (Interpolation::Linear, "Linear"),
+            (Interpolation::Nearest, "None"),
+        ] {
+            changed |= ui
+                .selectable_value(&mut s.snes_interpolation_mode, mode, label)
+                .changed();
         }
     });
     changed
@@ -661,6 +686,11 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         if (row.id == "diorama" || row.id == "mode7_ground")
             && row.enabled
             && diorama_controls(ui, ctx.settings, row.id == "diorama")
+        {
+            actions.settings_changed = true;
+        }
+        // Ticket W30-09: which smoother filter, right under its toggle.
+        if row.id == "snes_interpolation" && row.enabled && interpolation_controls(ui, ctx.settings)
         {
             actions.settings_changed = true;
         }

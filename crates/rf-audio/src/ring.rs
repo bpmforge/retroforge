@@ -103,6 +103,53 @@ pub fn pop_samples(consumer: &mut RingConsumer, out: &mut [i16]) -> usize {
     available
 }
 
+/// Ticket W30-09: push whole frames only. `samples` is interleaved with
+/// `channels` samples per frame; a frame that does not fit is left out
+/// rather than split, so the consumer can never read a channel-swapped
+/// stream. Returns the samples written (a multiple of `channels`).
+pub fn push_frames(producer: &mut RingProducer, samples: &[i16], channels: usize) -> usize {
+    let channels = channels.max(1);
+    let fit = producer.slots().min(samples.len()) / channels * channels;
+    push_samples(producer, &samples[..fit])
+}
+
+/// Ticket W30-09: pop whole frames only, as [`push_frames`]. `out.len()`
+/// should be a multiple of `channels`; the tail past the whole frames
+/// available is silence. Returns the samples read.
+pub fn pop_frames(consumer: &mut RingConsumer, out: &mut [i16], channels: usize) -> usize {
+    let channels = channels.max(1);
+    let whole = consumer.slots() / channels * channels;
+    let (head, _) = out.split_at_mut(out.len().min(whole) / channels * channels);
+    let got = pop_samples(consumer, head);
+    for slot in out.iter_mut().skip(got) {
+        *slot = 0;
+    }
+    got
+}
+
+/// Samples per frame in the ring: interleaved left/right (ticket W30-09).
+pub const RING_CHANNELS: usize = 2;
+
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
+/// Write one stereo frame across a device frame of any width: left and
+/// right on the first two slots, their average on the rest (and alone on a
+/// mono device). With `l == r` every slot gets that sample, which is what
+/// the mono-only ring used to do. No allocation (realtime callback).
+pub(crate) fn spread<T: Copy>(frame: &mut [T], l: i16, r: i16, convert: impl Fn(i16) -> T) {
+    let mid = convert(((i32::from(l) + i32::from(r)) / 2) as i16);
+    match frame.len() {
+        0 => {}
+        1 => frame[0] = mid,
+        _ => {
+            for slot in frame.iter_mut() {
+                *slot = mid;
+            }
+            frame[0] = convert(l);
+            frame[1] = convert(r);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +201,32 @@ mod tests {
             &[0i16; 6],
             "the tail is silence, not the last sample"
         );
+    }
+
+    #[test]
+    fn frame_push_and_pop_never_split_a_frame() {
+        let (mut tx, mut rx) = AudioRing::split(5);
+        // Room for 5 samples = 2 whole stereo frames.
+        assert_eq!(push_frames(&mut tx, &[1, 2, 3, 4, 5, 6], 2), 4);
+        let mut out = [9i16; 6];
+        assert_eq!(pop_frames(&mut rx, &mut out, 2), 4);
+        assert_eq!(out, [1, 2, 3, 4, 0, 0]);
+    }
+
+    #[test]
+    fn spread_puts_left_right_first_and_the_average_elsewhere() {
+        let mut stereo = [0i16; 2];
+        spread(&mut stereo, 100, -50, |s| s);
+        assert_eq!(stereo, [100, -50]);
+        let mut surround = [0i16; 4];
+        spread(&mut surround, 100, -50, |s| s);
+        assert_eq!(surround, [100, -50, 25, 25]);
+        let mut mono = [0i16; 1];
+        spread(&mut mono, 100, -50, |s| s);
+        assert_eq!(mono, [25]);
+        // A mono stream (l == r) fills every slot with that sample.
+        let mut dup = [0i16; 6];
+        spread(&mut dup, 7, 7, |s| s);
+        assert_eq!(dup, [7; 6]);
     }
 }

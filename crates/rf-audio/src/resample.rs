@@ -48,14 +48,16 @@ impl std::fmt::Display for ResampleError {
 
 impl std::error::Error for ResampleError {}
 
-/// Mono `i16` resampler with a live, bounded ratio adjustment.
+/// Interleaved `i16` resampler with a live, bounded ratio adjustment.
 ///
-/// Mono because the NES APU mixes to one channel (`rf_nes::apu`'s
-/// `mixed_sample`); a stereo core would construct this with `channels = 2`
-/// and interleave, which the adapter layer already supports.
+/// [`Resampler::new`] is mono (the NES APU mixes to one channel,
+/// `rf_nes::apu`'s `mixed_sample`); [`Resampler::with_channels`] builds the
+/// same thing for interleaved stereo (ticket W30-09). Every channel is
+/// resampled independently, so identical channels stay identical.
 pub struct Resampler {
     inner: Async<f32>,
     chunk_size: usize,
+    channels: usize,
     /// Input samples not yet consumed: `FixedAsync::Input` demands exactly
     /// `chunk_size` frames per call, and a core hands over whatever a frame
     /// happened to produce (~800), so the remainder waits here.
@@ -81,6 +83,24 @@ impl Resampler {
         chunk_size: usize,
         max_relative: f32,
     ) -> Result<Self, ResampleError> {
+        Self::with_channels(input_rate, output_rate, chunk_size, max_relative, 1)
+    }
+
+    /// As [`Resampler::new`] for `channels` interleaved channels.
+    /// `chunk_size` counts FRAMES (one sample per channel).
+    ///
+    /// # Errors
+    /// As [`Resampler::new`]; also for zero channels.
+    pub fn with_channels(
+        input_rate: u32,
+        output_rate: u32,
+        chunk_size: usize,
+        max_relative: f32,
+        channels: usize,
+    ) -> Result<Self, ResampleError> {
+        if channels == 0 {
+            return Err(ResampleError::Construction("zero channels".into()));
+        }
         let ratio = f64::from(output_rate) / f64::from(input_rate);
         // TRAP, measured: `rubato` treats `max_resample_ratio_relative` as
         // a RECIPROCAL-symmetric band -- passing 1.005 allows [1/1.005,
@@ -96,15 +116,16 @@ impl Resampler {
             max_rel,
             PolynomialDegree::Cubic,
             chunk_size,
-            1,
+            channels,
             FixedAsync::Input,
         )
         .map_err(|e| ResampleError::Construction(e.to_string()))?;
         Ok(Self {
             inner,
             chunk_size,
-            pending: Vec::with_capacity(chunk_size * 2),
-            scratch_in: vec![0.0; chunk_size],
+            channels,
+            pending: Vec::with_capacity(chunk_size * 2 * channels),
+            scratch_in: vec![0.0; chunk_size * channels],
             scratch_out: Vec::new(),
         })
     }
@@ -135,18 +156,20 @@ impl Resampler {
         self.pending
             .extend(input.iter().map(|&s| f32::from(s) / f32::from(i16::MAX)));
 
-        while self.pending.len() >= self.chunk_size {
+        let chunk_samples = self.chunk_size * self.channels;
+        while self.pending.len() >= chunk_samples {
             self.scratch_in
-                .copy_from_slice(&self.pending[..self.chunk_size]);
-            self.pending.drain(..self.chunk_size);
+                .copy_from_slice(&self.pending[..chunk_samples]);
+            self.pending.drain(..chunk_samples);
 
             let frames_out = self.inner.output_frames_next();
-            self.scratch_out.resize(frames_out, 0.0);
+            self.scratch_out.resize(frames_out * self.channels, 0.0);
 
-            let input_adapter = InterleavedSlice::new(&self.scratch_in, 1, self.chunk_size)
-                .map_err(|e| ResampleError::Process(e.to_string()))?;
+            let input_adapter =
+                InterleavedSlice::new(&self.scratch_in, self.channels, self.chunk_size)
+                    .map_err(|e| ResampleError::Process(e.to_string()))?;
             let mut output_adapter =
-                InterleavedSlice::new_mut(&mut self.scratch_out, 1, frames_out)
+                InterleavedSlice::new_mut(&mut self.scratch_out, self.channels, frames_out)
                     .map_err(|e| ResampleError::Process(e.to_string()))?;
             let indexing = Indexing {
                 input_offset: 0,
@@ -159,18 +182,22 @@ impl Resampler {
                 .process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing))
                 .map_err(|e| ResampleError::Process(e.to_string()))?;
 
-            out.extend(self.scratch_out[..produced].iter().map(|&s| {
-                #[allow(clippy::cast_possible_truncation)]
-                let scaled = (s * f32::from(i16::MAX))
-                    .clamp(f32::from(i16::MIN), f32::from(i16::MAX))
-                    as i16;
-                scaled
-            }));
+            out.extend(
+                self.scratch_out[..produced * self.channels]
+                    .iter()
+                    .map(|&s| {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let scaled = (s * f32::from(i16::MAX))
+                            .clamp(f32::from(i16::MIN), f32::from(i16::MAX))
+                            as i16;
+                        scaled
+                    }),
+            );
         }
         Ok(())
     }
 
-    /// Samples held back waiting for a complete chunk.
+    /// Samples (all channels) held back waiting for a complete chunk.
     #[must_use]
     pub fn pending(&self) -> usize {
         self.pending.len()
@@ -263,5 +290,34 @@ mod tests {
         r.process(&tone(200, 32), &mut out).expect("process");
         assert!(!out.is_empty(), "completing the chunk produces output");
         assert_eq!(r.pending(), 44, "with the remainder still held");
+    }
+
+    /// Ticket W30-09: a stereo resampler keeps its channels apart and, fed
+    /// the same signal on both, gives exactly what the mono one gives.
+    #[test]
+    fn stereo_channels_are_independent_and_match_mono() {
+        let mut mono = Resampler::new(48_000, 44_100, 256, MAX_RATIO_DEVIATION).expect("mono");
+        let mut st =
+            Resampler::with_channels(48_000, 44_100, 256, MAX_RATIO_DEVIATION, 2).expect("stereo");
+        let input = tone(4096, 64);
+        let mut m = Vec::new();
+        mono.process(&input, &mut m).expect("process");
+        let both: Vec<i16> = input.iter().flat_map(|&s| [s, s]).collect();
+        let mut s2 = Vec::new();
+        st.process(&both, &mut s2).expect("process");
+        assert_eq!(s2.len(), m.len() * 2);
+        for (i, &v) in m.iter().enumerate() {
+            assert_eq!(s2[2 * i], v);
+            assert_eq!(s2[2 * i + 1], v);
+        }
+        // Left only: right stays silent.
+        let mut st =
+            Resampler::with_channels(48_000, 48_000, 256, MAX_RATIO_DEVIATION, 2).expect("stereo");
+        let left_only: Vec<i16> = input.iter().flat_map(|&s| [s, 0]).collect();
+        let mut o = Vec::new();
+        st.process(&left_only, &mut o).expect("process");
+        assert!(o.iter().skip(1).step_by(2).all(|&r| r == 0));
+        assert!(o.iter().step_by(2).any(|&l| l.abs() > 1000));
+        assert!(Resampler::with_channels(48_000, 48_000, 256, MAX_RATIO_DEVIATION, 0).is_err());
     }
 }

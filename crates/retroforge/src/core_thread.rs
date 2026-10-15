@@ -609,6 +609,13 @@ pub enum CoreCommand {
     /// Enhanced-only "HD Mode 7" row is effective. Turns the frame sink's
     /// BG1 mask capture on and off with it.
     SetHdMode7(Option<rf_snes::ppu::hd_mode7::HdMode7Options>),
+    /// Ticket W30-09: how the S-DSP interpolates voices for the main L/R mix.
+    /// Presentation only: the echo, registers and every saved byte keep the
+    /// hardware Gaussian values whichever is chosen, so like `SetHdMode7`
+    /// this is safe in any mode; the shell sends a non-Gaussian filter only
+    /// while the Enhanced-only "Audio interpolation" row is effective. A
+    /// no-op on a console without an S-DSP.
+    SetSnesInterpolation(rf_snes::apu::dsp::Interpolation),
     /// Ticket W30-07: run-ahead, in frames (0 = off, 1 or 2; larger values
     /// are clamped). Presentation only: the real machine, its audio and
     /// every observer of it advance exactly as with it off, and only the
@@ -1134,6 +1141,21 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
         }
     }
 
+    /// Ticket W30-09: stereo whenever there is an audio chain to take it —
+    /// the chain is stereo end to end, so a mono core costs nothing extra
+    /// and the SNES keeps its two channels.
+    fn wants_stereo(&self) -> bool {
+        self.audio.is_some()
+    }
+
+    /// Ticket W30-09: `frame` and `bundle` ignore audio (video-only sinks),
+    /// so only the chain gets the stereo frames.
+    fn audio_stereo(&mut self, frames: &[[i16; 2]]) {
+        if let Some(audio) = self.audio.as_deref_mut() {
+            audio.push_stereo(frames);
+        }
+    }
+
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
         self.frame.event(ev.clone());
         self.bundle.event(ev);
@@ -1354,6 +1376,9 @@ fn core_thread_main(
                 CoreCommand::SetHdMode7(options) => {
                     stepper.set_hd_mode7(options);
                     sink.set_mode7_mask_capture(options.is_some());
+                }
+                CoreCommand::SetSnesInterpolation(mode) => {
+                    stepper.set_snes_interpolation(mode);
                 }
                 CoreCommand::SetRunAhead(frames) => {
                     run_ahead = frames.min(crate::run_ahead::MAX_RUN_AHEAD);
