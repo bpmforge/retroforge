@@ -325,8 +325,10 @@ pub mod camera_matrices {
 
     /// [`Placement`] for `camera` (W30-05). The eye orbits `target` on a
     /// sphere of radius `fit_distance / zoom`: pitch lifts it, yaw swings
-    /// it about the vertical axis. At the default camera this is the
-    /// pre-W30-05 placement bit for bit (`sin 0 == 0`, `cos 0 == 1`).
+    /// it about the vertical axis. The eye sits on the `+Z` side of the
+    /// target looking toward `-Z` (W30-05b): level row 0 is the far edge
+    /// (screen top) and world `+X` is screen-right, so the picture is the
+    /// level image seen from above, not mirrored or turned half way round.
     #[must_use]
     pub fn placement(
         tiles_w: f32,
@@ -351,7 +353,7 @@ pub mod camera_matrices {
         let eye = [
             target[0] + yaw.sin() * pitch.cos() * distance,
             pitch.sin() * distance,
-            target[2] - yaw.cos() * pitch.cos() * distance,
+            target[2] + yaw.cos() * pitch.cos() * distance,
         ];
         Placement {
             eye,
@@ -494,7 +496,7 @@ pub mod camera_matrices {
             let old_eye = [
                 target[0],
                 pitch.sin() * old_distance,
-                target[2] - pitch.cos() * old_distance,
+                target[2] + pitch.cos() * old_distance,
             ];
             let old_proj = perspective(
                 FOV_Y_DEG.to_radians(),
@@ -538,7 +540,7 @@ pub mod camera_matrices {
             [c[0] / c[3], c[1] / c[3]]
         }
 
-        /// The pre-W30-05 `view_proj`, reproduced verbatim: the default
+        /// The pre-W30-05 `view_proj` (with W30-05b's eye on the `+Z` side): the default
         /// camera must match it bit for bit.
         fn legacy_view_proj(
             (tiles_w, tiles_h, tile_px, aspect): (f32, f32, f32, f32),
@@ -553,7 +555,7 @@ pub mod camera_matrices {
             let eye = [
                 target[0],
                 pitch.sin() * distance,
-                target[2] - pitch.cos() * distance,
+                target[2] + pitch.cos() * distance,
             ];
             let proj = perspective(
                 FOV_Y_DEG.to_radians(),
@@ -1165,8 +1167,69 @@ impl DioramaPass {
     }
 }
 
+/// Probe helpers shared with `mode7_plane`'s tests (W30-05b).
+#[cfg(test)]
+pub(crate) mod probe_support {
+    /// Ground texture with four distinct quadrants, in image coordinates
+    /// (row 0 on top): top-left red, top-right green, bottom-left blue,
+    /// bottom-right yellow.
+    pub(crate) fn quadrant_ground(side: u32) -> Vec<u8> {
+        let mut px = Vec::with_capacity((side * side * 4) as usize);
+        for y in 0..side {
+            for x in 0..side {
+                let c = match (x < side / 2, y < side / 2) {
+                    (true, true) => [255, 0, 0, 255],
+                    (false, true) => [0, 255, 0, 255],
+                    (true, false) => [0, 0, 255, 255],
+                    (false, false) => [255, 255, 0, 255],
+                };
+                px.extend_from_slice(&c);
+            }
+        }
+        px
+    }
+
+    /// Mean screen position `(x, y)` of the pixels equal to `rgb`.
+    pub(crate) fn centroid(rgba: &[u8], width: usize, rgb: [u8; 3]) -> (f32, f32) {
+        let (mut sx, mut sy, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            if px[3] == 255 && px[..3] == rgb {
+                sx += (i % width) as f32;
+                sy += (i / width) as f32;
+                n += 1.0;
+            }
+        }
+        assert!(n > 0.0, "colour {rgb:?} is not on screen at all");
+        (sx / n, sy / n)
+    }
+
+    /// The four quadrant colours must land where the level image has them:
+    /// left-half colours left of right-half colours, top-half colours above
+    /// bottom-half colours.
+    pub(crate) fn assert_quadrants_upright(rgba: &[u8], width: usize, what: &str) {
+        let red = centroid(rgba, width, [255, 0, 0]);
+        let green = centroid(rgba, width, [0, 255, 0]);
+        let blue = centroid(rgba, width, [0, 0, 255]);
+        let yellow = centroid(rgba, width, [255, 255, 0]);
+        assert!(red.0 < green.0, "{what}: level-left (red) must be screen-left of level-right (green): {red:?} {green:?}");
+        assert!(
+            blue.0 < yellow.0,
+            "{what}: bottom row left/right: {blue:?} {yellow:?}"
+        );
+        assert!(
+            red.1 < blue.1,
+            "{what}: level-top (red) must be above level-bottom (blue): {red:?} {blue:?}"
+        );
+        assert!(
+            green.1 < yellow.1,
+            "{what}: right column top/bottom: {green:?} {yellow:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::probe_support::{assert_quadrants_upright, quadrant_ground};
     use super::*;
 
     fn gpu_or_skip(test_name: &str) -> Option<GpuContext> {
@@ -1239,5 +1302,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a, b);
+    }
+
+    /// W30-05b: screen-left is level-left (and screen-top is level-top) at
+    /// the default camera and at yaw +-30. Fixed by correcting the camera's
+    /// handedness (the eye now looks along -Z), not by flipping the texture.
+    #[test]
+    fn the_ground_is_not_mirrored_at_default_and_yawed_cameras() {
+        let Some(gpu) = gpu_or_skip("the_ground_is_not_mirrored_at_default_and_yawed_cameras")
+        else {
+            return;
+        };
+        let pass = DioramaPass::new(&gpu);
+        let scene = crate::diorama_mesh::DioramaScene {
+            tiles_w: 4,
+            tiles_h: 4,
+            tile_px: 16.0,
+            solid: &[0; 16],
+            depth: &[0; 16],
+            billboards: &[],
+        };
+        for yaw in [0.0f32, 30.0, -30.0] {
+            let camera = DioramaCamera {
+                yaw_deg: yaw,
+                ..DioramaCamera::default()
+            };
+            let verts = vertices_for_camera(&scene, 128, 128, &camera);
+            let out = pass
+                .render_camera(
+                    &gpu,
+                    &verts,
+                    &quadrant_ground(64),
+                    64,
+                    64,
+                    &[0u8; 4],
+                    1,
+                    1,
+                    4,
+                    4,
+                    16,
+                    128,
+                    128,
+                    &camera,
+                )
+                .expect("diorama renders");
+            assert_quadrants_upright(&out, 128, &format!("yaw {yaw}"));
+        }
     }
 }
