@@ -380,6 +380,56 @@ pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Asp
     changed
 }
 
+/// Ticket W30-05: the diorama camera controls -- tilt, turn and zoom
+/// sliders, plus (for the walls diorama only) a "Follow the player" switch.
+/// The Mode 7 ground has no level to scroll across, so `show_follow` is
+/// `false` there. `true` when anything changed. Shared by the Enhance
+/// workspace and the Enhancements cards so the two cannot drift.
+pub fn diorama_controls(
+    ui: &mut egui::Ui,
+    s: &mut crate::game_settings::GameSettings,
+    show_follow: bool,
+) -> bool {
+    use crate::game_settings::{
+        DIORAMA_PITCH_MAX, DIORAMA_PITCH_MIN, DIORAMA_YAW_LIMIT, DIORAMA_ZOOM_DEFAULT,
+        DIORAMA_ZOOM_MAX,
+    };
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Tilt");
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut s.diorama_pitch, DIORAMA_PITCH_MIN..=DIORAMA_PITCH_MAX)
+                    .suffix("\u{b0}"),
+            )
+            .changed();
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Turn");
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut s.diorama_yaw, -DIORAMA_YAW_LIMIT..=DIORAMA_YAW_LIMIT)
+                    .suffix("\u{b0}"),
+            )
+            .changed();
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Zoom");
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut s.diorama_zoom, DIORAMA_ZOOM_DEFAULT..=DIORAMA_ZOOM_MAX)
+                    .suffix("%"),
+            )
+            .changed();
+    });
+    if show_follow {
+        changed |= ui
+            .checkbox(&mut s.diorama_follow, "Follow the player")
+            .changed();
+    }
+    changed
+}
+
 /// Ticket W30-04: the HD-2D lens controls -- a checkbox and a strength
 /// slider per effect, the weather picker, and the time of day with its
 /// "follow my clock" switch. `true` when anything changed. Shared by the
@@ -528,6 +578,14 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         if row.id == "hd2d_lens"
             && row.availability == crate::enhance_ui::Availability::Available
             && lens_controls(ui, ctx.settings)
+        {
+            actions.settings_changed = true;
+        }
+        // Ticket W30-05: the camera, under both rows that use it. The
+        // Mode 7 ground has no level to scroll, so no "follow" there.
+        if (row.id == "diorama" || row.id == "mode7_ground")
+            && row.enabled
+            && diorama_controls(ui, ctx.settings, row.id == "diorama")
         {
             actions.settings_changed = true;
         }

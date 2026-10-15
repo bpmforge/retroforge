@@ -68,7 +68,7 @@
 //! this module's own golden test (`tests/mode7_plane_golden.rs`) is
 //! necessarily a SYNTHETIC scene for exactly that reason.
 
-use crate::diorama::{camera_matrices, DioramaPass, FOV_Y_DEG, PITCH_DEG};
+use crate::diorama::{camera_matrices, DioramaCamera, DioramaPass, FOV_Y_DEG, PITCH_DEG};
 use crate::diorama_mesh::{build_vertices, DioramaScene};
 use crate::gpu::GpuContext;
 use rf_core_api::Mode7Registers;
@@ -210,10 +210,58 @@ pub fn camera_view_proj_frame(
     native_screen_width_px: f32,
     aspect: f32,
 ) -> camera_matrices::Mat4 {
+    camera_view_proj_frame_with(
+        top,
+        bottom,
+        native_screen_width_px,
+        aspect,
+        &DioramaCamera::default(),
+    )
+}
+
+/// The pitch a user-adjusted camera gives the Mode 7 ground (W30-05): the
+/// frame-derived [`derive_pitch_deg`] shifted by how far the user moved the
+/// pitch from its default, kept inside what the matrix can represent. A
+/// default camera therefore changes nothing.
+#[must_use]
+pub fn adjusted_pitch_deg(derived: f32, camera: &DioramaCamera) -> f32 {
+    (derived + (camera.clamped().pitch_deg - PITCH_DEG)).clamp(DioramaCamera::PITCH_MIN, 88.0)
+}
+
+/// [`camera_view_proj_frame`] through a user-adjustable [`DioramaCamera`]
+/// (W30-05): yaw and zoom apply as-is, pitch as an offset from the derived
+/// pitch ([`adjusted_pitch_deg`]). `follow` is ignored: the ground quad is
+/// the whole visible playfield, so there is no level to scroll across.
+#[must_use]
+pub fn camera_view_proj_frame_with(
+    top: &Mode7Registers,
+    bottom: &Mode7Registers,
+    native_screen_width_px: f32,
+    aspect: f32,
+    camera: &DioramaCamera,
+) -> camera_matrices::Mat4 {
     let extent = ground_extent_px(top, native_screen_width_px)
         .max(ground_extent_px(bottom, native_screen_width_px));
-    let pitch = derive_pitch_deg(top, bottom);
-    camera_matrices::view_proj(1.0, 1.0, extent, aspect, pitch, FOV_Y_DEG, 1.3)
+    let camera = mode7_camera(derive_pitch_deg(top, bottom), camera);
+    camera_matrices::view_proj_camera(
+        1.0,
+        1.0,
+        extent,
+        aspect,
+        FOV_Y_DEG,
+        crate::diorama::DISTANCE_FACTOR,
+        &camera,
+    )
+}
+
+/// The camera actually used for a Mode 7 frame: user yaw/zoom, derived pitch
+/// plus the user's offset, no follow.
+fn mode7_camera(derived_pitch: f32, user: &DioramaCamera) -> DioramaCamera {
+    DioramaCamera {
+        pitch_deg: adjusted_pitch_deg(derived_pitch, user),
+        follow: None,
+        ..user.clamped()
+    }
 }
 
 /// [`render_mode7_ground`]'s frame-aware counterpart (ticket W16-14): the
@@ -243,6 +291,7 @@ pub fn render_mode7_ground_frame(
     sprite_h: u32,
     out_width: u32,
     out_height: u32,
+    camera: &DioramaCamera,
 ) -> Result<Vec<u8>, String> {
     // The larger of the two ends' extents, same reasoning as
     // `camera_view_proj_frame`'s own doc, so the tile grid and the
@@ -257,9 +306,20 @@ pub fn render_mode7_ground_frame(
         depth: &[0],
         billboards,
     };
-    let vertices = build_vertices(&scene);
     let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
-    let vp = camera_view_proj_frame(top, bottom, native_screen_width_px, aspect);
+    let vp = camera_view_proj_frame_with(top, bottom, native_screen_width_px, aspect, camera);
+    // Billboards face the camera's yaw. The ground is a single flat quad,
+    // so there are no walls to depth-sort and the default camera's mesh is
+    // the plain one.
+    let vertices = if camera.clamped().yaw_deg == 0.0 {
+        build_vertices(&scene)
+    } else {
+        crate::diorama_mesh::build_vertices_oriented(
+            &scene,
+            camera.clamped().yaw_deg,
+            [extent / 2.0, -extent],
+        )
+    };
 
     pass.render_with_vp(
         gpu,

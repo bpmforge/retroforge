@@ -17,7 +17,10 @@
 //!
 //! [`camera_matrices::view_proj`] builds a fixed-pitch ([`PITCH_DEG`]),
 //! fixed-FOV ([`FOV_Y_DEG`]) perspective camera framing the whole tile
-//! grid — "only the camera pitches" (§5), never the input/hit-testing
+//! grid; ticket W30-05's [`DioramaCamera`] makes pitch, yaw and zoom
+//! adjustable and can follow a world point instead
+//! ([`camera_matrices::view_proj_camera`]), the default being exactly this
+//! fixed camera — "only the camera pitches" (§5), never the input/hit-testing
 //! space, which stays 2D in the shell entirely (this crate has no
 //! opinion on input at all). The resulting `view * proj` matrix is
 //! uploaded as a 64-byte UBO (`shaders/diorama.wgsl`'s `Camera`) that the
@@ -48,6 +51,108 @@ pub const PITCH_DEG: f32 = 52.0;
 /// Fixed vertical field of view, degrees.
 pub const FOV_Y_DEG: f32 = 50.0;
 
+/// Margin [`DioramaPass::render`] gives [`camera_matrices::fit_distance`].
+pub const DISTANCE_FACTOR: f32 = 1.3;
+
+/// The vertices for one frame seen through `camera`. The default camera
+/// returns [`crate::diorama_mesh::build_vertices`] unchanged (so the pinned
+/// goldens hold); anything else takes the orbit-aware
+/// [`crate::diorama_mesh::build_vertices_oriented`], which needs the eye
+/// position the matching [`camera_matrices::placement`] gives.
+#[must_use]
+pub fn vertices_for_camera(
+    scene: &crate::diorama_mesh::DioramaScene<'_>,
+    out_width: u32,
+    out_height: u32,
+    camera: &DioramaCamera,
+) -> Vec<Vertex> {
+    if camera.clamped() == DioramaCamera::default() {
+        return crate::diorama_mesh::build_vertices(scene);
+    }
+    let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
+    let p = camera_matrices::placement(
+        scene.tiles_w.max(1) as f32,
+        scene.tiles_h.max(1) as f32,
+        scene.tile_px.max(1.0),
+        aspect,
+        FOV_Y_DEG,
+        DISTANCE_FACTOR,
+        camera,
+    );
+    crate::diorama_mesh::build_vertices_oriented(
+        scene,
+        camera.clamped().yaw_deg,
+        [p.eye[0], p.eye[2]],
+    )
+}
+
+/// The user-adjustable diorama camera (ticket W30-05; presentation only,
+/// nothing here reaches the simulation). [`Default`] is exactly the
+/// pre-W30-05 fixed camera ([`PITCH_DEG`], no yaw, 1.0x, whole level), so
+/// every existing caller and pinned golden is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DioramaCamera {
+    /// Degrees below horizontal, clamped to [`Self::PITCH_MIN`]`..=`[`Self::PITCH_MAX`].
+    pub pitch_deg: f32,
+    /// Degrees of orbit about the vertical axis, clamped to `-30..=30`.
+    /// Positive swings the camera toward world +X.
+    pub yaw_deg: f32,
+    /// `1.0` is the best fit of the whole level; larger moves the camera
+    /// closer (clamped to `1.0..=4.0`).
+    pub zoom: f32,
+    /// World-pixel `(x, z)` to centre on, or `None` to frame the whole
+    /// level. The shell passes the live camera's viewport centre here.
+    pub follow: Option<(f32, f32)>,
+}
+
+impl Default for DioramaCamera {
+    fn default() -> Self {
+        Self {
+            pitch_deg: PITCH_DEG,
+            yaw_deg: 0.0,
+            zoom: 1.0,
+            follow: None,
+        }
+    }
+}
+
+impl DioramaCamera {
+    pub const PITCH_MIN: f32 = 20.0;
+    pub const PITCH_MAX: f32 = 80.0;
+    pub const YAW_LIMIT: f32 = 30.0;
+    pub const ZOOM_MAX: f32 = 4.0;
+
+    /// [`Self::clamped`] with the pitch range widened to what the matrix can
+    /// represent (`1..=89`): the Mode 7 ground derives its own near-vertical
+    /// 88 degree pitch (`crate::mode7_plane::TOP_DOWN_PITCH_DEG`), which is
+    /// outside the 20..=80 the user may pick but must not be altered.
+    fn matrix_safe(self) -> Self {
+        let c = self.clamped();
+        let pitch = if self.pitch_deg.is_finite() {
+            self.pitch_deg.clamp(1.0, 89.0)
+        } else {
+            c.pitch_deg
+        };
+        Self {
+            pitch_deg: pitch,
+            ..c
+        }
+    }
+
+    /// The same camera with every field forced into its documented range
+    /// (a non-finite number falls back to the default for that field).
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let fin = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        Self {
+            pitch_deg: fin(self.pitch_deg, PITCH_DEG).clamp(Self::PITCH_MIN, Self::PITCH_MAX),
+            yaw_deg: fin(self.yaw_deg, 0.0).clamp(-Self::YAW_LIMIT, Self::YAW_LIMIT),
+            zoom: fin(self.zoom, 1.0).clamp(1.0, Self::ZOOM_MAX),
+            follow: self.follow.filter(|(x, z)| x.is_finite() && z.is_finite()),
+        }
+    }
+}
+
 /// Small hand-rolled column-major 4x4 matrix math (this crate has no
 /// `glam`/`nalgebra`/etc. dependency, `Cargo.toml`'s own dependency list —
 /// adding one for two matrices is not proportionate). Column-major to
@@ -58,6 +163,8 @@ pub const FOV_Y_DEG: f32 = 50.0;
 /// provenance stance `shader_chain.rs`'s own module doc takes for
 /// `nearest`/`scanlines`.
 pub mod camera_matrices {
+    use super::DioramaCamera;
+
     pub type Mat4 = [f32; 16];
 
     #[must_use]
@@ -180,6 +287,9 @@ pub mod camera_matrices {
     /// [`super::DioramaPass`] always calls this with its own documented
     /// constant, exposed here only so the number is named and testable
     /// rather than a magic literal buried in a render call.
+    ///
+    /// The W30-05 adjustable camera is [`view_proj_camera`]; this is its
+    /// no-yaw, no-zoom, whole-level special case.
     #[must_use]
     pub fn view_proj(
         tiles_w: f32,
@@ -190,31 +300,106 @@ pub mod camera_matrices {
         fovy_deg: f32,
         distance_factor: f32,
     ) -> Mat4 {
+        let camera = DioramaCamera {
+            pitch_deg,
+            ..DioramaCamera::default()
+        };
+        view_proj_camera(
+            tiles_w,
+            tiles_h,
+            tile_px,
+            aspect,
+            fovy_deg,
+            distance_factor,
+            &camera,
+        )
+    }
+
+    /// Where the camera sits and what it looks at, world space.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Placement {
+        pub eye: [f32; 3],
+        pub target: [f32; 3],
+        pub distance: f32,
+    }
+
+    /// [`Placement`] for `camera` (W30-05). The eye orbits `target` on a
+    /// sphere of radius `fit_distance / zoom`: pitch lifts it, yaw swings
+    /// it about the vertical axis. At the default camera this is the
+    /// pre-W30-05 placement bit for bit (`sin 0 == 0`, `cos 0 == 1`).
+    #[must_use]
+    pub fn placement(
+        tiles_w: f32,
+        tiles_h: f32,
+        tile_px: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        distance_factor: f32,
+        camera: &DioramaCamera,
+    ) -> Placement {
+        let camera = camera.matrix_safe();
         let ground_w = tiles_w * tile_px;
         let ground_h = tiles_h * tile_px;
-        let target = [ground_w / 2.0, 0.0, ground_h / 2.0];
-        let extent = ground_w.max(ground_h).max(tile_px);
-        let distance = fit_distance(ground_w, ground_h, aspect, fovy_deg, distance_factor);
-        let pitch = pitch_deg.to_radians();
+        let target = match camera.follow {
+            Some((x, z)) => [x.clamp(0.0, ground_w), 0.0, z.clamp(0.0, ground_h)],
+            None => [ground_w / 2.0, 0.0, ground_h / 2.0],
+        };
+        let distance =
+            fit_distance(ground_w, ground_h, aspect, fovy_deg, distance_factor) / camera.zoom;
+        let pitch = camera.pitch_deg.to_radians();
+        let yaw = camera.yaw_deg.to_radians();
         let eye = [
-            target[0],
+            target[0] + yaw.sin() * pitch.cos() * distance,
             pitch.sin() * distance,
-            target[2] - pitch.cos() * distance,
+            target[2] - yaw.cos() * pitch.cos() * distance,
         ];
+        Placement {
+            eye,
+            target,
+            distance,
+        }
+    }
+
+    /// The adjustable diorama camera's `proj * view` (W30-05).
+    #[must_use]
+    pub fn view_proj_camera(
+        tiles_w: f32,
+        tiles_h: f32,
+        tile_px: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        distance_factor: f32,
+        camera: &DioramaCamera,
+    ) -> Mat4 {
+        let ground_w = tiles_w * tile_px;
+        let ground_h = tiles_h * tile_px;
+        let extent = ground_w.max(ground_h).max(tile_px);
+        let p = placement(
+            tiles_w,
+            tiles_h,
+            tile_px,
+            aspect,
+            fovy_deg,
+            distance_factor,
+            camera,
+        );
+        // The far plane keeps the whole-level distance even when zoomed in,
+        // so nothing the zoomed camera can see is clipped away.
+        let far_distance = p.distance * camera.matrix_safe().zoom;
         let proj = perspective(
             fovy_deg.to_radians(),
             aspect.max(1e-3),
             1.0,
-            extent.max(distance) * 8.0,
+            extent.max(far_distance) * 8.0,
         );
-        let view = look_at(eye, target, [0.0, 1.0, 0.0]);
+        let view = look_at(p.eye, p.target, [0.0, 1.0, 0.0]);
         mul(proj, view)
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::diorama::{FOV_Y_DEG, PITCH_DEG};
+        use crate::diorama::{DioramaCamera, FOV_Y_DEG, PITCH_DEG};
 
         #[test]
         fn the_grids_own_centre_projects_inside_the_view_frustum() {
@@ -344,6 +529,147 @@ pub mod camera_matrices {
                 "the solved distance must fit the same corner the old heuristic clipped: \
                  {ndc_new:?}"
             );
+        }
+
+        // --- ticket W30-05: the adjustable camera ------------------------
+
+        fn ndc(vp: Mat4, p: [f32; 3]) -> [f32; 2] {
+            let c = mul_vec4(vp, [p[0], p[1], p[2], 1.0]);
+            [c[0] / c[3], c[1] / c[3]]
+        }
+
+        /// The pre-W30-05 `view_proj`, reproduced verbatim: the default
+        /// camera must match it bit for bit.
+        fn legacy_view_proj(
+            (tiles_w, tiles_h, tile_px, aspect): (f32, f32, f32, f32),
+            pitch_deg: f32,
+        ) -> Mat4 {
+            let ground_w = tiles_w * tile_px;
+            let ground_h = tiles_h * tile_px;
+            let target = [ground_w / 2.0, 0.0, ground_h / 2.0];
+            let extent = ground_w.max(ground_h).max(tile_px);
+            let distance = fit_distance(ground_w, ground_h, aspect, FOV_Y_DEG, 1.3);
+            let pitch = pitch_deg.to_radians();
+            let eye = [
+                target[0],
+                pitch.sin() * distance,
+                target[2] - pitch.cos() * distance,
+            ];
+            let proj = perspective(
+                FOV_Y_DEG.to_radians(),
+                aspect.max(1e-3),
+                1.0,
+                extent.max(distance) * 8.0,
+            );
+            mul(proj, look_at(eye, target, [0.0, 1.0, 0.0]))
+        }
+
+        const GRID: (f32, f32, f32, f32) = (20.0, 12.0, 16.0, 16.0 / 9.0);
+
+        #[test]
+        fn the_default_camera_reproduces_todays_view_proj_exactly() {
+            let new = view_proj_camera(
+                GRID.0,
+                GRID.1,
+                GRID.2,
+                GRID.3,
+                FOV_Y_DEG,
+                1.3,
+                &DioramaCamera::default(),
+            );
+            assert_eq!(new, legacy_view_proj(GRID, PITCH_DEG));
+            // ...and so does the legacy-signature wrapper, at any pitch
+            // (Mode 7 derives 88 degrees, outside the user's 20..=80).
+            for pitch in [PITCH_DEG, 88.0, 70.0] {
+                assert_eq!(
+                    view_proj(GRID.0, GRID.1, GRID.2, GRID.3, pitch, FOV_Y_DEG, 1.3),
+                    legacy_view_proj(GRID, pitch)
+                );
+            }
+        }
+
+        #[test]
+        fn pitch_changes_the_matrix_and_the_view() {
+            let at = |pitch_deg: f32| {
+                view_proj_camera(
+                    GRID.0,
+                    GRID.1,
+                    GRID.2,
+                    GRID.3,
+                    FOV_Y_DEG,
+                    1.3,
+                    &DioramaCamera {
+                        pitch_deg,
+                        ..DioramaCamera::default()
+                    },
+                )
+            };
+            assert_ne!(at(30.0), at(75.0));
+            // A point 40px up projects higher on a low camera than a steep one
+            // relative to its own footing: the two views differ.
+            let low = ndc(at(30.0), [160.0, 40.0, 96.0]);
+            let high = ndc(at(75.0), [160.0, 40.0, 96.0]);
+            assert!((low[1] - high[1]).abs() > 1e-3);
+        }
+
+        #[test]
+        fn yaw_moves_the_eye_and_zoom_moves_it_closer() {
+            let place = |camera: DioramaCamera| {
+                placement(GRID.0, GRID.1, GRID.2, GRID.3, FOV_Y_DEG, 1.3, &camera)
+            };
+            let base = place(DioramaCamera::default());
+            let yawed = place(DioramaCamera {
+                yaw_deg: 30.0,
+                ..DioramaCamera::default()
+            });
+            assert!(yawed.eye[0] > base.eye[0] + 1.0);
+            assert!((yawed.distance - base.distance).abs() < 1e-3);
+            let zoomed = place(DioramaCamera {
+                zoom: 2.0,
+                ..DioramaCamera::default()
+            });
+            assert!((zoomed.distance - base.distance / 2.0).abs() < 1e-3);
+        }
+
+        #[test]
+        fn follow_centres_the_given_world_point_on_screen() {
+            let point = (90.0, 140.0);
+            for (pitch, yaw, zoom) in [(52.0, 0.0, 1.0), (30.0, 20.0, 3.0), (75.0, -30.0, 4.0)] {
+                let vp = view_proj_camera(
+                    GRID.0,
+                    GRID.1,
+                    GRID.2,
+                    GRID.3,
+                    FOV_Y_DEG,
+                    1.3,
+                    &DioramaCamera {
+                        pitch_deg: pitch,
+                        yaw_deg: yaw,
+                        zoom,
+                        follow: Some(point),
+                    },
+                );
+                let n = ndc(vp, [point.0, 0.0, point.1]);
+                assert!(
+                    n[0].abs() < 1e-3 && n[1].abs() < 1e-3,
+                    "pitch {pitch} yaw {yaw} zoom {zoom}: {n:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn out_of_range_settings_are_clamped_not_trusted() {
+            let c = DioramaCamera {
+                pitch_deg: 5.0,
+                yaw_deg: 99.0,
+                zoom: 40.0,
+                follow: Some((f32::NAN, 1.0)),
+            }
+            .clamped();
+            assert_eq!(c.pitch_deg, DioramaCamera::PITCH_MIN);
+            assert_eq!(c.yaw_deg, DioramaCamera::YAW_LIMIT);
+            assert_eq!(c.zoom, DioramaCamera::ZOOM_MAX);
+            assert_eq!(c.follow, None);
         }
     }
 }
@@ -558,15 +884,57 @@ impl DioramaPass {
         out_width: u32,
         out_height: u32,
     ) -> Result<Vec<u8>, String> {
+        self.render_camera(
+            gpu,
+            vertices,
+            ground_rgba,
+            ground_w,
+            ground_h,
+            sprite_rgba,
+            sprite_w,
+            sprite_h,
+            tiles_w,
+            tiles_h,
+            tile_px,
+            out_width,
+            out_height,
+            &DioramaCamera::default(),
+        )
+    }
+
+    /// [`Self::render`] through an adjustable [`DioramaCamera`] (W30-05).
+    /// `vertices` should come from [`vertices_for_camera`] with the same
+    /// camera and output size, so billboards and draw order match the view.
+    ///
+    /// # Errors
+    /// Same as [`Self::render_with_vp`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_camera(
+        &self,
+        gpu: &GpuContext,
+        vertices: &[Vertex],
+        ground_rgba: &[u8],
+        ground_w: u32,
+        ground_h: u32,
+        sprite_rgba: &[u8],
+        sprite_w: u32,
+        sprite_h: u32,
+        tiles_w: u32,
+        tiles_h: u32,
+        tile_px: u32,
+        out_width: u32,
+        out_height: u32,
+        camera: &DioramaCamera,
+    ) -> Result<Vec<u8>, String> {
         let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
-        let vp = camera_matrices::view_proj(
+        let vp = camera_matrices::view_proj_camera(
             tiles_w.max(1) as f32,
             tiles_h.max(1) as f32,
             tile_px.max(1) as f32,
             aspect,
-            PITCH_DEG,
             FOV_Y_DEG,
-            1.3,
+            DISTANCE_FACTOR,
+            camera,
         );
         self.render_with_vp(
             gpu,
@@ -583,15 +951,6 @@ impl DioramaPass {
         )
     }
 
-    /// Same GPU pass as [`Self::render`], but with the camera's
-    /// `view * proj` matrix supplied directly rather than derived from a
-    /// tile grid + [`PITCH_DEG`]/[`FOV_Y_DEG`] — ticket W16-09's hook for
-    /// [`crate::mode7_plane`], which needs a camera whose height/distance
-    /// track the SNES's own Mode 7 matrix rather than the fixed-pitch
-    /// diorama camera. "Deliberately the same compositor... with a
-    /// different input" (`docs/design/ENHANCEMENT_WAVE_16.md` §9) — this
-    /// method IS that shared input seam: identical pipeline/bind-group/
-    /// vertex handling, only the camera differs.
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_vp(
         &self,

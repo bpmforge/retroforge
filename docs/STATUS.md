@@ -4442,3 +4442,9 @@ stories, 10 decisions).
   256x224 and 4.6 ms at 1024x896 (release, Metal, all five on). "Follow my
   clock" reads local time through the `date` command, UTC where that fails.
   Gate: workspace **2657 passing**.
+- **W30-05 — Diorama camera and upright billboards** (2026-10-15). Pitch
+  20-80°, yaw ±30°, zoom 1-4x and "Follow the player" for Diorama walls (pitch
+  offset/yaw/zoom for Mode 7 in 3D); cylindrical billboards, far-to-near
+  sorting, default camera byte-identical to before. Found: the diorama view
+  is mirrored left-right and billboards anchor at the sprite centre (W30-05b).
+  Gate: workspace **2674 passing**.

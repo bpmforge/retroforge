@@ -744,6 +744,45 @@ fn sprite_billboard(
     }
 }
 
+/// How the user wants the diorama seen (ticket W30-05): the settings'
+/// camera plus whether it follows the game's own camera. Kept apart from
+/// [`rf_renderer::diorama::DioramaCamera`] because the follow point is only
+/// known per frame, from the live game camera.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DioramaView {
+    pub camera: rf_renderer::diorama::DioramaCamera,
+    pub follow: bool,
+}
+
+impl DioramaView {
+    /// The view the per-game settings describe.
+    #[must_use]
+    pub fn from_settings(s: &crate::game_settings::GameSettings) -> Self {
+        Self {
+            camera: s.diorama_camera(),
+            follow: s.diorama_follow,
+        }
+    }
+
+    /// The camera for this frame: when following, centred on `live_centre`
+    /// (the game camera's viewport centre, in world pixels).
+    #[must_use]
+    pub fn camera_at(&self, live_centre: (f32, f32)) -> rf_renderer::diorama::DioramaCamera {
+        rf_renderer::diorama::DioramaCamera {
+            follow: self.follow.then_some(live_centre),
+            ..self.camera
+        }
+    }
+}
+
+/// World-pixel centre of the game's viewport at camera `(x, y)`.
+fn follow_point(camera_x: i64, camera_y: i64, viewport: (u16, u16)) -> (f32, f32) {
+    (
+        camera_x as f32 + f32::from(viewport.0) / 2.0,
+        camera_y as f32 + f32::from(viewport.1) / 2.0,
+    )
+}
+
 /// Build one Diorama frame for `session`'s decoded level (module doc).
 ///
 /// `ground_rgba`/`ground_w`/`ground_h` is the decoded level's rendered
@@ -772,7 +811,7 @@ fn sprite_billboard(
 ///   caller via `has_collision()` before ever reaching this function, so
 ///   in practice this is a caller-consistency assertion, not a runtime
 ///   surprise.
-/// - Otherwise propagates [`rf_renderer::diorama::DioramaPass::render`]'s
+/// - Otherwise propagates [`rf_renderer::diorama::DioramaPass::render_camera`]'s
 ///   `Err` (GPU readback timeout).
 #[allow(clippy::too_many_arguments)]
 pub fn compose_diorama(
@@ -790,6 +829,7 @@ pub fn compose_diorama(
     sprite_height_px: u8,
     out_width: u32,
     out_height: u32,
+    view: DioramaView,
 ) -> Result<DioramaRender, String> {
     let geometry_layer = session
         .diorama_geometry()
@@ -809,6 +849,7 @@ pub fn compose_diorama(
     let camera = rf_enhance::level_view::live_camera(&session.profile, read);
     let sprites = rf_enhance::level_view::sprites_in_world(&session.profile, entity_table, camera);
     let viewport = rf_enhance::level_view::ORIGINAL_VIEWPORT;
+    let camera_view = view.camera_at(follow_point(camera.x, camera.y, viewport));
     let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
         .iter()
         .map(|s| sprite_billboard(s.x, s.y, camera.x, camera.y, viewport, sprite_height_px))
@@ -822,9 +863,10 @@ pub fn compose_diorama(
         depth: &depth,
         billboards: &billboards,
     };
-    let vertices = rf_renderer::diorama_mesh::build_vertices(&scene);
+    let vertices =
+        rf_renderer::diorama::vertices_for_camera(&scene, out_width, out_height, &camera_view);
 
-    let rgba = pass.render(
+    let rgba = pass.render_camera(
         gpu,
         &vertices,
         ground_rgba,
@@ -838,6 +880,7 @@ pub fn compose_diorama(
         tile_px,
         out_width,
         out_height,
+        &camera_view,
     )?;
     Ok(DioramaRender {
         rgba,
@@ -948,6 +991,7 @@ pub fn compose_mode7_ground(
     sprite_h: u32,
     out_width: u32,
     out_height: u32,
+    view: DioramaView,
 ) -> Result<DioramaRender, String> {
     let extent = rf_renderer::mode7_plane::ground_extent_px(top, native_screen_width_px).max(
         rf_renderer::mode7_plane::ground_extent_px(bottom, native_screen_width_px),
@@ -974,6 +1018,8 @@ pub fn compose_mode7_ground(
         sprite_h,
         out_width,
         out_height,
+        // Follow is meaningless here: the quad IS the visible playfield.
+        &view.camera,
     )?;
     Ok(DioramaRender {
         rgba,
@@ -1138,6 +1184,32 @@ mod tests {
             false,
         );
         assert!(matches!(view, ActiveView::Ultrawide { .. }));
+    }
+
+    // --- ticket W30-05: DioramaView ---------------------------------------
+
+    #[test]
+    fn the_default_settings_give_the_default_diorama_camera() {
+        let view = DioramaView::from_settings(&crate::game_settings::GameSettings::default());
+        assert!(!view.follow);
+        assert_eq!(
+            view.camera_at((1.0, 2.0)),
+            rf_renderer::diorama::DioramaCamera::default(),
+            "no follow: the live centre is not used"
+        );
+    }
+
+    #[test]
+    fn following_centres_on_the_game_cameras_viewport() {
+        let mut settings = crate::game_settings::GameSettings::default();
+        settings.diorama_follow = true;
+        settings.diorama_zoom = 200;
+        let view = DioramaView::from_settings(&settings);
+        let centre = follow_point(100, 40, (256, 240));
+        assert_eq!(centre, (228.0, 160.0));
+        let cam = view.camera_at(centre);
+        assert_eq!(cam.follow, Some((228.0, 160.0)));
+        assert_eq!(cam.zoom, 2.0);
     }
 
     // --- sprite_billboard: 8x16 footprint (ticket W16-13) ----------------
