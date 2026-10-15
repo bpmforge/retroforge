@@ -4524,3 +4524,10 @@ stories, 10 decisions).
 - **W30-01d — Star Fox governor target** (2026-10-15). Profile pins
   `target_tick_hz = 30` (light 3D scenes hold 30/s at 100%; heavy flight
   15-20). Attract demo: seconds below 30 went 32 -> 22, never above.
+- **W31-01 — Star Fox polygon map (research)** (2026-10-15). Vertex table at
+  GSU RAM 0x07A2 (64 x 6-byte x, y, w; w = clip outcode + 5-bit depth-like
+  byte); face lists are ROM records (tag 0x14, count, colour, normal, indices)
+  read by GETB; per-polygon clipped corners at 0x0982 (count 0x0134).
+  Rebuilt polygons match the GSU's pixels at 0.990 (intro, 418) and 0.995
+  (play, 60) pixel IoU. A hi-res re-rasteriser is feasible. Report:
+  docs/research/W31-01-starfox-polygon-map.md.
