@@ -24,3 +24,11 @@ revision = "Legend of Zelda, The - A Link to the Past (USA), No-Intro"
 full_level = false
 hud_separation = false
 entity_overlay = false
+
+[[memory_map]]
+label = "frame_counter"
+addr = 0x7E001A
+len = 1
+type = "u8"
+notes = "Increments by exactly 1 (mod 256) on 100% of 4200 in-level frames = 59.9/s, 54 wraps; changed on 100% of 480 paused frames; it runs on while paused, so it is the frame counter, not a logic tick."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"

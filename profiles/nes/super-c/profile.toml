@@ -33,3 +33,11 @@ mode = "side_scroller"
 x = { addr = 0x00FD, type = "u8" }
 y = { addr = 0x00FC, type = "u8" }
 
+
+[[memory_map]]
+label = "tick_counter"
+addr = 0x00005B
+len = 1
+type = "u8"
+notes = "Increments by exactly 1 (mod 256) on 100% of 7000 in-level frames = 60.0/s, 29 wraps; changed on 0% of 480 paused frames (a per-logic-tick counter)."
+source = "observed: RetroForge re-find pass (W30, 2026-10-15)"

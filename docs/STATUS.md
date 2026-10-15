@@ -4492,3 +4492,10 @@ stories, 10 decisions).
   Start pattern: 45 vs 46 (learned 30/s). 7E15BD runs ~60/s in attract scenes
   and 15-30/s in play, so a `target_tick_hz` for Star Fox would help. Gate:
   workspace **2744 passing**.
+- **Profile re-find by observation (D-021)** (2026-10-15). Scripted headless
+  play recovered rows with evidence notes: tick counters for Super Mario World
+  (7E0014, also `[overclock]`), Mega Man 7 (7E0C46, also `[overclock]`), Super
+  C (0x5B) and SMB2 (0x10); frame counters for A Link to the Past, Contra and
+  Castlevania II; player x for Mega Man 7, SMB2 and Contra; SMW timer digits.
+  Donkey Kong Country never reached play. Harness: tests/profile_refind.rs
+  (`RF_REFIND_ROMS`).
