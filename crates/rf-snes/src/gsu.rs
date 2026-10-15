@@ -1217,14 +1217,23 @@ impl GsuState {
         self.fetch_extra_cost = 0;
         let opcode = self.fetch_byte(rom);
         self.regs.last_opcode = opcode;
-        let base_cost = self.exec_opcode(rom, opcode);
-        let total_cost = base_cost + self.fetch_extra_cost;
-        self.regs.last_cost = total_cost;
-        self.regs.instructions_executed += 1;
+        // Ticket W30-00: the jump takes effect right after the delay-slot
+        // OPCODE byte is fetched, before that opcode runs. fullsnes "GSU
+        // Jump Opcodes": "in case of multi-byte opcodes, this results in a
+        // 1-byte-fragment being located after the jump-origin, and the
+        // remaining byte(s) at the destination". Applying it after the
+        // whole opcode (as this did) read a delay-slot IWT's immediate from
+        // the bytes after the branch instead of the target -- Star Fox's
+        // `BEQ; IWT R7` select-a-constant idiom then mis-decoded the target
+        // bytes as an IWT R2 and fed garbage edge lengths to its rasteriser.
         if let Some((bank, pc)) = had_pending {
             self.regs.pbr = bank;
             self.regs.regs[15] = pc;
         }
+        let base_cost = self.exec_opcode(rom, opcode);
+        let total_cost = base_cost + self.fetch_extra_cost;
+        self.regs.last_cost = total_cost;
+        self.regs.instructions_executed += 1;
         total_cost
     }
 
@@ -2866,6 +2875,26 @@ mod exec_tests {
             0x1234,
             "pending jump overwrites R15 with the target verbatim"
         );
+    }
+
+    /// Ticket W30-00: a multi-byte opcode in a delay slot takes only its
+    /// first byte from after the branch; its operands come from the target
+    /// (fullsnes "GSU Jump Opcodes": "a 1-byte-fragment being located after
+    /// the jump-origin, and the remaining byte(s) at the destination").
+    ///   0: BRA +3        (05 03)    -> target 5
+    ///   2: IWT R7 (byte) (F7)       <- delay slot opcode only
+    ///   3: 11 22                    <- never read
+    ///   5: 34 12                    <- IWT's immediate, from the target
+    ///   7: INC R1        (D1)
+    #[test]
+    fn delay_slot_multi_byte_opcode_reads_operands_at_the_target() {
+        let bytes = [0x05, 0x03, 0xF7, 0x11, 0x22, 0x34, 0x12, 0xD1];
+        let (mut g, rom) = program(&bytes);
+        step_n(&mut g, &rom, 2); // BRA; IWT R7 fragment
+        assert_eq!(g.regs.reg(7), 0x1234);
+        assert_eq!(g.regs.reg(15), 7);
+        step_n(&mut g, &rom, 1); // INC R1
+        assert_eq!(g.regs.reg(1), 1);
     }
 
     #[test]
