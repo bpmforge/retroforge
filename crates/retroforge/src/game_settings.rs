@@ -211,6 +211,11 @@ pub struct GameSettings {
     /// [`Self::superfx_overclock`] is on. Valid 200..=800 in steps of 100;
     /// clamped on load. Defaults to 200.
     pub superfx_overclock_pct: u16,
+    /// Ticket W30-07: run-ahead, in frames (0 = off, 1 or 2). Hides the
+    /// game's own input lag by showing a frame from slightly ahead; the real
+    /// simulation is untouched (presentation only), but it costs extra CPU,
+    /// so it is off by default (law 6). Clamped to 0..=2 on load.
+    pub run_ahead: u8,
     /// Ticket W30-02: redraw Mode 7 floors at a finer step (presentation
     /// only; the simulation is untouched). Off by default (law 6).
     pub hd_mode7: bool,
@@ -296,6 +301,8 @@ pub struct GameSettings {
 /// Ticket W30-01: the lowest/highest/step of the stored overclock percent.
 const SUPERFX_PCT_MIN: u16 = 200;
 const SUPERFX_PCT_MAX: u16 = 800;
+/// Ticket W30-07: the most frames run-ahead may run ahead.
+const RUN_AHEAD_MAX: u8 = crate::run_ahead::MAX_RUN_AHEAD;
 const SUPERFX_PCT_DEFAULT: u16 = 200;
 
 /// Ticket W30-02: bounds and default of the stored HD Mode 7 scale.
@@ -332,6 +339,7 @@ impl Default for GameSettings {
             loading_fast_forward: false,
             superfx_overclock: false,
             superfx_overclock_pct: SUPERFX_PCT_DEFAULT,
+            run_ahead: 0,
             hd_mode7: false,
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
@@ -448,6 +456,10 @@ impl GameSettings {
                 "superfx_overclock_pct".to_string(),
                 self.superfx_overclock_pct.to_string(),
             );
+        }
+        // Ticket W30-07: written only when on, like the other opt-ins.
+        if self.run_ahead > 0 {
+            fields.insert("run_ahead".to_string(), self.run_ahead.to_string());
         }
         // Ticket W30-02: the scale and perspective flag are written only
         // when they differ from their defaults (2, on).
@@ -588,6 +600,11 @@ impl GameSettings {
                 "mode7_ground" => settings.mode7_ground = value == "true",
                 "loading_fast_forward" => settings.loading_fast_forward = value == "true",
                 "superfx_overclock" => settings.superfx_overclock = value == "true",
+                "run_ahead" => {
+                    if let Ok(frames) = value.parse::<u8>() {
+                        settings.run_ahead = frames.min(RUN_AHEAD_MAX);
+                    }
+                }
                 "superfx_overclock_pct" => {
                     if let Ok(pct) = value.parse::<u16>() {
                         // Round down to the 100 step, then clamp (W30-01).
@@ -1108,6 +1125,7 @@ mod mode_and_feature_persistence_tests {
             "mode7_ground",
             "superfx_overclock",
             "superfx_overclock_pct",
+            "run_ahead",
             "hd_mode7",
             "lens_",
         ] {
@@ -1124,6 +1142,7 @@ mod mode_and_feature_persistence_tests {
             mode7_ground: true,
             superfx_overclock: true,
             superfx_overclock_pct: 400,
+            run_ahead: 2,
             hd_mode7: true,
             hd_mode7_scale: 4,
             hd_mode7_supersample: true,
@@ -1176,6 +1195,13 @@ mod mode_and_feature_persistence_tests {
         }
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
+        // Ticket W30-07: run-ahead round-trips, and junk is clamped to 2.
+        assert_eq!(restored.run_ahead, 2);
+        for (raw, want) in [("1", 1), ("9", 2), ("0", 0), ("x", 0)] {
+            let t =
+                GameSettings::from_text(&format!("{MAGIC}\nrun_ahead={raw}\n")).expect("parses");
+            assert_eq!(t.run_ahead, want, "run_ahead {raw}");
+        }
         let wild = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_overclock_pct=9999\n"))
             .expect("parses");
         assert_eq!(wild.superfx_overclock_pct, 800);

@@ -329,6 +329,24 @@ impl Machine {
     }
 }
 
+/// Ticket W30-07: a machine captured by [`EmuStepper::snapshot`] for
+/// run-ahead; opaque, in memory only.
+pub struct MachineSnapshot {
+    container: rf_state::Container,
+    frames: u64,
+    last_scanline: Option<u16>,
+}
+
+impl MachineSnapshot {
+    /// SHA-256 over the snapshot's required state chunks (header excluded),
+    /// so two snapshots of the same machine state hash alike on either
+    /// console. What the run-ahead tests compare after every frame.
+    #[must_use]
+    pub fn state_hash(&self) -> [u8; 32] {
+        self.container.state_hash()
+    }
+}
+
 /// drives it through. See module doc.
 pub struct EmuStepper {
     /// Ticket W11-10: the machine, behind `rf_core_api::EmulatorCore`.
@@ -385,6 +403,13 @@ pub struct EmuStepper {
     /// Ticket W30-02: a probe has found a Mode 7 line in some frame this
     /// session (sticky; see [`Self::mode7_shown`]).
     mode7_latched: bool,
+    /// Ticket W30-07: the last widescreen request (`None` = off), kept so a
+    /// run-ahead shadow machine can be configured the same way; the core
+    /// keeps its own copy private.
+    widescreen_args: Option<(usize, [bool; 4], bool)>,
+    /// Ticket W30-07: the last sprite-overlay request, for the same reason
+    /// (the NES-only getter above reads `false` on a SNES session).
+    overlay_requested: bool,
 }
 
 impl EmuStepper {
@@ -439,6 +464,8 @@ impl EmuStepper {
             last_scanline: None,
             hd_mode7: None,
             mode7_latched: false,
+            widescreen_args: None,
+            overlay_requested: false,
             rom_sha256,
         })
     }
@@ -476,6 +503,8 @@ impl EmuStepper {
             last_scanline: None,
             hd_mode7: None,
             mode7_latched: false,
+            widescreen_args: None,
+            overlay_requested: false,
         })
     }
 
@@ -1092,6 +1121,7 @@ impl EmuStepper {
     /// layer), and a NES session simply has nothing to widen. Returning
     /// an error the caller would have to ignore would be noise.
     pub fn set_widescreen(&mut self, width: usize, bg: [bool; 4], obj: bool) {
+        self.widescreen_args = Some((width, bg, obj));
         if let Machine::Snes(core) = &mut self.machine {
             core.set_widescreen(width, rf_snes::ppu::WidenMask { bg, obj });
         }
@@ -1116,6 +1146,74 @@ impl EmuStepper {
     /// the options only; [`Self::render_hd_mode7`] reads them after a frame.
     pub fn set_hd_mode7(&mut self, options: Option<rf_snes::ppu::hd_mode7::HdMode7Options>) {
         self.hd_mode7 = options;
+    }
+
+    /// Ticket W30-07: capture everything run-ahead has to put back after a
+    /// speculative frame -- the console's save state (NES via `.rfstate`,
+    /// SNES via `crate::snes_save_state`, both in memory, never encoded)
+    /// plus the two shell-side counters a state does not carry. Read-only.
+    ///
+    /// # Errors
+    /// Whatever the console's serializer refuses with (the machine must be
+    /// at a frame boundary, which every caller in the frame loop is).
+    pub fn snapshot(&self) -> Result<MachineSnapshot, crate::save_state::SaveStateError> {
+        let container = match &self.machine {
+            Machine::Nes(_) => self.save_state(0)?,
+            Machine::Snes(core) => {
+                crate::snes_save_state::save_state(core.system(), self.rom_sha256, 0)?
+            }
+        };
+        Ok(MachineSnapshot {
+            container,
+            frames: self.frames,
+            last_scanline: self.last_scanline,
+        })
+    }
+
+    /// Ticket W30-07: put THIS machine exactly where `snap` was taken --
+    /// possibly from a different `EmuStepper` of the same ROM, which is how
+    /// run-ahead uses it: the real machine is only ever read, and a second
+    /// "shadow" machine is loaded from its snapshot to run the speculative
+    /// frames. (Loading back into the real machine instead would reset the
+    /// audio decimator, which a state does not carry, and so would change the
+    /// real timeline's sound.) Includes the shell's frame counter and
+    /// scanline readout.
+    ///
+    /// # Errors
+    /// As [`Self::load_state`]; a snapshot of the same ROM cannot fail, so a
+    /// caller treats `Err` as a bug, not a runtime condition.
+    pub fn restore(
+        &mut self,
+        snap: &MachineSnapshot,
+    ) -> Result<(), crate::save_state::SaveStateError> {
+        let rom = self.rom_sha256;
+        match &mut self.machine {
+            Machine::Nes(_) => {
+                self.load_state(&snap.container)?;
+            }
+            Machine::Snes(core) => {
+                crate::snes_save_state::load_state(core.system_mut(), rom, &snap.container)?;
+            }
+        }
+        self.frames = snap.frames;
+        self.last_scanline = snap.last_scanline;
+        Ok(())
+    }
+
+    /// Ticket W30-07: copy the settings that change what a frame looks like
+    /// or how the simulation runs (sprite overlay, Super FX clock,
+    /// widescreen, HD Mode 7) from `real` onto this shadow machine, so its
+    /// speculative frames are the frames `real` would have produced.
+    pub fn copy_picture_config_from(&mut self, real: &EmuStepper) {
+        self.set_sprite_overlay_enabled(real.overlay_requested);
+        self.hd_mode7 = real.hd_mode7;
+        if let (Machine::Snes(mine), Machine::Snes(theirs)) = (&mut self.machine, &real.machine) {
+            mine.set_gsu_overclock(theirs.gsu_overclock());
+        }
+        match real.widescreen_args {
+            Some((width, bg, obj)) => self.set_widescreen(width, bg, obj),
+            None => self.set_widescreen_off(),
+        }
     }
 
     /// Ticket W30-02: has this session's SNES game drawn a visible line in
@@ -1168,6 +1266,7 @@ impl EmuStepper {
 
     /// Turn widescreen off, restoring the accuracy path exactly.
     pub fn set_widescreen_off(&mut self) {
+        self.widescreen_args = None;
         if let Machine::Snes(core) = &mut self.machine {
             core.set_widescreen(rf_snes::ppu::WIDTH, rf_snes::ppu::WidenMask::ALL);
         }
@@ -1196,6 +1295,7 @@ impl EmuStepper {
     }
 
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
+        self.overlay_requested = enabled;
         self.machine.set_sprite_overlay(enabled);
     }
 

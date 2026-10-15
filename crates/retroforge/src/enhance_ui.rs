@@ -225,6 +225,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     // Ticket W30-01: a generic feature (no profile needed) that also needs
     // a Super FX cartridge. Unlike every presentation toggle it changes the
     // simulation, which is why it is off by default and Enhanced-only.
+    let (run_ahead_av, run_ahead_on) = generic(settings.run_ahead > 0);
     let (superfx_av, superfx_on) = also(
         generic(settings.superfx_overclock),
         superfx && superfx_max > 100,
@@ -318,6 +319,16 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, Super FX cartridges",
             enabled: superfx_on,
             availability: superfx_av,
+            heuristic: None,
+        },
+        // Ticket W30-07: presentation only and generic (any console, no
+        // profile); it only needs Enhanced mode.
+        FeatureRow {
+            id: "run_ahead",
+            label: "Run-ahead",
+            scope: "generic, any console",
+            enabled: run_ahead_on,
+            availability: run_ahead_av,
             heuristic: None,
         },
         FeatureRow {
@@ -784,7 +795,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 11, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 12, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -1154,6 +1165,42 @@ mod tests {
 
         s.superfx_overclock = false;
         assert!(!find(&s, &facts).effective());
+    }
+
+    /// Ticket W30-07: run-ahead is off in Accuracy mode, generic (no cartridge
+    /// or profile needed, any console), and counts toward the badge only when
+    /// effective.
+    #[test]
+    fn run_ahead_gating_and_badge() {
+        let find = |s: &GameSettings| {
+            feature_rows(s, &GameFacts::new(false, false, false))
+                .into_iter()
+                .find(|r| r.id == "run_ahead")
+                .unwrap()
+        };
+        let mut s = GameSettings::default();
+        assert_eq!(s.run_ahead, 0, "off by default");
+        assert!(!find(&s).enabled);
+
+        s.run_ahead = 1;
+        s.mode = Mode::Accuracy;
+        assert_eq!(find(&s).availability, Availability::NeedsMode("Enhanced"));
+        assert!(!find(&s).effective());
+        s.mode = Mode::GameAware;
+        assert!(
+            find(&s).effective(),
+            "a generic feature works in every enhancement mode, like the sprite overlay"
+        );
+
+        s.mode = Mode::Enhanced;
+        assert!(find(&s).effective());
+        let facts = GameFacts::new(false, false, false);
+        let with = badge_text("NES", &s, &facts);
+        s.run_ahead = 0;
+        assert!(!find(&s).effective());
+        assert_ne!(badge_text("NES", &s, &facts), with, "the badge counts it");
+        s.run_ahead = 2;
+        assert!(find(&s).effective(), "2 frames is on too");
     }
 
     /// Ticket W20-09 (§3 row D): the NES has no widescreen path.

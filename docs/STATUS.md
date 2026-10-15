@@ -4454,3 +4454,10 @@ stories, 10 decisions).
   sits at +Z. Billboards anchor at the sprite's feet and the Mode 7 sprite is
   centred. Re-pinned: diorama_golden and mode7_plane_golden ON_HASH. Gate:
   workspace **2679 passing**.
+- **W30-07 — Run-ahead (1-2 frames)** (2026-10-15). A shadow machine loaded
+  from a read-only snapshot runs 1-2 frames ahead and its picture is shown;
+  the real machine is never written, so state, picture, frame count and audio
+  are identical with it on (tested on NES and SNES). Skipped while stepping,
+  tracing, watchpoints, fast-forward, captures, de-flicker or video
+  recording. About 3.2 ms per frame extra at 2 frames (synthetic SNES).
+  Gate: workspace **2685 passing**.
