@@ -237,6 +237,229 @@ fn apply_step_typed(
     Ok(out)
 }
 
+/// Ticket W30-06 part B: the tallest wall the table may hold, in eighths of
+/// a tile (the loader's `HEIGHTS_MAX_EIGHTHS`).
+pub const HEIGHT_MAX: u8 = 64;
+/// Ticket W30-06 part B: how many paint actions Undo remembers.
+pub const PAINT_UNDO_DEPTH: usize = 20;
+
+/// The `[heights.tiles]` key for a tile number: `0x0A4`.
+#[must_use]
+pub fn tile_key(tile: u16) -> String {
+    format!("0x{tile:03X}")
+}
+
+/// Ticket W30-06 part B: the height painter's working table — what the
+/// author has painted so far, the brush, and the last
+/// [`PAINT_UNDO_DEPTH`] paint actions. Heights are set by a person clicking
+/// tiles; nothing here is inferred from the game.
+///
+/// A height belongs to a tile **number**, so painting one cell paints every
+/// cell on screen (and in the game) that uses that number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeightPainter {
+    /// The BG layer whose tilemap is read, 1..=4.
+    pub layer: u8,
+    /// The grid cell, 8 or 16.
+    pub tile_px: u8,
+    /// Eighths of a tile, `0..=`[`HEIGHT_MAX`], what a click paints.
+    pub brush: u8,
+    tiles: std::collections::BTreeMap<u16, u8>,
+    /// `(tile, height before)`; `None` = it was not in the table.
+    undo: Vec<(u16, Option<u8>)>,
+}
+
+impl HeightPainter {
+    /// A painter over an existing table (empty for a new one).
+    #[must_use]
+    pub fn new(layer: u8, tile_px: u8, tiles: std::collections::BTreeMap<u16, u8>) -> Self {
+        Self {
+            layer: layer.clamp(1, 4),
+            tile_px: if tile_px == 16 { 16 } else { 8 },
+            brush: 16,
+            tiles: tiles
+                .into_iter()
+                .filter(|(t, h)| *t <= 0x3FF && *h > 0)
+                .map(|(t, h)| (t, h.min(HEIGHT_MAX)))
+                .collect(),
+            undo: Vec::new(),
+        }
+    }
+
+    /// The painted height of `tile` (0 = flat).
+    #[must_use]
+    pub fn height_of(&self, tile: u16) -> u8 {
+        self.tiles.get(&tile).copied().unwrap_or(0)
+    }
+
+    /// The painted table, tile number to eighths, sorted.
+    #[must_use]
+    pub fn tiles(&self) -> &std::collections::BTreeMap<u16, u8> {
+        &self.tiles
+    }
+
+    /// How many tile numbers have a height.
+    #[must_use]
+    pub fn painted(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// How many actions Undo can take back.
+    #[must_use]
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Set the brush, clamped to `0..=`[`HEIGHT_MAX`].
+    pub fn set_brush(&mut self, eighths: u8) {
+        self.brush = eighths.min(HEIGHT_MAX);
+    }
+
+    /// Give `tile` the brush height. `false` when nothing changed.
+    pub fn paint(&mut self, tile: u16) -> bool {
+        self.set(tile, self.brush)
+    }
+
+    /// Back to flat ground. `false` when it already was.
+    pub fn clear(&mut self, tile: u16) -> bool {
+        self.set(tile, 0)
+    }
+
+    /// Copy `tile`'s height into the brush.
+    pub fn pick(&mut self, tile: u16) {
+        self.brush = self.height_of(tile);
+    }
+
+    /// Take back the last paint action. `false` when there is none.
+    pub fn undo(&mut self) -> bool {
+        let Some((tile, before)) = self.undo.pop() else {
+            return false;
+        };
+        match before {
+            Some(h) => {
+                self.tiles.insert(tile, h);
+            }
+            None => {
+                self.tiles.remove(&tile);
+            }
+        }
+        true
+    }
+
+    /// The table as the renderer reads it (the live preview).
+    #[must_use]
+    pub fn height_table(&self) -> crate::live_heights::HeightTable {
+        crate::live_heights::HeightTable::new(
+            self.layer,
+            self.tile_px,
+            self.tiles.iter().map(|(t, h)| (*t, *h)).collect(),
+        )
+    }
+
+    fn set(&mut self, tile: u16, eighths: u8) -> bool {
+        let eighths = eighths.min(HEIGHT_MAX);
+        if tile > 0x3FF || self.height_of(tile) == eighths {
+            return false;
+        }
+        let before = self.tiles.get(&tile).copied();
+        if eighths == 0 {
+            self.tiles.remove(&tile);
+        } else {
+            self.tiles.insert(tile, eighths);
+        }
+        self.undo.push((tile, before));
+        if self.undo.len() > PAINT_UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        true
+    }
+}
+
+/// Ticket W30-06 part B: the open painter, as the app holds it. Plain data;
+/// the app draws it (`RetroForgeApp::height_painter_window`).
+#[derive(Debug, Clone)]
+pub struct PainterSession {
+    pub painter: HeightPainter,
+    /// The next click copies that tile's height into the brush.
+    pub pick_armed: bool,
+    /// The diorama is shown beside the grid, which means the game runs.
+    pub preview: bool,
+    pub note: Option<String>,
+    /// The painter paused a running game, so closing it resumes.
+    pub paused_game: bool,
+    /// A paused game has sent no snapshot yet: step one frame to get one.
+    pub need_frame: bool,
+    /// Painted since the last save.
+    pub dirty: bool,
+}
+
+/// Ticket W30-06 part B: write the painted table into `text` (a profile) as
+/// `[heights]` — layer, tile_px and `[heights.tiles]` keyed `"0x0A4"`,
+/// sorted — replacing any table already there, and prove the result still
+/// loads. An empty table removes `[heights]`. The file is rewritten as plain
+/// TOML, like [`apply_step`].
+///
+/// # Errors
+/// Returns why the text could not be parsed or the result would not load.
+pub fn apply_heights(
+    text: &str,
+    layer: u8,
+    tile_px: u8,
+    tiles: &std::collections::BTreeMap<u16, u8>,
+) -> Result<String, String> {
+    let mut doc: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+    doc.remove("heights");
+    if !tiles.is_empty() {
+        let mut rows = toml::Table::new();
+        for (tile, h) in tiles.iter().filter(|(_, h)| **h > 0) {
+            rows.insert(tile_key(*tile), toml::Value::Integer(i64::from(*h)));
+        }
+        let mut t = toml::Table::new();
+        t.insert("layer".into(), toml::Value::Integer(i64::from(layer)));
+        t.insert("tile_px".into(), toml::Value::Integer(i64::from(tile_px)));
+        t.insert("tiles".into(), toml::Value::Table(rows));
+        doc.insert("heights".into(), toml::Value::Table(t));
+    }
+    let out = format!(
+        "# Made in RetroForge with the profile builder (docs/design/GAME_PROFILES.md).\n{}",
+        toml::to_string(&doc).map_err(|e| e.to_string())?
+    );
+    rf_profiles::load_str(&out).map_err(|e| format!("the profile would not load: {e}"))?;
+    Ok(out)
+}
+
+/// Ticket W30-06 part B: where "Save heights" writes. The builder only ever
+/// writes the player's own copy: a matched profile that already lives under
+/// `user_root` is rewritten in place; a shipped one is copied to
+/// `<user_root>/snes/<slug(title)>/profile.toml`, which the loader searches
+/// first, so the repo's file is never touched.
+#[must_use]
+pub fn heights_save_path(user_root: &Path, matched: Option<&Path>, title: &str) -> PathBuf {
+    match matched {
+        Some(path) if path.starts_with(user_root) => path.to_path_buf(),
+        _ => user_root
+            .join("snes")
+            .join(slug(title))
+            .join("profile.toml"),
+    }
+}
+
+/// Ticket W30-06 part B: the table a profile's text already holds, as a
+/// painter starts from it. `None` when it does not parse or has no
+/// `[heights]`.
+#[must_use]
+pub fn heights_from_text(text: &str) -> Option<HeightPainter> {
+    let profile = rf_profiles::load_str(text).ok()?.profile;
+    let h = profile.heights?;
+    let layer = u8::try_from(h.layer).unwrap_or(1);
+    let tile_px = u8::try_from(h.tile_px).unwrap_or(8);
+    Some(HeightPainter::new(
+        layer,
+        tile_px,
+        h.table().into_iter().collect(),
+    ))
+}
+
 /// Ticket W24-03: which way a value moved between two looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -435,5 +658,91 @@ mod tests {
         );
         assert!(text.contains("type = \"u8\""), "{text}");
         assert_eq!(cam.y.unwrap().addr, 0xFC);
+    }
+    /// Ticket W30-06 part B: painting, picking, clearing and a bounded undo.
+    #[test]
+    fn the_painter_paints_picks_clears_and_undoes_the_last_twenty() {
+        let mut p = HeightPainter::new(1, 8, Default::default());
+        p.set_brush(200);
+        assert_eq!(p.brush, HEIGHT_MAX);
+        p.set_brush(16);
+        assert!(p.paint(0x0A4));
+        assert!(!p.paint(0x0A4), "no change, no undo entry");
+        assert_eq!((p.height_of(0x0A4), p.undo_len()), (16, 1));
+        p.set_brush(32);
+        assert!(p.paint(0x0A4), "repainting changes it");
+        p.pick(0x0A4);
+        assert_eq!(p.brush, 32);
+        p.pick(0x777);
+        assert_eq!(p.brush, 0, "picking flat ground brushes 0");
+        assert!(p.clear(0x0A4));
+        assert!(!p.clear(0x0A4));
+        assert_eq!(p.painted(), 0);
+        assert!(p.undo() && p.height_of(0x0A4) == 32, "undo the clear");
+        assert!(p.undo() && p.height_of(0x0A4) == 16, "undo the repaint");
+        assert!(p.undo() && p.height_of(0x0A4) == 0, "undo the first paint");
+        assert!(!p.undo());
+        assert!(!p.paint(0x400), "tile numbers are 10 bits");
+
+        p.set_brush(8);
+        for t in 0..30u16 {
+            p.paint(t);
+        }
+        assert_eq!(p.undo_len(), PAINT_UNDO_DEPTH);
+        for _ in 0..PAINT_UNDO_DEPTH {
+            assert!(p.undo());
+        }
+        assert!(!p.undo());
+        assert_eq!(p.painted(), 10, "the oldest ten actions stay painted");
+    }
+
+    /// Ticket W30-06 part B: the saved table is sorted, keyed in hex, loads,
+    /// and reads back as painted; a second save replaces it; empty removes.
+    #[test]
+    fn saved_heights_round_trip_through_the_loader() {
+        let base = new_profile_text("Test Game", true, &hashes());
+        let mut tiles = std::collections::BTreeMap::new();
+        tiles.insert(0x1FF_u16, 64_u8);
+        tiles.insert(0x0A4, 16);
+        tiles.insert(0x010, 8);
+        let text = apply_heights(&base, 2, 16, &tiles).unwrap();
+        let a = text.find("0x010").unwrap();
+        let b = text.find("0x0A4").unwrap();
+        let c = text.find("0x1FF").unwrap();
+        assert!(a < b && b < c, "{text}");
+        assert!(text.contains("layer = 2") && text.contains("tile_px = 16"));
+        let back = heights_from_text(&text).expect("a table");
+        assert_eq!((back.layer, back.tile_px), (2, 16));
+        assert_eq!(back.tiles(), &tiles);
+        // The loader itself reads the same table.
+        let loaded = rf_profiles::load_str(&text).unwrap().profile;
+        assert_eq!(loaded.heights.unwrap().table().get(&0x0A4), Some(&16));
+        // Other sections survive and the identity still matches.
+        assert!(loaded.identity.iter().any(|i| i.matches(&hashes())));
+
+        tiles.remove(&0x1FF);
+        let text2 = apply_heights(&text, 1, 8, &tiles).unwrap();
+        let back = heights_from_text(&text2).unwrap();
+        assert_eq!((back.layer, back.painted()), (1, 2), "replaced, not merged");
+        let none = apply_heights(&text2, 1, 8, &Default::default()).unwrap();
+        assert!(heights_from_text(&none).is_none() && !none.contains("[heights"));
+    }
+
+    /// Ticket W30-06 part B: heights are only ever written to the player's
+    /// own copy, never to the shipped profile.
+    #[test]
+    fn heights_are_saved_to_the_players_copy_never_the_shipped_file() {
+        let user = Path::new("/cfg/retroforge/profiles");
+        let shipped = Path::new("/repo/profiles/snes/some-game/profile.toml");
+        assert_eq!(
+            heights_save_path(user, Some(shipped), "Some Game (USA)"),
+            user.join("snes/some-game-usa/profile.toml")
+        );
+        assert_eq!(
+            heights_save_path(user, None, "Some Game"),
+            user.join("snes/some-game/profile.toml")
+        );
+        let mine = user.join("snes/mine/profile.toml");
+        assert_eq!(heights_save_path(user, Some(&mine), "Whatever"), mine);
     }
 }

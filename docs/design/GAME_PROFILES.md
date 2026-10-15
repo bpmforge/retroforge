@@ -303,6 +303,28 @@ wavy water) is walled as if the last value held for the whole screen;
 Mode 7 has no tilemap and gets no grid; the tilemap entry's flip, palette
 and priority bits are ignored.
 
+**The height painter (W30-06 part B).** SNES games only. Press **Esc,
+Enhancements, Paint tile heights...** (or **Paint tile heights...** in the
+Profile Builder panel). The game pauses on its current picture with a grid
+at the profile's `tile_px` over it, aligned to the chosen BG layer's scroll
+by the same grid math the walls use. Click a tile to give it the brush
+height (0..=64 eighths; 0/8/16/32 quick buttons), right-click or Alt-click to
+clear it, **Pick** (or Ctrl/Cmd-click) to copy a tile's height into the
+brush, **Undo** for the last 20 paint actions. A height belongs to the tile
+*number*, so painting one cell paints every cell that uses it. **Save
+heights** writes `[heights]` into the player's own copy of the profile,
+`<config>/retroforge/profiles/snes/<title-slug>/profile.toml` (created from
+the matched profile if that was a shipped one, which is never modified; the
+user folder is searched first). Closing the painter drops unsaved painting.
+Nothing is read from game code: heights are only what a person clicked.
+
+**HD-2D preset.** In Game-Aware mode, Esc > Enhancements has an **HD-2D
+look** switch that sets, together: lens bloom 35%, tilt-shift 50%, soft
+shadows 50%, grading off, weather clear, Diorama walls on, camera tilt 40
+degrees, zoom 160%, follow the player. It is available exactly when the
+Diorama row is (a decoded level, or a height table); otherwise it says so.
+It only changes settings, and turning it off restores the previous values.
+
 ### `room_grid`'s collision field (ticket W16-05)
 
 `room_grid` (`rf_enhance::decode::room_grid`, W9-08) is the second decoder

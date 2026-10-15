@@ -143,6 +143,114 @@ impl LiveGrid {
     }
 }
 
+/// One frame's grid of tile numbers: [`LiveGrid`]'s geometry with the
+/// character number in each cell instead of a height. The painter hit-tests
+/// and draws against this, and [`build_grid`] is this plus the table, so the
+/// grid the author clicks on and the walls raised from it cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharGrid {
+    pub cols: u32,
+    pub rows: u32,
+    pub tile_px: u32,
+    /// As [`LiveGrid::offset`].
+    pub offset: (u32, u32),
+    /// 10-bit character numbers, `cols * rows`, row-major.
+    pub chars: Vec<u16>,
+}
+
+impl CharGrid {
+    /// The cell under screen pixel `(x, y)` (frame pixels, may be fractional),
+    /// or `None` outside the picture.
+    #[must_use]
+    pub fn cell_at(&self, x: f32, y: f32) -> Option<(u32, u32)> {
+        if !(x >= 0.0 && y >= 0.0) {
+            return None;
+        }
+        let p = self.tile_px.max(1);
+        // Truncation is the floor of a non-negative value.
+        let col = (x as u32 + self.offset.0) / p;
+        let row = (y as u32 + self.offset.1) / p;
+        (col < self.cols && row < self.rows).then_some((col, row))
+    }
+
+    /// The character number in cell `(col, row)`.
+    #[must_use]
+    pub fn char_at(&self, col: u32, row: u32) -> Option<u16> {
+        if col >= self.cols || row >= self.rows {
+            return None;
+        }
+        self.chars.get((row * self.cols + col) as usize).copied()
+    }
+
+    /// Where cell `(col, row)`'s top-left corner is on the screen (negative
+    /// for the first column/row under sub-cell scroll).
+    #[must_use]
+    pub fn cell_screen_origin(&self, col: u32, row: u32) -> (i32, i32) {
+        (
+            (col * self.tile_px) as i32 - self.offset.0 as i32,
+            (row * self.tile_px) as i32 - self.offset.1 as i32,
+        )
+    }
+}
+
+/// The tile numbers on screen for `layer` (1..=4) at `tile_px` (8 or 16).
+/// Same arguments and the same `None` cases as [`build_grid`].
+#[must_use]
+pub fn character_grid(
+    layer: u8,
+    tile_px: u8,
+    vram: &[u8],
+    ppu_regs: &[u8],
+    bg_scroll: [(u16, u16); 4],
+    screen: (u32, u32),
+) -> Option<CharGrid> {
+    let bgmode = *ppu_regs.get(BGMODE)?;
+    let mode = usize::from(bgmode & 0x07);
+    let layer = usize::from(layer.clamp(1, 4)) - 1;
+    if usize::from(*LAYERS_IN_MODE.get(mode)?) <= layer || vram.len() < 0x10000 {
+        return None;
+    }
+    let (screen_w, screen_h) = screen;
+    if screen_w == 0 || screen_h == 0 {
+        return None;
+    }
+
+    let sc = *ppu_regs.get(BG1SC + layer)?;
+    let map_base = u16::from(sc & 0xFC) << 8;
+    let map_size = sc & 0x03;
+    let bg_cell_px: u32 = if bgmode & (0x10 << layer) != 0 { 16 } else { 8 };
+    let p = u32::from(tile_px.max(1));
+    let (hofs, vofs) = bg_scroll[layer];
+    let (hofs, vofs) = (u32::from(hofs & SCROLL_MASK), u32::from(vofs & SCROLL_MASK));
+    let offset = (hofs % p, vofs % p);
+
+    let cols = (screen_w + offset.0).div_ceil(p);
+    let rows = (screen_h + offset.1).div_ceil(p);
+    let mut chars = Vec::with_capacity((cols * rows) as usize);
+    // Bounded ranges only (law 8): both walk a fixed, finite count.
+    for row in 0..rows {
+        let world_y = vofs - offset.1 + row * p;
+        for col in 0..cols {
+            let world_x = hofs - offset.0 + col * p;
+            let entry = tilemap_entry(
+                vram,
+                map_base,
+                map_size,
+                (world_x / bg_cell_px) as u16,
+                (world_y / bg_cell_px) as u16,
+            );
+            chars.push(entry.character);
+        }
+    }
+    Some(CharGrid {
+        cols,
+        rows,
+        tile_px: p,
+        offset,
+        chars,
+    })
+}
+
 /// Build the wall grid for the screen the PPU is showing.
 ///
 /// `vram` is 64 KiB, `ppu_regs` is `$2100-$213F` indexed so `[n]` is
@@ -158,53 +266,25 @@ pub fn build_grid(
     bg_scroll: [(u16, u16); 4],
     screen: (u32, u32),
 ) -> Option<LiveGrid> {
-    let bgmode = *ppu_regs.get(BGMODE)?;
-    let mode = usize::from(bgmode & 0x07);
-    let layer = usize::from(table.layer.clamp(1, 4)) - 1;
-    if usize::from(*LAYERS_IN_MODE.get(mode)?) <= layer || vram.len() < 0x10000 {
-        return None;
-    }
-    let (screen_w, screen_h) = screen;
-    if screen_w == 0 || screen_h == 0 {
-        return None;
-    }
-
-    let sc = *ppu_regs.get(BG1SC + layer)?;
-    let map_base = u16::from(sc & 0xFC) << 8;
-    let map_size = sc & 0x03;
-    let bg_cell_px: u32 = if bgmode & (0x10 << layer) != 0 { 16 } else { 8 };
-    let p = u32::from(table.tile_px.max(1));
-    let (hofs, vofs) = bg_scroll[layer];
-    let (hofs, vofs) = (u32::from(hofs & SCROLL_MASK), u32::from(vofs & SCROLL_MASK));
-    let offset = (hofs % p, vofs % p);
-
-    let cols = (screen_w + offset.0).div_ceil(p);
-    let rows = (screen_h + offset.1).div_ceil(p);
-    let mut solid = Vec::with_capacity((cols * rows) as usize);
-    let mut depth = Vec::with_capacity((cols * rows) as usize);
-    // Bounded ranges only (law 8): both walk a fixed, finite count.
-    for row in 0..rows {
-        let world_y = vofs - offset.1 + row * p;
-        for col in 0..cols {
-            let world_x = hofs - offset.0 + col * p;
-            let entry = tilemap_entry(
-                vram,
-                map_base,
-                map_size,
-                (world_x / bg_cell_px) as u16,
-                (world_y / bg_cell_px) as u16,
-            );
-            let h = table.height_of(entry.character).min(64);
-            solid.push(u8::from(h > 0));
-            depth.push(h);
-        }
-    }
+    let g = character_grid(
+        table.layer,
+        table.tile_px,
+        vram,
+        ppu_regs,
+        bg_scroll,
+        screen,
+    )?;
+    let depth: Vec<u8> = g
+        .chars
+        .iter()
+        .map(|c| table.height_of(*c).min(64))
+        .collect();
     Some(LiveGrid {
-        cols,
-        rows,
-        tile_px: p,
-        offset,
-        solid,
+        cols: g.cols,
+        rows: g.rows,
+        tile_px: g.tile_px,
+        offset: g.offset,
+        solid: depth.iter().map(|h| u8::from(*h > 0)).collect(),
         depth,
     })
 }
@@ -425,6 +505,47 @@ mod tests {
         assert!(padded_ground(&frame[..8], 4, 2, &grid)
             .iter()
             .all(|b| *b == 0));
+    }
+
+    #[test]
+    fn the_painters_character_grid_matches_the_walls_cell_for_cell() {
+        let mut vram = vec![0u8; 0x10000];
+        put(&mut vram, 10, 5, 0x0A4);
+        put(&mut vram, 11, 5, 0x0B0);
+        let t = table(8, &[(0x0A4, 8), (0x0B0, 24)]);
+        let r = regs(1, 0, false);
+        for scroll in [(0u16, 0u16), (3, 5), (11, 12)] {
+            let s = [scroll, (0, 0), (0, 0), (0, 0)];
+            let walls = build_grid(&t, &vram, &r, s, (256, 224)).unwrap();
+            let chars = character_grid(1, 8, &vram, &r, s, (256, 224)).unwrap();
+            assert_eq!((walls.cols, walls.rows), (chars.cols, chars.rows));
+            assert_eq!(walls.offset, chars.offset);
+            for (i, c) in chars.chars.iter().enumerate() {
+                assert_eq!(walls.depth[i], t.height_of(*c), "cell {i} at {scroll:?}");
+            }
+            // Hit-testing the middle of the on-screen tile finds it.
+            let (sx, sy) = (80 - i32::from(scroll.0) + 4, 40 - i32::from(scroll.1) + 4);
+            let (col, row) = chars.cell_at(sx as f32, sy as f32).unwrap();
+            assert_eq!(chars.char_at(col, row), Some(0x0A4), "scroll {scroll:?}");
+        }
+    }
+
+    #[test]
+    fn hit_testing_rejects_outside_the_picture_and_handles_sixteen_pixel_cells() {
+        let mut vram = vec![0u8; 0x10000];
+        put(&mut vram, 2, 2, 0x0A4);
+        let r = regs(1, 0, false);
+        let g = character_grid(1, 16, &vram, &r, [(0, 0); 4], (256, 224)).unwrap();
+        assert_eq!((g.cols, g.rows), (16, 14));
+        assert_eq!(g.cell_at(-1.0, 5.0), None);
+        assert_eq!(g.cell_at(5.0, -0.5), None);
+        assert_eq!(g.cell_at(256.0, 5.0), None);
+        assert_eq!(g.cell_at(5.0, 224.0), None);
+        // Pixel (20, 20) is in 16 px cell (1, 1) = tiles 2..4: top-left is tile (2,2).
+        let (c, r_) = g.cell_at(20.0, 20.0).unwrap();
+        assert_eq!((c, r_), (1, 1));
+        assert_eq!(g.char_at(c, r_), Some(0x0A4));
+        assert_eq!(g.char_at(99, 0), None);
     }
 
     #[test]

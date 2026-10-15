@@ -4499,3 +4499,11 @@ stories, 10 decisions).
   Castlevania II; player x for Mega Man 7, SMB2 and Contra; SMW timer digits.
   Donkey Kong Country never reached play. Harness: tests/profile_refind.rs
   (`RF_REFIND_ROMS`).
+- **W30-06 — Height painter, live-screen diorama and HD-2D preset**
+  (2026-10-15). Profiles take `[heights]`; SNES Diorama walls rise live from the
+  on-screen tilemap. Painter: Esc → Enhancements → "Paint tile heights…"
+  (click paints, right/Alt-click clears, Pick, undo 20); "Save heights"
+  writes the user's copy under `<config>/retroforge/profiles/snes/<slug>/`.
+  "HD-2D look" card turns lens, Diorama and the tilted follow camera on
+  together. Painter not yet tried on a real game. Gate: workspace **2774
+  passing**.

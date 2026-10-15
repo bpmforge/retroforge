@@ -52,6 +52,7 @@ pub mod explainers;
 pub mod game_info;
 pub mod game_settings;
 pub mod hash;
+pub mod hd2d_preset;
 pub mod icons;
 pub mod input_map;
 pub mod lens_view;
