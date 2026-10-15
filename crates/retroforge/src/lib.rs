@@ -59,6 +59,7 @@ pub mod level_view;
 pub mod library;
 pub mod library_cache;
 pub mod library_roots;
+pub mod live_heights;
 pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod overclock_ui;

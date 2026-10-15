@@ -215,6 +215,15 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "heights",
+            Shape::Object(vec![
+                ("layer", Shape::Leaf),
+                ("tile_px", Shape::Leaf),
+                // Keys are tile numbers: per-game, not enumerable.
+                ("tiles", Shape::Any),
+            ]),
+        ),
+        (
             "loading",
             Shape::Object(vec![(
                 "wait_loops",

@@ -111,6 +111,12 @@ nes_extra_lines_max = 120   # ... and the NES extra vblank lines (0..=240)
 tick_counter = 0x7E0012     # a WRAM byte the game increments once per logic tick
 target_tick_hz = 60         # the game's normal logic rate (1..=60)
 
+[heights]                   # ticket W30-06: raise the live screen into a diorama
+layer = 1                   # SNES BG layer 1..=4 whose tilemap is read (NES: ignored)
+tile_px = 16                # grid cell: 8, or 16 (= 2x2 tiles, top-left tile's number)
+[heights.tiles]             # tile number (hex string) -> height in eighths, 0..=64
+"0x0A4" = 16
+
 [loading]
 [[loading.wait_loops]]
 pc = 0xC12A
@@ -261,6 +267,41 @@ The governor also has a hang guard: a game that stops changing the picture
 for 180 frames while overclocked is returned to 100% for the rest of the
 session ("Turned off: the game stopped responding at higher speed"). That
 protects games that stall at a raised clock without any profile entry.
+
+### `[heights]` (ticket W30-06)
+
+`[heights]` (`rf_profiles::schema::Heights`) is optional. It is the
+"height painter": a table the profile author paints by hand (the Profile
+Builder painter, W30-06 part B), mapping a tile number to a wall height. It
+exists for a game with **no level decoder** — one that lays its world out
+tile by tile as it scrolls, so there is no level to decode and nothing in
+the ROM that says which tile is a wall. Nothing is inferred from game code.
+
+| Key | Range | Meaning |
+|---|---|---|
+| `layer` | 1..=4 (default 1) | The SNES BG layer whose tilemap is read. Ignored for NES. |
+| `tile_px` | 8 or 16 (default 8) | The grid cell a height applies to. `16` groups 2x2 tiles and uses the top-left tile's number. |
+| `[heights.tiles]` | key `"0x000"`..`"0x3FF"`, value 0..=64 | Tile number (the tilemap entry's 10-bit character number; hex, `0x` optional) to height in eighths of a tile. Tiles not listed are flat ground. |
+
+The loader rejects a bad value naming its key (`[heights].tiles."0x400"`),
+and a tile listed twice under two spellings.
+
+**How it is used.** With a matched profile in Game-Aware mode, the Diorama
+row is available for a profile that has `[heights]` even though it has no
+decoder (a profile that does have a decoded level keeps using that). Every
+frame the app reads the chosen layer's tilemap for the screen currently
+showing, offset by the layer's live scroll so the walls stay locked to the
+picture, looks each cell up in the table (a cell > 0 is a wall of that
+height, anything else is ground), and renders the diorama with the current
+frame as the ground and wall-top texture and the sprites as upright
+billboards. Presentation only, opt-in: Accuracy output is untouched.
+
+**Limits, stated.** SNES only for now (the live NES nametable path has no
+scroll snapshot); the scroll used is the one the layer holds at the end of
+the frame, so a game that changes scroll mid-frame with HDMA (parallax,
+wavy water) is walled as if the last value held for the whole screen;
+Mode 7 has no tilemap and gets no grid; the tilemap entry's flip, palette
+and priority bits are ignored.
 
 ### `room_grid`'s collision field (ticket W16-05)
 

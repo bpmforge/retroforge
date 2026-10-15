@@ -63,6 +63,9 @@ pub struct Profile {
     /// `[overclock]` — caps the player's Super FX overclock for this game
     /// (ticket W30-01).
     pub overclock: Option<Overclock>,
+    /// `[heights]` — a hand-painted per-tile height table the live-screen
+    /// diorama raises its walls from (ticket W30-06).
+    pub heights: Option<Heights>,
     pub loading: Option<Loading>,
     pub plugins: Option<Plugins>,
     pub mods: Option<Mods>,
@@ -502,6 +505,76 @@ pub struct Overclock {
     pub target_tick_hz: Option<u32>,
 }
 
+/// `[heights]` (§2, ticket W30-06): a per-tile height table the author
+/// paints by hand, from which the diorama is raised out of the tilemap that
+/// is ON SCREEN right now — for a game with no level decoder, which has no
+/// other way to know a wall from a floor. Nothing is inferred from game
+/// code; a tile the table does not list is flat ground (height 0).
+///
+/// - `layer` — the SNES BG layer whose tilemap is read, `1..=4` (default 1).
+///   Ignored for NES, which has a single nametable.
+/// - `tile_px` — the grid cell a height applies to, `8` or `16` (default 8).
+///   `16` groups 2x2 tiles and uses the top-left tile's number.
+/// - `tiles` — tile number (the tilemap entry's 10-bit character number, as
+///   a hex string key such as `"0x0A4"`) to height in eighths of a tile,
+///   `0..=64`.
+///
+/// Fields are signed so the loader can reject an out-of-range value by
+/// naming its key rather than failing with a generic type error.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Heights {
+    #[serde(default = "default_heights_layer")]
+    pub layer: i64,
+    #[serde(default = "default_heights_tile_px")]
+    pub tile_px: i64,
+    #[serde(default)]
+    pub tiles: std::collections::BTreeMap<String, i64>,
+}
+
+fn default_heights_layer() -> i64 {
+    1
+}
+
+fn default_heights_tile_px() -> i64 {
+    8
+}
+
+/// The largest tile number a tilemap entry can hold (10 bits).
+pub const HEIGHTS_MAX_TILE: u32 = 0x3FF;
+/// The tallest wall, in eighths of a tile.
+pub const HEIGHTS_MAX_EIGHTHS: i64 = 64;
+
+impl Heights {
+    /// Parse a `[heights.tiles]` key: a hex number, `0x` prefix optional,
+    /// `0..=0x3FF`. `None` for anything else.
+    #[must_use]
+    pub fn parse_tile_key(key: &str) -> Option<u16> {
+        let digits = key
+            .strip_prefix("0x")
+            .or_else(|| key.strip_prefix("0X"))
+            .unwrap_or(key);
+        let n = u32::from_str_radix(digits, 16).ok()?;
+        (n <= HEIGHTS_MAX_TILE).then_some(n as u16)
+    }
+
+    /// The validated table as tile number -> height in eighths. Entries that
+    /// fail validation (the loader rejects them, so none reach here from a
+    /// loaded profile) are skipped.
+    #[must_use]
+    pub fn table(&self) -> std::collections::HashMap<u16, u8> {
+        self.tiles
+            .iter()
+            .filter_map(|(k, v)| {
+                let tile = Self::parse_tile_key(k)?;
+                let eighths = u8::try_from(*v)
+                    .ok()
+                    .filter(|h| i64::from(*h) <= HEIGHTS_MAX_EIGHTHS)?;
+                Some((tile, eighths))
+            })
+            .collect()
+    }
+}
+
 /// `[loading]` (§2).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Loading {
@@ -805,6 +878,7 @@ mod tests {
             antiflicker: None,
             atmosphere: None,
             overclock: None,
+            heights: None,
             loading: None,
             plugins: None,
             mods: None,

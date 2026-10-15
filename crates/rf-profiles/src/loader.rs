@@ -171,7 +171,49 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
         }
     }
 
+    if let Some(heights) = profile.heights.as_ref() {
+        validate_heights(heights)?;
+    }
+
     Ok(LoadOutcome { profile, warnings })
+}
+
+/// `[heights]` (ticket W30-06): every error names the offending key.
+fn validate_heights(heights: &crate::schema::Heights) -> Result<(), ProfileError> {
+    use crate::schema::{Heights, HEIGHTS_MAX_EIGHTHS};
+    let bad = |key: String, value: i64, valid| ProfileError::HeightsInvalid {
+        key,
+        value: value.to_string(),
+        valid,
+    };
+    if !(1..=4).contains(&heights.layer) {
+        return Err(bad("layer".into(), heights.layer, "1..=4"));
+    }
+    if ![8, 16].contains(&heights.tile_px) {
+        return Err(bad("tile_px".into(), heights.tile_px, "8 or 16"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in &heights.tiles {
+        let named = format!("tiles.\"{key}\"");
+        let Some(tile) = Heights::parse_tile_key(key) else {
+            return Err(ProfileError::HeightsInvalid {
+                key: named,
+                value: value.to_string(),
+                valid: "a hex tile number 0x000..=0x3FF as the key",
+            });
+        };
+        if !seen.insert(tile) {
+            return Err(ProfileError::HeightsInvalid {
+                key: named,
+                value: value.to_string(),
+                valid: "each tile number listed once (this key repeats another)",
+            });
+        }
+        if !(0..=HEIGHTS_MAX_EIGHTHS).contains(value) {
+            return Err(bad(named, *value, "0..=64 eighths"));
+        }
+    }
+    Ok(())
 }
 
 /// Load and validate a profile from a file path.
@@ -555,5 +597,91 @@ mod tests {
             ProfileError::MissingField(path) => assert_eq!(path, "meta.profile_version"),
             other => panic!("expected MissingField, got {other:?}"),
         }
+    }
+
+    // `[heights]` (ticket W30-06; GAME_PROFILES.md §2).
+
+    fn heights_text(body: &str) -> String {
+        format!("{VALID}\n[heights]\n{body}\n")
+    }
+
+    #[test]
+    fn a_valid_heights_table_loads_and_resolves() {
+        let text = heights_text(
+            "layer = 2\ntile_px = 16\n[heights.tiles]\n\"0x0A4\" = 16\n\"3FF\" = 64\n\"0x001\" = 0",
+        );
+        let h = load_str(&text)
+            .expect("valid [heights]")
+            .profile
+            .heights
+            .unwrap();
+        assert_eq!((h.layer, h.tile_px), (2, 16));
+        let table = h.table();
+        assert_eq!(table.get(&0x0A4), Some(&16));
+        assert_eq!(table.get(&0x3FF), Some(&64));
+        assert_eq!(table.get(&0x001), Some(&0));
+        assert_eq!(table.len(), 3);
+    }
+
+    #[test]
+    fn heights_defaults_to_layer_one_and_eight_pixel_cells_and_no_warnings() {
+        let out = load_str(&heights_text("")).expect("empty [heights]");
+        let h = out.profile.heights.unwrap();
+        assert_eq!((h.layer, h.tile_px, h.tiles.len()), (1, 8, 0));
+        let out = load_str(&heights_text("[heights.tiles]\n\"0x10\" = 8")).unwrap();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_profile_without_heights_has_none() {
+        assert!(load_str(VALID).unwrap().profile.heights.is_none());
+    }
+
+    #[test]
+    fn a_misspelt_heights_key_warns() {
+        let out = load_str(&heights_text("lyer = 1")).unwrap();
+        assert!(
+            out.warnings.contains(&"heights.lyer".to_string()),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn heights_layer_and_tile_px_are_range_checked_by_name() {
+        for (body, key) in [
+            ("layer = 0", "[heights].layer"),
+            ("layer = 5", "[heights].layer"),
+            ("tile_px = 12", "[heights].tile_px"),
+            ("tile_px = 0", "[heights].tile_px"),
+        ] {
+            let err = load_str(&heights_text(body)).unwrap_err();
+            assert!(err.to_string().contains(key), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn heights_tile_keys_and_values_are_validated_and_the_error_names_the_key() {
+        for (entry, needle) in [
+            ("\"0x400\" = 8", "0x400"),
+            ("\"zz\" = 8", "zz"),
+            ("\"\" = 8", "tiles"),
+            ("\"0x0A4\" = 65", "0x0A4"),
+            ("\"0x0A4\" = -1", "0x0A4"),
+        ] {
+            let text = heights_text(&format!("[heights.tiles]\n{entry}"));
+            let err = load_str(&text).unwrap_err();
+            assert!(
+                matches!(err, ProfileError::HeightsInvalid { .. }),
+                "{entry}: {err}"
+            );
+            assert!(err.to_string().contains(needle), "{entry}: {err}");
+        }
+        // Two spellings of one tile are a mistake, not a silent override.
+        let dup = heights_text("[heights.tiles]\n\"0x0A4\" = 8\n\"A4\" = 16");
+        assert!(matches!(
+            load_str(&dup).unwrap_err(),
+            ProfileError::HeightsInvalid { .. }
+        ));
     }
 }

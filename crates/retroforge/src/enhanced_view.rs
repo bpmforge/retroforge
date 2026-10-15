@@ -1033,6 +1033,122 @@ pub fn compose_mode7_ground(
     })
 }
 
+// ---------------------------------------------------------------------
+// Live-screen diorama (ticket W30-06): walls raised from the tilemap on
+// screen by the profile's `[heights]` table, no decoded level required.
+// ---------------------------------------------------------------------
+
+/// One SNES sprite's footprint on the live-screen diorama's grid, or `None`
+/// when it is not on the picture (a parked sprite, or one wholly off an edge).
+///
+/// The grid IS the screen shifted by [`crate::live_heights::LiveGrid::offset`]
+/// (that module's doc), so a sprite stands at its OAM position plus that
+/// shift, feet at the bottom edge (ticket W30-05b), and its UV rect is the
+/// same OAM rectangle on the screen-sized sprite layer. The sprite's size is
+/// the `$2101` pair selected by its high-table size bit
+/// ([`rf_snes::debug::obj_sizes`]).
+#[must_use]
+fn live_sprite_billboard(
+    sprite: &rf_snes::debug::SpriteEntry,
+    obj_size_select: u8,
+    grid: &crate::live_heights::LiveGrid,
+    screen: (u32, u32),
+) -> Option<rf_renderer::diorama_mesh::Billboard> {
+    let (small, big) = rf_snes::debug::obj_sizes(obj_size_select);
+    let (w, h) = if sprite.large { big } else { small };
+    let (w, h) = (f32::from(w), f32::from(h));
+    let (sx, sy) = (f32::from(sprite.x), f32::from(sprite.y));
+    let (screen_w, screen_h) = (screen.0.max(1) as f32, screen.1.max(1) as f32);
+    if sy >= screen_h || sx >= screen_w || sx + w <= 0.0 {
+        return None;
+    }
+    let (gx, gy) = grid.screen_to_grid(sx, sy);
+    Some(rf_renderer::diorama_mesh::Billboard {
+        center_x_px: gx + w / 2.0,
+        center_z_px: gy + h,
+        width_px: w,
+        height_px: h,
+        uv: [
+            sx / screen_w,
+            sy / screen_h,
+            (sx + w) / screen_w,
+            (sy + h) / screen_h,
+        ],
+    })
+}
+
+/// Build one live-screen diorama frame (ticket W30-06 part A).
+///
+/// `grid` is [`crate::live_heights::build_grid`]'s output for this frame;
+/// `frame_rgba` (`frame_w` x `frame_h`) is the picture the PPU just drew and
+/// becomes the ground and wall-top texture, laid out by
+/// [`crate::live_heights::padded_ground`] so a wall stays on the tile it was
+/// raised from. `sprites`/`obj_size_select` are the live OAM snapshot and
+/// `sprite_rgba` the sprite-only layer, exactly as [`compose_mode7_ground`]
+/// takes them. Same pass, same camera and same billboards as the decoded
+/// path ([`compose_diorama`]).
+///
+/// # Errors
+/// Propagates [`rf_renderer::diorama::DioramaPass::render_camera`]'s `Err`
+/// (GPU readback timeout).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_live_diorama(
+    gpu: &GpuContext,
+    pass: &rf_renderer::diorama::DioramaPass,
+    grid: &crate::live_heights::LiveGrid,
+    frame_rgba: &[u8],
+    frame_w: u32,
+    frame_h: u32,
+    sprites: &[rf_snes::debug::SpriteEntry],
+    obj_size_select: u8,
+    sprite_rgba: &[u8],
+    sprite_w: u32,
+    sprite_h: u32,
+    out_width: u32,
+    out_height: u32,
+    view: DioramaView,
+) -> Result<DioramaRender, String> {
+    let ground = crate::live_heights::padded_ground(frame_rgba, frame_w, frame_h, grid);
+    let (ground_w, ground_h) = grid.extent();
+    let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
+        .iter()
+        .filter_map(|s| live_sprite_billboard(s, obj_size_select, grid, (frame_w, frame_h)))
+        .collect();
+    let (cx, cy) = grid.screen_to_grid(frame_w as f32 / 2.0, frame_h as f32 / 2.0);
+    let camera_view = view.camera_at((cx, cy));
+    let scene = rf_renderer::diorama_mesh::DioramaScene {
+        tiles_w: grid.cols,
+        tiles_h: grid.rows,
+        tile_px: grid.tile_px as f32,
+        solid: &grid.solid,
+        depth: &grid.depth,
+        billboards: &billboards,
+    };
+    let vertices =
+        rf_renderer::diorama::vertices_for_camera(&scene, out_width, out_height, &camera_view);
+    let rgba = pass.render_camera(
+        gpu,
+        &vertices,
+        &ground,
+        ground_w,
+        ground_h,
+        sprite_rgba,
+        sprite_w,
+        sprite_h,
+        grid.cols,
+        grid.rows,
+        grid.tile_px,
+        out_width,
+        out_height,
+        &camera_view,
+    )?;
+    Ok(DioramaRender {
+        rgba,
+        width: out_width,
+        height: out_height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1608,5 +1724,58 @@ mod tests {
             (0.0, 0.0),
             "a zero-width layer must not divide by zero"
         );
+    }
+
+    // --- ticket W30-06: live_sprite_billboard ------------------------------
+
+    fn live_grid(offset: (u32, u32)) -> crate::live_heights::LiveGrid {
+        crate::live_heights::LiveGrid {
+            cols: 33,
+            rows: 29,
+            tile_px: 8,
+            offset,
+            solid: vec![0; 33 * 29],
+            depth: vec![0; 33 * 29],
+        }
+    }
+
+    fn oam(x: i16, y: u8, large: bool) -> rf_snes::debug::SpriteEntry {
+        rf_snes::debug::SpriteEntry {
+            index: 0,
+            x,
+            y,
+            tile: 0,
+            palette: 0,
+            priority: 0,
+            flip_x: false,
+            flip_y: false,
+            large,
+            second_page: false,
+        }
+    }
+
+    #[test]
+    fn a_live_sprite_stands_at_its_oam_position_shifted_into_the_grid() {
+        // $2101 select 0: 8x8 small, 16x16 large.
+        let b = live_sprite_billboard(&oam(40, 100, true), 0, &live_grid((3, 5)), (256, 224))
+            .expect("on screen");
+        assert_eq!((b.width_px, b.height_px), (16.0, 16.0));
+        assert_eq!((b.center_x_px, b.center_z_px), (43.0 + 8.0, 105.0 + 16.0));
+        assert_eq!(
+            b.uv,
+            [40.0 / 256.0, 100.0 / 224.0, 56.0 / 256.0, 116.0 / 224.0]
+        );
+        let small =
+            live_sprite_billboard(&oam(0, 0, false), 0, &live_grid((0, 0)), (256, 224)).unwrap();
+        assert_eq!((small.width_px, small.height_px), (8.0, 8.0));
+    }
+
+    #[test]
+    fn parked_and_wholly_off_screen_sprites_are_not_billboarded() {
+        let g = live_grid((0, 0));
+        assert!(live_sprite_billboard(&oam(10, 240, false), 0, &g, (256, 224)).is_none());
+        assert!(live_sprite_billboard(&oam(-8, 10, false), 0, &g, (256, 224)).is_none());
+        assert!(live_sprite_billboard(&oam(-4, 10, false), 0, &g, (256, 224)).is_some());
+        assert!(live_sprite_billboard(&oam(256, 10, false), 0, &g, (256, 224)).is_none());
     }
 }

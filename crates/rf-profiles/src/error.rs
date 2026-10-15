@@ -80,6 +80,13 @@ pub enum ProfileError {
         value: u32,
         valid: &'static str,
     },
+    /// A `[heights]` key was out of range or malformed (ticket W30-06).
+    /// `key` names it (`layer`, `tile_px`, or `tiles."0x0A4"`).
+    HeightsInvalid {
+        key: String,
+        value: String,
+        valid: &'static str,
+    },
 }
 
 impl fmt::Display for ProfileError {
@@ -134,6 +141,9 @@ impl fmt::Display for ProfileError {
                 f,
                 "`[overclock].{key}` = {value} (0x{value:X}) is invalid (valid: {valid})"
             ),
+            ProfileError::HeightsInvalid { key, value, valid } => {
+                write!(f, "`[heights].{key}` = {value} is invalid (valid: {valid})")
+            }
             ProfileError::AtmosphereInvalidTint(v) => write!(
                 f,
                 "`[atmosphere].tint` = `{v}` is not a `#rrggbb` hex colour"

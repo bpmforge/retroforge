@@ -1340,6 +1340,11 @@ pub struct RetroForgeApp {
     /// re-derived every repaint by [`Self::sync_diorama_subscription`],
     /// this field only exists to detect the change.
     mode7_ground_wanted: bool,
+    /// Ticket W30-06: the matched SNES profile's `[heights]` table, which
+    /// lets Diorama raise walls from the tilemap on screen with no decoded
+    /// level (`crate::live_heights`). `None` for any other game. Set by
+    /// [`Self::apply_profile_match`].
+    live_heights: Option<crate::live_heights::HeightTable>,
     /// The Mode 7 ground texture built from the live VRAM/CGRAM snapshot
     /// (`rf_snes::debug::render_mode7_plane_rgba`), cached by a cheap hash
     /// of the plane's own bytes so a VRAM snapshot that has not changed
@@ -1782,6 +1787,7 @@ impl RetroForgeApp {
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
             mode7_seen: false,
             mode7_ground_wanted: false,
+            live_heights: None,
             mode7_plane_cache: None,
             ultrawide_refresh_countdown: 0,
             awaiting_canvas_snapshot: false,
@@ -4691,10 +4697,10 @@ impl RetroForgeApp {
         crate::enhance_ui::GameFacts {
             profile_matched: self.profile_matched,
             level_decoded: self.level_session.is_some(),
-            diorama_available: self
-                .level_session
-                .as_ref()
-                .is_some_and(crate::level_view::LevelSession::has_collision),
+            // A decoded level with collision, or (W30-06) a painted height
+            // table to raise the live screen from.
+            diorama_available: self.decoded_diorama_available()
+                || self.live_heights.as_ref().is_some_and(|h| !h.is_empty()),
             mode7_active: self.mode7_seen,
             widescreen_supported: self.console_label == "SNES",
             loading_declared: !self.loading_waits.is_empty(),
@@ -4721,6 +4727,21 @@ impl RetroForgeApp {
                 && self.lens_budget.is_enabled()
                 && !self.lens_failed,
         }
+    }
+
+    /// Whether the decoded level carries collision (the walls tier's own
+    /// source; a profile with one keeps using it even if it also has
+    /// `[heights]`).
+    fn decoded_diorama_available(&self) -> bool {
+        self.level_session
+            .as_ref()
+            .is_some_and(crate::level_view::LevelSession::has_collision)
+    }
+
+    /// Ticket W30-06: Diorama is wanted AND is being raised from the live
+    /// screen's tilemap rather than a decoded level.
+    fn live_diorama_active(&self) -> bool {
+        self.diorama_wanted && self.live_heights.is_some() && !self.decoded_diorama_available()
     }
 
     /// Ticket W20-17: whether a declared HUD is pinned over the ultrawide
@@ -5018,6 +5039,10 @@ impl RetroForgeApp {
             self.refresh_mode7_ground_render(msg);
             return;
         }
+        if self.live_diorama_active() {
+            self.refresh_live_diorama(msg);
+            return;
+        }
         if !self.diorama_wanted || msg.sprite_rgba.is_empty() {
             return;
         }
@@ -5078,6 +5103,84 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
+        self.store_diorama_result(result);
+    }
+
+    /// Ticket W30-06: [`Self::refresh_diorama_render`] for a game with no
+    /// decoder — the walls come from the BG tilemap on screen right now and
+    /// the profile's `[heights]` table (`crate::live_heights`), the ground is
+    /// this frame's own picture, and the sprites are billboards from the live
+    /// OAM. Recomputed every frame, so the walls track scrolling.
+    ///
+    /// Anything it cannot do (no snapshot yet, a hi-res or widescreen frame
+    /// whose width is not the SNES's 256, a BG mode with no plain tilemap, no
+    /// GPU, a blown budget) clears the render, so the player sees the flat
+    /// picture rather than a stale diorama.
+    fn refresh_live_diorama(&mut self, msg: &core_thread::FrameMsg) {
+        let (width, height) = (
+            u32::try_from(msg.width).unwrap_or(0),
+            u32::try_from(msg.height).unwrap_or(0),
+        );
+        let grid = match (&self.live_heights, &msg.snes) {
+            (Some(table), Some(snes)) if width == 256 => crate::live_heights::build_grid(
+                table,
+                &snes.vram,
+                &snes.ppu_regs,
+                snes.bg_scroll,
+                (width, height),
+            ),
+            _ => None,
+        };
+        let usable = grid.is_some()
+            && !msg.sprite_rgba.is_empty()
+            && self.diorama_budget.is_enabled()
+            && self.gpu.is_some();
+        let (Some(grid), Some(snes), true) = (grid, &msg.snes, usable) else {
+            self.diorama_render = None;
+            self.diorama_texture = None;
+            return;
+        };
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        if self.diorama_pass.is_none() {
+            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+        }
+        let pass = self
+            .diorama_pass
+            .as_ref()
+            .expect("just constructed above when absent");
+
+        let sprites = rf_snes::debug::decode_oam(&snes.oam);
+        // `$2101` bits 5-7 (`ppu_regs[n]` is `$21nn`).
+        let obj_size_select = snes.ppu_regs.get(0x01).copied().unwrap_or(0) >> 5;
+
+        let start = std::time::Instant::now();
+        let result = enhanced_view::compose_live_diorama(
+            gpu,
+            pass,
+            &grid,
+            &msg.rgba,
+            width,
+            height,
+            &sprites,
+            obj_size_select,
+            &msg.sprite_rgba,
+            width,
+            height,
+            width,
+            height,
+            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
+        );
+        self.diorama_budget
+            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
+        self.store_diorama_result(result);
+    }
+
+    /// Upload a finished diorama frame as [`Self::diorama_texture`], or fall
+    /// back to the flat view silently (`enhanced_view::select_active_view`'s
+    /// own doc) when it failed.
+    fn store_diorama_result(&mut self, result: Result<enhanced_view::DioramaRender, String>) {
         match result {
             Ok(render) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -5097,10 +5200,6 @@ impl RetroForgeApp {
                 self.diorama_render = Some(render);
             }
             Err(_) => {
-                // Silent fallback to the flat view (`enhanced_view::
-                // select_active_view`'s own doc: Diorama degrades quietly
-                // rather than blocking play or showing an error box over
-                // the game).
                 self.diorama_render = None;
                 self.diorama_texture = None;
             }
@@ -5217,31 +5316,7 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
-        match result {
-            Ok(render) => {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [render.width as usize, render.height as usize],
-                    &render.rgba,
-                );
-                match &mut self.diorama_texture {
-                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
-                    None => {
-                        self.diorama_texture = Some(self.ctx.load_texture(
-                            "diorama-frame",
-                            image,
-                            egui::TextureOptions::NEAREST,
-                        ));
-                    }
-                }
-                self.diorama_render = Some(render);
-            }
-            Err(_) => {
-                // Same silent-degrade posture `refresh_diorama_render`'s
-                // own doc states.
-                self.diorama_render = None;
-                self.diorama_texture = None;
-            }
-        }
+        self.store_diorama_result(result);
     }
 
     /// Ticket W4-03e: keep the Ultrawide view live while it's the active
@@ -10397,6 +10472,15 @@ impl RetroForgeApp {
                 target_hz: overclock.as_ref().and_then(|o| o.target_tick_hz),
             },
         ));
+        // Ticket W30-06: a SNES profile's `[heights]` table. NES has no
+        // scroll snapshot to align a live grid with yet, so a NES profile's
+        // table is not claimed (the Diorama row must not read Available for
+        // something that cannot render).
+        self.live_heights = matched
+            .as_ref()
+            .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
+            .and_then(|(p, _)| p.heights.as_ref())
+            .map(crate::live_heights::HeightTable::from_profile);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -11934,7 +12018,69 @@ impl RetroForgeApp {
         height: usize,
     ) {
         self.mode7_seen = true;
-        let msg = core_thread::FrameMsg {
+        let snes = core_thread::SnesDebugFrame {
+            vram,
+            cgram,
+            oam: vec![0u8; 544],
+            ppu_regs: vec![0u8; 0x40],
+            aram: Vec::new(),
+            mode7: rf_snes::ppu::mode7::Mode7::default(),
+            hdma_lanes: Vec::new(),
+            voices: Vec::new(),
+            bg_scroll: [(0, 0); 4],
+        };
+        let msg = Self::synthetic_frame_msg(
+            vec![0u8; width * height * 4],
+            sprite_rgba,
+            width,
+            height,
+            snes,
+            Some(Box::new(frame)),
+        );
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// Ticket W30-06: give the app a SNES profile's `[heights]` table the
+    /// way a matched profile would (and mark a profile matched), so the
+    /// Diorama row can become available with no decoder.
+    #[doc(hidden)]
+    pub fn set_live_heights_for_test(&mut self, table: crate::live_heights::HeightTable) {
+        self.live_heights = Some(table);
+        self.profile_matched = true;
+    }
+
+    /// Ticket W30-06: whether the Diorama row is currently effective (what
+    /// a repaint's `sync_diorama_subscription` last saw).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_wanted_for_test(&self) -> bool {
+        self.diorama_wanted
+    }
+
+    /// Ticket W30-06: deliver one synthetic SNES frame — the picture, the
+    /// sprite layer and the PPU snapshot — through the identical private
+    /// path a real frame takes to the live-screen diorama.
+    #[doc(hidden)]
+    pub fn inject_snes_live_frame_for_test(
+        &mut self,
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        snes: core_thread::SnesDebugFrame,
+    ) {
+        let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// A `FrameMsg` with only the fields the diorama paths read filled in.
+    fn synthetic_frame_msg(
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        width: usize,
+        height: usize,
+        snes: core_thread::SnesDebugFrame,
+        mode7: Option<Box<rf_core_api::Mode7Frame>>,
+    ) -> core_thread::FrameMsg {
+        core_thread::FrameMsg {
             governors: crate::clock_governor::GovernorReport::default(),
             loading: None,
             paced: true,
@@ -11945,7 +12091,7 @@ impl RetroForgeApp {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
-            rgba: vec![0u8; width * height * 4],
+            rgba,
             line_palettes: Vec::new(),
             width,
             height,
@@ -11955,16 +12101,7 @@ impl RetroForgeApp {
             sprite_rgba,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
-            snes: Some(Box::new(core_thread::SnesDebugFrame {
-                vram,
-                cgram,
-                oam: vec![0u8; 544],
-                ppu_regs: vec![0u8; 0x40],
-                aram: Vec::new(),
-                mode7: rf_snes::ppu::mode7::Mode7::default(),
-                hdma_lanes: Vec::new(),
-                voices: Vec::new(),
-            })),
+            snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
             palette_ram: Box::new([0u8; 32]),
@@ -11973,10 +12110,9 @@ impl RetroForgeApp {
             items: Vec::new(),
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
-            mode7: Some(Box::new(frame)),
+            mode7,
             canvas_frame: None,
-        };
-        self.refresh_diorama_render(&msg);
+        }
     }
 
     /// Ticket W16-13: whether this build has a real GPU device
@@ -12011,6 +12147,15 @@ impl RetroForgeApp {
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
         Some(hash)
+    }
+
+    /// Ticket W30-06: how many pixels of the current Diorama render are not
+    /// fully transparent, or `None` when there is no render.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_opaque_pixels_for_test(&self) -> Option<usize> {
+        let render = self.diorama_render.as_ref()?;
+        Some(render.rgba.chunks_exact(4).filter(|px| px[3] != 0).count())
     }
 
     /// The status-bar badge text exactly as the toolbar renders it
@@ -13777,7 +13922,11 @@ impl RetroForgeApp {
         // Ticket W16-14: Mode 7 ground needs the live VRAM/CGRAM snapshot
         // (`FrameMsg::snes`) to build its plane texture, same OR-safety
         // shape as `sync_event_subscription`'s own `wants` just below.
-        let wants = self.debug_panels.wants_snes_capture() || self.mode7_ground_wanted;
+        // Ticket W30-06: the live-screen diorama reads VRAM, the registers
+        // and the scroll from the same snapshot.
+        let wants = self.debug_panels.wants_snes_capture()
+            || self.mode7_ground_wanted
+            || self.live_diorama_active();
         if wants == self.snes_capture_active {
             return;
         }
