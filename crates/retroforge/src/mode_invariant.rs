@@ -85,6 +85,9 @@ pub const CORPUS: &[CorpusEntry] = &[
         // Ticket W30-01: the Super FX overclock changes the simulation by
         // design and must NEVER be added to `enable_enhancement`; this
         // invariant covers presentation enhancements only.
+        // Ticket W30-08: the same goes for the CPU overclock, the SA-1
+        // overclock (governed or fixed) and the NES extra vblank lines --
+        // each changes what the game computes per frame.
         enable_enhancement: |s| s.set_sprite_overlay_enabled(true),
     },
     // Ticket W30-02: HD Mode 7 is presentation only. `run` renders the HD

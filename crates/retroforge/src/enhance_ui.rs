@@ -92,6 +92,20 @@ pub struct GameFacts {
     /// means "no overclock", so the row is unavailable rather than an ON
     /// row the badge would count while nothing changes.
     pub superfx_max: u16,
+    /// Ticket W30-08: the running core is the SNES / the NES. The CPU and
+    /// SA-1 overclock rows need the first, "Less slowdown" the second.
+    pub snes: bool,
+    pub nes: bool,
+    /// Ticket W30-08: the loaded cartridge has an SA-1 coprocessor.
+    pub sa1: bool,
+    /// Ticket W30-08: the highest ceiling the matched profile allows for
+    /// the 65816 and the SA-1 (`[overclock].cpu_max` / `sa1_max`; 400 when
+    /// uncapped), and the most NES extra lines (`nes_extra_lines_max`;
+    /// 240). A cap that allows nothing (100 / 0) makes the row unavailable
+    /// rather than an ON row the badge counts while nothing changes.
+    pub cpu_max: u16,
+    pub sa1_max: u16,
+    pub nes_lines_max: u16,
     /// Ticket W30-04: the HD-2D lens can draw -- there is a GPU, and the
     /// pass has kept to its frame budget and not failed. Like
     /// `fog_rendered`, so the badge never counts a row nothing draws.
@@ -114,6 +128,12 @@ impl GameFacts {
             fog_rendered: true,
             superfx: true,
             superfx_max: 800,
+            snes: true,
+            nes: true,
+            sa1: true,
+            cpu_max: 400,
+            sa1_max: 400,
+            nes_lines_max: 240,
             lens_available: true,
         }
     }
@@ -166,6 +186,12 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         fog_rendered,
         superfx,
         superfx_max,
+        snes,
+        nes,
+        sa1,
+        cpu_max,
+        sa1_max,
+        nes_lines_max,
         lens_available,
     } = *facts;
     let mode = settings.mode;
@@ -225,6 +251,24 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     // Ticket W30-01: a generic feature (no profile needed) that also needs
     // a Super FX cartridge. Unlike every presentation toggle it changes the
     // simulation, which is why it is off by default and Enhanced-only.
+    // Ticket W30-08: three more simulation changes, on the same terms. The
+    // governed default removes slowdown without speeding the game up; the
+    // rows are still Enhanced-only and off until turned on.
+    let (cpu_av, cpu_on) = also(
+        generic(settings.cpu_overclock),
+        snes && cpu_max > 100,
+        "an SNES game whose profile allows overclocking",
+    );
+    let (sa1_av, sa1_on) = also(
+        generic(settings.sa1_overclock),
+        sa1 && sa1_max > 100,
+        "an SA-1 cartridge whose profile allows overclocking",
+    );
+    let (nes_lines_av, nes_lines_on) = also(
+        generic(settings.nes_extra_lines > 0),
+        nes && nes_lines_max > 0,
+        "an NES game whose profile allows extra vblank lines",
+    );
     let (run_ahead_av, run_ahead_on) = generic(settings.run_ahead > 0);
     let (superfx_av, superfx_on) = also(
         generic(settings.superfx_overclock),
@@ -319,6 +363,30 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, Super FX cartridges",
             enabled: superfx_on,
             availability: superfx_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "cpu_overclock",
+            label: "CPU overclock",
+            scope: "generic, SNES",
+            enabled: cpu_on,
+            availability: cpu_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "sa1_overclock",
+            label: "SA-1 overclock",
+            scope: "generic, SA-1 cartridges",
+            enabled: sa1_on,
+            availability: sa1_av,
+            heuristic: None,
+        },
+        FeatureRow {
+            id: "nes_extra_lines",
+            label: "Extra vblank lines",
+            scope: "generic, NES",
+            enabled: nes_lines_on,
+            availability: nes_lines_av,
             heuristic: None,
         },
         // Ticket W30-07: presentation only and generic (any console, no
@@ -795,7 +863,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 12, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 15, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -1201,6 +1269,78 @@ mod tests {
         assert_ne!(badge_text("NES", &s, &facts), with, "the badge counts it");
         s.run_ahead = 2;
         assert!(find(&s).effective(), "2 frames is on too");
+    }
+
+    /// Ticket W30-08: the CPU overclock, SA-1 overclock and NES extra-lines
+    /// rows — Enhanced-only, each needing its own console or chip, each
+    /// honouring a profile cap that allows nothing, and counted by the badge
+    /// only when effective.
+    #[test]
+    fn overclock_rows_gating_and_badge() {
+        type Set = fn(&mut GameSettings);
+        type Facts = fn(&mut GameFacts);
+        let find = |id: &str, s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f).into_iter().find(|r| r.id == id).unwrap()
+        };
+        // (row, turn it on, remove the thing it needs, cap it to nothing)
+        let cases: [(&str, Set, Facts, Facts); 3] = [
+            (
+                "cpu_overclock",
+                |s| s.cpu_overclock = true,
+                |f| f.snes = false,
+                |f| f.cpu_max = 100,
+            ),
+            (
+                "sa1_overclock",
+                |s| s.sa1_overclock = true,
+                |f| f.sa1 = false,
+                |f| f.sa1_max = 100,
+            ),
+            (
+                "nes_extra_lines",
+                |s| s.nes_extra_lines = 60,
+                |f| f.nes = false,
+                |f| f.nes_lines_max = 0,
+            ),
+        ];
+        for (id, on, remove, cap) in cases {
+            let facts = GameFacts::new(false, false, false);
+
+            let mut s = GameSettings::default();
+            s.mode = Mode::Accuracy;
+            on(&mut s);
+            assert_eq!(
+                find(id, &s, &facts).availability,
+                Availability::NeedsMode("Enhanced"),
+                "{id}"
+            );
+            assert!(!find(id, &s, &facts).effective(), "{id}");
+
+            s.mode = Mode::Enhanced;
+            assert!(find(id, &s, &facts).effective(), "{id}");
+            assert!(badge_text("SNES", &s, &facts).contains('1'), "{id}");
+
+            let mut wrong = facts;
+            remove(&mut wrong);
+            assert!(
+                matches!(
+                    find(id, &s, &wrong).availability,
+                    Availability::NeedsGameState(_)
+                ),
+                "{id}: needs its console or chip"
+            );
+            assert!(!find(id, &s, &wrong).effective(), "{id}");
+
+            let mut capped = facts;
+            cap(&mut capped);
+            assert!(
+                !find(id, &s, &capped).effective(),
+                "{id}: capped to nothing"
+            );
+
+            // Off (the default) is never effective.
+            assert!(!find(id, &GameSettings::default(), &facts).effective());
+        }
     }
 
     /// Ticket W20-09 (§3 row D): the NES has no widescreen path.

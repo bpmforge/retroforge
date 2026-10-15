@@ -39,7 +39,7 @@ pub mod ops;
 pub mod speed;
 
 pub use bus::{Access, CpuBus, FlatBus};
-pub use speed::{access_cycles, AccessCost};
+pub use speed::{access_cycles, is_apu_port, AccessCost};
 
 /// Status register bits.
 ///

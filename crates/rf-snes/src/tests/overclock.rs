@@ -550,3 +550,60 @@ fn sa1_frame_idle_follows_the_sa1_cpu() {
         "no SA-1, no signal"
     );
 }
+
+/// Master cycles the rest of the machine saw pass for each of the first
+/// `steps` instructions, beside what each cost at the console's real clock.
+fn step_costs(program: &[u8], percent: u16, steps: usize) -> Vec<(u64, u64)> {
+    let mut core = core_with(program, |c| {
+        c.set_cpu_overclock(percent);
+    });
+    // `step` re-applies the multiplier from the core's setting; one frame
+    // call is not wanted here, so apply it to the system directly.
+    core.system_mut().cpu_clock_multiplier = u64::from(percent / 100);
+    (0..steps)
+        .map(|_| {
+            let before = core.system().master_cycles;
+            core.system_mut().step().expect("implemented opcode");
+            let sys = core.system();
+            (sys.master_cycles - before, sys.last_instr_master_cycles)
+        })
+        .collect()
+}
+
+/// Ticket W30-08: an instruction that reads an APU port is charged its full
+/// cost at a 300% CPU clock (so the SPC700 handshake keeps its 100% relative
+/// timing), while the branch beside it, and a read of a non-APU register,
+/// are scaled.
+#[test]
+fn apu_port_instructions_are_charged_unscaled() {
+    // loop: LDA $2140 ; BRA loop
+    let port = [0xAD, 0x40, 0x21, 0x80, 0xFB];
+    let costs = step_costs(&port, 300, 8);
+    for pair in costs.chunks(2) {
+        let (lda_scaled, lda_real) = pair[0];
+        let (bra_scaled, bra_real) = pair[1];
+        assert_eq!(lda_scaled, lda_real, "APU port read must not be scaled");
+        assert!(bra_scaled * 3 <= bra_real + 3 && bra_scaled * 3 + 3 >= bra_real);
+    }
+    // The same shape on a WRAM port ($2180) is scaled like any other.
+    let wram = [0xAD, 0x80, 0x21, 0x80, 0xFB];
+    let (scaled, real) = step_costs(&wram, 300, 1)[0];
+    assert!(scaled * 3 <= real + 3 && scaled * 3 + 3 >= real);
+    // At 100% nothing changes.
+    let (scaled, real) = step_costs(&port, 100, 1)[0];
+    assert_eq!(scaled, real);
+}
+
+/// The APU port window is `$2140-$217F` in the system banks only.
+#[test]
+fn apu_port_window_is_the_mirrored_range_in_system_banks() {
+    use crate::cpu::is_apu_port;
+    assert!(is_apu_port(0x00_2140));
+    assert!(is_apu_port(0x3F_217F));
+    assert!(is_apu_port(0x80_2143));
+    assert!(is_apu_port(0xBF_2160));
+    assert!(!is_apu_port(0x00_213F));
+    assert!(!is_apu_port(0x00_2180));
+    assert!(!is_apu_port(0x7E_2140), "bank $7E is WRAM");
+    assert!(!is_apu_port(0x40_2140));
+}

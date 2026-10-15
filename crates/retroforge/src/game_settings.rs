@@ -176,6 +176,43 @@ impl Mode {
     }
 }
 
+/// Ticket W30-08: how an overclocked chip's speed is chosen.
+///
+/// `Governed` (the default) only ever REMOVES SLOWDOWN: the speed governor
+/// (`rf_enhance::speed_governor`) raises the clock while the game runs short
+/// of its normal rate and lowers it again the moment it does not, so the game
+/// never ticks faster than it was designed to; the slider is its ceiling.
+/// `Fixed` always runs at the slider's speed, which makes some games run
+/// faster than intended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverclockMode {
+    #[default]
+    Governed,
+    Fixed,
+}
+
+impl OverclockMode {
+    /// The settings-file spelling.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            OverclockMode::Governed => "governed",
+            OverclockMode::Fixed => "fixed",
+        }
+    }
+
+    /// Parse [`Self::key`]; anything else is `None` (the caller keeps the
+    /// default, which is the safe one).
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "governed" => Some(OverclockMode::Governed),
+            "fixed" => Some(OverclockMode::Fixed),
+            _ => None,
+        }
+    }
+}
+
 /// One game's settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSettings {
@@ -211,6 +248,22 @@ pub struct GameSettings {
     /// [`Self::superfx_overclock`] is on. Valid 200..=800 in steps of 100;
     /// clamped on load. Defaults to 200.
     pub superfx_overclock_pct: u16,
+    /// Ticket W30-08: run the SNES main CPU (65816) faster to remove
+    /// slowdown. A simulation change by design, so off by default (law 6)
+    /// and Enhanced-only. [`Self::cpu_overclock_pct`] is the ceiling
+    /// (200..=400, clamped on load, default 200) and
+    /// [`Self::cpu_overclock_mode`] says whether the governor chooses the
+    /// speed or it is fixed at the ceiling.
+    pub cpu_overclock: bool,
+    pub cpu_overclock_pct: u16,
+    pub cpu_overclock_mode: OverclockMode,
+    /// Ticket W30-08: the same trio for the SA-1 coprocessor.
+    pub sa1_overclock: bool,
+    pub sa1_overclock_pct: u16,
+    pub sa1_overclock_mode: OverclockMode,
+    /// Ticket W30-08: extra CPU-only vblank lines for the NES, 0 (off)
+    /// ..=240; clamped on load.
+    pub nes_extra_lines: u16,
     /// Ticket W30-07: run-ahead, in frames (0 = off, 1 or 2). Hides the
     /// game's own input lag by showing a frame from slightly ahead; the real
     /// simulation is untouched (presentation only), but it costs extra CPU,
@@ -304,6 +357,14 @@ const SUPERFX_PCT_MAX: u16 = 800;
 /// Ticket W30-07: the most frames run-ahead may run ahead.
 const RUN_AHEAD_MAX: u8 = crate::run_ahead::MAX_RUN_AHEAD;
 const SUPERFX_PCT_DEFAULT: u16 = 200;
+/// Ticket W30-08: the stored CPU / SA-1 overclock ceiling's range (whole
+/// hundreds) and the most extra NES vblank lines.
+pub const CLOCK_PCT_MIN: u16 = 200;
+pub const CLOCK_PCT_MAX: u16 = 400;
+pub const CLOCK_PCT_DEFAULT: u16 = 200;
+pub const NES_EXTRA_LINES_MAX: u16 = 240;
+/// What switching "Less slowdown" on starts at, before the slider moves it.
+pub const NES_EXTRA_LINES_ON: u16 = 60;
 
 /// Ticket W30-02: bounds and default of the stored HD Mode 7 scale.
 const HD_MODE7_SCALE_MIN: u8 = 2;
@@ -339,6 +400,13 @@ impl Default for GameSettings {
             loading_fast_forward: false,
             superfx_overclock: false,
             superfx_overclock_pct: SUPERFX_PCT_DEFAULT,
+            cpu_overclock: false,
+            cpu_overclock_pct: CLOCK_PCT_DEFAULT,
+            cpu_overclock_mode: OverclockMode::Governed,
+            sa1_overclock: false,
+            sa1_overclock_pct: CLOCK_PCT_DEFAULT,
+            sa1_overclock_mode: OverclockMode::Governed,
+            nes_extra_lines: 0,
             run_ahead: 0,
             hd_mode7: false,
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
@@ -442,6 +510,8 @@ impl GameSettings {
             ("mode7_ground", self.mode7_ground),
             ("loading_fast_forward", self.loading_fast_forward),
             ("superfx_overclock", self.superfx_overclock),
+            ("cpu_overclock", self.cpu_overclock),
+            ("sa1_overclock", self.sa1_overclock),
             ("hd_mode7", self.hd_mode7),
             ("hd_mode7_supersample", self.hd_mode7_supersample),
         ] {
@@ -455,6 +525,25 @@ impl GameSettings {
             fields.insert(
                 "superfx_overclock_pct".to_string(),
                 self.superfx_overclock_pct.to_string(),
+            );
+        }
+        // Ticket W30-08: only what differs from the default (200%,
+        // governed, no extra lines).
+        for (key, pct, mode) in [
+            ("cpu", self.cpu_overclock_pct, self.cpu_overclock_mode),
+            ("sa1", self.sa1_overclock_pct, self.sa1_overclock_mode),
+        ] {
+            if pct != CLOCK_PCT_DEFAULT {
+                fields.insert(format!("{key}_overclock_pct"), pct.to_string());
+            }
+            if mode != OverclockMode::Governed {
+                fields.insert(format!("{key}_overclock_mode"), mode.key().to_string());
+            }
+        }
+        if self.nes_extra_lines > 0 {
+            fields.insert(
+                "nes_extra_lines".to_string(),
+                self.nes_extra_lines.to_string(),
             );
         }
         // Ticket W30-07: written only when on, like the other opt-ins.
@@ -600,6 +689,34 @@ impl GameSettings {
                 "mode7_ground" => settings.mode7_ground = value == "true",
                 "loading_fast_forward" => settings.loading_fast_forward = value == "true",
                 "superfx_overclock" => settings.superfx_overclock = value == "true",
+                "cpu_overclock" => settings.cpu_overclock = value == "true",
+                "sa1_overclock" => settings.sa1_overclock = value == "true",
+                // Ticket W30-08: whole hundreds, clamped; an unknown mode
+                // keeps the safe default (governed).
+                "cpu_overclock_pct" | "sa1_overclock_pct" => {
+                    if let Ok(pct) = value.parse::<u16>() {
+                        let pct = (pct / 100 * 100).clamp(CLOCK_PCT_MIN, CLOCK_PCT_MAX);
+                        if key == "cpu_overclock_pct" {
+                            settings.cpu_overclock_pct = pct;
+                        } else {
+                            settings.sa1_overclock_pct = pct;
+                        }
+                    }
+                }
+                "cpu_overclock_mode" | "sa1_overclock_mode" => {
+                    if let Some(mode) = OverclockMode::from_key(value) {
+                        if key == "cpu_overclock_mode" {
+                            settings.cpu_overclock_mode = mode;
+                        } else {
+                            settings.sa1_overclock_mode = mode;
+                        }
+                    }
+                }
+                "nes_extra_lines" => {
+                    if let Ok(lines) = value.parse::<u16>() {
+                        settings.nes_extra_lines = lines.min(NES_EXTRA_LINES_MAX);
+                    }
+                }
                 "run_ahead" => {
                     if let Ok(frames) = value.parse::<u8>() {
                         settings.run_ahead = frames.min(RUN_AHEAD_MAX);
@@ -1125,6 +1242,9 @@ mod mode_and_feature_persistence_tests {
             "mode7_ground",
             "superfx_overclock",
             "superfx_overclock_pct",
+            "cpu_overclock",
+            "sa1_overclock",
+            "nes_extra_lines",
             "run_ahead",
             "hd_mode7",
             "lens_",
@@ -1142,6 +1262,12 @@ mod mode_and_feature_persistence_tests {
             mode7_ground: true,
             superfx_overclock: true,
             superfx_overclock_pct: 400,
+            cpu_overclock: true,
+            cpu_overclock_pct: 300,
+            cpu_overclock_mode: OverclockMode::Fixed,
+            sa1_overclock: true,
+            sa1_overclock_pct: 400,
+            nes_extra_lines: 120,
             run_ahead: 2,
             hd_mode7: true,
             hd_mode7_scale: 4,
@@ -1195,6 +1321,31 @@ mod mode_and_feature_persistence_tests {
         }
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
+        // Ticket W30-08: the trio and the line count round-trip; the
+        // governed default writes no mode key; junk clamps or is ignored.
+        assert!(restored.cpu_overclock && restored.sa1_overclock);
+        assert_eq!(restored.cpu_overclock_pct, 300);
+        assert_eq!(restored.cpu_overclock_mode, OverclockMode::Fixed);
+        assert_eq!(restored.sa1_overclock_pct, 400);
+        assert_eq!(restored.sa1_overclock_mode, OverclockMode::Governed);
+        assert!(!s.to_text().contains("sa1_overclock_mode"));
+        assert_eq!(restored.nes_extra_lines, 120);
+        for (raw, want) in [("9999", 400), ("50", 200), ("350", 300), ("x", 200)] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\ncpu_overclock_pct={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.cpu_overclock_pct, want, "cpu pct {raw}");
+            let t = GameSettings::from_text(&format!("{MAGIC}\nsa1_overclock_pct={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.sa1_overclock_pct, want, "sa1 pct {raw}");
+        }
+        for (raw, want) in [("500", 240), ("240", 240), ("1", 1), ("x", 0)] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\nnes_extra_lines={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.nes_extra_lines, want, "lines {raw}");
+        }
+        let t = GameSettings::from_text(&format!("{MAGIC}\ncpu_overclock_mode=turbo\n"))
+            .expect("parses");
+        assert_eq!(t.cpu_overclock_mode, OverclockMode::Governed);
         // Ticket W30-07: run-ahead round-trips, and junk is clamped to 2.
         assert_eq!(restored.run_ahead, 2);
         for (raw, want) in [("1", 1), ("9", 2), ("0", 0), ("x", 0)] {

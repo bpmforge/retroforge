@@ -205,7 +205,14 @@ fn known_shape() -> Shape {
         ),
         (
             "overclock",
-            Shape::Object(vec![("superfx_max", Shape::Leaf)]),
+            Shape::Object(vec![
+                ("superfx_max", Shape::Leaf),
+                ("cpu_max", Shape::Leaf),
+                ("sa1_max", Shape::Leaf),
+                ("nes_extra_lines_max", Shape::Leaf),
+                ("tick_counter", Shape::Leaf),
+                ("target_tick_hz", Shape::Leaf),
+            ]),
         ),
         (
             "loading",

@@ -249,3 +249,118 @@ fn idle_signal_census_on_real_cartridges() {
         }
     }
 }
+
+/// One governed (or plain 100%) run: per-second tick counts, the
+/// multiplier at the end of each second, and the governor's last status.
+struct GovRun {
+    ticks_per_second: Vec<u32>,
+    multiplier_per_second: Vec<u16>,
+    status: Option<rf_enhance::speed_governor::GovernorStatus>,
+}
+
+/// 3600 frames with the census Start pattern. `ceiling` `None` is plain
+/// 100%; `Some` runs a [`SpeedGovernor`] with that ceiling on the SA-1 (for
+/// an SA-1 cartridge) or the 65816, fed the S-CPU idle signal as its tick
+/// and "the picture differs from the last frame" as its change flag — the
+/// same observations the shell's core thread feeds it.
+fn governed_run(bytes: &[u8], ceiling: Option<u16>, frames: u32) -> GovRun {
+    use rf_enhance::speed_governor::{Observation, SpeedGovernor};
+    let mut core = SnesCore::load(bytes).expect("dump loads");
+    let on_sa1 = core.has_sa1();
+    let mut governor = ceiling.map(|c| SpeedGovernor::new(c, None));
+    let mut sink = FrameHasher::new();
+    let mut last = 0;
+    let mut ticks = vec![0u32; (frames as usize).div_ceil(60)];
+    let mut multipliers = vec![100u16; ticks.len()];
+    for f in 0..frames {
+        press_start(&mut core, f);
+        let _ = core.step(Step::Frame, &mut sink);
+        let picture = sink.take();
+        let obs = Observation {
+            tick: core.frame_idle(),
+            picture_changed: picture != last,
+        };
+        last = picture;
+        let second = (f / 60) as usize;
+        ticks[second] += u32::from(obs.tick);
+        if let Some(g) = governor.as_mut() {
+            let m = g.observe(obs);
+            if on_sa1 {
+                core.set_sa1_overclock(m);
+            } else {
+                core.set_cpu_overclock(m);
+            }
+            multipliers[second] = m;
+        }
+    }
+    GovRun {
+        ticks_per_second: ticks,
+        multiplier_per_second: multipliers,
+        status: governor.map(|g| g.status()),
+    }
+}
+
+/// W30-08 part B: the speed governor on real cartridges. For each dump,
+/// prints per-second tick counts at 100% and governed (ceiling 400%), the
+/// learned target, and the multiplier timeline; then the two numbers that
+/// matter — seconds below the target in each run, and seconds where the
+/// governed run ticked ABOVE the target (it must never).
+#[test]
+fn speed_governor_on_real_cartridges() {
+    let Some(paths) = list("RF_GOV_ROMS") else {
+        return;
+    };
+    let frames: u32 = std::env::var("RF_GOV_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    for path in paths {
+        let n = name(&path);
+        let Some(bytes) = rom_bytes(Path::new(&path)) else {
+            println!("{n}: no cartridge found, skipped");
+            continue;
+        };
+        let plain = governed_run(&bytes, None, frames);
+        let gov = governed_run(&bytes, Some(400), frames);
+        let status = gov.status.expect("governed run reports");
+        println!("{n}: 100% ticks/s : {:?}", plain.ticks_per_second);
+        println!("{n}: governed 400% : {:?}", gov.ticks_per_second);
+        println!("{n}: multiplier/s  : {:?}", gov.multiplier_per_second);
+        println!(
+            "{n}: learned target {:?} ({:?}), notice {:?}, final {}%",
+            status.target, status.target_source, status.notice, status.multiplier
+        );
+        let Some(target) = status.target else {
+            println!("{n}: no target learned, governor held 100%");
+            assert!(
+                gov.multiplier_per_second.iter().all(|m| *m == 100),
+                "{n}: no target, no overclock"
+            );
+            continue;
+        };
+        let below = |run: &GovRun| {
+            run.ticks_per_second
+                .iter()
+                .filter(|t| **t + 2 <= target)
+                .count()
+        };
+        // Seconds where the plain run ticked at the target: the governed
+        // run must not exceed it in the same second.
+        let over = plain
+            .ticks_per_second
+            .iter()
+            .zip(&gov.ticks_per_second)
+            .filter(|(p, g)| **p >= target && **g > target + 1)
+            .count();
+        println!(
+            "{n}: seconds below target {target}: 100% = {}, governed = {}; \
+             governed ticked above target in {over} seconds that 100% hit it",
+            below(&plain),
+            below(&gov)
+        );
+        assert_eq!(
+            over, 0,
+            "{n}: the governor made the game faster than normal"
+        );
+    }
+}

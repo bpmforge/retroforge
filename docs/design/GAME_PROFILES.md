@@ -105,6 +105,11 @@ ladder = "active"                    # optional: shadow | advisory | active (def
 
 [overclock]
 superfx_max = 300   # ticket W30-01: cap the Super FX overclock (100..=800, step 100)
+cpu_max = 400       # ticket W30-08: cap the S-CPU overclock ceiling (100..=400, step 100)
+sa1_max = 400       # ... and the SA-1's
+nes_extra_lines_max = 120   # ... and the NES extra vblank lines (0..=240)
+tick_counter = 0x7E0012     # a WRAM byte the game increments once per logic tick
+target_tick_hz = 60         # the game's normal logic rate (1..=60)
 
 [loading]
 [[loading.wait_loops]]
@@ -219,14 +224,43 @@ A future commercial profile earns this table the same way `[antiflicker]`
 or a `[decode]` row does — a cited, checkable source naming the plane, not
 an assumption.
 
-### `[overclock]` (ticket W30-01)
+### `[overclock]` (tickets W30-01, W30-08)
 
-`[overclock]` (`rf_profiles::schema::Overclock`) is optional. Its one key,
-`superfx_max`, caps the Super FX overclock a player may apply to a game
-known to speed up when the chip runs faster (a whole-hundred percent in
-`100..=800`; the loader rejects anything else, naming the key). Omit the
-table to leave the overclock uncapped. The overclock itself is a per-game,
-off-by-default, Enhanced-only player setting; the profile only limits it.
+`[overclock]` (`rf_profiles::schema::Overclock`) is optional and every key in
+it is optional. The overclock rows themselves are per-game, off-by-default,
+Enhanced-only player settings; the profile only limits them and tells the
+speed governor what it cannot work out alone. The loader rejects a bad value
+naming its key.
+
+| Key | Range | Meaning |
+|---|---|---|
+| `superfx_max` | 100..=800, step 100 | Highest Super FX overclock (W30-01). |
+| `cpu_max` | 100..=400, step 100 | Highest S-CPU ceiling. `100` = this game may not be overclocked (the row becomes unavailable). |
+| `sa1_max` | 100..=400, step 100 | Highest SA-1 ceiling, likewise. |
+| `nes_extra_lines_max` | 0..=240 | Most NES extra vblank lines. `0` = none (row unavailable). |
+| `tick_counter` | `0x7E0000..=0x7FFFFF` | The WRAM address of a byte the game increments by one each time its logic tick finishes. The governor's tick signal; without it the S-CPU's idle observer is used. |
+| `target_tick_hz` | 1..=60 | The game's normal logic rate. Without it the governor learns it. |
+
+**Why the governor needs `tick_counter` and `target_tick_hz`.** An overclock
+must only remove slowdown ("we don't want to distort the game, we are
+enhancing it"). Governed mode, the default, raises a chip's clock only while
+the game ticks below its normal rate, and lowers it the moment it does not;
+the player's slider is the ceiling. To do that it counts logic ticks per
+second. By default a tick is a frame in which the S-CPU reached an idle wait
+(`frame_idle`), and the normal rate is learned: the most common ticks-per-
+second seen at 100% while the picture is changing, needing 10 such seconds.
+That fails for some games (Gradius III almost never idles visibly, so the
+governor reports "No speed signal for this game; add a tick counter to its
+profile" and never raises the clock). A `tick_counter` fixes the signal, and
+`target_tick_hz` fixes a game that is slow from its very first frame, which
+the learned mode would take for its normal speed. Find the counter in the
+profile builder's RAM search: it is the byte that changes by exactly +1 each
+logic tick (not each frame, for a 30 Hz game).
+
+The governor also has a hang guard: a game that stops changing the picture
+for 180 frames while overclocked is returned to 100% for the rest of the
+session ("Turned off: the game stopped responding at higher speed"). That
+protects games that stall at a raised clock without any profile entry.
 
 ### `room_grid`'s collision field (ticket W16-05)
 

@@ -264,6 +264,9 @@ pub struct HdMode7Frame {
 }
 
 pub struct FrameMsg {
+    /// Ticket W30-08: each governed chip's status, for the overclock rows'
+    /// live status line.
+    pub governors: crate::clock_governor::GovernorReport,
     /// Ticket W20-13: the rewind ring's extent after this frame, `None`
     /// while rewind is off.
     pub rewind: Option<RewindStatus>,
@@ -584,6 +587,22 @@ pub enum CoreCommand {
     /// the shell only sends a value above 100 when the Enhanced-only
     /// "Super FX overclock" row is effective. A no-op without a Super FX.
     SetGsuOverclock(u16),
+    /// Ticket W30-08: one chip's clock policy -- off, fixed at a speed, or
+    /// governed (the speed governor chooses, up to a ceiling). Like
+    /// `SetGsuOverclock` a simulation change by design, so the shell only
+    /// sends anything but `Off` while the Enhanced-only row is effective.
+    /// The governor runs on THIS thread because only it sees every real
+    /// frame; its status comes back on [`FrameMsg::governors`].
+    SetClockPolicy(
+        crate::clock_governor::ClockChip,
+        crate::clock_governor::ClockPolicy,
+    ),
+    /// Ticket W30-08: what the matched profile says about the game's tick
+    /// (`[overclock].tick_counter` / `target_tick_hz`).
+    SetClockSignal(crate::clock_governor::ClockSignal),
+    /// Ticket W30-08: NES extra CPU-only vblank lines (0 = off). A no-op on
+    /// the SNES.
+    SetNesExtraLines(u16),
     /// Ticket W30-02: HD Mode 7 options (`None` = off). Presentation only:
     /// the core's state is never touched, so unlike `SetGsuOverclock` this
     /// is safe in any mode; the shell sends `Some` only while the
@@ -1251,6 +1270,10 @@ fn core_thread_main(
     // buffers, and whether memory watchpoints are armed (a watchpoint
     // observes execution, so speculation steps aside for it).
     let mut run_ahead: u8 = 0;
+    // Ticket W30-08: the speed governors (one per overclocked chip). They
+    // observe only REAL frames, here; run-ahead's shadow machine copies the
+    // multipliers they chose.
+    let mut clocks = crate::clock_governor::ClockGovernors::default();
     let mut speculator = crate::run_ahead::Speculator::new();
     let mut watches_armed = false;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
@@ -1321,6 +1344,15 @@ fn core_thread_main(
                 }
                 CoreCommand::SetGsuOverclock(pct) => {
                     stepper.set_gsu_overclock(pct);
+                }
+                CoreCommand::SetClockPolicy(chip, policy) => {
+                    clocks.set_policy(chip, policy, &mut stepper);
+                }
+                CoreCommand::SetClockSignal(signal) => {
+                    clocks.set_signal(signal);
+                }
+                CoreCommand::SetNesExtraLines(lines) => {
+                    stepper.set_nes_extra_lines(lines);
                 }
                 CoreCommand::SetHdMode7(options) => {
                     stepper.set_hd_mode7(options);
@@ -1482,6 +1514,7 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
+                    clocks.resync();
                 }
                 CoreCommand::SetRewind(config) => {
                     rewind = config.map(rf_state::RewindRing::new);
@@ -1493,6 +1526,7 @@ fn core_thread_main(
                         .and_then(|(_, bytes)| rf_state::Container::decode_default(&bytes).ok())
                         .is_some_and(|(container, _)| stepper.load_state(&container).is_ok());
                     if restored {
+                        clocks.resync();
                         stepper.latch_and_advance_frame(
                             input.load(),
                             &mut FanoutSink {
@@ -1707,6 +1741,11 @@ fn core_thread_main(
             // materialized bundle, so this cannot perturb core state
             // (Law 6).
             let bundle = bundle_builder.take(stepper.frame_count());
+            // Ticket W30-08: feed the speed governors this REAL frame (a
+            // single-stepped or rewound frame is not a running one).
+            if ran && !stepped {
+                clocks.observe(&mut stepper, sink.rgba());
+            }
             // Ticket W27-02: the camera finder, an observer of this frame's
             // scroll and work RAM (rf_enhance::camera_finder). Reads only.
             let mut camera_done = None;
@@ -1864,6 +1903,7 @@ fn core_thread_main(
             });
             bundle_writer.publish(bundle);
             let mut msg = FrameMsg {
+                governors: clocks.report(),
                 loading: loading_unpaced.clone(),
                 paced: pacer.is_enabled(),
                 rewind: rewind.as_ref().map(|ring| RewindStatus {
@@ -2120,6 +2160,7 @@ mod tests {
     /// at.
     fn empty_frame_msg() -> FrameMsg {
         FrameMsg {
+            governors: crate::clock_governor::GovernorReport::default(),
             loading: None,
             paced: true,
             rewind: None,

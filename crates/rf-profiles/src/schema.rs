@@ -479,13 +479,27 @@ pub struct Atmosphere {
     pub ladder: Option<AtmosphereLadder>,
 }
 
-/// `[overclock]` (§2, ticket W30-01): the highest Super FX overclock the
-/// player may apply to this game, for a title known to speed up when the
-/// chip runs faster. Omitted = uncapped (the shell's own 800% maximum).
-/// Validated in `crate::loader`: 100..=800 and a multiple of 100.
+/// `[overclock]` (§2, tickets W30-01 and W30-08): what the player may do to
+/// the game's clocks, and what the speed governor needs to know about the
+/// game. Every key is optional; omitted caps mean "uncapped" (the shell's
+/// own maximum). Validated in `crate::loader`.
+///
+/// - `superfx_max` — highest Super FX overclock, 100..=800, step 100.
+/// - `cpu_max` / `sa1_max` — highest S-CPU / SA-1 ceiling, 100..=400,
+///   step 100 (100 = this game may not be overclocked).
+/// - `nes_extra_lines_max` — most extra vblank lines, 0..=240 (0 = none).
+/// - `tick_counter` — a WRAM address (`0x7E0000..=0x7FFFFF`) of a byte the
+///   game increments once per logic tick; the governor's tick signal.
+/// - `target_tick_hz` — the game's normal logic rate, 1..=60; otherwise the
+///   governor learns it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Overclock {
     pub superfx_max: Option<u16>,
+    pub cpu_max: Option<u16>,
+    pub sa1_max: Option<u16>,
+    pub nes_extra_lines_max: Option<u16>,
+    pub tick_counter: Option<u32>,
+    pub target_tick_hz: Option<u32>,
 }
 
 /// `[loading]` (§2).

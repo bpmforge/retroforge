@@ -1136,6 +1136,68 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W30-08: set the SNES main CPU (65816) clock in percent (100 =
+    /// stock). A no-op on the NES.
+    pub fn set_cpu_overclock(&mut self, percent: u16) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_cpu_overclock(percent);
+        }
+    }
+
+    /// Ticket W30-08: set the SA-1 clock in percent. A no-op without an SA-1.
+    pub fn set_sa1_overclock(&mut self, percent: u16) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_sa1_overclock(percent);
+        }
+    }
+
+    /// Ticket W30-08: NES extra CPU-only vblank lines (0 = off). A no-op on
+    /// the SNES.
+    pub fn set_nes_extra_lines(&mut self, lines: u16) {
+        if let Machine::Nes(core) = &mut self.machine {
+            core.set_extra_vblank_lines(lines);
+        }
+    }
+
+    /// Ticket W30-08: whether the loaded cartridge has an SA-1.
+    #[must_use]
+    pub fn has_sa1(&self) -> bool {
+        matches!(&self.machine, Machine::Snes(core) if core.has_sa1())
+    }
+
+    /// Ticket W30-08: did the S-CPU reach an idle wait during the frame
+    /// just run (the speed governor's tick signal when a profile declares no
+    /// tick counter)? Read-only; `false` on the NES.
+    #[must_use]
+    pub fn frame_idle(&self) -> bool {
+        matches!(&self.machine, Machine::Snes(core) if core.frame_idle())
+    }
+
+    /// Ticket W30-08: the CPU, SA-1 clocks and NES extra lines in force.
+    #[must_use]
+    pub fn cpu_overclock(&self) -> u16 {
+        match &self.machine {
+            Machine::Snes(core) => core.cpu_overclock(),
+            Machine::Nes(_) => 100,
+        }
+    }
+
+    #[must_use]
+    pub fn sa1_overclock(&self) -> u16 {
+        match &self.machine {
+            Machine::Snes(core) => core.sa1_overclock(),
+            Machine::Nes(_) => 100,
+        }
+    }
+
+    #[must_use]
+    pub fn nes_extra_lines(&self) -> u16 {
+        match &self.machine {
+            Machine::Nes(core) => core.extra_vblank_lines(),
+            Machine::Snes(_) => 0,
+        }
+    }
+
     /// Ticket W30-01: whether the loaded cartridge has a Super FX.
     #[must_use]
     pub fn has_gsu(&self) -> bool {
@@ -1209,6 +1271,13 @@ impl EmuStepper {
         self.hd_mode7 = real.hd_mode7;
         if let (Machine::Snes(mine), Machine::Snes(theirs)) = (&mut self.machine, &real.machine) {
             mine.set_gsu_overclock(theirs.gsu_overclock());
+            // Ticket W30-08: the governor only ever observes the REAL
+            // frame; the shadow just runs at the multipliers it chose.
+            mine.set_cpu_overclock(theirs.cpu_overclock());
+            mine.set_sa1_overclock(theirs.sa1_overclock());
+        }
+        if let (Machine::Nes(mine), Machine::Nes(theirs)) = (&mut self.machine, &real.machine) {
+            mine.set_extra_vblank_lines(theirs.extra_vblank_lines());
         }
         match real.widescreen_args {
             Some((width, bg, obj)) => self.set_widescreen(width, bg, obj),

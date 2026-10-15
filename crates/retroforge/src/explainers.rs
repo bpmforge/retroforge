@@ -54,6 +54,29 @@ pub fn long_text(id: &str) -> &'static str {
              frames are drawn. Unlike the other options it changes the simulation, so some \
              games also run faster than intended; it is off until you turn it on."
         }
+        "cpu_overclock" => {
+            "Some SNES games slow down when too much happens at once, because the main \
+             processor runs out of time in a frame. Governed (the default) gives it more \
+             speed only while the game is running slow, and takes it back the moment the \
+             game is back at its normal pace, so nothing runs faster than it was meant to. \
+             The slider is the most it may use. Fixed always runs at the slider's speed, \
+             which makes some games run faster than intended. It changes the simulation, \
+             so it is off until you turn it on."
+        }
+        "sa1_overclock" => {
+            "Cartridges with an SA-1 chip (such as Kirby Super Star or Super Mario RPG) do \
+             their heavy work on that second, faster processor, and can still slow down. \
+             This gives the chip more speed in the same way as the CPU option: Governed \
+             only while the game is running slow, Fixed always. It changes the simulation, \
+             so it is off until you turn it on."
+        }
+        "nes_extra_lines" => {
+            "NES games slow down or flicker when their code does not finish before the \
+             picture needs it. This gives the processor extra time between frames while the \
+             picture and sound wait, so the game finishes its work. Some games may glitch; \
+             turn it down or off if one does. It changes the simulation, so it is off until \
+             you turn it on."
+        }
         "run_ahead" => {
             "Many games take a frame or two to react to a button press. This quietly plays \
              the game one or two frames further ahead, with your buttons held as they are, and \
@@ -208,7 +231,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                 painter.rect_filled(wall, egui::CornerRadius::same(2), accent);
             }
         }
-        "superfx_overclock" => {
+        "superfx_overclock" | "cpu_overclock" | "sa1_overclock" => {
             // Two clock traces: the original period and a faster one.
             for (i, ticks) in [(0, 4), (1, 8)] {
                 let y = r.top() + r.height() * (0.35 + 0.35 * i as f32);
@@ -224,6 +247,22 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                         if i == 0 { faint } else { accent },
                     );
                 }
+            }
+        }
+        "nes_extra_lines" => {
+            // A frame's picture lines, then extra lines before the next
+            // frame in the accent colour.
+            let n = 8;
+            let h = (r.height() - 8.0) / n as f32;
+            for i in 0..n {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(r.left() + 4.0, r.top() + 4.0 + h * i as f32 + 1.0),
+                        egui::vec2(r.width() - 8.0, h - 2.0),
+                    ),
+                    egui::CornerRadius::same(1),
+                    if i < 5 { faint } else { accent },
+                );
             }
         }
         "hd2d_lens" => {

@@ -34,11 +34,20 @@
 //! master time the CPU runs `m` times as many. DMA/HDMA cycles, charged
 //! separately, are not scaled — a transfer takes as long as it always did.
 //!
-//! Three details follow from "everything keys off the master clock":
+//! Four details follow from "everything keys off the master clock":
 //!
 //! - A **halted** CPU (`WAI`/`STP`) is charged its flat one-cycle step
 //!   unscaled: waiting is wall-clock time, not computation, and the idle
 //!   observer's cycle counts stay in real console cycles.
+//! - An instruction that touches the **APU I/O ports** (`$2140-$217F`, which
+//!   fullsnes says mirror across that range) is charged its full,
+//!   unscaled cost. The CPU-to-SPC700 handshake is a timing contract between
+//!   two processors on one master clock, and the overclock speeds up only
+//!   one of them; leaving the instruction that talks to the other at the
+//!   real clock keeps the handshake's relative timing exactly as it is at
+//!   100%. Without it Contra III hung at a 200% CPU clock, spinning on
+//!   `CMP $2140 / BNE` (and reading as "idle" the whole time), and with it
+//!   the same 3600-frame run keeps its picture changing.
 //! - The **math unit** is clocked by the CPU clock (fullsnes "SNES Maths
 //!   Multiply/Divide": waits are counted in CPU cycles "no matter if the CPU
 //!   Clock is 3.5MHz or 2.6MHz"), and still receives the instruction's
@@ -418,13 +427,17 @@ impl SnesSystem {
         // instruction. At multiplier 1 (and for a halted step, which is
         // waiting rather than computing) it is `spent`; at m it is
         // `spent / m`, with the remainder carried so no time is lost.
-        let scaled = if was_halted || self.cpu_clock_multiplier <= 1 {
-            spent
-        } else {
-            let total = self.cpu_overclock_remainder + spent;
-            self.cpu_overclock_remainder = total % self.cpu_clock_multiplier;
-            total / self.cpu_clock_multiplier
-        };
+        // An instruction that touches the APU I/O ports is also charged at
+        // the real clock (`speed::is_apu_port`): the CPU-to-SPC700
+        // handshake keeps the relative timing it has at 100%.
+        let scaled =
+            if was_halted || self.cpu_clock_multiplier <= 1 || counting.apu_port_accesses > 0 {
+                spent
+            } else {
+                let total = self.cpu_overclock_remainder + spent;
+                self.cpu_overclock_remainder = total % self.cpu_clock_multiplier;
+                total / self.cpu_clock_multiplier
+            };
         // Ticket W30-08: the idle observer, fed values already computed, in
         // master-clock cycles (`scaled`), so idle time is real console time.
         self.idle.observe(

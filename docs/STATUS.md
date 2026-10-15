@@ -4461,3 +4461,12 @@ stories, 10 decisions).
   tracing, watchpoints, fast-forward, captures, de-flicker or video
   recording. About 3.2 ms per frame extra at 2 frames (synthetic SNES).
   Gate: workspace **2685 passing**.
+- **W30-08 — CPU/SA-1 overclock with a speed governor; NES extra lines**
+  (2026-10-15). Governed by default (adds speed only while the game ticks
+  below its normal rate, never above; learned or profile target; hang guard;
+  futility back-off), Fixed as advanced. Instructions touching the APU ports
+  run unscaled, which cured Contra III's hang at 200%. ROM results: Super
+  R-Type rises to 200% only in dips (one dip 44 -> 53 ticks/s); Gradius III
+  no signal (stays 100%); Contra III and Kirby Super Star no slowdown removed
+  with the idle signal — they need a profile `tick_counter`. Gate: workspace
+  **2742 passing**.
