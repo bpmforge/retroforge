@@ -14,7 +14,14 @@ Everything needed to resume without re-discovery. Tickets are in
   test is **not identified**. The machine was at load 30+ from an external
   28-34 GB VM. First step next session: when the VM is idle run
   `cargo test --workspace --no-fail-fast > log` once and read the
-  `FAILED` lines. Suspects, most likely first: (1) another wall-clock test
+  `FAILED` lines. **Identified 12:32 local (load 38):**
+  `badge_and_tip::the_tip_shows_once_and_the_badge_opens_enhancements`
+  ("the tip shows the first time", badge_and_tip.rs:40) and
+  `rewind_hotkey::rewind_is_off_by_default_and_when_on_walks_back_and_resumes`;
+  **both pass alone** (2.5 s and 5.4 s). Fix them the way menu_pauses and
+  toasts_and_modals were fixed today: replace fixed step/sleep windows with
+  "wait until the condition, up to 15 s". Grep the other app tests for the
+  same pattern and harden them in one pass. Earlier suspects: (1) another wall-clock test
   starved by load (same pattern as the two already hardened; look for fixed
   sleeps or `0..N` step loops checking `frame_count_for_test`); (2) the
   W31-05 GPU tests competing for the Metal device with other binaries;
