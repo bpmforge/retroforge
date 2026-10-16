@@ -1,0 +1,736 @@
+//! **Screenshots of the W30/W31 enhancements** (before/after pairs).
+//!
+//! Not a correctness test. It drives real commercial ROMs (which never live
+//! in git, law 5: only the rendered PNGs are committed) to a scene, then
+//! renders the SAME simulated frame twice -- feature off, feature on -- and
+//! writes both to `docs/screens/w30-w31/`.
+//!
+//! **How "the same frame" is arranged.** Pause on the scene, save a state to
+//! a scratch slot, then for each variant: re-apply that state and step
+//! exactly one frame. The simulation is deterministic and the feature is a
+//! presentation setting, so the only difference between the two shots is the
+//! feature. Features that live on the core thread (HD Mode 7, widescreen,
+//! Super FX polygons) show up in the frame the core sends
+//! (`last_frame_rgba_for_test`); post passes on the UI thread (lens, Diorama)
+//! are cropped out of the fully rendered window instead.
+//!
+//! ```text
+//! cargo test --release -p retroforge --test w30_screens -- --ignored --nocapture
+//! RF_SCREENS_ONLY=lens ...   # only shots whose name contains this
+//! ```
+//!
+//! One test per binary: `RETROFORGE_CONFIG_DIR` is process-global.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use eframe::egui;
+use egui_kittest::Harness;
+use retroforge::app::{RetroForgeApp, WINDOW_SIZE};
+use retroforge::core_thread::CoreCommand;
+use retroforge::game_settings::Mode;
+use rf_enhance::widescreen::{Aspect, MarginSource};
+
+type H = Harness<'static, RetroForgeApp>;
+
+/// An RGBA picture.
+#[derive(Clone)]
+struct Pic {
+    w: usize,
+    h: usize,
+    rgba: Vec<u8>,
+}
+
+impl Pic {
+    fn upscale(&self, n: usize) -> Pic {
+        let (w, h) = (self.w * n, self.h * n);
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let s = ((y / n) * self.w + x / n) * 4;
+                rgba[(y * w + x) * 4..][..4].copy_from_slice(&self.rgba[s..s + 4]);
+            }
+        }
+        Pic { w, h, rgba }
+    }
+
+    fn crop(&self, x0: usize, y0: usize, cw: usize, ch: usize) -> Pic {
+        let mut rgba = Vec::with_capacity(cw * ch * 4);
+        for y in y0..y0 + ch {
+            let s = (y * self.w + x0) * 4;
+            rgba.extend_from_slice(&self.rgba[s..s + cw * 4]);
+        }
+        Pic { w: cw, h: ch, rgba }
+    }
+
+    /// Opaque black, so a transparent corner cannot hide in a viewer.
+    fn opaque(&self) -> Pic {
+        let mut me = self.clone();
+        for px in me.rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        me
+    }
+
+    /// Two pictures side by side with a gap, nearest-resized to the taller.
+    fn beside(&self, other: &Pic, gap: usize) -> Pic {
+        let h = self.h.max(other.h);
+        let w = self.w + gap + other.w;
+        let mut rgba = vec![0u8; w * h * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[24, 24, 28, 255]);
+        }
+        for (pic, ox) in [(self, 0), (other, self.w + gap)] {
+            for y in 0..pic.h {
+                let d = (y * w + ox) * 4;
+                rgba[d..d + pic.w * 4].copy_from_slice(&pic.rgba[y * pic.w * 4..][..pic.w * 4]);
+            }
+        }
+        Pic { w, h, rgba }
+    }
+
+    /// Nearest resize to a width (box-free; used only for the contact sheet).
+    fn fit_width(&self, w: usize) -> Pic {
+        let h = (self.h * w / self.w).max(1);
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let sy = y * self.h / h;
+            for x in 0..w {
+                let sx = x * self.w / w;
+                rgba[(y * w + x) * 4..][..4]
+                    .copy_from_slice(&self.rgba[(sy * self.w + sx) * 4..][..4]);
+            }
+        }
+        Pic { w, h, rgba }
+    }
+}
+
+fn out_dir() -> PathBuf {
+    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screens/w30-w31");
+    std::fs::create_dir_all(&d).expect("create screens dir");
+    d
+}
+
+fn probe_dir() -> PathBuf {
+    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/screens-probe");
+    std::fs::create_dir_all(&d).expect("create probe dir");
+    d
+}
+
+fn save(path: &Path, pic: &Pic) {
+    image::save_buffer(
+        path,
+        &pic.rgba,
+        u32::try_from(pic.w).unwrap(),
+        u32::try_from(pic.h).unwrap(),
+        image::ColorType::Rgba8,
+    )
+    .expect("write png");
+    println!("SHOT {}", path.display());
+}
+
+fn wanted(name: &str) -> bool {
+    std::env::var("RF_SCREENS_ONLY").map_or(true, |f| name.contains(&f))
+}
+
+fn rom(console: &str, file: &str) -> Option<PathBuf> {
+    let root = std::env::var("RF_SCREENS_ROMS_DIR")
+        .unwrap_or_else(|_| "/Users/bmatthews/Games/Roms".to_string());
+    let p = Path::new(&root).join(console).join(file);
+    p.exists().then_some(p)
+}
+
+fn new_harness() -> H {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .renderer(egui_kittest::wgpu::WgpuTestRenderer::default())
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    h.run();
+    h
+}
+
+fn run_n(h: &mut H, n: usize) {
+    for _ in 0..n {
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+fn run_frames(h: &mut H, target: u64, deadline: Duration) {
+    let start = Instant::now();
+    while h.state().frame_count_for_test() < target && start.elapsed() < deadline {
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+fn key_event(h: &mut H, key: egui::Key, pressed: bool) {
+    h.input_mut().events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    });
+}
+
+/// Press, hold `frames` core frames, release, settle a few frames. Paced
+/// (real time), so a tap is a tap.
+fn tap(h: &mut H, key: egui::Key, frames: u64) {
+    key_event(h, key, true);
+    let t = h.state().frame_count_for_test() + frames;
+    run_frames(h, t, Duration::from_secs(60));
+    key_event(h, key, false);
+    let t = h.state().frame_count_for_test() + 8;
+    run_frames(h, t, Duration::from_secs(60));
+}
+
+/// Advance `frames` core frames with pacing off (no input): fast scripting.
+fn wait(h: &mut H, tag: &str, frames: u64) {
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    let end = h.state().frame_count_for_test() + frames;
+    let mut next_probe = h.state().frame_count_for_test() + 600;
+    while h.state().frame_count_for_test() < end {
+        run_frames(h, next_probe.min(end), Duration::from_secs(300));
+        if h.state().frame_count_for_test() >= next_probe {
+            if let Some(p) = grab(h) {
+                let name = format!("probe-{tag}-{:06}.png", h.state().frame_count_for_test());
+                save(&probe_dir().join(name), &p);
+            }
+            next_probe += 600;
+        }
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+}
+
+/// Hold keys for `frames` core frames at real speed, then release.
+fn hold_for(h: &mut H, keys: &[egui::Key], frames: u64) {
+    for &k in keys {
+        key_event(h, k, true);
+    }
+    let t = h.state().frame_count_for_test() + frames;
+    run_frames(h, t, Duration::from_secs(300));
+    for &k in keys {
+        key_event(h, k, false);
+    }
+    run_n(h, 6);
+}
+
+fn grab(h: &H) -> Option<Pic> {
+    let rgba = h.state().last_frame_rgba_for_test()?;
+    let (w, hh) = h.state().frame_size_for_test()?;
+    (rgba.len() == w * hh * 4).then_some(Pic { w, h: hh, rgba })
+}
+
+/// The whole window as the user sees it, then the Original view's rect.
+fn grab_play_area(h: &mut H) -> Option<Pic> {
+    let img = h.render().ok()?;
+    let (iw, ih) = (img.width() as usize, img.height() as usize);
+    let full = Pic {
+        w: iw,
+        h: ih,
+        rgba: img.into_raw(),
+    };
+    save(&probe_dir().join("probe-window.png"), &full);
+    let (rect, _) = h.state().play_rect_for_test()?;
+    let scale = iw as f32 / WINDOW_SIZE[0];
+    let x0 = (rect.min.x * scale).max(0.0) as usize;
+    let y0 = (rect.min.y * scale).max(0.0) as usize;
+    let cw = ((rect.width() * scale) as usize).min(iw - x0);
+    let ch = ((rect.height() * scale) as usize).min(ih - y0);
+    Some(full.crop(x0, y0, cw, ch))
+}
+
+fn open_and_run(h: &mut H, path: &Path) {
+    h.state_mut().open_rom_path(path);
+    run_n(h, 3);
+    h.state_mut().resume_for_test();
+    run_frames(h, 20, Duration::from_secs(60));
+}
+
+/// Pause on the current frame. Pairs are captured on consecutive frames:
+/// "off" after one stepped frame, "on" after the next (a save-state replay
+/// would give the identical frame, but the SNES state slots are not
+/// readable through this harness's NES migration path).
+fn snapshot(h: &mut H, _tag: &str) {
+    h.state_mut().pause_for_test();
+    run_n(h, 30);
+}
+
+/// Step exactly one frame and let the UI consume it.
+fn step_from(h: &mut H, _state: &()) {
+    h.state().send_core_command_for_test(CoreCommand::StepFrame);
+    run_n(h, 120);
+}
+
+fn release_all(h: &mut H) {
+    use egui::Key as K;
+    for k in [
+        K::ArrowUp,
+        K::ArrowDown,
+        K::ArrowLeft,
+        K::ArrowRight,
+        K::Z,
+        K::X,
+        K::A,
+        K::S,
+        K::Enter,
+    ] {
+        key_event(h, k, false);
+    }
+    run_n(h, 10);
+}
+
+fn skip(readme: &mut Vec<String>, name: &str, why: &str) {
+    println!("SKIP {name}: {why}");
+    readme.push(format!("{name}|SKIPPED|{why}"));
+}
+
+fn note(readme: &mut Vec<String>, line: String) {
+    println!("NOTE {line}");
+    readme.push(line);
+}
+
+// ---------------------------------------------------------------- shots
+
+fn shot_hdmode7(readme: &mut Vec<String>) {
+    use egui::Key as K;
+    let name = "hdmode7-4x";
+    if !wanted(name) {
+        return;
+    }
+    let game = ["F-Zero (USA).zip", "Super Mario Kart (USA).zip"]
+        .iter()
+        .find_map(|f| rom("snes", f).map(|p| (p, (*f).to_string())));
+    let Some((path, file)) = game else {
+        return skip(
+            readme,
+            name,
+            "neither F-Zero (USA) nor Super Mario Kart (USA) found",
+        );
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "fzero", 240);
+    // Through title, mode, class, car, into the race.
+    for i in 0..14 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "fzero", 100);
+    }
+    wait(&mut h, "fzero", 400);
+    hold_for(&mut h, &[K::X], 240);
+    release_all(&mut h);
+    let st = snapshot(&mut h, "hdm7");
+    // Off: native.
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_hd_mode7_for_test(false, 4);
+    run_n(&mut h, 10);
+    step_from(&mut h, &st);
+    let Some(off) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    // On: 4x with supersampling.
+    h.state_mut().edit_game_settings_for_test(|s| {
+        s.hd_mode7_supersample = true;
+    });
+    h.state_mut().set_hd_mode7_for_test(true, 4);
+    run_n(&mut h, 20);
+    step_from(&mut h, &st);
+    let Some(on) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    println!("hdmode7: off {}x{} on {}x{}", off.w, off.h, on.w, on.h);
+    let off4 = if off.w * 4 == on.w {
+        off.upscale(4)
+    } else {
+        off.upscale(on.w / off.w.max(1))
+    };
+    let d = out_dir();
+    save(&d.join("hdmode7-4x-off.png"), &off4.opaque());
+    save(&d.join("hdmode7-4x-on.png"), &on.opaque());
+    note(
+        readme,
+        format!(
+            "hdmode7-4x|{file}|{}x{} native, nearest to {}x{}; HD {}x{}",
+            off.w, off.h, off4.w, off4.h, on.w, on.h
+        ),
+    );
+}
+
+fn shot_widescreen(readme: &mut Vec<String>) {
+    let name = "widescreen";
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA) not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    h.state_mut().set_widescreen(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    // The title screen plays a demo of a level scrolling behind the logo:
+    // no input needed, and it scrolls, so the stitched canvas fills in.
+    wait(&mut h, "smw", 1500);
+    let mut sources = Vec::new();
+    for (aspect, tagname) in [(Aspect::Wide16x9, "16x9"), (Aspect::Wide32x9, "32x9")] {
+        h.state_mut().set_widescreen_aspect_for_test(aspect);
+        h.state_mut().set_widescreen(true);
+        run_n(&mut h, 60);
+        let st = snapshot(&mut h, tagname);
+        h.state_mut().set_widescreen(false);
+        run_n(&mut h, 20);
+        step_from(&mut h, &st);
+        let off = grab(&h);
+        h.state_mut().set_widescreen(true);
+        h.state_mut().set_widescreen_aspect_for_test(aspect);
+        run_n(&mut h, 20);
+        step_from(&mut h, &st);
+        step_from(&mut h, &st);
+        let on = grab(&h);
+        let src = h.state().widescreen_source_for_test();
+        let (Some(off), Some(on)) = (off, on) else {
+            skip(readme, &format!("widescreen-{tagname}"), "no frame");
+            continue;
+        };
+        println!(
+            "widescreen {tagname}: off {}x{} on {}x{} source {src:?}",
+            off.w, off.h, on.w, on.h
+        );
+        let d = out_dir();
+        // Off is the native 4:3 frame; show it centred in the wide canvas'
+        // height at the same pixel scale (no resampling).
+        save(
+            &d.join(format!("widescreen-{tagname}-off.png")),
+            &off.opaque(),
+        );
+        save(
+            &d.join(format!("widescreen-{tagname}-on.png")),
+            &on.opaque(),
+        );
+        sources.push((tagname, src == MarginSource::StitchedCanvas, src));
+        note(
+            readme,
+            format!(
+                "widescreen-{tagname}|Super Mario World (USA)|off {}x{}, on {}x{}, margin source {src:?}",
+                off.w, off.h, on.w, on.h
+            ),
+        );
+    }
+}
+
+fn shot_hd2d(readme: &mut Vec<String>) {
+    use egui::Key as K;
+    let name = "hd2d-look";
+    if !wanted(name) {
+        return;
+    }
+    // No A Link to the Past heights are painted yet, and NES Zelda only
+    // decodes its level in play (past name registration). The in-repo
+    // RF-Scroller test game's profile decodes its level with collision at
+    // load, so Diorama walls - and the HD-2D look - work on it.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/nes/rf-scroller/build/rf-scroller.nes");
+    if !path.exists() {
+        return skip(readme, name, "RF-Scroller fixture not built");
+    }
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "scroller", 300);
+    hold_for(&mut h, &[K::ArrowRight], 90);
+    release_all(&mut h);
+    h.state_mut().set_mode_for_test(Mode::GameAware);
+    run_n(&mut h, 30);
+    println!(
+        "hd2d: decoded level {}",
+        h.state().has_decoded_level_for_test()
+    );
+    let st = snapshot(&mut h, "zelda");
+    step_from(&mut h, &st);
+    let Some(off) = grab_play_area(&mut h) else {
+        return skip(readme, name, "no play rect");
+    };
+    if let Some(why) = h.state().hd2d_unavailable_for_test() {
+        return skip(readme, name, &format!("HD-2D look unavailable: {why}"));
+    }
+    h.state_mut().toggle_hd2d_for_test();
+    run_n(&mut h, 30);
+    step_from(&mut h, &st);
+    step_from(&mut h, &st);
+    let on = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
+    println!(
+        "hd2d: opaque diorama px {:?}",
+        h.state().diorama_opaque_pixels_for_test()
+    );
+    let d = out_dir();
+    save(&d.join("hd2d-look-off.png"), &off.opaque());
+    save(&d.join("hd2d-look-on.png"), &on.opaque());
+    note(
+        readme,
+        "hd2d-look|RF-Scroller (in-repo NES test game; decoded level + collision)|Game-Aware; HD-2D look preset; window crop of the play area. A Link to the Past has no painted heights yet".to_string(),
+    );
+}
+
+fn shot_lens(readme: &mut Vec<String>) {
+    use egui::Key as K;
+    let name = "lens";
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA) not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "smwlens", 200);
+    for i in 0..10 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "smwlens", 100);
+    }
+    wait(&mut h, "smwlens", 300);
+    hold_for(&mut h, &[K::ArrowRight, K::A], 120);
+    release_all(&mut h);
+    let st = snapshot(&mut h, "lens");
+    h.state_mut().edit_lens_for_test(|s| s.lens_clear());
+    run_n(&mut h, 10);
+    step_from(&mut h, &st);
+    let Some(off) = grab_play_area(&mut h) else {
+        return skip(readme, name, "no play rect");
+    };
+    h.state_mut().edit_lens_for_test(|s| {
+        s.lens_bloom = true;
+        s.lens_tiltshift = true;
+        s.lens_shadows = true;
+        s.lens_grade = true;
+        s.lens_follow_clock = false;
+        s.lens_time_of_day = 20;
+    });
+    run_n(&mut h, 30);
+    step_from(&mut h, &st);
+    step_from(&mut h, &st);
+    let on = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
+    let d = out_dir();
+    save(&d.join("lens-off.png"), &off.opaque());
+    save(&d.join("lens-on.png"), &on.opaque());
+    note(
+        readme,
+        "lens|Super Mario World (USA)|bloom + tilt-shift + soft shadows + grading at 0.2 time, no weather; window crop of the play area".to_string(),
+    );
+}
+
+fn shot_superfx_hd(readme: &mut Vec<String>) {
+    let name = "superfx-hd";
+    if !wanted(name) {
+        return;
+    }
+    let game = ["Star Fox (USA).zip", "Star Fox (USA) (Rev 1).zip"]
+        .iter()
+        .find_map(|f| rom("snes", f).map(|p| (p, (*f).to_string())));
+    let Some((path, file)) = game else {
+        return skip(readme, name, "Star Fox (USA) not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    // No input: the intro (Great Fox and the Arwings launching, frames
+    // ~850-1100) is where the W31 proof ran.
+    wait(&mut h, "starfox", 880);
+    // A render job spans several frames, so the HD path needs to run for a
+    // while before it has a job to match: run with it on, pause, capture
+    // "on", then switch it off and step one frame for "off" (consecutive
+    // frames, not the identical one).
+    h.state_mut()
+        .set_superfx_hd_for_test(true, 3, Mode::Enhanced, true);
+    run_n(&mut h, 30);
+    println!(
+        "superfx effective: {}",
+        h.state().superfx_hd_effective_for_test()
+    );
+    h.state_mut().resume_for_test();
+    let t = h.state().frame_count_for_test() + 120;
+    run_frames(&mut h, t, Duration::from_secs(120));
+    let st = snapshot(&mut h, "sfx");
+    step_from(&mut h, &st);
+    let Some(on) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    h.state_mut()
+        .set_superfx_hd_for_test(false, 3, Mode::Enhanced, true);
+    run_n(&mut h, 20);
+    step_from(&mut h, &st);
+    let Some(off) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    println!("superfx: off {}x{} on {}x{}", off.w, off.h, on.w, on.h);
+    let off3 = off.upscale(3);
+    let d = out_dir();
+    save(&d.join("superfx-hd-3x-off.png"), &off3.clone().opaque());
+    save(&d.join("superfx-hd-3x-on.png"), &on.clone().opaque());
+    // Zoom: 64x64 native pixels at 8x; the HD picture is `k`x native.
+    let k = (on.w / off.w.max(1)).max(1);
+    let (zx, zy) = zoom_origin(&off, 64);
+    let zoom_off = off.crop(zx, zy, 64, 64).upscale(8);
+    let zoom_on = on.crop(zx * k, zy * k, 64 * k, 64 * k).fit_width(512);
+    save(
+        &d.join("superfx-hd-3x-zoom.png"),
+        &zoom_off.beside(&zoom_on, 8).opaque(),
+    );
+    note(
+        readme,
+        format!(
+            "superfx-hd-3x|{file}|native {}x{} (nearest 3x) vs HD {}x{}; zoom crop at native ({zx},{zy}) 64x64, 8x nearest (left) vs HD crop at 512 wide (right)",
+            off.w, off.h, on.w, on.h
+        ),
+    );
+}
+
+/// The 64x64 window with the most edge energy: a slanted polygon edge is
+/// where horizontal and vertical neighbours differ the most.
+fn zoom_origin(p: &Pic, size: usize) -> (usize, usize) {
+    let mut best = (-1i64, (0usize, 0usize));
+    let lum = |x: usize, y: usize| -> i32 {
+        let i = (y * p.w + x) * 4;
+        i32::from(p.rgba[i]) + i32::from(p.rgba[i + 1]) + i32::from(p.rgba[i + 2])
+    };
+    for y0 in (0..p.h.saturating_sub(size)).step_by(8) {
+        for x0 in (0..p.w.saturating_sub(size)).step_by(8) {
+            let mut e = 0i64;
+            for y in y0..y0 + size - 1 {
+                for x in x0..x0 + size - 1 {
+                    e += i64::from((lum(x, y) - lum(x + 1, y)).abs().min(60));
+                    e += i64::from((lum(x, y) - lum(x, y + 1)).abs().min(60));
+                }
+            }
+            if e > best.0 {
+                best = (e, (x0, y0));
+            }
+        }
+    }
+    best.1
+}
+
+fn shot_stunt(readme: &mut Vec<String>) {
+    use egui::Key as K;
+    let name = "superfx-3d-drawing";
+    if !wanted(name) {
+        return;
+    }
+    let game = ["Stunt Race FX (USA) (Rev 1).zip", "Stunt Race FX (USA).zip"]
+        .iter()
+        .find_map(|f| rom("snes", f).map(|p| (p, (*f).to_string())));
+    let Some((path, file)) = game else {
+        return skip(readme, name, "Stunt Race FX not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "stunt", 600);
+    for i in 0..12 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "stunt", 120);
+    }
+    wait(&mut h, "stunt", 600);
+    hold_for(&mut h, &[K::X], 300);
+    release_all(&mut h);
+    run_n(&mut h, 20);
+    let Some(p) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    save(&out_dir().join("superfx-3d-drawing.png"), &p.opaque());
+    note(
+        readme,
+        format!("superfx-3d-drawing|{file}|a race frame; single image"),
+    );
+}
+
+fn contact_sheet(readme: &mut Vec<String>) {
+    let d = out_dir();
+    let pairs = [
+        "hdmode7-4x",
+        "widescreen-16x9",
+        "widescreen-32x9",
+        "hd2d-look",
+        "lens",
+        "superfx-hd-3x",
+    ];
+    let cell_w = 480usize;
+    let load = |p: PathBuf| -> Option<Pic> {
+        let img = image::open(p).ok()?.to_rgba8();
+        Some(Pic {
+            w: img.width() as usize,
+            h: img.height() as usize,
+            rgba: img.into_raw(),
+        })
+    };
+    let mut rows: Vec<Pic> = Vec::new();
+    for n in pairs {
+        let (Some(a), Some(b)) = (
+            load(d.join(format!("{n}-off.png"))),
+            load(d.join(format!("{n}-on.png"))),
+        ) else {
+            continue;
+        };
+        rows.push(a.fit_width(cell_w).beside(&b.fit_width(cell_w), 6));
+    }
+    if let Some(z) = load(d.join("superfx-hd-3x-zoom.png")) {
+        rows.push(z.fit_width(cell_w * 2 + 6));
+    }
+    if let Some(s) = load(d.join("superfx-3d-drawing.png")) {
+        rows.push(s.fit_width(cell_w));
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let w = rows.iter().map(|r| r.w).max().unwrap();
+    let gap = 10;
+    let h: usize = rows.iter().map(|r| r.h).sum::<usize>() + gap * (rows.len() - 1);
+    let mut rgba = vec![0u8; w * h * 4];
+    for px in rgba.chunks_exact_mut(4) {
+        px.copy_from_slice(&[24, 24, 28, 255]);
+    }
+    let mut y = 0;
+    for r in &rows {
+        for yy in 0..r.h {
+            let dst = ((y + yy) * w) * 4;
+            rgba[dst..dst + r.w * 4].copy_from_slice(&r.rgba[yy * r.w * 4..][..r.w * 4]);
+        }
+        y += r.h + gap;
+    }
+    save(&d.join("contact-sheet.png"), &Pic { w, h, rgba });
+    note(
+        readme,
+        "contact-sheet|-|rows in README order; pairs are OFF (left) | ON (right)".to_string(),
+    );
+}
+
+#[test]
+#[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
+fn w30_w31_screens() {
+    let dir = std::env::temp_dir().join(format!("retroforge_screens_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    // SAFETY: first statement of the only test in this binary.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
+        std::env::set_var(
+            "RETROFORGE_PROFILES_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles"),
+        );
+    }
+    let mut readme: Vec<String> = Vec::new();
+    shot_hdmode7(&mut readme);
+    shot_widescreen(&mut readme);
+    shot_hd2d(&mut readme);
+    shot_lens(&mut readme);
+    shot_superfx_hd(&mut readme);
+    shot_stunt(&mut readme);
+    if std::env::var("RF_SCREENS_ONLY").is_err() {
+        contact_sheet(&mut readme);
+    }
+    println!("--- summary ---");
+    for l in &readme {
+        println!("{l}");
+    }
+}

@@ -12637,6 +12637,14 @@ impl RetroForgeApp {
         });
     }
 
+    /// Screens harness (tests): send a raw command to the core thread, so a
+    /// test can save a state, re-apply it and step ONE frame with a feature
+    /// off and then on -- the same simulated frame rendered both ways.
+    #[doc(hidden)]
+    pub fn send_core_command_for_test(&self, cmd: CoreCommand) {
+        self.send_command(cmd);
+    }
+
     /// Ticket W31-03 (tests): whether the Super FX HD row is effective.
     #[doc(hidden)]
     #[must_use]
