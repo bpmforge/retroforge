@@ -270,11 +270,17 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     // Run until a frame lands, so `position` and eventually `fps` are
     // populated — bounded, because a hang here is a denial of service,
     // not a failing test (project law 8).
-    for _ in 0..600 {
+    // Bounded by wall-clock time with a short sleep per step, like the
+    // other app tests' `run_frames`: 600 back-to-back UI steps gave the core
+    // thread no time to produce a frame on a loaded machine (2026-10-15,
+    // load ~48: failed 2 of 3 runs).
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(30) {
         harness.run_steps(1);
         if harness.state().has_presented_frame() {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(4));
     }
     assert!(
         harness.state().has_presented_frame(),

@@ -4531,3 +4531,10 @@ stories, 10 decisions).
   Rebuilt polygons match the GSU's pixels at 0.990 (intro, 418) and 0.995
   (play, 60) pixel IoU. A hi-res re-rasteriser is feasible. Report:
   docs/research/W31-01-starfox-polygon-map.md.
+- **Fix: canvas snapshots no longer write to disk every time** (2026-10-15).
+  Every `RequestCanvasSnapshot` persisted the whole stitched canvas
+  (encode + atomic write); with widescreen edges (W30-03) requesting often and
+  a busy OS file scanner, the core crawled to ~0.1 fps
+  (widescreen_aspects failed after 600 s; now passes in 10 s). Persistence
+  is throttled to once per 5 s. Also: hud_fits waited 600 UI steps with no
+  sleep and failed 2 of 3 runs under load; now waits up to 30 s.
