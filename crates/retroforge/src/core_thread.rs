@@ -313,10 +313,15 @@ pub struct FrameMsg {
     /// session ([`EmuStepper::mode7_shown`]; sticky). Unlike `mode7`, it
     /// needs no event subscription, so it can unlock the Mode 7 rows.
     pub mode7_shown: bool,
-    /// Ticket W31-02: the latest Super FX render job the polygon observer
-    /// completed since the previous frame message, or `None` when none did
-    /// (or the observer is off). Shared, not copied.
-    pub gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
+    /// Ticket W31-02: the Super FX render jobs the polygon observer
+    /// completed since the previous DELIVERED frame message, oldest first,
+    /// at most [`GSU_JOBS_CARRIED`] (empty when none did or the observer is
+    /// off). Shared, not copied. Jobs from a frame that was dropped (the
+    /// [`MAX_PENDING_FRAMES`] cap, or a UI pass that drained several frames)
+    /// are carried into the next one, because the screen may be showing one
+    /// of them (fix 2026-10-16: losing them made Sharper Super FX 3D lose
+    /// its match whenever the UI fell behind).
+    pub gsu_poly_jobs: Vec<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -1320,6 +1325,8 @@ fn core_thread_main(
     // performance problem and defeats the point of fixing one.
     let mut dropped_frames_since_log: u64 = 0;
     let mut last_drop_log = Instant::now();
+    // Super FX polygon jobs waiting for a frame that will be delivered.
+    let mut carried_gsu_jobs: Vec<Arc<rf_core_api::gsu_poly::PolyJob>> = Vec::new();
     run_guarded_loop(&evt_tx, move || {
         // Ticket W2-14: a stepped frame must be SENT, not just rendered.
         // Before this flag existed the only `CoreEvent::Frame` send site
@@ -1992,7 +1999,13 @@ fn core_thread_main(
                 }),
                 hd_mode7: hd_mode7_frame,
                 mode7_shown: stepper.mode7_shown(),
-                gsu_poly_job: stepper.take_gsu_poly_job(),
+                // Only the core thread raises `pending_frames`, so when
+                // this reads below the cap the publish below sends.
+                gsu_poly_jobs: carry_gsu_jobs(
+                    &mut carried_gsu_jobs,
+                    stepper.take_gsu_poly_jobs(),
+                    pending_frames.load(Ordering::Acquire) < MAX_PENDING_FRAMES,
+                ),
                 rgba: display,
                 line_palettes: sink.line_palettes().to_vec(),
                 width: sink.width(),
@@ -2106,6 +2119,41 @@ fn core_thread_main(
     });
 }
 
+/// How many Super FX polygon jobs a frame message carries at most: the
+/// matcher only looks at that many (`rf_renderer::superfx_hd::CANDIDATES`).
+pub const GSU_JOBS_CARRIED: usize = rf_renderer::superfx_hd::CANDIDATES;
+
+/// Keep only the newest [`GSU_JOBS_CARRIED`] jobs (oldest first).
+fn keep_newest_gsu_jobs(jobs: &mut Vec<Arc<rf_core_api::gsu_poly::PolyJob>>) {
+    let extra = jobs.len().saturating_sub(GSU_JOBS_CARRIED);
+    jobs.drain(..extra);
+}
+
+/// Add this frame's new polygon jobs to the carried ones and hand them all
+/// to the frame message when it will be sent; otherwise keep carrying them.
+fn carry_gsu_jobs(
+    carried: &mut Vec<Arc<rf_core_api::gsu_poly::PolyJob>>,
+    new: Vec<Arc<rf_core_api::gsu_poly::PolyJob>>,
+    will_send: bool,
+) -> Vec<Arc<rf_core_api::gsu_poly::PolyJob>> {
+    carried.extend(new);
+    keep_newest_gsu_jobs(carried);
+    if will_send {
+        std::mem::take(carried)
+    } else {
+        Vec::new()
+    }
+}
+
+/// The UI drained `older` and `newer` in one pass and paints only `newer`:
+/// move `older`'s polygon jobs in front of `newer`'s so none is lost.
+pub fn merge_skipped_frame_jobs(newer: &mut FrameMsg, older: FrameMsg) {
+    let mut jobs = older.gsu_poly_jobs;
+    jobs.append(&mut newer.gsu_poly_jobs);
+    keep_newest_gsu_jobs(&mut jobs);
+    newer.gsu_poly_jobs = jobs;
+}
+
 /// Ticket W14-20 defects 1 and 2: try to publish one frame, respecting
 /// [`MAX_PENDING_FRAMES`], and wake `waker` after a successful send.
 ///
@@ -2211,6 +2259,47 @@ mod tests {
     /// to exercise [`publish_frame`]'s bookkeeping without needing a real
     /// stepped frame's actual pixels, which `publish_frame` never looks
     /// at.
+    /// A distinct polygon job, told apart by its `bpp`.
+    fn gsu_job(tag: u8) -> Arc<rf_core_api::gsu_poly::PolyJob> {
+        Arc::new(rf_core_api::gsu_poly::PolyJob {
+            bpp: tag,
+            ..Default::default()
+        })
+    }
+
+    fn tags(jobs: &[Arc<rf_core_api::gsu_poly::PolyJob>]) -> Vec<u8> {
+        jobs.iter().map(|j| j.bpp).collect()
+    }
+
+    #[test]
+    fn gsu_jobs_from_a_dropped_frame_ride_on_the_next_sent_one() {
+        let mut carried = Vec::new();
+        // Frame 1 is dropped (cap reached): its job is kept, not lost.
+        assert!(carry_gsu_jobs(&mut carried, vec![gsu_job(1)], false).is_empty());
+        // Frame 2 is sent: it carries frame 1's job, then its own.
+        let sent = carry_gsu_jobs(&mut carried, vec![gsu_job(2)], true);
+        assert_eq!(tags(&sent), [1, 2]);
+        assert!(carried.is_empty());
+        // Many dropped frames: only the newest GSU_JOBS_CARRIED survive.
+        for t in 3..10 {
+            carry_gsu_jobs(&mut carried, vec![gsu_job(t)], false);
+        }
+        assert_eq!(
+            tags(&carry_gsu_jobs(&mut carried, Vec::new(), true)),
+            [7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn a_frame_the_ui_skips_hands_its_gsu_jobs_to_the_painted_one() {
+        let mut older = empty_frame_msg();
+        older.gsu_poly_jobs = vec![gsu_job(1), gsu_job(2)];
+        let mut newer = empty_frame_msg();
+        newer.gsu_poly_jobs = vec![gsu_job(3), gsu_job(4)];
+        merge_skipped_frame_jobs(&mut newer, older);
+        assert_eq!(tags(&newer.gsu_poly_jobs), [2, 3, 4]);
+    }
+
     fn empty_frame_msg() -> FrameMsg {
         FrameMsg {
             governors: crate::clock_governor::GovernorReport::default(),
@@ -2223,7 +2312,7 @@ mod tests {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
-            gsu_poly_job: None,
+            gsu_poly_jobs: Vec::new(),
             rgba: Vec::new(),
             line_palettes: Vec::new(),
             width: 0,

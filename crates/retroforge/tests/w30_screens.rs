@@ -89,6 +89,44 @@ impl Pic {
         Pic { w, h, rgba }
     }
 
+    /// Before/after split: the left half of `self`, the right half of
+    /// `other` (same size), with a 3-px white divider.
+    fn split(&self, other: &Pic) -> Pic {
+        let mut me = self.clone();
+        let mid = self.w / 2;
+        for y in 0..self.h {
+            for x in mid..self.w {
+                let i = (y * self.w + x) * 4;
+                let px = if x < mid + 3 {
+                    [255, 255, 255, 255]
+                } else {
+                    [other.rgba[i], other.rgba[i + 1], other.rgba[i + 2], 255]
+                };
+                me.rgba[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        me
+    }
+
+    /// `self` centred above `other` (the widescreen pairs: 4:3 over wide),
+    /// on the dark background, `gap` rows apart.
+    fn above_centred(&self, other: &Pic, gap: usize) -> Pic {
+        let w = self.w.max(other.w);
+        let h = self.h + gap + other.h;
+        let mut rgba = vec![0u8; w * h * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[24, 24, 28, 255]);
+        }
+        for (pic, oy) in [(self, 0), (other, self.h + gap)] {
+            let ox = (w - pic.w) / 2;
+            for y in 0..pic.h {
+                let d = ((oy + y) * w + ox) * 4;
+                rgba[d..d + pic.w * 4].copy_from_slice(&pic.rgba[y * pic.w * 4..][..pic.w * 4]);
+            }
+        }
+        Pic { w, h, rgba }
+    }
+
     /// Nearest resize to a width (box-free; used only for the contact sheet).
     fn fit_width(&self, w: usize) -> Pic {
         let h = (self.h * w / self.w).max(1);
@@ -265,6 +303,13 @@ fn step_from(h: &mut H, _state: &()) {
     run_n(h, 120);
 }
 
+/// Save the current frame under `target/screens-probe/` (scene checks).
+fn probe(h: &H, tag: &str) {
+    if let Some(p) = grab(h) {
+        save(&probe_dir().join(format!("probe-{tag}.png")), &p);
+    }
+}
+
 fn release_all(h: &mut H) {
     use egui::Key as K;
     for k in [
@@ -367,31 +412,109 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
         return skip(readme, name, "Super Mario World (USA) not found");
     };
+    use egui::Key as K;
     let mut h = new_harness();
     open_and_run(&mut h, &path);
+    // Into a real level: menus to the map (as the lens shot), walk to
+    // Yoshi's Island 1 (`RF_SMW_MAP_DIR`, default left), enter it, then run
+    // right with a jump now and then, so the screen scrolls and the
+    // stitched canvas fills the margins.
+    wait(&mut h, "smw", 200);
+    for i in 0..10 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "smw", 100);
+    }
+    wait(&mut h, "smw", 300);
+    // Close the "Welcome to Dinosaur Land" message; the game then shows the
+    // map at Yoshi's House.
+    tap(&mut h, K::X, 8);
+    wait(&mut h, "smw", 400);
+    let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
+        Ok("right") => K::ArrowRight,
+        Ok("up") => K::ArrowUp,
+        _ => K::ArrowLeft,
+    };
+    tap(&mut h, dir, 8);
+    wait(&mut h, "smw", 150);
+    probe(&h, "smw-map");
+    tap(&mut h, K::X, 8);
+    // "MARIO START!" and the fade-in, but not long enough for the first
+    // enemy to walk into a Mario standing still.
+    let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    wait(&mut h, "smw", enter);
+    probe(&h, "smw-level-start");
     h.state_mut().set_widescreen(true);
     h.state_mut()
         .set_widescreen_aspect_for_test(Aspect::Wide32x9);
-    // The title screen plays a demo of a level scrolling behind the logo:
-    // no input needed, and it scrolls, so the stitched canvas fills in.
-    wait(&mut h, "smw", 1500);
+    let run_s: u64 = std::env::var("RF_SMW_RUN_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    // An enemy stands next to Mario at the start: jump first, then walk
+    // right hopping often (landing on an enemy is a stomp, walking into
+    // one is not).
+    key_event(&mut h, K::ArrowRight, true);
+    let mut ran = 0;
+    while ran < run_s {
+        hold_for(&mut h, &[K::X], 18);
+        let t = h.state().frame_count_for_test() + 22;
+        run_frames(&mut h, t, Duration::from_secs(120));
+        ran += 40;
+        probe(&h, &format!("smw-run-{ran:04}"));
+    }
+    key_event(&mut h, K::ArrowRight, false);
+    run_n(&mut h, 6);
+    // The stitched canvas only holds what the camera has seen, so walk back
+    // left for a while: then the level both ahead and behind is known and
+    // fills a 32:9 view.
+    let back: u64 = std::env::var("RF_SMW_BACK_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(160);
+    key_event(&mut h, K::ArrowLeft, true);
+    let mut walked = 0;
+    while walked < back {
+        hold_for(&mut h, &[K::X], 18);
+        let t = h.state().frame_count_for_test() + 22;
+        run_frames(&mut h, t, Duration::from_secs(120));
+        walked += 40;
+        probe(&h, &format!("smw-back-{walked:04}"));
+    }
+    key_event(&mut h, K::ArrowLeft, false);
+    run_n(&mut h, 6);
+    probe(&h, "smw-ran");
     let mut sources = Vec::new();
     for (aspect, tagname) in [(Aspect::Wide16x9, "16x9"), (Aspect::Wide32x9, "32x9")] {
+        // Captured LIVE (Mario standing still), not paused and stepped: a
+        // stepped frame carries no scroll position, so its margins fall back
+        // to VRAM. "On" then "off" a few frames apart.
         h.state_mut().set_widescreen_aspect_for_test(aspect);
         h.state_mut().set_widescreen(true);
-        run_n(&mut h, 60);
-        let st = snapshot(&mut h, tagname);
-        h.state_mut().set_widescreen(false);
-        run_n(&mut h, 20);
-        step_from(&mut h, &st);
-        let off = grab(&h);
-        h.state_mut().set_widescreen(true);
-        h.state_mut().set_widescreen_aspect_for_test(aspect);
-        run_n(&mut h, 20);
-        step_from(&mut h, &st);
-        step_from(&mut h, &st);
+        let t = h.state().frame_count_for_test() + 30;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        // The stitched canvas for this game still has flaws (offset
+        // repeats, HUD stitched in, no sky/parallax layer), so the tour
+        // shot uses the VRAM margins -- what the console itself has loaded
+        // -- and the canvas version is kept as a probe for the follow-up.
+        if let Some(p) = grab(&h) {
+            save(
+                &probe_dir().join(format!("widescreen-{tagname}-canvas.png")),
+                &p,
+            );
+        }
+        h.state_mut().force_vram_margins_for_test(true);
+        let t = h.state().frame_count_for_test() + 4;
+        run_frames(&mut h, t, Duration::from_secs(60));
         let on = grab(&h);
         let src = h.state().widescreen_source_for_test();
+        h.state_mut().force_vram_margins_for_test(false);
+        h.state_mut().set_widescreen(false);
+        let t = h.state().frame_count_for_test() + 4;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        let off = grab(&h);
         let (Some(off), Some(on)) = (off, on) else {
             skip(readme, &format!("widescreen-{tagname}"), "no frame");
             continue;
@@ -586,6 +709,133 @@ fn shot_superfx_hd(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W31-05: the GPU path, for the product tour. Every image here is
+/// one simulated frame: the native side is the exact frame the HD composite
+/// was made from (`superfx_hd_native_for_test`), so a split lines up.
+/// Variants (4x/3x, smoothing on/off) are consecutive stepped frames.
+fn shot_superfx_gpu(readme: &mut Vec<String>) {
+    let name = "superfx-gpu";
+    if !wanted(name) {
+        return;
+    }
+    let game = ["Star Fox (USA).zip", "Star Fox (USA) (Rev 1).zip"]
+        .iter()
+        .find_map(|f| rom("snes", f).map(|p| (p, (*f).to_string())));
+    let Some((path, file)) = game else {
+        return skip(readme, name, "Star Fox (USA) not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "starfox", 880);
+    h.state_mut()
+        .set_superfx_hd_for_test(true, 4, Mode::Enhanced, true);
+    h.state_mut().set_superfx_hd_msaa_for_test(4);
+    run_n(&mut h, 30);
+    h.state_mut().resume_for_test();
+    let t = h.state().frame_count_for_test() + 120;
+    run_frames(&mut h, t, Duration::from_secs(120));
+    let st = snapshot(&mut h, "sfx-gpu");
+    let mut shots: Vec<(&str, Pic, Pic)> = Vec::new();
+    for (tag, scale, msaa) in [
+        ("4x-smooth", 4u8, 4u8),
+        ("3x-smooth", 3, 4),
+        ("3x-sharp", 3, 1),
+    ] {
+        h.state_mut()
+            .set_superfx_hd_for_test(true, scale, Mode::Enhanced, true);
+        h.state_mut().set_superfx_hd_msaa_for_test(msaa);
+        step_from(&mut h, &st);
+        let readout = h.state().superfx_hd_readout_for_test().unwrap_or_default();
+        println!("superfx-gpu {tag}: {readout}");
+        if !readout.contains("HD (GPU") {
+            return skip(
+                readme,
+                name,
+                &format!("{tag}: not drawn by the GPU ({readout})"),
+            );
+        }
+        let (Some(hd), Some((rgba, w, hh))) = (grab(&h), h.state().superfx_hd_native_for_test())
+        else {
+            return skip(readme, name, "no frame");
+        };
+        shots.push((tag, hd, Pic { w, h: hh, rgba }));
+    }
+    let d = out_dir();
+    for (tag, hd, _) in &shots {
+        save(&d.join(format!("superfx-gpu-{tag}.png")), &hd.opaque());
+    }
+    let (_, hd4, native4) = &shots[0];
+    save(
+        &d.join("superfx-gpu-native.png"),
+        &native4.upscale(4).opaque(),
+    );
+    // Product-tour comparison: native (nearest 4x) | 4x smoothed, one frame.
+    save(
+        &d.join("compare-superfx-gpu.png"),
+        &native4.upscale(4).split(hd4).opaque(),
+    );
+    // Zoom, 64x64 native pixels at 8x: native | 3x no smoothing | 3x
+    // smoothed (the last two are one frame apart; the native one is the
+    // smoothed one's own frame).
+    let (_, sharp, _) = &shots[2];
+    let (_, smooth, native3) = &shots[1];
+    let (zx, zy) = zoom_origin(native3, 64);
+    let zoom = |p: &Pic| {
+        let k = (p.w / native3.w.max(1)).max(1);
+        p.crop(zx * k, zy * k, 64 * k, 64 * k).fit_width(512)
+    };
+    save(
+        &d.join("superfx-gpu-zoom.png"),
+        &native3
+            .crop(zx, zy, 64, 64)
+            .upscale(8)
+            .beside(&zoom(sharp), 8)
+            .beside(&zoom(smooth), 8)
+            .opaque(),
+    );
+    note(
+        readme,
+        format!(
+            "superfx-gpu|{file}|GPU path: 4x+4x smoothing, 3x+4x smoothing, 3x no smoothing, native; zoom at native ({zx},{zy}) 64x64 8x: native | 3x sharp | 3x smooth"
+        ),
+    );
+}
+
+/// Product-tour comparisons: one image per feature, OFF on the left half and
+/// ON on the right half with a white divider (pictures of different sizes,
+/// e.g. widescreen, go side by side instead).
+fn compare_images(readme: &mut Vec<String>) {
+    let d = out_dir();
+    let load = |p: PathBuf| -> Option<Pic> {
+        let img = image::open(p).ok()?.to_rgba8();
+        Some(Pic {
+            w: img.width() as usize,
+            h: img.height() as usize,
+            rgba: img.into_raw(),
+        })
+    };
+    // Only the pairs good enough for the tour: the HD-2D pair is a flat
+    // test fixture, so it waits for a game with painted heights.
+    for n in ["hdmode7-4x", "lens", "widescreen-16x9", "widescreen-32x9"] {
+        let (Some(a), Some(b)) = (
+            load(d.join(format!("{n}-off.png"))),
+            load(d.join(format!("{n}-on.png"))),
+        ) else {
+            continue;
+        };
+        let out = if (a.w, a.h) == (b.w, b.h) {
+            a.split(&b)
+        } else {
+            a.above_centred(&b, 8)
+        };
+        save(&d.join(format!("compare-{n}.png")), &out.opaque());
+    }
+    note(
+        readme,
+        "compare-*|-|tour comparisons: OFF left half | ON right half (split), or side by side when sizes differ".to_string(),
+    );
+}
+
 /// The 64x64 window with the most edge energy: a slanted polygon edge is
 /// where horizontal and vertical neighbours differ the most.
 fn zoom_origin(p: &Pic, size: usize) -> (usize, usize) {
@@ -726,6 +976,10 @@ fn w30_w31_screens() {
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);
+    shot_superfx_gpu(&mut readme);
+    if std::env::var("RF_SCREENS_ONLY").is_err() || wanted("compare") {
+        compare_images(&mut readme);
+    }
     if std::env::var("RF_SCREENS_ONLY").is_err() {
         contact_sheet(&mut readme);
     }
