@@ -173,14 +173,18 @@ impl CanvasAccumulator {
             .expect("just inserted above if it was missing");
         stitch_frame(canvas, &bundle.video, bundle.width, &bands);
 
-        // Ticket W30-03: the largest non-HUD band is the one that carries
-        // the level (the same pick the stitcher's world position follows).
-        // Stitched column `c` is world `world_x + c`; a widened frame's
-        // 256-dot picture starts `(width - 256) / 2` columns in.
+        // Ticket W30-03: the largest band is the one that carries the level
+        // (the scroll tracker's own primary, whose world position it
+        // accumulates). Stitched column `c` is world `world_x + c`; a
+        // widened frame's 256-dot picture starts `(width - 256) / 2`
+        // columns in. Not filtered by `is_hud`: the tracker marks ANY band
+        // whose scroll did not change as HUD, the level band included, so a
+        // camera standing still lost its position and widescreen margins
+        // fell back to VRAM until it moved again (fix 2026-10-16).
         let pad = i64::from(bundle.width.saturating_sub(256) / 2);
         self.last_position = bands
             .iter()
-            .filter(|(band, _)| !band.is_hud && band.end > band.start)
+            .filter(|(band, _)| band.end > band.start)
             .max_by_key(|(band, _)| band.end - band.start)
             .map(|(band, pos)| FramePosition {
                 scene: scene_id.0,
@@ -310,6 +314,20 @@ mod tests {
         let cut = acc.observe_frame(&frame_bundle(2, 300, 250), &[]);
         assert_ne!(cut, id, "a cut is a different scene");
         assert_eq!(acc.frame_position().unwrap().scene, cut.0);
+    }
+
+    /// A camera that stops (the scroll register unchanged, which the scroll
+    /// tracker calls a HUD band) keeps its frame position.
+    #[test]
+    fn a_still_camera_keeps_its_frame_position() {
+        let mut acc = CanvasAccumulator::new("rom-a".to_string(), None);
+        acc.observe_frame(&frame_bundle(0, 0, 3), &[]);
+        acc.observe_frame(&frame_bundle(1, 4, 3), &[]);
+        let moving = acc.frame_position().expect("moving");
+        for frame in 2..6 {
+            acc.observe_frame(&frame_bundle(frame, 4, 3), &[]);
+            assert_eq!(acc.frame_position(), Some(moving), "frame {frame}");
+        }
     }
 
     /// Ticket W30-03: a core that emits no scroll events (the SNES) is fed

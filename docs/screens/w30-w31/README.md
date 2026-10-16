@@ -11,8 +11,8 @@ here beyond these rendered frames.
 | File | Game | What it shows |
 |---|---|---|
 | `hdmode7-4x-off.png` / `-on.png` | F-Zero (USA) | Native 256x224, nearest-upscaled to 1024x896, vs HD Mode 7 at 4x with supersampling. In the "off" image every 4x4 block is one colour; in "on" 59% of the ground blocks carry sub-pixel detail. Near the car the track texture's own texels are big, which is correct magnification. |
-| `widescreen-16x9-*.png`, `widescreen-32x9-*.png` | Super Mario World (USA), title-screen demo | 4:3 vs 16:9 (400 wide) and 32:9 (800 wide). Margin source was **VRAM**, not the stitched canvas (the demo does not scroll far enough), so past 512 dots it is black. The first capture showed a bug: with widescreen on, the sky and hills vanished even inside the 4:3 area, because widened lines lost colour math (the sub-screen was only sent for 256-dot lines). It is fixed, and these files are re-shot with the fix. |
-| `widescreen-16x9-fixed.png` | Super Mario World (USA) | The 16:9 frame after the colour-math fix: sky gradient and hills in the centre and into the margins. |
+| `widescreen-16x9-*.png`, `widescreen-32x9-*.png` | Super Mario World (USA), Yoshi's Island 1 | 4:3 vs 16:9 (400 wide) and 32:9 (800 wide), in a level after walking right and back (re-shot 2026-10-16; the first set was the title-screen demo). Margins from **VRAM** (what the console has loaded, 512 dots wide), captured live with Mario standing still. 16:9 is real level edge to edge. At 32:9 the outer ~144 dots each side are sky and, low down, black, because the console holds no more of the level than 512 dots. The stitched-canvas margins that should fill those are not tour quality for this game yet (offset repeats, HUD stitched in, no sky layer); see the follow-up. |
+| `widescreen-16x9-fixed.png` | Super Mario World (USA) | The 16:9 title-screen frame after the colour-math fix (kept as the record of that fix). |
 | `lens-off.png` / `-on.png` | Super Mario World (USA), overworld map | Lens and lighting: bloom, tilt-shift, soft shadows, grading at time 0.2, no weather. Subtle at these strengths: 99% of pixels change, by a mean of about 9 levels in 255. |
 | `hd2d-look-off.png` / `-on.png` | RF-Scroller (in-repo NES test game) | "HD-2D look" preset in Game-Aware mode. **Substitute:** no A Link to the Past heights are painted yet, and NES Zelda decodes its level only in play (past name registration). The fixture's level is a flat floor, so the 3D view is a thin strip; the follow camera also looks off-centre (worth a look). |
 | `superfx-hd-3x-off.png` / `-on.png` | Star Fox (USA), intro | Native (nearest 3x) vs Sharper Super FX 3D at 3x. |
@@ -34,8 +34,7 @@ divider. Use these for the tour.
 | `superfx-gpu-zoom.png` | Star Fox (USA) | 64x64 native pixels at 8x: native, 3x no smoothing, 3x with 4x smoothing. Edges go from steps to clean antialiased lines. Thin 1-px plotted lines stay stepped, and corners stay on the game's whole-pixel grid (W31-06). |
 | `compare-hdmode7-4x.png` | F-Zero (USA) | Native vs HD Mode 7 at 4x (consecutive frames). |
 | `compare-lens.png` | Super Mario World (USA) | Lens and lighting off vs on (subtle by design; consecutive frames). |
+| `compare-widescreen-16x9.png`, `compare-widescreen-32x9.png` | Super Mario World (USA), Yoshi's Island 1 | 4:3 (top, centred) over widescreen (bottom), a few frames apart. |
 
-Not in the tour yet: **widescreen** (the capture is the title-screen demo,
-so the margins are mostly black; it needs an in-level scroll so the stitched
-canvas fills them) and **HD-2D** (no game has painted heights yet; the
+Not in the tour yet: **HD-2D** (no game has painted heights yet; the
 fixture shot is a flat strip).

@@ -108,6 +108,25 @@ impl Pic {
         me
     }
 
+    /// `self` centred above `other` (the widescreen pairs: 4:3 over wide),
+    /// on the dark background, `gap` rows apart.
+    fn above_centred(&self, other: &Pic, gap: usize) -> Pic {
+        let w = self.w.max(other.w);
+        let h = self.h + gap + other.h;
+        let mut rgba = vec![0u8; w * h * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[24, 24, 28, 255]);
+        }
+        for (pic, oy) in [(self, 0), (other, self.h + gap)] {
+            let ox = (w - pic.w) / 2;
+            for y in 0..pic.h {
+                let d = ((oy + y) * w + ox) * 4;
+                rgba[d..d + pic.w * 4].copy_from_slice(&pic.rgba[y * pic.w * 4..][..pic.w * 4]);
+            }
+        }
+        Pic { w, h, rgba }
+    }
+
     /// Nearest resize to a width (box-free; used only for the contact sheet).
     fn fit_width(&self, w: usize) -> Pic {
         let h = (self.h * w / self.w).max(1);
@@ -284,6 +303,13 @@ fn step_from(h: &mut H, _state: &()) {
     run_n(h, 120);
 }
 
+/// Save the current frame under `target/screens-probe/` (scene checks).
+fn probe(h: &H, tag: &str) {
+    if let Some(p) = grab(h) {
+        save(&probe_dir().join(format!("probe-{tag}.png")), &p);
+    }
+}
+
 fn release_all(h: &mut H) {
     use egui::Key as K;
     for k in [
@@ -386,31 +412,109 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
         return skip(readme, name, "Super Mario World (USA) not found");
     };
+    use egui::Key as K;
     let mut h = new_harness();
     open_and_run(&mut h, &path);
+    // Into a real level: menus to the map (as the lens shot), walk to
+    // Yoshi's Island 1 (`RF_SMW_MAP_DIR`, default left), enter it, then run
+    // right with a jump now and then, so the screen scrolls and the
+    // stitched canvas fills the margins.
+    wait(&mut h, "smw", 200);
+    for i in 0..10 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "smw", 100);
+    }
+    wait(&mut h, "smw", 300);
+    // Close the "Welcome to Dinosaur Land" message; the game then shows the
+    // map at Yoshi's House.
+    tap(&mut h, K::X, 8);
+    wait(&mut h, "smw", 400);
+    let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
+        Ok("right") => K::ArrowRight,
+        Ok("up") => K::ArrowUp,
+        _ => K::ArrowLeft,
+    };
+    tap(&mut h, dir, 8);
+    wait(&mut h, "smw", 150);
+    probe(&h, "smw-map");
+    tap(&mut h, K::X, 8);
+    // "MARIO START!" and the fade-in, but not long enough for the first
+    // enemy to walk into a Mario standing still.
+    let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    wait(&mut h, "smw", enter);
+    probe(&h, "smw-level-start");
     h.state_mut().set_widescreen(true);
     h.state_mut()
         .set_widescreen_aspect_for_test(Aspect::Wide32x9);
-    // The title screen plays a demo of a level scrolling behind the logo:
-    // no input needed, and it scrolls, so the stitched canvas fills in.
-    wait(&mut h, "smw", 1500);
+    let run_s: u64 = std::env::var("RF_SMW_RUN_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    // An enemy stands next to Mario at the start: jump first, then walk
+    // right hopping often (landing on an enemy is a stomp, walking into
+    // one is not).
+    key_event(&mut h, K::ArrowRight, true);
+    let mut ran = 0;
+    while ran < run_s {
+        hold_for(&mut h, &[K::X], 18);
+        let t = h.state().frame_count_for_test() + 22;
+        run_frames(&mut h, t, Duration::from_secs(120));
+        ran += 40;
+        probe(&h, &format!("smw-run-{ran:04}"));
+    }
+    key_event(&mut h, K::ArrowRight, false);
+    run_n(&mut h, 6);
+    // The stitched canvas only holds what the camera has seen, so walk back
+    // left for a while: then the level both ahead and behind is known and
+    // fills a 32:9 view.
+    let back: u64 = std::env::var("RF_SMW_BACK_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(160);
+    key_event(&mut h, K::ArrowLeft, true);
+    let mut walked = 0;
+    while walked < back {
+        hold_for(&mut h, &[K::X], 18);
+        let t = h.state().frame_count_for_test() + 22;
+        run_frames(&mut h, t, Duration::from_secs(120));
+        walked += 40;
+        probe(&h, &format!("smw-back-{walked:04}"));
+    }
+    key_event(&mut h, K::ArrowLeft, false);
+    run_n(&mut h, 6);
+    probe(&h, "smw-ran");
     let mut sources = Vec::new();
     for (aspect, tagname) in [(Aspect::Wide16x9, "16x9"), (Aspect::Wide32x9, "32x9")] {
+        // Captured LIVE (Mario standing still), not paused and stepped: a
+        // stepped frame carries no scroll position, so its margins fall back
+        // to VRAM. "On" then "off" a few frames apart.
         h.state_mut().set_widescreen_aspect_for_test(aspect);
         h.state_mut().set_widescreen(true);
-        run_n(&mut h, 60);
-        let st = snapshot(&mut h, tagname);
-        h.state_mut().set_widescreen(false);
-        run_n(&mut h, 20);
-        step_from(&mut h, &st);
-        let off = grab(&h);
-        h.state_mut().set_widescreen(true);
-        h.state_mut().set_widescreen_aspect_for_test(aspect);
-        run_n(&mut h, 20);
-        step_from(&mut h, &st);
-        step_from(&mut h, &st);
+        let t = h.state().frame_count_for_test() + 30;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        // The stitched canvas for this game still has flaws (offset
+        // repeats, HUD stitched in, no sky/parallax layer), so the tour
+        // shot uses the VRAM margins -- what the console itself has loaded
+        // -- and the canvas version is kept as a probe for the follow-up.
+        if let Some(p) = grab(&h) {
+            save(
+                &probe_dir().join(format!("widescreen-{tagname}-canvas.png")),
+                &p,
+            );
+        }
+        h.state_mut().force_vram_margins_for_test(true);
+        let t = h.state().frame_count_for_test() + 4;
+        run_frames(&mut h, t, Duration::from_secs(60));
         let on = grab(&h);
         let src = h.state().widescreen_source_for_test();
+        h.state_mut().force_vram_margins_for_test(false);
+        h.state_mut().set_widescreen(false);
+        let t = h.state().frame_count_for_test() + 4;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        let off = grab(&h);
         let (Some(off), Some(on)) = (off, on) else {
             skip(readme, &format!("widescreen-{tagname}"), "no frame");
             continue;
@@ -710,10 +814,9 @@ fn compare_images(readme: &mut Vec<String>) {
             rgba: img.into_raw(),
         })
     };
-    // Only the pairs good enough for the tour: the widescreen pairs are a
-    // title screen with black margins and the HD-2D pair is a flat test
-    // fixture, so both wait for better scenes.
-    for n in ["hdmode7-4x", "lens"] {
+    // Only the pairs good enough for the tour: the HD-2D pair is a flat
+    // test fixture, so it waits for a game with painted heights.
+    for n in ["hdmode7-4x", "lens", "widescreen-16x9", "widescreen-32x9"] {
         let (Some(a), Some(b)) = (
             load(d.join(format!("{n}-off.png"))),
             load(d.join(format!("{n}-on.png"))),
@@ -723,7 +826,7 @@ fn compare_images(readme: &mut Vec<String>) {
         let out = if (a.w, a.h) == (b.w, b.h) {
             a.split(&b)
         } else {
-            a.beside(&b, 8)
+            a.above_centred(&b, 8)
         };
         save(&d.join(format!("compare-{n}.png")), &out.opaque());
     }
