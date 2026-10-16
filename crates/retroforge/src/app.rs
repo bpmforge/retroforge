@@ -717,6 +717,13 @@ pub struct RetroForgeApp {
     /// observer's config (`None` = no such profile row), and the most recent
     /// completed render job the core thread sent.
     superfx_polygons: Option<rf_snes::gsu_observer::GsuPolyConfig>,
+    /// Ticket W31-03: whether the polygon observer was last sent on for
+    /// "Sharper Super FX 3D" (`None` = nothing sent yet for this core); the
+    /// compositor (last jobs, remembered placement) and its last frame's
+    /// one-line readout for the Enhance panel.
+    superfx_hd_sent: Option<bool>,
+    superfx_hd: rf_renderer::superfx_hd::SuperFxHd,
+    superfx_hd_readout: Option<String>,
     latest_gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     /// Ticket W30-09: the S-DSP interpolation last sent to the core.
     interpolation_sent: Option<rf_snes::apu::dsp::Interpolation>,
@@ -1608,6 +1615,9 @@ impl RetroForgeApp {
             run_ahead_sent: None,
             hd_mode7_sent: None,
             superfx_polygons: None,
+            superfx_hd_sent: None,
+            superfx_hd: rf_renderer::superfx_hd::SuperFxHd::default(),
+            superfx_hd_readout: None,
             latest_gsu_poly_job: None,
             interpolation_sent: None,
             superfx_cart: false,
@@ -3661,6 +3671,8 @@ impl RetroForgeApp {
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
         self.hd_mode7_sent = None;
+        self.superfx_hd_sent = None;
+        self.superfx_hd.clear();
         self.interpolation_sent = None;
         self.superfx_cart = matches!(
             rf_cart::Cartridge::load(&bytes),
@@ -4129,6 +4141,10 @@ impl RetroForgeApp {
                             crate::play_view::crop_rows(&hd.rgba, w, rows).to_vec(),
                             (w, rows),
                         )
+                    } else if let Some(hd) = self.superfx_hd_frame(&msg, rows) {
+                        // Ticket W31-03: the Super FX 3D redrawn finer (an
+                        // HD pack or HD Mode 7 frame wins over it).
+                        hd
                     } else {
                         let native = (
                             crate::play_view::crop_rows(&msg.rgba, msg.width, rows).to_vec(),
@@ -4749,6 +4765,7 @@ impl RetroForgeApp {
             lens_available: self.gpu.is_some()
                 && self.lens_budget.is_enabled()
                 && !self.lens_failed,
+            superfx_polygons: self.superfx_polygons.is_some(),
         }
     }
 
@@ -8288,6 +8305,16 @@ impl RetroForgeApp {
                     )
                 {
                     actions.settings_changed = true;
+                }
+                // Ticket W31-03: the Super FX HD scale.
+                if row.id == "superfx_hd" && row.enabled {
+                    let settings = &mut self.current_game_settings;
+                    if ui
+                        .add(egui::Slider::new(&mut settings.superfx_hd_scale, 2..=4).suffix("x"))
+                        .changed()
+                    {
+                        actions.settings_changed = true;
+                    }
                 }
                 // Ticket W30-02: the HD Mode 7 options.
                 if row.id == "hd_mode7" && row.enabled {
@@ -12585,6 +12612,38 @@ impl RetroForgeApp {
         self.current_game_settings.hd_mode7_scale = scale;
     }
 
+    /// Ticket W31-03 (tests): turn "Sharper Super FX 3D" on/off at `scale`
+    /// in `mode`, as its row and slider do, and pretend the matched profile
+    /// does (`polygons`) or does not carry `[superfx_polygons]`.
+    #[doc(hidden)]
+    pub fn set_superfx_hd_for_test(
+        &mut self,
+        on: bool,
+        scale: u8,
+        mode: crate::game_settings::Mode,
+        polygons: bool,
+    ) {
+        self.current_game_settings.superfx_hd = on;
+        self.current_game_settings.superfx_hd_scale = scale;
+        self.current_game_settings.mode = mode;
+        self.superfx_polygons = polygons.then_some(rf_snes::gsu_observer::GsuPolyConfig {
+            pc_bank: 1,
+            count_read_pc: 0x8DE0,
+            count_addr: 0x0134,
+            buffer_addr: 0x0982,
+            walker_pcs: (0xA6C0, 0xA740),
+            viewport: (224, 170),
+            capture_bitmap: false,
+        });
+    }
+
+    /// Ticket W31-03 (tests): whether the Super FX HD row is effective.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn superfx_hd_effective_for_test(&self) -> bool {
+        self.superfx_hd_effective()
+    }
+
     /// Ticket W16-14: feed a synthetic [`rf_core_api::Mode7Frame`] plus a
     /// VRAM/CGRAM snapshot through the SAME `refresh_diorama_render` path
     /// a real running SNES core's `FrameMsg` would — the kittest hook this
@@ -14727,6 +14786,7 @@ impl RetroForgeApp {
                     hd_summary: self.hd_summary.as_deref(),
                     hd_unsatisfied: &self.hd_unsatisfied,
                     hd_report: self.hd_report,
+                    superfx_hd_readout: self.superfx_hd_readout.clone(),
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session
@@ -14994,6 +15054,79 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::SetHdMode7(want));
             self.hd_mode7_sent = Some(want);
         }
+    }
+
+    /// Ticket W31-03: whether "Sharper Super FX 3D" is EFFECTIVE (Enhanced,
+    /// a profile with `[superfx_polygons]`, toggle on, no HD pack loaded).
+    fn superfx_hd_effective(&self) -> bool {
+        self.hd_pack.is_none()
+            && self.superfx_polygons.is_some()
+            && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .any(|r| r.id == "superfx_hd" && r.effective())
+    }
+
+    /// Ticket W31-03: keep the core's polygon observer matching the row's
+    /// effective state; sends only on a change. Off means off at the core
+    /// (one `Option` check per GSU instruction), and the compositor forgets
+    /// its jobs.
+    fn sync_superfx_hd(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let on = self.superfx_hd_effective();
+        if self.superfx_hd_sent != Some(on) {
+            // A fresh core's observer is already off: never send a redundant
+            // "off" (it would also undo a test hook's observer).
+            if on || self.superfx_hd_sent.is_some() {
+                self.send_command(CoreCommand::SetGsuPolyObserver(
+                    self.superfx_polygons.filter(|_| on),
+                ));
+            }
+            self.superfx_hd_sent = Some(on);
+            if !on {
+                self.superfx_hd.clear();
+                self.latest_gsu_poly_job = None;
+                self.superfx_hd_readout = None;
+            }
+        }
+    }
+
+    /// Ticket W31-03: the `n`x Super FX picture for this frame, or `None`
+    /// (use the native frame). Takes the frame's job, composes against the
+    /// native frame's own pixels on the UI thread, and records the readout.
+    fn superfx_hd_frame(
+        &mut self,
+        msg: &core_thread::FrameMsg,
+        rows: usize,
+    ) -> Option<(Vec<u8>, (usize, usize))> {
+        if self.superfx_hd_sent != Some(true) || self.widescreen_on {
+            return None;
+        }
+        if let Some(job) = &msg.gsu_poly_job {
+            self.superfx_hd.push_job(job.clone());
+        }
+        let n = u32::from(self.current_game_settings.superfx_hd_scale.clamp(2, 4));
+        let frame = rf_renderer::superfx_hd::Frame {
+            rgba: crate::play_view::crop_rows(&msg.rgba, msg.width, rows),
+            width: msg.width,
+            height: rows,
+        };
+        let out = self.superfx_hd.compose(&frame, n);
+        let s = self.superfx_hd.last_stats();
+        self.superfx_hd_readout =
+            self.superfx_hd.has_jobs().then(|| {
+                format!(
+                "3D layer: {} (score {:.3}, offset {},{}, job age {}, {:.0}% of the view redrawn)",
+                if s.accepted { "HD" } else { "not found, native" },
+                s.score,
+                s.offset.0,
+                s.offset.1,
+                s.job_age,
+                100.0 * s.masked as f32 / s.viewport_pixels.max(1) as f32,
+            )
+            });
+        out.map(|rgba| (rgba, (msg.width * n as usize, rows * n as usize)))
     }
 
     /// Ticket W31-02 test hook: turn the Super FX polygon observer on (from
@@ -15874,6 +16007,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_loading(&ctx);
         self.sync_clocks();
         self.sync_hd_mode7();
+        self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
         // Ticket W14-02: adopt a background library scan the moment it

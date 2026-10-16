@@ -110,6 +110,10 @@ pub struct GameFacts {
     /// pass has kept to its frame budget and not failed. Like
     /// `fog_rendered`, so the badge never counts a row nothing draws.
     pub lens_available: bool,
+    /// Ticket W31-03: the matched profile declares `[superfx_polygons]`
+    /// (the addresses the Super FX polygon observer needs). Only Star Fox
+    /// has one so far; "Sharper Super FX 3D" is unavailable without it.
+    pub superfx_polygons: bool,
 }
 
 impl GameFacts {
@@ -135,6 +139,7 @@ impl GameFacts {
             sa1_max: 400,
             nes_lines_max: 240,
             lens_available: true,
+            superfx_polygons: false,
         }
     }
 }
@@ -193,6 +198,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         sa1_max,
         nes_lines_max,
         lens_available,
+        superfx_polygons,
     } = *facts;
     let mode = settings.mode;
     let enhancement = mode.enhancement_active();
@@ -289,6 +295,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         generic(settings.lens_any()),
         lens_available,
         "a graphics card that can draw it",
+    );
+    // Ticket W31-03: presentation-only, Enhanced, and only for a game whose
+    // profile says where its 3D polygons are (so a Super FX game without one
+    // gets a clear reason rather than a row that turns on and does nothing).
+    let (sfx_hd_av, sfx_hd_on) = also(
+        generic(settings.superfx_hd),
+        superfx_polygons,
+        "a Super FX game whose profile describes its 3D (Star Fox)",
     );
     let (level_av, level_on) = also(
         profiled(settings.full_level_view),
@@ -463,6 +477,15 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, requires live BG mode 7",
             enabled: settings.hd_mode7,
             availability: mode7_av,
+            heuristic: None,
+        },
+        // Ticket W31-03: the Super FX polygon stream redrawn at 2-4x.
+        FeatureRow {
+            id: "superfx_hd",
+            label: "Sharper Super FX 3D",
+            scope: "requires profile, Super FX",
+            enabled: sfx_hd_on,
+            availability: sfx_hd_av,
             heuristic: None,
         },
         // Ticket W30-04: bloom, tilt-shift, shadows, day/night and weather.
@@ -878,7 +901,7 @@ mod tests {
             &GameSettings::default(),
             &GameFacts::new(false, false, false),
         );
-        assert_eq!(rows.len(), 16, "every feature is listed in every mode");
+        assert_eq!(rows.len(), 17, "every feature is listed in every mode");
         assert!(rows.iter().all(|r| r.availability.explanation().is_some()));
     }
 
@@ -1031,6 +1054,65 @@ mod tests {
         assert!(badge_breakdown(&s, &GameFacts::new(false, false, true))
             .iter()
             .any(|l| l.contains("Diorama: Mode 7")));
+    }
+
+    /// Ticket W31-03: "Sharper Super FX 3D" is Enhanced-only, needs the
+    /// matched profile's `[superfx_polygons]`, and counts toward the badge
+    /// only when effective.
+    #[test]
+    fn superfx_hd_gating_and_badge() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "superfx_hd")
+                .unwrap()
+        };
+        let with = GameFacts {
+            superfx_polygons: true,
+            ..GameFacts::new(true, false, false)
+        };
+        let without = GameFacts::new(true, false, false);
+        let mut s = settings(Mode::Accuracy);
+        s.superfx_hd = true;
+        assert_eq!(
+            find(&s, &with).availability,
+            Availability::NeedsMode("Enhanced")
+        );
+        assert!(!find(&s, &with).effective(), "Accuracy never applies it");
+        s.mode = Mode::Enhanced;
+        assert!(matches!(
+            find(&s, &without).availability,
+            Availability::NeedsGameState(_)
+        ));
+        assert!(!find(&s, &without).effective());
+        assert!(find(&s, &with).effective());
+        assert_eq!(find(&s, &with).label, "Sharper Super FX 3D");
+        assert!(badge_breakdown(&s, &with)
+            .iter()
+            .any(|l| l.contains("Sharper Super FX 3D")));
+        assert!(!badge_breakdown(&s, &without)
+            .iter()
+            .any(|l| l.contains("Sharper Super FX 3D")));
+        s.superfx_hd = false;
+        assert!(!find(&s, &with).effective(), "off stays off");
+        assert!(
+            feature_rows(&s, &with)
+                .iter()
+                .filter(|r| r.id == "superfx_hd")
+                .count()
+                == 1
+        );
+        // Mode cards: available in Enhanced only (and Game-Aware shows
+        // generic rows only if the mode enables enhancements).
+        assert_eq!(
+            features_unlocked(&s, &with, Mode::Enhanced)
+                - features_unlocked(&s, &without, Mode::Enhanced),
+            1
+        );
+        assert_eq!(
+            features_unlocked(&s, &with, Mode::Accuracy),
+            features_unlocked(&s, &without, Mode::Accuracy)
+        );
     }
 
     /// Ticket W30-02: HD Mode 7 is Enhanced-only, needs a game that has

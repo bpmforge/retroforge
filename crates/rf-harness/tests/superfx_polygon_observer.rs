@@ -12,6 +12,14 @@
 //! jobs' pixels, so the rest is not comparable): exact palette-index match
 //! over those pixels, and pixel IoU of coverage (drawn vs plotted).
 //!
+//! W31-03 adds `hd_composite_*`: the same game with a real
+//! `rf_renderer::frame::FrameBuffer` sink, the HD compositor
+//! (`rf_renderer::superfx_hd`) run on every frame that has a job. At 1x the
+//! composite must equal the native frame byte for byte (asserted); the
+//! score distribution, accepted share, masked share and the 3x cost are
+//! printed. `RF_SUPERFX_HD_OUT=<dir>` writes native/3x PNG pairs every 50
+//! frames.
+//!
 //! Frame bounds: `RF_POLY_INTRO` (default `850:1100`, no input) and
 //! `RF_POLY_ATTRACT` (default `2600:2800`, no input).
 
@@ -277,5 +285,155 @@ fn observer_does_not_change_the_machine_on_star_fox() {
             on.4 > 0,
             "{name}: the observer saw no job in frames {from}-{to}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Ticket W31-03: the HD compositor against the real screen.
+// ---------------------------------------------------------------------
+
+use rf_renderer::frame::FrameBuffer;
+use rf_renderer::superfx_hd::{Frame, SuperFxHd, MIN_SCORE};
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct HdProof {
+    frames: u32,
+    accepted: u32,
+    /// <0.5, <0.9, <0.97, >=0.97
+    buckets: [u32; 4],
+    score_sum: f64,
+    masked: u64,
+    viewport: u64,
+    identity_checked: u32,
+    ages: [u32; 3],
+    times: Vec<Duration>,
+}
+
+fn nearest_upscale(rgba: &[u8], w: usize, h: usize, n: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * n * h * n * 4];
+    for y in 0..h * n {
+        for x in 0..w * n {
+            let s = ((y / n) * w + x / n) * 4;
+            let d = (y * w * n + x) * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    out
+}
+
+fn run_hd_scene(name: &str, bytes: &[u8], scene: &str, from: u32, to: u32) -> HdProof {
+    let out_dir = std::env::var("RF_SUPERFX_HD_OUT").ok().map(|d| {
+        let dir = std::path::PathBuf::from(d);
+        std::fs::create_dir_all(&dir).expect("create RF_SUPERFX_HD_OUT");
+        dir
+    });
+    let mut core = SnesCore::load(bytes).expect("loads");
+    let mut sink = FrameBuffer::with_size(256, 224);
+    // Same as the app: one job (the newest) per frame reaches the compositor.
+    let mut hd1 = SuperFxHd::default();
+    let mut hd3 = SuperFxHd::default();
+    // The threshold lowered to nothing: the mask alone must keep 1x exact.
+    let mut hd1_weak = SuperFxHd::default();
+    hd1_weak.min_score = 0.0;
+    let mut proof = HdProof::default();
+    for f in 0..to {
+        if f == from.saturating_sub(30) {
+            core.set_gsu_poly_observer(Some(star_fox_config(false)));
+        }
+        let _ = core.step(Step::Frame, &mut sink);
+        if let Some(job) = core.take_gsu_poly_jobs().pop() {
+            for hd in [&mut hd1, &mut hd3, &mut hd1_weak] {
+                hd.push_job(job.clone());
+            }
+        }
+        if f < from || !hd1.has_jobs() {
+            continue;
+        }
+        let (w, h) = (sink.width(), sink.height());
+        let native = sink.rgba();
+        let frame = Frame {
+            rgba: native,
+            width: w,
+            height: h,
+        };
+        proof.frames += 1;
+        let one = hd1.compose(&frame, 1);
+        let s = hd1.last_stats();
+        proof.score_sum += f64::from(s.score);
+        proof.buckets[match s.score {
+            x if x < 0.5 => 0,
+            x if x < 0.9 => 1,
+            x if x < MIN_SCORE => 2,
+            _ => 3,
+        }] += 1;
+        if let Some(out) = one {
+            proof.accepted += 1;
+            proof.ages[s.job_age.min(2)] += 1;
+            proof.masked += s.masked as u64;
+            proof.viewport += s.viewport_pixels as u64;
+            assert_eq!(out, native, "{name} {scene} frame {f}: 1x differs");
+            proof.identity_checked += 1;
+        }
+        if let Some(out) = hd1_weak.compose(&frame, 1) {
+            assert_eq!(out, native, "{name} {scene} frame {f}: weak 1x differs");
+            proof.identity_checked += 1;
+        }
+        let t = Instant::now();
+        let three = hd3.compose(&frame, 3);
+        if three.is_some() {
+            proof.times.push(t.elapsed());
+        }
+        if let (Some(dir), true) = (&out_dir, f % 50 == 0) {
+            let rom = Path::new(name)
+                .file_stem()
+                .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                .replace([' ', '(', ')'], "_");
+            let stem = format!("{rom}_{scene}_{f}");
+            let up = nearest_upscale(native, w, h, 3);
+            let pair = [("native", Some(up)), ("hd", three)];
+            for (label, img) in pair {
+                if let Some(img) = img {
+                    let png = rf_renderer::png::encode_rgba(&img, (w * 3) as u32, (h * 3) as u32);
+                    std::fs::write(dir.join(format!("{stem}_{label}.png")), png).expect("png");
+                }
+            }
+        }
+    }
+    proof
+}
+
+#[test]
+fn hd_composite_is_exact_at_1x_and_reports_on_star_fox() {
+    let Some(roms) = roms() else { return };
+    let scenes = [
+        ("intro", frame_range("RF_POLY_INTRO", (850, 1100))),
+        ("attract", frame_range("RF_POLY_ATTRACT", (2600, 2800))),
+    ];
+    for (name, bytes) in &roms {
+        for (scene, (from, to)) in scenes {
+            let p = run_hd_scene(name, bytes, scene, from, to);
+            let mut times = p.times.clone();
+            times.sort();
+            let ms = |d: Option<&Duration>| d.map_or(0.0, |d| d.as_secs_f64() * 1e3);
+            let mean = times.iter().map(Duration::as_secs_f64).sum::<f64>()
+                / times.len().max(1) as f64
+                * 1e3;
+            println!(
+                "{name} {scene}: {} frames with a job; score mean {:.4}, buckets <0.5/<0.9/<0.97/>=0.97 = {:?}; \
+                 accepted {:.1}% (job age 0/1/2 = {:?}); masked {:.1}% of the viewport on accepted frames; \
+                 1x identity checked on {} composites; 3x compose ms: mean {mean:.2}, p95 {:.2}, max {:.2}",
+                p.frames,
+                p.score_sum / f64::from(p.frames.max(1)),
+                p.buckets,
+                100.0 * f64::from(p.accepted) / f64::from(p.frames.max(1)),
+                p.ages,
+                100.0 * p.masked as f64 / p.viewport.max(1) as f64,
+                p.identity_checked,
+                ms(times.get(times.len() * 95 / 100)),
+                ms(times.last()),
+            );
+            assert!(p.frames > 0, "{scene}: no frame had a job");
+        }
     }
 }

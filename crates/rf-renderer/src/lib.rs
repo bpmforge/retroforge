@@ -60,6 +60,7 @@ pub mod pipeline;
 pub mod png;
 pub mod scale;
 pub mod shader_chain;
+pub mod superfx_hd;
 
 pub use compare::{
     blink_shows_original, compose_split, original_rgba_from_indexed,

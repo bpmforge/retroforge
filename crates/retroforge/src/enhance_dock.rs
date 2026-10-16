@@ -89,6 +89,9 @@ pub struct EnhanceCtx<'a> {
     pub hd_summary: Option<&'a str>,
     pub hd_unsatisfied: &'a [String],
     pub hd_report: Option<rf_enhance::hd_render::CompositeReport>,
+    /// Ticket W31-03: the Super FX HD compositor's last frame, as one line
+    /// (score, offset, job age, masked share); `None` when it is off.
+    pub superfx_hd_readout: Option<String>,
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -363,6 +366,8 @@ pub fn apply_toggle(
         "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
+        // Ticket W31-03: read every frame by `sync_superfx_hd`.
+        "superfx_hd" => ctx_settings.superfx_hd = enabled,
         // Ticket W30-09: likewise read every frame by `sync_snes_interpolation`.
         "snes_interpolation" => ctx_settings.snes_interpolation = enabled,
         // Ticket W30-04: the row reads on when any effect is, so its own
@@ -693,6 +698,20 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         if row.id == "snes_interpolation" && row.enabled && interpolation_controls(ui, ctx.settings)
         {
             actions.settings_changed = true;
+        }
+        // Ticket W31-03: the Super FX HD scale, right under its toggle.
+        if row.id == "superfx_hd" && row.enabled {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Slider::new(&mut ctx.settings.superfx_hd_scale, 2..=4).suffix("x"))
+                    .changed()
+                {
+                    actions.settings_changed = true;
+                }
+            });
+            if let Some(line) = &ctx.superfx_hd_readout {
+                ui.weak(line);
+            }
         }
         // Ticket W30-02: the HD Mode 7 options, right under its toggle.
         if row.id == "hd_mode7" && row.enabled {

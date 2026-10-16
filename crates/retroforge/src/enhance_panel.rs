@@ -33,6 +33,9 @@ pub fn describe(id: &str) -> &'static str {
         "diorama" => "Raises the level's walls into a 3D diorama.",
         "mode7_ground" => "Turns a Mode 7 floor into a 3D ground you look across.",
         "hd_mode7" => "Redraws Mode 7 floors at 2-4x resolution, with smooth perspective.",
+        "superfx_hd" => {
+            "Redraws the 3D shapes of a Super FX game at 2-4x resolution, with smoother edges."
+        }
         "hd2d_lens" => {
             "Adds a soft glow, a miniature-model focus blur, day and night light, and rain or snow."
         }
@@ -107,6 +110,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"nes_extra_lines" => "Less slowdown",
         b"run_ahead" => "Less input lag",
         b"hd_mode7" => "Sharper Mode 7",
+        b"superfx_hd" => "HD Super FX",
         b"hd2d_lens" => "Lens and lighting",
         b"snes_interpolation" => "Smoother sound",
         _ => "Enhancement",
