@@ -152,6 +152,15 @@ fn the_lens_changes_the_screen_but_never_the_core_or_its_frame() {
         s.lens_shadows_pct = 100;
     });
     settle(&mut harness, 20);
+    // Then wait for the flag itself (up to 15 s): under load the frames
+    // above can land before the UI has turned the request around.
+    let start = Instant::now();
+    while !harness.state().lens_shadows_wanted_for_test()
+        && start.elapsed() < Duration::from_secs(15)
+    {
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
     assert!(harness.state().lens_shadows_wanted_for_test());
     let (screen_shadow, frame_shadow) = hashes(&mut harness);
     assert_ne!(
