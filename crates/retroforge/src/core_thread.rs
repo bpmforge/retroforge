@@ -456,6 +456,10 @@ pub struct SceneCanvas {
 /// of slack for the ordinary race between the producer incrementing and
 /// the consumer's next drain, without reopening the unbounded growth this
 /// exists to close.
+/// How often a canvas snapshot request may also persist the canvas to the
+/// disk cache (ticket W30-03 follow-up; see `CoreCommand::RequestCanvasSnapshot`).
+const CANVAS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub const MAX_PENDING_FRAMES: usize = 2;
 
 /// Ticket W27-02: the SNES work RAM the camera finder searches,
@@ -1263,6 +1267,8 @@ fn core_thread_main(
     // doc), never a reason to fail loading the ROM.
     let cache = rf_cache::Cache::open(canvas_cache_root(), CANVAS_CACHE_CAP_BYTES).ok();
     let mut canvas_accum = CanvasAccumulator::new(rom_sha256, cache);
+    // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
+    let mut last_canvas_flush: Option<std::time::Instant> = None;
 
     // `run_guarded_loop` needs its own `&Sender` (to report a crash) at
     // the same time the loop body needs to *own* a sender to `send` frames
@@ -1490,7 +1496,20 @@ fn core_thread_main(
                     let _ = stepper.set_watches(&watches);
                 }
                 CoreCommand::RequestCanvasSnapshot => {
-                    canvas_accum.flush();
+                    // Persisting the canvas is a disk write of the whole
+                    // stitched canvas (encode + atomic file write). Widescreen
+                    // edges (W30-03) request snapshots often, and doing that
+                    // write on every request stalled the core for seconds per
+                    // frame when the disk was slow (an OS file scanner on
+                    // every new file). The snapshot itself needs no disk
+                    // write, so persistence is throttled to once per
+                    // CANVAS_FLUSH_INTERVAL.
+                    if last_canvas_flush
+                        .is_none_or(|t: std::time::Instant| t.elapsed() >= CANVAS_FLUSH_INTERVAL)
+                    {
+                        canvas_accum.flush();
+                        last_canvas_flush = Some(std::time::Instant::now());
+                    }
                     let snapshot = SceneCanvas {
                         canvas: canvas_accum.current_canvas().unwrap_or_default(),
                         scene: canvas_accum.current_scene_id().map(|id| id.0),
