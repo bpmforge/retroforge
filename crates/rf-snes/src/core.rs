@@ -447,7 +447,12 @@ impl SnesCore {
                 };
                 sink.sub_scanline(y, &sub, fixed_color);
             }
-            sink.video_scanline(y, &line.pixels);
+            if wide_line {
+                let pad = line.pixels.len().saturating_sub(crate::ppu::WIDTH) / 2;
+                sink.video_scanline_widened(y, &line.pixels, pad);
+            } else {
+                sink.video_scanline(y, &line.pixels);
+            }
             sink.overlay_scanline(y, &line.overlay);
         }
         // Ticket W16-09: promote the Mode 7 matrix to the generic

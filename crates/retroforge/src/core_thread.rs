@@ -1155,6 +1155,19 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
         self.bundle.video_scanline(y, pixels);
     }
 
+    /// A widened line: the picture (and layer split) get all of it, the
+    /// accuracy-exact bundle only the console's own middle 256 dots.
+    fn video_scanline_widened(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel], pad: usize) {
+        self.frame.video_scanline(y, pixels);
+        if let Some(layers) = self.layers.as_mut() {
+            layers.video_scanline(y, pixels);
+        }
+        let middle = pixels
+            .get(pad..pad + usize::from(self.bundle.width()))
+            .unwrap_or(pixels);
+        self.bundle.video_scanline(y, middle);
+    }
+
     /// Ticket W7-21: the sub-screen, to the frame (the layer split is a
     /// debug view of the indexed screens and does not blend).
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
@@ -2310,6 +2323,36 @@ mod tests {
     /// to exercise [`publish_frame`]'s bookkeeping without needing a real
     /// stepped frame's actual pixels, which `publish_frame` never looks
     /// at.
+    /// A widened (widescreen) line reaches the accuracy-exact bundle as the
+    /// console's own middle 256 dots, not the first 256 (which are margin):
+    /// the shift that made stitched canvases repeat terrain (2026-10-16).
+    #[test]
+    fn a_widened_line_gives_the_bundle_its_middle() {
+        use rf_core_api::CoreSink as _;
+        let mut frame = rf_renderer::FrameBuffer::new();
+        let mut bundle = rf_core_api::FrameBundleBuilder::new(256, 1);
+        let pad = 128usize;
+        let line: Vec<rf_core_api::PpuPixel> = (0..256 + 2 * pad)
+            .map(|x| rf_core_api::PpuPixel {
+                palette_index: (x % 251) as u8,
+                layer: rf_core_api::PixelLayer::Background(0),
+                sprite_id: None,
+                priority: 0,
+            })
+            .collect();
+        FanoutSink {
+            frame: &mut frame,
+            layers: None,
+            bundle: &mut bundle,
+            audio: None,
+            overlay: None,
+        }
+        .video_scanline_widened(0, &line, pad);
+        let video = bundle.take(0).video;
+        assert_eq!(video[0].palette_index, (pad % 251) as u8);
+        assert_eq!(video[255].palette_index, ((pad + 255) % 251) as u8);
+    }
+
     /// A distinct polygon job, told apart by its `bpp`.
     fn gsu_job(tag: u8) -> Arc<rf_core_api::gsu_poly::PolyJob> {
         Arc::new(rf_core_api::gsu_poly::PolyJob {
