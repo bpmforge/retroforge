@@ -18,11 +18,16 @@
 //! 4. the mask is "inside the viewport, the 1x raster has an index there, and
 //!    the screen colour equals the mapping" - a sprite or HUD over the 3D
 //!    never matches, so it stays native;
-//! 5. the job is re-drawn at `n`x ([`crate::gsu_poly::rasterise_job_scaled`])
-//!    and its colours replace the masked pixels' `n` by `n` blocks of the
-//!    nearest-upscaled native frame.
+//! 5. the job is re-drawn at `n`x and its colours replace the masked pixels'
+//!    `n` by `n` blocks of the nearest-upscaled native frame. Two ways to
+//!    redraw it: on the GPU as antialiased triangles
+//!    ([`crate::superfx_gpu`], ticket W31-05, the default when a GPU and
+//!    `n >= 2` are available -- the picture's alpha is the polygon coverage,
+//!    blended over the background behind it) or, without a GPU, by the CPU
+//!    scanline fill ([`crate::gsu_poly::rasterise_job_scaled`]). At `n == 1`
+//!    it is always the CPU path, so the 1x proof stays byte-identical.
 //!
-//! Pure and CPU-only. Presentation only (project laws 4 and 6): it reads the
+//! Matching and masking are CPU-only. Presentation only (project laws 4 and 6): it reads the
 //! frame the core already produced and never writes anything back.
 
 use std::collections::VecDeque;
@@ -30,7 +35,9 @@ use std::sync::Arc;
 
 use rf_core_api::gsu_poly::PolyJob;
 
+use crate::gpu::GpuContext;
 use crate::gsu_poly::{rasterise_job_1x, rasterise_job_scaled, NONE};
+use crate::superfx_gpu::{GpuPolyImage, SuperFxGpu, SCALE_MAX};
 
 /// The best (job, offset) is used only if this share of its indexed pixels
 /// agree with the screen. Below it we show the original, never a guess.
@@ -264,11 +271,45 @@ pub struct HdStats {
     pub indexed: usize,
     /// Whether the score cleared the threshold and an HD picture was made.
     pub accepted: bool,
+    /// Whether the HD picture was drawn on the GPU (else the CPU fill).
+    pub gpu: bool,
+    /// The multisample count the GPU drew with (0 when `gpu` is false).
+    pub samples: u32,
 }
 
-/// Compose the `n`x picture for `m`: the nearest-upscaled native frame with
-/// the masked pixels' blocks taken from the job drawn at `n`x. Returns the
-/// `(width * n) x (height * n)` RGBA frame and the masked pixel count.
+/// The GPU side of a composite: the drawing pass, its device and the
+/// requested multisample count (lowered to what the device supports).
+#[derive(Clone, Copy)]
+pub struct GpuPath<'a> {
+    pub renderer: &'a SuperFxGpu,
+    pub ctx: &'a GpuContext,
+    pub msaa: u32,
+}
+
+/// Where the `n`x picture's pixels come from.
+enum HdSource {
+    /// Palette indices ([`NONE`] = nothing) through the screen mapping.
+    Cpu(Vec<u8>),
+    /// Straight-alpha RGBA, alpha = coverage.
+    Gpu(GpuPolyImage),
+}
+
+/// `base` blended toward `rgb` by `alpha / 255`.
+fn blend(base: [u8; 3], rgb: [u8; 3], alpha: u8) -> [u8; 3] {
+    let a = u32::from(alpha);
+    let mix = |b: u8, c: u8| ((u32::from(b) * (255 - a) + u32::from(c) * a + 127) / 255) as u8;
+    [
+        mix(base[0], rgb[0]),
+        mix(base[1], rgb[1]),
+        mix(base[2], rgb[2]),
+    ]
+}
+
+fn unpack(c: u32) -> [u8; 3] {
+    [(c >> 16) as u8, (c >> 8) as u8, c as u8]
+}
+
+/// [`composite_with`] without a GPU: the CPU scanline fill.
 #[must_use]
 pub fn composite(
     frame: &Frame,
@@ -277,7 +318,29 @@ pub fn composite(
     raster_1x: &[u8],
     n: u32,
 ) -> (Vec<u8>, usize) {
-    let n = n.clamp(1, 4) as usize;
+    let (out, masked, _) = composite_with(frame, m, job, raster_1x, n, None);
+    (out, masked)
+}
+
+/// Compose the `n`x picture for `m`: the nearest-upscaled native frame with
+/// the masked pixels' blocks taken from the job drawn at `n`x. Returns the
+/// `(width * n) x (height * n)` RGBA frame, the masked pixel count and
+/// whether the GPU drew the job (`gpu` given, `n >= 2` and it succeeded).
+///
+/// On the GPU path a subpixel's coverage `alpha` blends the polygon colour
+/// over what is behind it (the neighbouring background, else the native
+/// colour): that is what makes the edges antialiased. The CPU path is the
+/// `alpha = 255 / 0` special case.
+#[must_use]
+pub fn composite_with(
+    frame: &Frame,
+    m: &Match,
+    job: &PolyJob,
+    raster_1x: &[u8],
+    n: u32,
+    gpu: Option<GpuPath>,
+) -> (Vec<u8>, usize, bool) {
+    let n = n.clamp(1, SCALE_MAX) as usize;
     let vp = job.viewport;
     let (vw, vh) = (usize::from(vp.0), usize::from(vp.1));
     let (out_w, out_h) = (frame.width * n, frame.height * n);
@@ -300,19 +363,52 @@ pub fn composite(
             tail[..out_w * 4].copy_from_slice(&head[first..first + out_w * 4]);
         }
     }
-    let hd = if n == 1 {
-        raster_1x.to_vec()
-    } else {
-        rasterise_job_scaled(job, vp, n as u32)
+    let mapping = &m.scored.mapping;
+    let gpu_image = gpu.filter(|_| n > 1).and_then(|g| {
+        g.renderer
+            .render(g.ctx, job, vp, n as u32, g.msaa, &|i| {
+                mapping.get(i).map(unpack)
+            })
+            .ok()
+    });
+    let used_gpu = gpu_image.is_some();
+    let hd = match gpu_image {
+        Some(img) => HdSource::Gpu(img),
+        None if n == 1 => HdSource::Cpu(raster_1x.to_vec()),
+        None => HdSource::Cpu(rasterise_job_scaled(job, vp, n as u32)),
     };
     let hd_w = vw * n;
+    // The HD picture's subpixel `(sx, sy)`: its colour and coverage.
+    let hd_px = |sx: usize, sy: usize| -> Option<([u8; 3], u8)> {
+        match &hd {
+            HdSource::Cpu(r) => {
+                let h = r[sy * hd_w + sx];
+                (h != NONE)
+                    .then(|| mapping.get(h))
+                    .flatten()
+                    .map(|c| (unpack(c), 255))
+            }
+            HdSource::Gpu(img) => {
+                let (rgb, a) = img.pixel(sx, sy);
+                (a > 0).then_some((rgb, a))
+            }
+        }
+    };
+    let put = |out: &mut [u8], o: usize, base: Option<[u8; 3]>, px: ([u8; 3], u8)| {
+        let c = match (px.1, base) {
+            (255, _) => px.0,
+            (a, Some(b)) => blend(b, px.0, a),
+            (a, None) => blend([out[o], out[o + 1], out[o + 2]], px.0, a),
+        };
+        out[o..o + 3].copy_from_slice(&c);
+    };
     let mut masked = 0usize;
     for (i, &index) in raster_1x.iter().enumerate() {
         if index == NONE || i >= vw * vh {
             continue;
         }
         let (x, y) = ((i % vw) as i32 + m.offset.0, (i / vw) as i32 + m.offset.1);
-        let (Some(rgb), Some(want)) = (frame.rgb(x, y), m.scored.mapping.get(index)) else {
+        let (Some(rgb), Some(want)) = (frame.rgb(x, y), mapping.get(index)) else {
             continue;
         };
         if rgb != want {
@@ -336,22 +432,17 @@ pub fn composite(
                     && raster_1x[ny as usize * vw + nx as usize] == NONE)
                     .then(|| frame.rgb(nx + m.offset.0, ny + m.offset.1))
                     .flatten()
-            });
+            })
+            .map(unpack);
         let (hx, hy) = ((i % vw) * n, (i / vw) * n);
         for dy in 0..n {
             for dx in 0..n {
-                let h = hd[(hy + dy) * hd_w + hx + dx];
-                let c = match (h != NONE).then(|| m.scored.mapping.get(h)).flatten() {
-                    Some(c) => c,
-                    None => match behind {
-                        Some(b) => b,
-                        None => continue, // nothing drawn here at n x: the native colour
-                    },
-                };
                 let o = ((y as usize * n + dy) * out_w + x as usize * n + dx) * 4;
-                out[o] = (c >> 16) as u8;
-                out[o + 1] = (c >> 8) as u8;
-                out[o + 2] = c as u8;
+                match (hd_px(hx + dx, hy + dy), behind) {
+                    (Some(px), base) => put(&mut out, o, base, px),
+                    (None, Some(b)) => out[o..o + 3].copy_from_slice(&b),
+                    (None, None) => {} // nothing drawn here at n x: the native colour
+                }
             }
         }
     }
@@ -370,7 +461,7 @@ pub fn composite(
             idx != NONE
                 && frame
                     .rgb(xi + m.offset.0, yi + m.offset.1)
-                    .is_some_and(|rgb| m.scored.mapping.get(idx) == Some(rgb))
+                    .is_some_and(|rgb| mapping.get(idx) == Some(rgb))
         };
         let plain_neighbour = |xi: i32, yi: i32, rgb: u32| -> bool {
             [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
@@ -402,19 +493,16 @@ pub fn composite(
             let (hx, hy) = ((i % vw) * n, (i / vw) * n);
             for dy in 0..n {
                 for dx in 0..n {
-                    let h = hd[(hy + dy) * hd_w + hx + dx];
-                    let Some(c) = (h != NONE).then(|| m.scored.mapping.get(h)).flatten() else {
+                    let Some(px) = hd_px(hx + dx, hy + dy) else {
                         continue;
                     };
                     let o = ((y as usize * n + dy) * out_w + x as usize * n + dx) * 4;
-                    out[o] = (c >> 16) as u8;
-                    out[o + 1] = (c >> 8) as u8;
-                    out[o + 2] = c as u8;
+                    put(&mut out, o, None, px);
                 }
             }
         }
     }
-    (out, masked)
+    (out, masked, used_gpu)
 }
 
 /// The stateful side: the last jobs with their cached 1x rasters, and the
@@ -474,6 +562,12 @@ impl SuperFxHd {
     /// there is no job or no candidate clears the threshold. The stats are
     /// available from [`Self::last_stats`] either way.
     pub fn compose(&mut self, frame: &Frame, n: u32) -> Option<Vec<u8>> {
+        self.compose_with(frame, n, None)
+    }
+
+    /// [`Self::compose`] drawing the job on the GPU when `gpu` is given and
+    /// `n >= 2` (falling back to the CPU fill if the GPU draw fails).
+    pub fn compose_with(&mut self, frame: &Frame, n: u32, gpu: Option<GpuPath>) -> Option<Vec<u8>> {
         let Some((newest, _)) = self.jobs.front() else {
             self.last = HdStats::default();
             return None;
@@ -511,6 +605,8 @@ impl SuperFxHd {
             viewport_pixels,
             indexed: m.scored.indexed,
             accepted: ok,
+            gpu: false,
+            samples: 0,
         };
         if !ok {
             self.hint = None;
@@ -518,8 +614,12 @@ impl SuperFxHd {
         }
         self.hint = Some(m.offset);
         let (job, raster) = &self.jobs[m.job_age];
-        let (out, masked) = composite(frame, &m, job, raster, n);
+        let (out, masked, used_gpu) = composite_with(frame, &m, job, raster, n, gpu);
         self.last.masked = masked;
+        self.last.gpu = used_gpu;
+        self.last.samples = gpu
+            .filter(|_| used_gpu)
+            .map_or(0, |g| g.renderer.effective_samples(g.msaa));
         Some(out)
     }
 }
@@ -699,6 +799,57 @@ mod tests {
         let (sx, sy) = (12 + 3, 6 + 3);
         let p = ((sy * 3 + 1) * 192 + sx * 3 + 1) * 4;
         assert_eq!(&out[p..p + 3], &colour_of(3));
+    }
+
+    #[test]
+    fn at_3x_on_the_gpu_edges_are_antialiased_and_the_interior_is_the_mapped_colour() {
+        let Ok(ctx) = GpuContext::request_headless() else {
+            println!("SKIP: no wgpu adapter");
+            return;
+        };
+        let renderer = SuperFxGpu::new(&ctx);
+        let path = GpuPath {
+            renderer: &renderer,
+            ctx: &ctx,
+            msaa: 4,
+        };
+        let job = scene();
+        let raster = rasterise_job_1x(&job, VP);
+        let rgba = frame_with(&raster, (12, 6));
+        let mut cpu = SuperFxHd::default();
+        cpu.push_job(Arc::new(job.clone()));
+        let cpu_out = cpu.compose(&frame(&rgba), 3).expect("accepted");
+        assert!(!cpu.last_stats().gpu);
+        let mut hd = SuperFxHd::default();
+        hd.push_job(Arc::new(job));
+        let out = hd
+            .compose_with(&frame(&rgba), 3, Some(path))
+            .expect("accepted");
+        let s = hd.last_stats();
+        assert!(s.gpu && s.samples >= 1 && s.accepted, "{s:?}");
+        assert_eq!(out.len(), cpu_out.len());
+        // Interior of the big polygon: the mapped colour, as on the CPU.
+        let (sx, sy) = (12 + 3, 6 + 3);
+        let p = ((sy * 3 + 1) * 192 + sx * 3 + 1) * 4;
+        assert_eq!(&out[p..p + 3], &colour_of(3));
+        // The slanted triangle's edge yields in-between colours (blends of
+        // two palette colours / the background) that the CPU fill never has.
+        let palette: Vec<[u8; 3]> = (0..16).map(colour_of).collect();
+        let is_known = |px: &[u8]| {
+            palette.iter().any(|c| c == &px[..3]) || px[..3] == rgba[..3] || px[1] == 250
+        };
+        let blended = out.chunks_exact(4).filter(|px| !is_known(px)).count();
+        let cpu_blended = cpu_out.chunks_exact(4).filter(|px| !is_known(px)).count();
+        assert_eq!(cpu_blended, 0, "the CPU fill has no blended pixels");
+        assert!(blended > 20, "blended edge pixels: {blended}");
+        // A scale the GPU is not asked for falls back to the CPU fill.
+        let mut hd1 = SuperFxHd::default();
+        hd1.push_job(Arc::new(scene()));
+        let one = hd1
+            .compose_with(&frame(&rgba), 1, Some(path))
+            .expect("accepted");
+        assert_eq!(one, rgba, "1x is the CPU path and stays identical");
+        assert!(!hd1.last_stats().gpu);
     }
 
     #[test]

@@ -724,6 +724,9 @@ pub struct RetroForgeApp {
     superfx_hd_sent: Option<bool>,
     superfx_hd: rf_renderer::superfx_hd::SuperFxHd,
     superfx_hd_readout: Option<String>,
+    /// Ticket W31-05: the GPU polygon pass, built on first use from
+    /// [`Self::gpu`].
+    superfx_gpu: Option<rf_renderer::superfx_gpu::SuperFxGpu>,
     latest_gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     /// Ticket W30-09: the S-DSP interpolation last sent to the core.
     interpolation_sent: Option<rf_snes::apu::dsp::Interpolation>,
@@ -1618,6 +1621,7 @@ impl RetroForgeApp {
             superfx_hd_sent: None,
             superfx_hd: rf_renderer::superfx_hd::SuperFxHd::default(),
             superfx_hd_readout: None,
+            superfx_gpu: None,
             latest_gsu_poly_job: None,
             interpolation_sent: None,
             superfx_cart: false,
@@ -8307,14 +8311,11 @@ impl RetroForgeApp {
                     actions.settings_changed = true;
                 }
                 // Ticket W31-03: the Super FX HD scale.
-                if row.id == "superfx_hd" && row.enabled {
-                    let settings = &mut self.current_game_settings;
-                    if ui
-                        .add(egui::Slider::new(&mut settings.superfx_hd_scale, 2..=4).suffix("x"))
-                        .changed()
-                    {
-                        actions.settings_changed = true;
-                    }
+                if row.id == "superfx_hd"
+                    && row.enabled
+                    && crate::enhance_dock::superfx_hd_controls(ui, &mut self.current_game_settings)
+                {
+                    actions.settings_changed = true;
                 }
                 // Ticket W30-02: the HD Mode 7 options.
                 if row.id == "hd_mode7" && row.enabled {
@@ -15114,18 +15115,43 @@ impl RetroForgeApp {
         if let Some(job) = &msg.gsu_poly_job {
             self.superfx_hd.push_job(job.clone());
         }
-        let n = u32::from(self.current_game_settings.superfx_hd_scale.clamp(2, 4));
+        let n = u32::from(self.current_game_settings.superfx_hd_scale.clamp(
+            crate::game_settings::SUPERFX_HD_SCALE_MIN,
+            crate::game_settings::SUPERFX_HD_SCALE_MAX,
+        ));
         let frame = rf_renderer::superfx_hd::Frame {
             rgba: crate::play_view::crop_rows(&msg.rgba, msg.width, rows),
             width: msg.width,
             height: rows,
         };
-        let out = self.superfx_hd.compose(&frame, n);
+        // Ticket W31-05: draw on the GPU (antialiased triangles) when there
+        // is one; the CPU fill is the fallback inside `compose_with`.
+        if self.superfx_gpu.is_none() {
+            self.superfx_gpu = self
+                .gpu
+                .as_ref()
+                .map(rf_renderer::superfx_gpu::SuperFxGpu::new);
+        }
+        let msaa = u32::from(self.current_game_settings.superfx_hd_msaa);
+        let path = match (&self.superfx_gpu, &self.gpu) {
+            (Some(renderer), Some(ctx)) => Some(rf_renderer::superfx_hd::GpuPath {
+                renderer,
+                ctx,
+                msaa,
+            }),
+            _ => None,
+        };
+        let out = self.superfx_hd.compose_with(&frame, n, path);
         let s = self.superfx_hd.last_stats();
+        let drawn_by = match (s.gpu, s.samples) {
+            (true, 1) => "GPU, no smoothing".to_string(),
+            (true, k) => format!("GPU, {k}x smoothing"),
+            (false, _) => "CPU".to_string(),
+        };
         self.superfx_hd_readout =
             self.superfx_hd.has_jobs().then(|| {
                 format!(
-                "3D layer: {} (score {:.3}, offset {},{}, job age {}, {:.0}% of the view redrawn)",
+                "3D layer: {} ({drawn_by}; score {:.3}, offset {},{}, job age {}, {:.0}% of the view redrawn)",
                 if s.accepted { "HD" } else { "not found, native" },
                 s.score,
                 s.offset.0,

@@ -298,8 +298,11 @@ pub struct GameSettings {
     /// (presentation only; the simulation is untouched). Off by default
     /// (law 6).
     pub superfx_hd: bool,
-    /// Ticket W31-03: output pixels per native pixel, 2..=4; clamped on load.
+    /// Ticket W31-03: output pixels per native pixel, 2..=8; clamped on load.
     pub superfx_hd_scale: u8,
+    /// Ticket W31-05: GPU multisample antialiasing for the Super FX 3D, `1`
+    /// (off), `4` or `8` (lowered at draw time to what the GPU supports).
+    pub superfx_hd_msaa: u8,
     /// Ticket W30-04: the HD-2D lens and lighting effects (presentation
     /// only, applied to the finished picture). Each is off by default
     /// (law 6) and has a strength stored as an integer percent `0..=100`
@@ -387,10 +390,24 @@ pub const NES_EXTRA_LINES_MAX: u16 = 240;
 /// What switching "Less slowdown" on starts at, before the slider moves it.
 pub const NES_EXTRA_LINES_ON: u16 = 60;
 
+/// Ticket W31-05: the nearest offered multisample count (`1`, `4` or `8`).
+#[must_use]
+pub fn normalise_msaa(samples: u8) -> u8 {
+    match samples {
+        0..=1 => 1,
+        2..=5 => 4,
+        _ => 8,
+    }
+}
+
 /// Ticket W30-02: bounds and default of the stored HD Mode 7 scale.
 const HD_MODE7_SCALE_MIN: u8 = 2;
 const HD_MODE7_SCALE_MAX: u8 = 4;
 const SUPERFX_HD_SCALE_DEFAULT: u8 = 3;
+/// Ticket W31-05: the Super FX HD scale reaches 8x on the GPU path.
+pub const SUPERFX_HD_SCALE_MIN: u8 = 2;
+pub const SUPERFX_HD_SCALE_MAX: u8 = 8;
+pub const SUPERFX_HD_MSAA_DEFAULT: u8 = 4;
 const HD_MODE7_SCALE_DEFAULT: u8 = 2;
 
 /// Ticket W30-04: every lens strength defaults to half; the time of day to
@@ -439,6 +456,7 @@ impl Default for GameSettings {
             hd_mode7_perspective: true,
             superfx_hd: false,
             superfx_hd_scale: SUPERFX_HD_SCALE_DEFAULT,
+            superfx_hd_msaa: SUPERFX_HD_MSAA_DEFAULT,
             lens_bloom: false,
             lens_bloom_pct: LENS_PCT_DEFAULT,
             lens_tiltshift: false,
@@ -609,6 +627,13 @@ impl GameSettings {
             fields.insert(
                 "superfx_hd_scale".to_string(),
                 self.superfx_hd_scale.to_string(),
+            );
+        }
+        // Ticket W31-05: edge smoothing only when it is not the default (4x).
+        if self.superfx_hd_msaa != SUPERFX_HD_MSAA_DEFAULT {
+            fields.insert(
+                "superfx_hd_msaa".to_string(),
+                self.superfx_hd_msaa.to_string(),
             );
         }
         // Ticket W30-04: same rule -- only what differs from the default.
@@ -808,7 +833,12 @@ impl GameSettings {
                 "superfx_hd_scale" => {
                     if let Ok(scale) = value.parse::<u8>() {
                         settings.superfx_hd_scale =
-                            scale.clamp(HD_MODE7_SCALE_MIN, HD_MODE7_SCALE_MAX);
+                            scale.clamp(SUPERFX_HD_SCALE_MIN, SUPERFX_HD_SCALE_MAX);
+                    }
+                }
+                "superfx_hd_msaa" => {
+                    if let Ok(samples) = value.parse::<u8>() {
+                        settings.superfx_hd_msaa = normalise_msaa(samples);
                     }
                 }
                 "lens_bloom" => settings.lens_bloom = value == "true",
@@ -1414,11 +1444,31 @@ mod mode_and_feature_persistence_tests {
                 .superfx_hd_scale,
             3
         );
-        for (raw, want) in [("9", 4), ("1", 2), ("3", 3)] {
+        for (raw, want) in [("9", 8), ("200", 8), ("1", 2), ("3", 3), ("6", 6)] {
             let t = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_hd_scale={raw}\n"))
                 .expect("parses");
             assert_eq!(t.superfx_hd_scale, want, "scale {raw}");
         }
+        // Ticket W31-05: edge smoothing round-trips; the default (4x) is
+        // never written; odd values snap to 1 / 4 / 8.
+        assert_eq!(GameSettings::default().superfx_hd_msaa, 4);
+        assert!(!on_only.contains("superfx_hd_msaa"));
+        for (raw, want) in [("1", 1), ("8", 8), ("4", 4), ("2", 4), ("0", 1), ("16", 8)] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_hd_msaa={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.superfx_hd_msaa, want, "msaa {raw}");
+        }
+        let off = GameSettings {
+            superfx_hd_msaa: 1,
+            ..GameSettings::default()
+        };
+        assert!(off.to_text().contains("superfx_hd_msaa=1"));
+        assert_eq!(
+            GameSettings::from_text(&off.to_text())
+                .expect("parses")
+                .superfx_hd_msaa,
+            1
+        );
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
         // Ticket W30-01c: the Super FX mode round-trips; governed writes no key.
