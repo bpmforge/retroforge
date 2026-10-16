@@ -177,8 +177,11 @@ pub fn front_layer_pixel(
         })
 }
 
-/// Per picture row, the colour the backdrop shows on screen: the displayed
-/// RGBA of the row's first `Backdrop` pixel, `None` for a row with none.
+/// Per picture row, the colour the backdrop shows on screen: the most
+/// common displayed colour among the row's `Backdrop` pixels, `None` for a
+/// row with none. The most common, not the first: with colour math the
+/// first backdrop pixel can sit on a cloud or hill edge of the sub-screen,
+/// which streaked the margins (W31-07 probe, 2026-10-16).
 ///
 /// Why not just palette index 0: games like Super Mario World draw their sky
 /// through colour math, so the row's backdrop ON SCREEN differs from
@@ -195,10 +198,23 @@ pub fn row_backdrops(video: &[PpuPixel], width: u16, rgba: &[u8]) -> Vec<Option<
         .chunks_exact(width)
         .enumerate()
         .map(|(y, row)| {
-            let x = row.iter().position(|p| p.layer == PixelLayer::Backdrop)?;
-            let at = (y * width + x) * 4;
-            let p = rgba.get(at..at + 3)?;
-            Some([p[0], p[1], p[2]])
+            let mut counts: std::collections::HashMap<[u8; 3], u32> =
+                std::collections::HashMap::new();
+            for (x, _) in row
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.layer == PixelLayer::Backdrop)
+            {
+                let at = (y * width + x) * 4;
+                if let Some(p) = rgba.get(at..at + 3) {
+                    *counts.entry([p[0], p[1], p[2]]).or_default() += 1;
+                }
+            }
+            // Ties break on the colour itself, so the pick is deterministic.
+            counts
+                .into_iter()
+                .max_by_key(|&(c, n)| (n, c))
+                .map(|(c, _)| c)
         })
         .collect()
 }

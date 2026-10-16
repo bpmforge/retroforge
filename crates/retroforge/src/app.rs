@@ -4059,7 +4059,7 @@ impl RetroForgeApp {
             self.awaiting_canvas_snapshot = false;
             self.ultrawide_canvas = Some(snapshot.canvas);
             self.ultrawide_canvas_scene = snapshot.scene;
-            self.ultrawide_layers = snapshot.layers;
+            self.ultrawide_layers = *snapshot.layers;
             // Ticket W30-03: a snapshot the widescreen margins asked for
             // must not pay for a GPU compose nobody will look at.
             if self.camera == CameraToggle::Ultrawide || self.show_enhance {

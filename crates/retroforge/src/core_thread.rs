@@ -485,7 +485,7 @@ pub struct SceneCanvas {
     pub scene: Option<u64>,
     /// Ticket W31-07: the same scene's per-layer canvases (empty on the NES
     /// or when nothing was stitched per layer).
-    pub layers: crate::layer_canvas::LayerCanvases,
+    pub layers: Box<crate::layer_canvas::LayerCanvases>,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -1566,7 +1566,7 @@ fn core_thread_main(
                     let snapshot = SceneCanvas {
                         canvas: canvas_accum.current_canvas().unwrap_or_default(),
                         scene: canvas_accum.current_scene_id().map(|id| id.0),
-                        layers: layer_canvases.current_canvases(),
+                        layers: Box::new(layer_canvases.current_canvases()),
                     };
                     if frame_tx.send(CoreEvent::CanvasSnapshot(snapshot)).is_err() {
                         return LoopControl::Stop; // UI thread hung up.
