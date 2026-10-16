@@ -70,6 +70,26 @@ the start of the core_thread wiring. Not done: the margin compose in
    the tour shot from forced VRAM back to the canvas (w30_screens.rs,
    `force_vram_margins_for_test`).
 
+**Update 2026-10-16 evening:** built on the branch (7fb696a, not merged;
+layer_canvas 11 tests, workspace 2850 on the agent's run). Fixed: no HUD
+pieces in the world, no black margins, sky to the edges (row backdrop =
+most common displayed backdrop colour, since SMW's sky is colour math and
+CGRAM 0 is black). **Open bug:** after the camera scrolls back left,
+canvas content ahead of the camera shows about **125 px right of its true
+place**. The VRAM probe of the same moment shows flat ground where the
+canvas shows a copy of the first slope and its coin. The offset is the
+same after 118 px and 178 px of backtrack (constant, not accumulating);
+with no backtrack the visited area behind lines up. Ruled out: frame
+width (256, pad 0), `WorldAxis` backward deltas, `blit_row`/`get`, the
+app read path (`dx = x - pad_256`, current-frame origins), layer index
+numbering (0-based both sides). Next checks: log, per frame, BG1 hofs
+next to the column where a known BG1 tile (the coin) lands in
+`bundle.video`, to see whether the registers read after a frame lag the
+video during the SMW camera's catch-up; and test run-ahead/frame drops
+(`publish_frame` drop cap) for a register/video mismatch. Repro:
+`RF_SMW_RUN_FRAMES=240 RF_SMW_BACK_FRAMES=120` widescreen shot, compare
+`target/screens-probe/widescreen-32x9-vram.png` with the `-on` frame.
+
 **Cheap extras from bsnes-hd's options** (same ticket or a small follow-on):
 backdrop fill colour (auto / colour / black), a marker for the widened area
 (lines / darken, good for the tour), sprite mode (clip at the 4:3 edge vs
