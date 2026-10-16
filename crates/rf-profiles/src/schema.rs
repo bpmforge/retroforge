@@ -63,6 +63,9 @@ pub struct Profile {
     /// `[overclock]` — caps the player's Super FX overclock for this game
     /// (ticket W30-01).
     pub overclock: Option<Overclock>,
+    /// `[superfx_polygons]` — where a Super FX game keeps its polygon stream,
+    /// for the polygon observer (ticket W31-02).
+    pub superfx_polygons: Option<SuperfxPolygons>,
     /// `[heights]` — a hand-painted per-tile height table the live-screen
     /// diorama raises its walls from (ticket W30-06).
     pub heights: Option<Heights>,
@@ -505,6 +508,31 @@ pub struct Overclock {
     pub target_tick_hz: Option<u32>,
 }
 
+/// `[superfx_polygons]` (§2, ticket W31-02): the addresses at which a Super FX
+/// game's rasteriser can be *observed* handing the GSU a polygon, found by
+/// watching the emulator run the game (no disassembly, no source). All keys
+/// are required; ranges are validated in `crate::loader`. See
+/// `docs/research/W31-01-starfox-polygon-map.md` for how each was found.
+///
+/// - `pc_bank` — GSU program bank (`0..=0xFF`) of both code ranges below.
+/// - `count_read_pc` — address of the instruction that reads the polygon's
+///   vertex count; it starts a polygon.
+/// - `count_addr` — GSU RAM address of that count.
+/// - `buffer_addr` — GSU RAM address of the clipped-corner work buffer:
+///   4-byte entries, x word then y word, only the low byte of each meaningful.
+/// - `walker_pcs` — `[start, end)` instruction addresses of the edge walker,
+///   whose reads of the buffer say how many corners the polygon has.
+/// - `viewport` — `[width, height]` of the 3D view in pixels.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SuperfxPolygons {
+    pub pc_bank: u32,
+    pub count_read_pc: u32,
+    pub count_addr: u32,
+    pub buffer_addr: u32,
+    pub walker_pcs: Vec<u32>,
+    pub viewport: Vec<u32>,
+}
+
 /// `[heights]` (§2, ticket W30-06): a per-tile height table the author
 /// paints by hand, from which the diorama is raised out of the tilemap that
 /// is ON SCREEN right now — for a game with no level decoder, which has no
@@ -878,6 +906,7 @@ mod tests {
             antiflicker: None,
             atmosphere: None,
             overclock: None,
+            superfx_polygons: None,
             heights: None,
             loading: None,
             plugins: None,

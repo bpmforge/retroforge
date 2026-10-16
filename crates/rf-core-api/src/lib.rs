@@ -19,6 +19,7 @@ mod cpu_regs;
 mod error;
 mod event;
 mod frame_bundle;
+pub mod gsu_poly;
 mod input;
 mod state_view;
 mod triple_buffer;

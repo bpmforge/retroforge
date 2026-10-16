@@ -80,6 +80,13 @@ pub enum ProfileError {
         value: u32,
         valid: &'static str,
     },
+    /// A `[superfx_polygons]` key was out of range or malformed (ticket
+    /// W31-02). `key` names it; `valid` says what it accepts.
+    SuperfxPolygonsInvalid {
+        key: &'static str,
+        value: String,
+        valid: &'static str,
+    },
     /// A `[heights]` key was out of range or malformed (ticket W30-06).
     /// `key` names it (`layer`, `tile_px`, or `tiles."0x0A4"`).
     HeightsInvalid {
@@ -140,6 +147,10 @@ impl fmt::Display for ProfileError {
             ProfileError::OverclockInvalid { key, value, valid } => write!(
                 f,
                 "`[overclock].{key}` = {value} (0x{value:X}) is invalid (valid: {valid})"
+            ),
+            ProfileError::SuperfxPolygonsInvalid { key, value, valid } => write!(
+                f,
+                "`[superfx_polygons].{key}` = {value} is invalid (valid: {valid})"
             ),
             ProfileError::HeightsInvalid { key, value, valid } => {
                 write!(f, "`[heights].{key}` = {value} is invalid (valid: {valid})")

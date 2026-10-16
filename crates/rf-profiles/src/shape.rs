@@ -215,6 +215,17 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "superfx_polygons",
+            Shape::Object(vec![
+                ("pc_bank", Shape::Leaf),
+                ("count_read_pc", Shape::Leaf),
+                ("count_addr", Shape::Leaf),
+                ("buffer_addr", Shape::Leaf),
+                ("walker_pcs", Shape::Leaf),
+                ("viewport", Shape::Leaf),
+            ]),
+        ),
+        (
             "heights",
             Shape::Object(vec![
                 ("layer", Shape::Leaf),

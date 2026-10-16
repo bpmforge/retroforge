@@ -48,6 +48,7 @@ pub mod fallback;
 pub mod fog;
 pub mod frame;
 pub mod gpu;
+pub mod gsu_poly;
 pub mod hd_layer;
 pub mod layers;
 pub mod lens;

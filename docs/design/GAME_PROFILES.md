@@ -268,6 +268,28 @@ for 180 frames while overclocked is returned to 100% for the rest of the
 session ("Turned off: the game stopped responding at higher speed"). That
 protects games that stall at a raised clock without any profile entry.
 
+### `[superfx_polygons]` (ticket W31-02)
+
+`[superfx_polygons]` (`rf_profiles::schema::SuperfxPolygons`) is optional and
+**every key is required**. It tells the Super FX polygon observer where a game's
+3D rasteriser can be seen handing the GSU a polygon. The addresses are found by
+observation only (watch GSU RAM reads and `PLOT`s in our own emulator; no
+disassembly, no leaked source; method in `docs/research/W31-01-starfox-polygon-map.md`).
+Nothing reads it in Accuracy Mode; the observer is read-only, so the machine is
+bit-identical with it on or off.
+
+| Key | Range | Meaning |
+|---|---|---|
+| `pc_bank` | `0x00..=0xFF` | GSU program bank of the two code addresses below. |
+| `count_read_pc` | `0x0000..=0xFFFF` | Address of the instruction that reads a polygon's vertex count; seeing it start a polygon. |
+| `count_addr` | `0x0000..=0xFFFF` | GSU RAM address of that count. |
+| `buffer_addr` | `0x0000..=0xFF00` | GSU RAM address of the clipped-corner work buffer: 4-byte entries (x word, y word); only the low byte of each is meaningful. |
+| `walker_pcs` | `[start, end)`, `start < end <= 0x10000` | The edge walker's code range; its reads of the buffer say how many corners the polygon has. |
+| `viewport` | `[w, h]`, each `1..=256` | The 3D view's size in pixels. |
+
+The first `PLOT` after the walker has read the buffer closes the polygon's
+corner list; its fill ends at the next count read or at `STOP`.
+
 ### `[heights]` (ticket W30-06)
 
 `[heights]` (`rf_profiles::schema::Heights`) is optional. It is the

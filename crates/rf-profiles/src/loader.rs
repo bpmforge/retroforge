@@ -171,11 +171,54 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
         }
     }
 
+    if let Some(sp) = profile.superfx_polygons.as_ref() {
+        validate_superfx_polygons(sp)?;
+    }
+
     if let Some(heights) = profile.heights.as_ref() {
         validate_heights(heights)?;
     }
 
     Ok(LoadOutcome { profile, warnings })
+}
+
+/// `[superfx_polygons]` (ticket W31-02): every error names the offending key.
+fn validate_superfx_polygons(sp: &crate::schema::SuperfxPolygons) -> Result<(), ProfileError> {
+    let bad =
+        |key, value: String, valid| ProfileError::SuperfxPolygonsInvalid { key, value, valid };
+    let scalar = |key, value: u32, max: u32, valid| {
+        if value <= max {
+            Ok(())
+        } else {
+            Err(bad(key, format!("{value} (0x{value:X})"), valid))
+        }
+    };
+    scalar("pc_bank", sp.pc_bank, 0xFF, "0x00..=0xFF")?;
+    scalar("count_read_pc", sp.count_read_pc, 0xFFFF, "0x0000..=0xFFFF")?;
+    scalar("count_addr", sp.count_addr, 0xFFFF, "0x0000..=0xFFFF")?;
+    // The observer reads up to 0x100 bytes from the buffer.
+    scalar("buffer_addr", sp.buffer_addr, 0xFF00, "0x0000..=0xFF00")?;
+    match sp.walker_pcs[..] {
+        [lo, hi] if lo < hi && hi <= 0x1_0000 => {}
+        _ => {
+            return Err(bad(
+                "walker_pcs",
+                format!("{:?}", sp.walker_pcs),
+                "[start, end) with start < end <= 0x10000",
+            ))
+        }
+    }
+    match sp.viewport[..] {
+        [w, h] if (1..=256).contains(&w) && (1..=256).contains(&h) => {}
+        _ => {
+            return Err(bad(
+                "viewport",
+                format!("{:?}", sp.viewport),
+                "[width, height], each 1..=256",
+            ))
+        }
+    }
+    Ok(())
 }
 
 /// `[heights]` (ticket W30-06): every error names the offending key.
@@ -410,6 +453,69 @@ mod tests {
             "{:?}",
             outcome.warnings
         );
+    }
+
+    const SUPERFX_POLYGONS: &str = "[superfx_polygons]\npc_bank = 0x01\ncount_read_pc = 0x8DE0\n\
+        count_addr = 0x0134\nbuffer_addr = 0x0982\nwalker_pcs = [0xA6C0, 0xA740]\n\
+        viewport = [224, 170]\n";
+
+    /// Ticket W31-02: `[superfx_polygons]` loads when valid, with hex values.
+    #[test]
+    fn superfx_polygons_load() {
+        let outcome = load_str(&format!("{VALID}\n{SUPERFX_POLYGONS}")).expect("valid");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let sp = outcome.profile.superfx_polygons.expect("section");
+        assert_eq!(
+            (sp.pc_bank, sp.count_read_pc, sp.count_addr, sp.buffer_addr),
+            (1, 0x8DE0, 0x134, 0x982)
+        );
+        assert_eq!(
+            (sp.walker_pcs, sp.viewport),
+            (vec![0xA6C0, 0xA740], vec![224, 170])
+        );
+    }
+
+    /// Ticket W31-02: every bad value is rejected by name; a missing key is
+    /// a parse error; an unknown key warns.
+    #[test]
+    fn superfx_polygons_are_validated() {
+        let with =
+            |from: &str, to: &str| format!("{VALID}\n{}", SUPERFX_POLYGONS.replace(from, to));
+        for (from, to, key) in [
+            ("pc_bank = 0x01", "pc_bank = 0x100", "pc_bank"),
+            (
+                "count_read_pc = 0x8DE0",
+                "count_read_pc = 0x10000",
+                "count_read_pc",
+            ),
+            ("count_addr = 0x0134", "count_addr = 0x10000", "count_addr"),
+            (
+                "buffer_addr = 0x0982",
+                "buffer_addr = 0xFF01",
+                "buffer_addr",
+            ),
+            ("[0xA6C0, 0xA740]", "[0xA740, 0xA6C0]", "walker_pcs"),
+            ("[0xA6C0, 0xA740]", "[0xA6C0, 0xA6C0]", "walker_pcs"),
+            ("[0xA6C0, 0xA740]", "[0xA6C0]", "walker_pcs"),
+            ("[0xA6C0, 0xA740]", "[0xA6C0, 0x10001]", "walker_pcs"),
+            ("[224, 170]", "[0, 170]", "viewport"),
+            ("[224, 170]", "[224, 257]", "viewport"),
+            ("[224, 170]", "[224, 170, 1]", "viewport"),
+        ] {
+            let err = load_str(&with(from, to)).expect_err(to);
+            assert!(
+                err.to_string()
+                    .contains(&format!("[superfx_polygons].{key}")),
+                "{to}: {err}"
+            );
+        }
+        let edge = with("[0xA6C0, 0xA740]", "[0xA6C0, 0x10000]").replace("0x0982", "0xFF00");
+        load_str(&edge).expect("the largest legal walker range and buffer");
+        let missing = with("count_addr = 0x0134\n", "");
+        assert!(load_str(&missing).is_err(), "all keys are required");
+        let unknown = format!("{VALID}\n{SUPERFX_POLYGONS}bogus = 1\n");
+        let warnings = load_str(&unknown).expect("unknown key warns").warnings;
+        assert!(warnings.iter().any(|w| w.contains("bogus")), "{warnings:?}");
     }
 
     /// Vacuity trap (b): an `[[identity]]` entry with zero hash families
