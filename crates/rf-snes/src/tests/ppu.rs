@@ -1783,3 +1783,49 @@ fn obj_palettes_0_to_3_never_take_colour_math() {
     );
     assert_eq!(sprite_op(0x30 | (4 << 1)), ColorMathOp::Add, "palette 4");
 }
+
+/// Ticket W30-03 follow-up (the widescreen colour-math bug): a widescreen
+/// line must carry its sub-screen at the same width, with the same colour
+/// math, or every widened line silently loses colour math (Super Mario
+/// World's sky gradient and hills vanished, even inside the 4:3 area). At
+/// 256 dots the width-aware path must equal the original one exactly.
+#[test]
+fn widescreen_lines_keep_colour_math_at_their_own_width() {
+    use crate::ppu::{WidenMask, WIDTH};
+    use rf_core_api::ColorMathOp;
+
+    let mut p = ppu_with_tile();
+    for i in 0..32 {
+        set_tilemap(&mut p, 0, i, 1);
+    }
+    p.write_register(0x212C, 0x01); // TM: BG1 on the main screen
+    p.write_register(0x212D, 0x02); // TS: BG2 on the sub screen
+    p.bgs[1].enabled = true;
+    p.write_register(0x2131, 0x01); // CGADSUB: math on BG1, add
+    p.write_register(0x2132, 0x3F);
+
+    let narrow = p.render_sub_scanline(0);
+    let same = p.render_sub_scanline_width(0, WIDTH, WidenMask::ALL);
+    assert_eq!(narrow.1, same.1);
+    assert_eq!(
+        narrow
+            .0
+            .iter()
+            .map(|s| (s.op, s.palette_index, s.fixed))
+            .collect::<Vec<_>>(),
+        same.0
+            .iter()
+            .map(|s| (s.op, s.palette_index, s.fixed))
+            .collect::<Vec<_>>(),
+        "at 256 dots the width-aware sub-screen is the original one"
+    );
+
+    let (wide, _) = p.render_sub_scanline_width(0, 400, WidenMask::ALL);
+    assert_eq!(wide.len(), 400, "the sub-screen is as wide as the line");
+    assert!(
+        wide[..72].iter().any(|s| s.op == ColorMathOp::Add)
+            && wide[328..].iter().any(|s| s.op == ColorMathOp::Add),
+        "colour math reaches the widened margins"
+    );
+    assert!(!p.line_hires(0), "a widescreen line is not a hires line");
+}
