@@ -80,6 +80,73 @@ pub fn rasterise_job_with(job: &PolyJob, viewport: (u16, u16), rule: RightEdge) 
     img
 }
 
+/// Rasterise `job` at `n`x (`1..=4`) into a `viewport.0 * n` by
+/// `viewport.1 * n` image of palette indices ([`NONE`] where nothing was
+/// drawn): the Super FX HD path (ticket W31-03).
+///
+/// The mapping, so the HD picture is the same picture drawn finer and not a
+/// shifted one: native pixel `(x, y)` is the block `x*n..x*n+n` by
+/// `y*n..y*n+n`. A corner `(x, y)` goes to `(x*n, y*n)`; the scanline rule
+/// is the 1x rule in that space (rows `top*n..bottom*n`, bottom excluded,
+/// each edge crossing `floor`ed), and the right edge is the 1x rule's
+/// "inclusive" pixel, which at 1x is one pixel wide and here is one
+/// **native** pixel wide (`n` HD pixels). So an axis-aligned polygon covers
+/// exactly `n * n` times its 1x pixels, and a slanted edge keeps the 1x
+/// footprint on average but follows the true slope inside it. A loose
+/// `PLOT` is an `n` by `n` block. Colour is [`plot_colour`] at the
+/// **native** pixel (`x / n`, `y / n`), so a dither pattern keeps its
+/// original scale. At `n == 1` this is byte-identical to
+/// [`rasterise_job_1x`] (a test pins it).
+#[must_use]
+pub fn rasterise_job_scaled(job: &PolyJob, viewport: (u16, u16), n: u32) -> Vec<u8> {
+    let n = n.clamp(1, 4) as i32;
+    let (w, h) = (
+        usize::from(viewport.0) * n as usize,
+        usize::from(viewport.1) * n as usize,
+    );
+    let mut img = vec![NONE; w * h];
+    let keep: u8 = if job.bpp >= 8 {
+        0xFF
+    } else {
+        (1u8 << job.bpp) - 1
+    };
+    let mut put = |x: i32, y: i32, colr: u8, por: u8| {
+        if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+            return;
+        }
+        // `x / n` of a pixel inside a `u16`-wide viewport can exceed a u8
+        // only for a viewport wider than 256, where the GSU itself wraps.
+        if let Some(c) = plot_colour(colr, por, job.bpp, (x / n) as u8, (y / n) as u8) {
+            img[y as usize * w + x as usize] = c & keep;
+        }
+    };
+    for op in &job.ops {
+        match op {
+            PolyOp::Plot { x, y, colr, por } => {
+                for dy in 0..n {
+                    for dx in 0..n {
+                        put(i32::from(*x) * n + dx, i32::from(*y) * n + dy, *colr, *por);
+                    }
+                }
+            }
+            PolyOp::Polygon { corners, colr, por } => {
+                let scaled: Vec<(i32, i32)> = corners
+                    .iter()
+                    .map(|c| (i32::from(c.0) * n, i32::from(c.1) * n))
+                    .collect();
+                for (y, left, right) in spans_i32(&scaled) {
+                    // `left..=right + n - 1` is finite and bounded by the
+                    // corner range (law 8: a range, not a hand-rolled index).
+                    for x in left..=right + n - 1 {
+                        put(x, y, *colr, *por);
+                    }
+                }
+            }
+        }
+    }
+    img
+}
+
 /// `floor(a / b)` for `b > 0`.
 fn floor_div(a: i32, b: i32) -> i32 {
     a.div_euclid(b)
@@ -90,10 +157,19 @@ fn floor_div(a: i32, b: i32) -> i32 {
 /// yb)` (top included, bottom excluded), so the polygon's lowest row is never
 /// produced and a horizontal edge produces nothing itself.
 fn spans(corners: &[(u8, u8)]) -> Vec<(i32, i32, i32)> {
+    let wide: Vec<(i32, i32)> = corners
+        .iter()
+        .map(|c| (i32::from(c.0), i32::from(c.1)))
+        .collect();
+    spans_i32(&wide)
+}
+
+/// [`spans`] on integer corners of any scale (the HD path draws at `n`x).
+fn spans_i32(corners: &[(i32, i32)]) -> Vec<(i32, i32, i32)> {
     if corners.len() < 2 {
         return Vec::new();
     }
-    let ys = corners.iter().map(|c| i32::from(c.1));
+    let ys = corners.iter().map(|c| c.1);
     let (top, bottom) = (ys.clone().min().unwrap_or(0), ys.max().unwrap_or(0));
     let mut out = Vec::new();
     for y in top..bottom {
@@ -103,12 +179,7 @@ fn spans(corners: &[(u8, u8)]) -> Vec<(i32, i32, i32)> {
             let b = corners[(i + 1) % corners.len()];
             // Orient the edge downwards so the divisor is positive.
             let (a, b) = if a.1 <= b.1 { (*a, b) } else { (b, *a) };
-            let (xa, ya, xb, yb) = (
-                i32::from(a.0),
-                i32::from(a.1),
-                i32::from(b.0),
-                i32::from(b.1),
-            );
+            let (xa, ya, xb, yb) = (a.0, a.1, b.0, b.1);
             if y < ya || y >= yb {
                 continue;
             }
@@ -199,6 +270,109 @@ mod tests {
         let img = rasterise_job_1x(&j, (16, 16));
         assert_eq!(rows(&img, 0), "55555...21212...");
         assert_eq!(img[15 * 16 + 15], 7);
+    }
+
+    /// A tiny deterministic generator (no rand dependency).
+    fn lcg(state: &mut u64) -> u32 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*state >> 33) as u32
+    }
+
+    #[test]
+    fn scaled_at_1x_is_byte_identical_to_the_reference() {
+        let mut st = 7u64;
+        for round in 0..200 {
+            let mut ops = Vec::new();
+            for _ in 0..(1 + lcg(&mut st) % 12) {
+                if lcg(&mut st).is_multiple_of(5) {
+                    ops.push(PolyOp::Plot {
+                        x: (lcg(&mut st) % 70) as u8,
+                        y: (lcg(&mut st) % 60) as u8,
+                        colr: (lcg(&mut st) % 256) as u8,
+                        por: (lcg(&mut st) % 16) as u8,
+                    });
+                } else {
+                    let corners: Vec<(u8, u8)> = (0..(2 + lcg(&mut st) % 5))
+                        .map(|_| ((lcg(&mut st) % 80) as u8, (lcg(&mut st) % 64) as u8))
+                        .collect();
+                    ops.push(poly(
+                        &corners,
+                        (lcg(&mut st) % 256) as u8,
+                        (lcg(&mut st) % 16) as u8,
+                    ));
+                }
+            }
+            let bpp = [2u8, 4, 8][round % 3];
+            let j = job(ops, bpp);
+            for vp in [(16u16, 16u16), (64, 48)] {
+                assert_eq!(
+                    rasterise_job_scaled(&j, vp, 1),
+                    rasterise_job_1x(&j, vp),
+                    "round {round} bpp {bpp} viewport {vp:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_square_covers_n_squared_times_the_pixels() {
+        let j = job(vec![poly(&[(2, 1), (6, 1), (6, 5), (2, 5)], 3, 0)], 4);
+        let count = |img: &[u8]| img.iter().filter(|&&c| c != NONE).count();
+        let base = count(&rasterise_job_1x(&j, (16, 16)));
+        assert_eq!(base, 5 * 4, "inclusive right edge, excluded bottom row");
+        for n in 2..=4u32 {
+            let img = rasterise_job_scaled(&j, (16, 16), n);
+            assert_eq!(count(&img), base * (n * n) as usize, "n = {n}");
+        }
+    }
+
+    #[test]
+    fn a_slanted_polygon_keeps_its_area_within_rounding() {
+        let j = job(vec![poly(&[(4, 0), (12, 8), (0, 8)], 1, 0)], 4);
+        let base = rasterise_job_1x(&j, (16, 16))
+            .iter()
+            .filter(|&&c| c != NONE)
+            .count() as f64;
+        let hd = rasterise_job_scaled(&j, (16, 16), 3)
+            .iter()
+            .filter(|&&c| c != NONE)
+            .count() as f64;
+        let ratio = hd / (base * 9.0);
+        assert!((0.8..1.2).contains(&ratio), "area ratio {ratio}");
+    }
+
+    #[test]
+    fn dither_keeps_the_original_pattern_scale() {
+        // 0x12 dithered: native even parity -> 2, odd -> 1. At 3x each
+        // native pixel is a 3x3 block of one colour.
+        let j = job(vec![poly(&[(0, 0), (4, 0), (4, 2), (0, 2)], 0x12, 2)], 4);
+        let img = rasterise_job_scaled(&j, (16, 16), 3);
+        let w = 48;
+        for y in 0..6usize {
+            for x in 0..15usize {
+                let want = if ((x / 3) ^ (y / 3)) & 1 == 0 { 2 } else { 1 };
+                assert_eq!(img[y * w + x], want, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_loose_plot_becomes_an_n_by_n_block() {
+        let j = job(
+            vec![PolyOp::Plot {
+                x: 2,
+                y: 3,
+                colr: 6,
+                por: 0,
+            }],
+            4,
+        );
+        let img = rasterise_job_scaled(&j, (16, 16), 4);
+        let drawn: Vec<usize> = (0..img.len()).filter(|&i| img[i] != NONE).collect();
+        assert_eq!(drawn.len(), 16);
+        assert_eq!(drawn[0], 12 * 64 + 8);
     }
 
     #[test]

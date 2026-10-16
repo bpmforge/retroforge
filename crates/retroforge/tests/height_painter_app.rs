@@ -85,16 +85,3 @@ fn the_hd2d_preset_is_gated_on_a_height_table_sets_the_look_and_restores_it() {
     assert_eq!(harness.state().game_settings_for_test(), &mine);
     assert!(!harness.state().diorama_wanted_for_test());
 }
-
-#[test]
-fn the_height_painter_needs_a_running_snes_game() {
-    let dir = std::env::temp_dir().join(format!("retroforge_painter_open_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch config dir");
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
-        .build_eframe(|cc| RetroForgeApp::new(cc));
-    harness.run();
-    harness.state_mut().open_height_painter_for_test();
-    assert!(!harness.state().height_painter_open_for_test());
-}

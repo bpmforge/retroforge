@@ -4544,3 +4544,14 @@ stories, 10 decisions).
   identical on/off. 1x reference rasteriser vs the GSU's own pixels: 99.58%
   exact palette match, IoU 0.999 (intro, 6887 polygons) and 99.59% / 0.997
   (attract play, 2021 polygons). Gate: workspace **2806 passing**.
+- **W31-03/W31-04 — Sharper Super FX 3D** (2026-10-15). Enhanced/Game-Aware
+  row "Sharper Super FX 3D" (2-4x, default 3x) for games whose profile has
+  `[superfx_polygons]` (Star Fox). The polygon stream is matched against the
+  screen (position and colours from the frame itself, used only at >= 97%
+  agreement), only 3D pixels are replaced, and silhouettes take the
+  background colour so outer edges are smooth too. Star Fox: 250/250 intro and
+  200/200 attract frames matched (mean 0.996); 1x composite byte-identical to
+  the original on 900 composites; ~1 ms per frame at 3x. Also: the height
+  painter's "needs a running game" test moved to its own binary (it raced
+  `RETROFORGE_CONFIG_DIR`). Report: docs/research/W31-04-superfx-hd-proof.md.
+  Gate: workspace **2823 passing**.

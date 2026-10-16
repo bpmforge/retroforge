@@ -99,6 +99,15 @@ pub fn long_text(id: &str) -> &'static str {
              finer step, so the floor is sharper. Perspective smoothing blends between \
              scanlines; supersampling smooths edges at some CPU cost."
         }
+        "superfx_hd" => {
+            "A Super FX game's 3D is drawn by the cartridge's own chip into a small picture \
+             made of flat-coloured shapes. This watches those shapes as they are drawn, \
+             finds where they appear on your screen, and draws the same shapes again at 2-4 \
+             times the resolution, so slanted edges are cleaner. It only changes pixels \
+             that really are that 3D picture; sprites and the status display stay exactly as \
+             the console draws them, and if it cannot be sure it shows the original. The \
+             game itself is untouched."
+        }
         "hd2d_lens" => {
             "A set of picture effects laid over the finished frame, each on its own switch \
              and strength: a glow around bright spots, a miniature-model blur above and below \
@@ -363,6 +372,28 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
                             );
                         }
                     }
+                }
+            }
+        }
+        "superfx_hd" => {
+            // One slanted edge: a coarse staircase (left), a fine one (right).
+            let half = r.width() / 2.0;
+            let side = (half - 8.0).min(r.height() - 8.0);
+            for (col, steps) in [(0, 4), (1, 12)] {
+                let left = r.left() + half * col as f32 + 4.0;
+                let top = r.center().y - side / 2.0;
+                let cell = side / steps as f32;
+                for step in 0..steps {
+                    // each row fills from the left up to the slanted edge
+                    let w = cell * (step + 1) as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(left, top + cell * step as f32),
+                            egui::vec2(w, cell),
+                        ),
+                        egui::CornerRadius::ZERO,
+                        if col == 0 { faint } else { accent },
+                    );
                 }
             }
         }

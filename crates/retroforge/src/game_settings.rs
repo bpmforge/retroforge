@@ -294,6 +294,12 @@ pub struct GameSettings {
     /// Ticket W30-02: blend the Mode 7 matrix between scanlines. On by
     /// default; only the OFF state is persisted.
     pub hd_mode7_perspective: bool,
+    /// Ticket W31-03: redraw a Super FX game's 3D polygons at a finer scale
+    /// (presentation only; the simulation is untouched). Off by default
+    /// (law 6).
+    pub superfx_hd: bool,
+    /// Ticket W31-03: output pixels per native pixel, 2..=4; clamped on load.
+    pub superfx_hd_scale: u8,
     /// Ticket W30-04: the HD-2D lens and lighting effects (presentation
     /// only, applied to the finished picture). Each is off by default
     /// (law 6) and has a strength stored as an integer percent `0..=100`
@@ -384,6 +390,7 @@ pub const NES_EXTRA_LINES_ON: u16 = 60;
 /// Ticket W30-02: bounds and default of the stored HD Mode 7 scale.
 const HD_MODE7_SCALE_MIN: u8 = 2;
 const HD_MODE7_SCALE_MAX: u8 = 4;
+const SUPERFX_HD_SCALE_DEFAULT: u8 = 3;
 const HD_MODE7_SCALE_DEFAULT: u8 = 2;
 
 /// Ticket W30-04: every lens strength defaults to half; the time of day to
@@ -430,6 +437,8 @@ impl Default for GameSettings {
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
             hd_mode7_perspective: true,
+            superfx_hd: false,
+            superfx_hd_scale: SUPERFX_HD_SCALE_DEFAULT,
             lens_bloom: false,
             lens_bloom_pct: LENS_PCT_DEFAULT,
             lens_tiltshift: false,
@@ -533,6 +542,7 @@ impl GameSettings {
             ("snes_interpolation", self.snes_interpolation),
             ("hd_mode7", self.hd_mode7),
             ("hd_mode7_supersample", self.hd_mode7_supersample),
+            ("superfx_hd", self.superfx_hd),
         ] {
             if on {
                 fields.insert(key.to_string(), "true".to_string());
@@ -593,6 +603,13 @@ impl GameSettings {
         }
         if !self.hd_mode7_perspective {
             fields.insert("hd_mode7_perspective".to_string(), "false".to_string());
+        }
+        // Ticket W31-03: the scale only when it is not the default (3).
+        if self.superfx_hd_scale != SUPERFX_HD_SCALE_DEFAULT {
+            fields.insert(
+                "superfx_hd_scale".to_string(),
+                self.superfx_hd_scale.to_string(),
+            );
         }
         // Ticket W30-04: same rule -- only what differs from the default.
         for (key, on) in [
@@ -784,6 +801,13 @@ impl GameSettings {
                 "hd_mode7_scale" => {
                     if let Ok(scale) = value.parse::<u8>() {
                         settings.hd_mode7_scale =
+                            scale.clamp(HD_MODE7_SCALE_MIN, HD_MODE7_SCALE_MAX);
+                    }
+                }
+                "superfx_hd" => settings.superfx_hd = value == "true",
+                "superfx_hd_scale" => {
+                    if let Ok(scale) = value.parse::<u8>() {
+                        settings.superfx_hd_scale =
                             scale.clamp(HD_MODE7_SCALE_MIN, HD_MODE7_SCALE_MAX);
                     }
                 }
@@ -1292,6 +1316,7 @@ mod mode_and_feature_persistence_tests {
             "nes_extra_lines",
             "run_ahead",
             "hd_mode7",
+            "superfx_hd",
             "lens_",
         ] {
             assert!(
@@ -1366,6 +1391,33 @@ mod mode_and_feature_persistence_tests {
             let t = GameSettings::from_text(&format!("{MAGIC}\nhd_mode7_scale={raw}\n"))
                 .expect("parses");
             assert_eq!(t.hd_mode7_scale, want, "scale {raw}");
+        }
+        // Ticket W31-03: Super FX HD round-trips; the default scale (3) is
+        // never written, and a bad one is clamped.
+        let hd = GameSettings {
+            superfx_hd: true,
+            superfx_hd_scale: 4,
+            ..GameSettings::default()
+        };
+        let back = GameSettings::from_text(&hd.to_text()).expect("parses");
+        assert!(back.superfx_hd);
+        assert_eq!(back.superfx_hd_scale, 4);
+        let on_only = GameSettings {
+            superfx_hd: true,
+            ..GameSettings::default()
+        }
+        .to_text();
+        assert!(on_only.contains("superfx_hd=true") && !on_only.contains("superfx_hd_scale"));
+        assert_eq!(
+            GameSettings::from_text(&on_only)
+                .expect("parses")
+                .superfx_hd_scale,
+            3
+        );
+        for (raw, want) in [("9", 4), ("1", 2), ("3", 3)] {
+            let t = GameSettings::from_text(&format!("{MAGIC}\nsuperfx_hd_scale={raw}\n"))
+                .expect("parses");
+            assert_eq!(t.superfx_hd_scale, want, "scale {raw}");
         }
         assert!(restored.superfx_overclock);
         assert_eq!(restored.superfx_overclock_pct, 400);
