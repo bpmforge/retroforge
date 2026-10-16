@@ -20,6 +20,14 @@
 //! printed. `RF_SUPERFX_HD_OUT=<dir>` writes native/3x PNG pairs every 50
 //! frames.
 //!
+//! W31-05 adds the GPU path (`rf_renderer::superfx_gpu`, wgpu -> Metal /
+//! Vulkan, 4x MSAA): the same frames composed at 3x and 4x on the GPU, with
+//! per-frame timing (GPU render + readback + composite, search included on
+//! the frames that need one), the on-screen match score unchanged and 1x still
+//! byte-identical (1x never uses the GPU). With `RF_SUPERFX_HD_OUT` it also
+//! writes the GPU 3x/4x frames and `zoom_*` crops of one edge region:
+//! native vs CPU 3x vs GPU 3x with 4x MSAA.
+//!
 //! Frame bounds: `RF_POLY_INTRO` (default `850:1100`, no input) and
 //! `RF_POLY_ATTRACT` (default `2600:2800`, no input).
 
@@ -293,7 +301,9 @@ fn observer_does_not_change_the_machine_on_star_fox() {
 // ---------------------------------------------------------------------
 
 use rf_renderer::frame::FrameBuffer;
-use rf_renderer::superfx_hd::{Frame, SuperFxHd, MIN_SCORE};
+use rf_renderer::superfx_gpu::SuperFxGpu;
+use rf_renderer::superfx_hd::{Frame, GpuPath, SuperFxHd, MIN_SCORE};
+use rf_renderer::GpuContext;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -308,6 +318,74 @@ struct HdProof {
     identity_checked: u32,
     ages: [u32; 3],
     times: Vec<Duration>,
+    /// W31-05: GPU 3x / 4x composites (render + readback + composite).
+    gpu3: Vec<Duration>,
+    gpu4: Vec<Duration>,
+    /// W31-05: the GPU draw + readback alone (no match, no composite).
+    gpu_draw3: Vec<Duration>,
+    gpu_draw4: Vec<Duration>,
+    gpu_composites: u32,
+    gpu_samples: u32,
+    /// GPU 3x composites that differ from the CPU 3x one (they should, at
+    /// the edges) and the share of pixels that differ, summed.
+    gpu_cpu_diff_share: f64,
+}
+
+/// The 64x64 native window with the most edge energy (as the w30 screenshot
+/// tour picks its zoom).
+fn zoom_origin(rgba: &[u8], w: usize, h: usize, size: usize) -> (usize, usize) {
+    let lum = |x: usize, y: usize| -> i32 {
+        let i = (y * w + x) * 4;
+        i32::from(rgba[i]) + i32::from(rgba[i + 1]) + i32::from(rgba[i + 2])
+    };
+    let mut best = (-1i64, (0usize, 0usize));
+    for y0 in (0..h.saturating_sub(size)).step_by(8) {
+        for x0 in (0..w.saturating_sub(size)).step_by(8) {
+            let mut e = 0i64;
+            for y in y0..y0 + size - 1 {
+                for x in x0..x0 + size - 1 {
+                    e += i64::from((lum(x, y) - lum(x + 1, y)).abs())
+                        + i64::from((lum(x, y) - lum(x, y + 1)).abs());
+                }
+            }
+            if e > best.0 {
+                best = (e, (x0, y0));
+            }
+        }
+    }
+    best.1
+}
+
+/// Crop `(x, y, cw, ch)` of an RGBA image and nearest-resample it to
+/// `out_w x out_h`.
+fn crop_resample(
+    rgba: &[u8],
+    w: usize,
+    crop: (usize, usize, usize, usize),
+    out: (usize, usize),
+) -> Vec<u8> {
+    let (cx, cy, cw, ch) = crop;
+    let mut o = vec![0u8; out.0 * out.1 * 4];
+    for y in 0..out.1 {
+        for x in 0..out.0 {
+            let s = ((cy + y * ch / out.1) * w + cx + x * cw / out.0) * 4;
+            o[(y * out.0 + x) * 4..][..4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    o
+}
+
+/// Three panels side by side, `gap` px apart, in white.
+fn side_by_side(panels: &[Vec<u8>], pw: usize, ph: usize, gap: usize) -> (Vec<u8>, usize) {
+    let total = panels.len() * pw + (panels.len() - 1) * gap;
+    let mut o = vec![255u8; total * ph * 4];
+    for (k, p) in panels.iter().enumerate() {
+        for y in 0..ph {
+            let d = (y * total + k * (pw + gap)) * 4;
+            o[d..d + pw * 4].copy_from_slice(&p[y * pw * 4..(y + 1) * pw * 4]);
+        }
+    }
+    (o, total)
 }
 
 fn nearest_upscale(rgba: &[u8], w: usize, h: usize, n: usize) -> Vec<u8> {
@@ -320,6 +398,17 @@ fn nearest_upscale(rgba: &[u8], w: usize, h: usize, n: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+fn last_viewport(_p: &HdProof) -> (u16, u16) {
+    star_fox_config(false).viewport
+}
+
+fn rom_stem(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+        .replace([' ', '(', ')'], "_")
 }
 
 fn run_hd_scene(name: &str, bytes: &[u8], scene: &str, from: u32, to: u32) -> HdProof {
@@ -336,14 +425,21 @@ fn run_hd_scene(name: &str, bytes: &[u8], scene: &str, from: u32, to: u32) -> Hd
     // The threshold lowered to nothing: the mask alone must keep 1x exact.
     let mut hd1_weak = SuperFxHd::default();
     hd1_weak.min_score = 0.0;
+    // W31-05: the GPU path (a clean skip of the GPU half without an adapter).
+    let gpu_ctx = GpuContext::request_headless().ok();
+    let gpu_pass = gpu_ctx.as_ref().map(SuperFxGpu::new);
+    let mut hdg3 = SuperFxHd::default();
+    let mut hdg4 = SuperFxHd::default();
     let mut proof = HdProof::default();
+    let mut last_job: Option<std::sync::Arc<PolyJob>> = None;
     for f in 0..to {
         if f == from.saturating_sub(30) {
             core.set_gsu_poly_observer(Some(star_fox_config(false)));
         }
         let _ = core.step(Step::Frame, &mut sink);
         if let Some(job) = core.take_gsu_poly_jobs().pop() {
-            for hd in [&mut hd1, &mut hd3, &mut hd1_weak] {
+            last_job = Some(job.clone());
+            for hd in [&mut hd1, &mut hd3, &mut hd1_weak, &mut hdg3, &mut hdg4] {
                 hd.push_job(job.clone());
             }
         }
@@ -384,19 +480,115 @@ fn run_hd_scene(name: &str, bytes: &[u8], scene: &str, from: u32, to: u32) -> Hd
         if three.is_some() {
             proof.times.push(t.elapsed());
         }
+        let mut gpu_frames: [Option<Vec<u8>>; 2] = [None, None];
+        if let (Some(ctx), Some(pass), Some(job)) = (&gpu_ctx, &gpu_pass, &last_job) {
+            // The draw + readback alone, with a stand-in palette.
+            for (n, sink) in [(3u32, &mut proof.gpu_draw3), (4, &mut proof.gpu_draw4)] {
+                let t = Instant::now();
+                let img = pass
+                    .render(ctx, job, job.viewport, n, 4, &|i| {
+                        Some([i * 16, i * 16, i * 16])
+                    })
+                    .expect("gpu draw");
+                sink.push(t.elapsed());
+                assert_eq!(img.w, usize::from(job.viewport.0) * n as usize);
+            }
+            let path = GpuPath {
+                renderer: pass,
+                ctx,
+                msaa: 4,
+            };
+            for (k, n) in [3u32, 4].into_iter().enumerate() {
+                let hd = if k == 0 { &mut hdg3 } else { &mut hdg4 };
+                let t = Instant::now();
+                let out = hd.compose_with(&frame, n, Some(path));
+                let dt = t.elapsed();
+                if let Some(out) = out {
+                    // Only frames that really went through the GPU count.
+                    if hd.last_stats().gpu {
+                        proof.gpu_composites += 1;
+                        proof.gpu_samples = hd.last_stats().samples;
+                        if k == 0 {
+                            proof.gpu3.push(dt);
+                        } else {
+                            proof.gpu4.push(dt);
+                        }
+                    }
+                    if k == 0 {
+                        if let Some(cpu3) = &three {
+                            let differ = cpu3
+                                .chunks_exact(4)
+                                .zip(out.chunks_exact(4))
+                                .filter(|(a, b)| a[..3] != b[..3])
+                                .count();
+                            proof.gpu_cpu_diff_share +=
+                                differ as f64 / (cpu3.len() / 4).max(1) as f64;
+                        }
+                    }
+                    gpu_frames[k] = Some(out);
+                }
+            }
+        }
+        if let (Some(dir), true, Some(cpu3), Some(g3)) = (
+            &out_dir,
+            scene == "intro" && f == 1000,
+            &three,
+            &gpu_frames[0],
+        ) {
+            // One edge region, three ways: native (nearest), CPU 3x, GPU 3x
+            // with 4x MSAA. 64x64 native pixels for context, then the
+            // central 24x24 at exactly 24x / 8x / 8x (each HD pixel 8x).
+            let rom = rom_stem(name);
+            let (zx, zy) = zoom_origin(native, w, h, 64);
+            let panel = |crop: usize, ox: usize, oy: usize, size: usize| -> Vec<Vec<u8>> {
+                vec![
+                    crop_resample(native, w, (ox, oy, crop, crop), (size, size)),
+                    crop_resample(
+                        cpu3,
+                        w * 3,
+                        (ox * 3, oy * 3, crop * 3, crop * 3),
+                        (size, size),
+                    ),
+                    crop_resample(
+                        g3,
+                        w * 3,
+                        (ox * 3, oy * 3, crop * 3, crop * 3),
+                        (size, size),
+                    ),
+                ]
+            };
+            for (label, crop, ox, oy, size) in [
+                ("64", 64usize, zx, zy, 512usize),
+                ("24", 24, zx + 20, zy + 20, 576),
+            ] {
+                let (img, total) = side_by_side(&panel(crop, ox, oy, size), size, size, 8);
+                let png = rf_renderer::png::encode_rgba(&img, total as u32, size as u32);
+                std::fs::write(
+                    dir.join(format!("{rom}_zoom{label}_native_cpu3x_gpu3x-msaa4.png")),
+                    png,
+                )
+                .expect("png");
+            }
+            println!("zoom region: native ({zx},{zy}) 64x64 at frame {f}");
+        }
         if let (Some(dir), true) = (&out_dir, f % 50 == 0) {
-            let rom = Path::new(name)
-                .file_stem()
-                .map_or(String::new(), |n| n.to_string_lossy().into_owned())
-                .replace([' ', '(', ')'], "_");
+            let rom = rom_stem(name);
             let stem = format!("{rom}_{scene}_{f}");
             let up = nearest_upscale(native, w, h, 3);
-            let pair = [("native", Some(up)), ("hd", three)];
+            let pair = [
+                ("native", Some(up)),
+                ("hd", three.clone()),
+                ("gpu3", gpu_frames[0].clone()),
+            ];
             for (label, img) in pair {
                 if let Some(img) = img {
                     let png = rf_renderer::png::encode_rgba(&img, (w * 3) as u32, (h * 3) as u32);
                     std::fs::write(dir.join(format!("{stem}_{label}.png")), png).expect("png");
                 }
+            }
+            if let Some(img) = &gpu_frames[1] {
+                let png = rf_renderer::png::encode_rgba(img, (w * 4) as u32, (h * 4) as u32);
+                std::fs::write(dir.join(format!("{stem}_gpu4.png")), png).expect("png");
             }
         }
     }
@@ -410,8 +602,13 @@ fn hd_composite_is_exact_at_1x_and_reports_on_star_fox() {
         ("intro", frame_range("RF_POLY_INTRO", (850, 1100))),
         ("attract", frame_range("RF_POLY_ATTRACT", (2600, 2800))),
     ];
+    // `RF_SUPERFX_SCENE=intro|attract` runs one scene only.
+    let only = std::env::var("RF_SUPERFX_SCENE").ok();
     for (name, bytes) in &roms {
         for (scene, (from, to)) in scenes {
+            if only.as_deref().is_some_and(|o| o != scene) {
+                continue;
+            }
             let p = run_hd_scene(name, bytes, scene, from, to);
             let mut times = p.times.clone();
             times.sort();
@@ -432,6 +629,41 @@ fn hd_composite_is_exact_at_1x_and_reports_on_star_fox() {
                 p.identity_checked,
                 ms(times.get(times.len() * 95 / 100)),
                 ms(times.last()),
+            );
+            let stat = |v: &[Duration]| {
+                let mut v = v.to_vec();
+                v.sort();
+                let mean = v.iter().map(Duration::as_secs_f64).sum::<f64>() / v.len().max(1) as f64;
+                (
+                    mean * 1e3,
+                    ms(v.get(v.len() * 95 / 100)),
+                    ms(v.last()),
+                    v.len(),
+                )
+            };
+            let (g3, g4) = (stat(&p.gpu3), stat(&p.gpu4));
+            let (d3, d4) = (stat(&p.gpu_draw3), stat(&p.gpu_draw4));
+            println!(
+                "{name} {scene} GPU draw + readback only (viewport {:?}): 3x mean {:.2} ms, p95 {:.2}; 4x mean {:.2} ms, p95 {:.2}",
+                last_viewport(&p),
+                d3.0,
+                d3.1,
+                d4.0,
+                d4.1,
+            );
+            println!(
+                "{name} {scene} GPU (MSAA {}x): 3x compose ms: mean {:.2}, p95 {:.2}, max {:.2} ({} frames); \
+                 4x: mean {:.2}, p95 {:.2}, max {:.2} ({} frames); GPU 3x differs from CPU 3x on {:.2}% of pixels (mean)",
+                p.gpu_samples,
+                g3.0,
+                g3.1,
+                g3.2,
+                g3.3,
+                g4.0,
+                g4.1,
+                g4.2,
+                g4.3,
+                100.0 * p.gpu_cpu_diff_share / f64::from(p.gpu3.len().max(1) as u32),
             );
             assert!(p.frames > 0, "{scene}: no frame had a job");
         }

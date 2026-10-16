@@ -423,6 +423,35 @@ pub fn run_ahead_picker(ui: &mut egui::Ui, frames: &mut u8) -> bool {
     changed
 }
 
+/// Ticket W31-05: the Super FX HD scale slider (2x-8x) and the edge-smoothing
+/// choice (off / 4x / 8x multisampling on the GPU path), under the toggle.
+/// `true` when either changed. Shared by the Enhance workspace and the
+/// Enhancements cards.
+pub fn superfx_hd_controls(ui: &mut egui::Ui, s: &mut crate::game_settings::GameSettings) -> bool {
+    use crate::game_settings::{SUPERFX_HD_SCALE_MAX, SUPERFX_HD_SCALE_MIN};
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .add(
+                egui::Slider::new(
+                    &mut s.superfx_hd_scale,
+                    SUPERFX_HD_SCALE_MIN..=SUPERFX_HD_SCALE_MAX,
+                )
+                .suffix("x"),
+            )
+            .changed();
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Edge smoothing");
+        for (samples, label) in [(1u8, "Off"), (4, "4x"), (8, "8x")] {
+            changed |= ui
+                .selectable_value(&mut s.superfx_hd_msaa, samples, label)
+                .changed();
+        }
+    });
+    changed
+}
+
 /// Ticket W30-09: the audio-interpolation filter choice (cubic, linear or
 /// none), under its toggle. `true` when it changed. Shared by the Enhance
 /// workspace and the Enhancements cards like [`diorama_controls`].
@@ -701,14 +730,9 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         }
         // Ticket W31-03: the Super FX HD scale, right under its toggle.
         if row.id == "superfx_hd" && row.enabled {
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Slider::new(&mut ctx.settings.superfx_hd_scale, 2..=4).suffix("x"))
-                    .changed()
-                {
-                    actions.settings_changed = true;
-                }
-            });
+            if superfx_hd_controls(ui, ctx.settings) {
+                actions.settings_changed = true;
+            }
             if let Some(line) = &ctx.superfx_hd_readout {
                 ui.weak(line);
             }

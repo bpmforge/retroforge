@@ -80,7 +80,7 @@ pub fn rasterise_job_with(job: &PolyJob, viewport: (u16, u16), rule: RightEdge) 
     img
 }
 
-/// Rasterise `job` at `n`x (`1..=4`) into a `viewport.0 * n` by
+/// Rasterise `job` at `n`x (`1..=8`) into a `viewport.0 * n` by
 /// `viewport.1 * n` image of palette indices ([`NONE`] where nothing was
 /// drawn): the Super FX HD path (ticket W31-03).
 ///
@@ -99,7 +99,7 @@ pub fn rasterise_job_with(job: &PolyJob, viewport: (u16, u16), rule: RightEdge) 
 /// [`rasterise_job_1x`] (a test pins it).
 #[must_use]
 pub fn rasterise_job_scaled(job: &PolyJob, viewport: (u16, u16), n: u32) -> Vec<u8> {
-    let n = n.clamp(1, 4) as i32;
+    let n = n.clamp(1, 8) as i32;
     let (w, h) = (
         usize::from(viewport.0) * n as usize,
         usize::from(viewport.1) * n as usize,

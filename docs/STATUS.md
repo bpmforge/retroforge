@@ -4555,6 +4555,15 @@ stories, 10 decisions).
   painter's "needs a running game" test moved to its own binary (it raced
   `RETROFORGE_CONFIG_DIR`). Report: docs/research/W31-04-superfx-hd-proof.md.
   Gate: workspace **2823 passing**.
+- **W31-05 — Sharper Super FX 3D on the GPU** (2026-10-16). At 2-8x the
+  captured polygon stream is redrawn as wgpu triangles (one WGSL shader:
+  Metal on macOS, Vulkan/DX12 elsewhere) with MSAA "Edge smoothing" Off/4x/8x
+  (default 4x; 8x falls back to 4x where the adapter lacks it, e.g. Metal
+  here), blended by coverage over the background. 1x stays the CPU path and
+  byte-identical; no GPU -> CPU fallback. Sawtooth edge gone; loose 1-px
+  plotted lines stay stepped; corners remain on the game's whole-pixel grid
+  (sub-pixel needs W31-06). Zoom: docs/screens/w30-w31/superfx-gpu-3x-msaa4-zoom.png.
+  Release timing not yet measured (machine loaded). Gate: workspace **2836 passing**.
 - **Fix: widescreen lines keep colour math** (2026-10-16). The SNES core
   sent the colour-math sub-screen only for 256-dot lines, so every widened
   line lost colour math (Super Mario World's sky and hills vanished, centre
