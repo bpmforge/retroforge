@@ -112,6 +112,11 @@ pub struct SnesCore {
     /// (presentation only; the machine stays exact), held here and pushed
     /// down every step for the same reason as the overclocks.
     interpolation: crate::apu::dsp::Interpolation,
+    /// Ticket W31-02: the Super FX polygon-stream observer's config, held
+    /// here (not only on the GSU) for the same reason as the overclocks: a
+    /// cartridge load or state restore can rebuild the system, and `step`
+    /// reinstalls it. Read-only observation; never part of a save state.
+    gsu_poly: Option<crate::gsu_observer::GsuPolyConfig>,
     /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
     /// stream every core hands `CoreSink::audio`.
     audio: AudioConverter,
@@ -207,6 +212,7 @@ impl SnesCore {
             sa1_overclock_percent: SA1_OVERCLOCK_DEFAULT,
             cpu_overclock_percent: CPU_OVERCLOCK_DEFAULT,
             interpolation: crate::apu::dsp::Interpolation::default(),
+            gsu_poly: None,
             audio: AudioConverter::default(),
         })
     }
@@ -258,6 +264,37 @@ impl SnesCore {
         self.gsu_overclock_percent =
             (percent / 100 * 100).clamp(GSU_OVERCLOCK_DEFAULT, GSU_OVERCLOCK_MAX);
         self.gsu_overclock_percent
+    }
+
+    /// Ticket W31-02: watch the Super FX's polygon stream (`None` = stop).
+    /// Pure observation: the machine's state is identical with it on or off,
+    /// and a cartridge without a Super FX ignores it. Not saved.
+    pub fn set_gsu_poly_observer(&mut self, cfg: Option<crate::gsu_observer::GsuPolyConfig>) {
+        self.gsu_poly = cfg;
+        if let Some(gsu) = self.system.bus.gsu.as_mut() {
+            gsu.set_poly_observer(cfg);
+        }
+    }
+
+    /// Ticket W31-02: render jobs the observer has completed since it was
+    /// installed (a counter, so a caller can tell when there is a new one).
+    #[must_use]
+    pub fn gsu_poly_jobs_completed(&self) -> u64 {
+        self.system
+            .bus
+            .gsu
+            .as_ref()
+            .map_or(0, crate::gsu::GsuState::poly_jobs_completed)
+    }
+
+    /// Ticket W31-02: remove and return the last (up to 3) completed render
+    /// jobs, oldest first.
+    pub fn take_gsu_poly_jobs(&mut self) -> Vec<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
+        self.system
+            .bus
+            .gsu
+            .as_mut()
+            .map_or_else(Vec::new, crate::gsu::GsuState::take_poly_jobs)
     }
 
     /// The Super FX overclock in force, in percent (100 is off).
@@ -546,6 +583,11 @@ impl EmulatorCore for SnesCore {
         if self.config.watches != self.pushed_watches {
             self.system.bus.set_watches(self.config.watches);
             self.pushed_watches = self.config.watches;
+        }
+        if let Some(gsu) = self.system.bus.gsu.as_mut() {
+            if gsu.poly_observer_config() != self.gsu_poly {
+                gsu.set_poly_observer(self.gsu_poly);
+            }
         }
         self.system.gsu_clock_multiplier = u64::from(self.gsu_overclock_percent / 100);
         self.system.sa1_clock_multiplier = u64::from(self.sa1_overclock_percent / 100);

@@ -4538,3 +4538,9 @@ stories, 10 decisions).
   (widescreen_aspects failed after 600 s; now passes in 10 s). Persistence
   is throttled to once per 5 s. Also: hud_fits waited 600 UI steps with no
   sleep and failed 2 of 3 runs under load; now waits up to 30 s.
+- **W31-02 — Super FX polygon-stream observer** (2026-10-15). Profile
+  `[superfx_polygons]` (Star Fox filled in); rf-snes records each GSU render
+  job as an ordered polygon/plot stream, zero cost when off, machine state
+  identical on/off. 1x reference rasteriser vs the GSU's own pixels: 99.58%
+  exact palette match, IoU 0.999 (intro, 6887 polygons) and 99.59% / 0.997
+  (attract play, 2021 polygons). Gate: workspace **2806 passing**.

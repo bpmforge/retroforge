@@ -42,3 +42,17 @@ tick_counter = 0x7E15BD
 # 30 and never past it. A learned target picked 30 or 60 depending on what
 # was on screen, which is why it is pinned here.
 target_tick_hz = 30
+
+# W31-02: where Star Fox's 3D rasteriser can be observed handing the GSU a
+# polygon -- found 2026-10-15 by watching our own emulator run the user's dump
+# (GSU RAM reads/writes with the instruction address that made them, and every
+# PLOT); no disassembly, no source. See docs/research/W31-01-starfox-polygon-map.md.
+# Used only by the polygon observer behind the (opt-in) Star Fox re-rasteriser;
+# Accuracy Mode never reads it.
+[superfx_polygons]
+pc_bank = 0x01                  # the code below runs in GSU program bank 01
+count_read_pc = 0x8DE0          # reads the polygon's vertex count: starts a polygon
+count_addr = 0x0134             # GSU RAM: the vertex count
+buffer_addr = 0x0982            # GSU RAM: clipped corners, 4-byte entries (x word, y word); only the low bytes are meaningful
+walker_pcs = [0xA6C0, 0xA740]   # the edge walker's corner reads, [start, end)
+viewport = [224, 170]           # the 3D view, in pixels

@@ -713,6 +713,11 @@ pub struct RetroForgeApp {
     /// Ticket W30-02: the HD Mode 7 options last sent to the core
     /// (outer `None` = nothing sent yet for this core).
     hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
+    /// Ticket W31-02: the matched profile's `[superfx_polygons]` as the
+    /// observer's config (`None` = no such profile row), and the most recent
+    /// completed render job the core thread sent.
+    superfx_polygons: Option<rf_snes::gsu_observer::GsuPolyConfig>,
+    latest_gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     /// Ticket W30-09: the S-DSP interpolation last sent to the core.
     interpolation_sent: Option<rf_snes::apu::dsp::Interpolation>,
     superfx_cart: bool,
@@ -1602,6 +1607,8 @@ impl RetroForgeApp {
             gsu_clock_sent: None,
             run_ahead_sent: None,
             hd_mode7_sent: None,
+            superfx_polygons: None,
+            latest_gsu_poly_job: None,
             interpolation_sent: None,
             superfx_cart: false,
             superfx_cap: None,
@@ -4237,6 +4244,9 @@ impl RetroForgeApp {
             // flicker the feature row unavailable).
             if msg.mode7.is_some() || msg.mode7_shown {
                 self.mode7_seen = true;
+            }
+            if msg.gsu_poly_job.is_some() {
+                self.latest_gsu_poly_job = msg.gsu_poly_job.clone();
             }
             // Ticket W16-13 acceptance 1: refresh the Diorama compositor's
             // output for THIS frame — placed BEFORE the bg/sprite-layer
@@ -10521,6 +10531,12 @@ impl RetroForgeApp {
             .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
             .and_then(|(p, _)| p.heights.as_ref())
             .map(crate::live_heights::HeightTable::from_profile);
+        // Ticket W31-02: where the matched profile says a Super FX game's
+        // polygons can be observed (sent to the core only on request).
+        self.superfx_polygons = matched
+            .as_ref()
+            .and_then(|(p, _)| p.superfx_polygons.as_ref())
+            .and_then(crate::gsu_poly::observer_config);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -12713,6 +12729,7 @@ impl RetroForgeApp {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
+            gsu_poly_job: None,
             rgba,
             line_palettes: Vec::new(),
             width,
@@ -14977,6 +14994,27 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::SetHdMode7(want));
             self.hd_mode7_sent = Some(want);
         }
+    }
+
+    /// Ticket W31-02 test hook: turn the Super FX polygon observer on (from
+    /// the matched profile's `[superfx_polygons]`; nothing happens if it has
+    /// none) or off. The step-2 feature that needs the stream will call the
+    /// same thing from its effective-row state.
+    #[doc(hidden)]
+    pub fn set_gsu_poly_observer_for_test(&mut self, on: bool) {
+        let cfg = if on { self.superfx_polygons } else { None };
+        self.send_command(CoreCommand::SetGsuPolyObserver(cfg));
+        if !on {
+            self.latest_gsu_poly_job = None;
+        }
+    }
+
+    /// Ticket W31-02: the latest completed Super FX render job (test/step-2
+    /// reader).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn latest_gsu_poly_job(&self) -> Option<&std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
+        self.latest_gsu_poly_job.as_ref()
     }
 
     /// Turn the sprite-limit bypass on or off exactly as its Features row

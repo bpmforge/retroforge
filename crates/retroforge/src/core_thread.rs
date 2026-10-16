@@ -313,6 +313,10 @@ pub struct FrameMsg {
     /// session ([`EmuStepper::mode7_shown`]; sticky). Unlike `mode7`, it
     /// needs no event subscription, so it can unlock the Mode 7 rows.
     pub mode7_shown: bool,
+    /// Ticket W31-02: the latest Super FX render job the polygon observer
+    /// completed since the previous frame message, or `None` when none did
+    /// (or the observer is off). Shared, not copied.
+    pub gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
@@ -607,6 +611,10 @@ pub enum CoreCommand {
     /// Ticket W30-08: NES extra CPU-only vblank lines (0 = off). A no-op on
     /// the SNES.
     SetNesExtraLines(u16),
+    /// Ticket W31-02: watch the Super FX polygon stream (`None` = stop).
+    /// Read-only observation, so safe in any mode; the shell sends `Some`
+    /// only while a feature that needs the polygon stream is effective.
+    SetGsuPolyObserver(Option<rf_snes::gsu_observer::GsuPolyConfig>),
     /// Ticket W30-02: HD Mode 7 options (`None` = off). Presentation only:
     /// the core's state is never touched, so unlike `SetClockPolicy` this
     /// is safe in any mode; the shell sends `Some` only while the
@@ -1379,6 +1387,9 @@ fn core_thread_main(
                 CoreCommand::SetNesExtraLines(lines) => {
                     stepper.set_nes_extra_lines(lines);
                 }
+                CoreCommand::SetGsuPolyObserver(cfg) => {
+                    stepper.set_gsu_poly_observer(cfg);
+                }
                 CoreCommand::SetHdMode7(options) => {
                     stepper.set_hd_mode7(options);
                     sink.set_mode7_mask_capture(options.is_some());
@@ -1981,6 +1992,7 @@ fn core_thread_main(
                 }),
                 hd_mode7: hd_mode7_frame,
                 mode7_shown: stepper.mode7_shown(),
+                gsu_poly_job: stepper.take_gsu_poly_job(),
                 rgba: display,
                 line_palettes: sink.line_palettes().to_vec(),
                 width: sink.width(),
@@ -2211,6 +2223,7 @@ mod tests {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
+            gsu_poly_job: None,
             rgba: Vec::new(),
             line_palettes: Vec::new(),
             width: 0,

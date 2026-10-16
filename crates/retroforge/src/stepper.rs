@@ -1153,6 +1153,26 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W31-02: watch the Super FX polygon stream (`None` = stop).
+    /// Read-only observation; a no-op on the NES and on a cartridge without
+    /// a Super FX.
+    pub fn set_gsu_poly_observer(&mut self, cfg: Option<rf_snes::gsu_observer::GsuPolyConfig>) {
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_gsu_poly_observer(cfg);
+        }
+    }
+
+    /// Ticket W31-02: the most recent render job the observer completed
+    /// since the last call, if any (older ones in the ring are dropped).
+    pub fn take_gsu_poly_job(&mut self) -> Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
+        match &mut self.machine {
+            Machine::Snes(core) if core.gsu_poly_jobs_completed() > 0 => {
+                core.take_gsu_poly_jobs().pop()
+            }
+            _ => None,
+        }
+    }
+
     /// Ticket W30-08: set the SNES main CPU (65816) clock in percent (100 =
     /// stock). A no-op on the NES.
     pub fn set_cpu_overclock(&mut self, percent: u16) {

@@ -1120,6 +1120,9 @@ pub struct GsuState {
     /// `step_one` call, the same reasoning [`Gsu::last_cost`] itself
     /// already documents for values that only matter mid-instruction.
     fetch_extra_cost: u32,
+    /// Ticket W31-02: the polygon-stream observer, `None` unless a profile
+    /// asked for it. Read-only (law 4) and not part of save state.
+    pub(crate) poly: Option<Box<crate::gsu_observer::GsuPolyObserver>>,
 }
 
 impl GsuState {
@@ -1133,6 +1136,7 @@ impl GsuState {
             ram_len,
             credit: 0,
             fetch_extra_cost: 0,
+            poly: None,
         }
     }
 
@@ -1215,6 +1219,9 @@ impl GsuState {
     fn step_one(&mut self, rom: &[u8]) -> u32 {
         let had_pending = self.regs.pending_jump.take();
         self.fetch_extra_cost = 0;
+        if let Some(obs) = self.poly.as_deref_mut() {
+            obs.set_pc(self.regs.pbr, self.regs.regs[15]);
+        }
         let opcode = self.fetch_byte(rom);
         self.regs.last_opcode = opcode;
         // Ticket W30-00: the jump takes effect right after the delay-slot
@@ -1650,40 +1657,18 @@ impl GsuState {
             };
         }
 
+        // The colour rule lives in `rf_core_api::gsu_poly::plot_colour` (POR
+        // bits 0/1/3: transparency, dither, freeze-high) so the Star Fox
+        // re-rasteriser shares it exactly.
         let por = self.regs.por;
-        let scmr = self.regs.scmr;
-        let bpp = Self::bpp_for_scmr(scmr);
-        let plot_transparent = por & 0x01 != 0; // 1 = also plot color 0
-        let dither = por & 0x02 != 0;
-        let freeze_high = por & 0x08 != 0;
-
-        // Dither (POR bit1, 4/16-color mode only): fullsnes "if
-        // (r1.bit0 XOR r2.bit0)=1 then COLOR/10h is used as drawing
-        // color" — "COLOR/10h" is COLR divided by 0x10, i.e. its high
-        // nibble.
-        let mut colour = self.regs.colr;
-        if dither && bpp != 8 && (x ^ y) & 1 != 0 {
-            colour >>= 4;
-        }
-
-        // Transparency (POR bit0=0 skips color 0): the check width is
-        // normally `bpp` bits, but Freeze-High narrows a 256-color check
-        // to the low 4 bits (fullsnes: "if POR.Bit3 (Freeze-High) is set,
-        // then it checks only the lower 2/4 bits, and ignores upper 4bit
-        // even when in 256-color mode").
-        let check_bits = if freeze_high { bpp.min(4) } else { bpp };
-        let check_mask: u8 = if check_bits >= 8 {
-            0xFF
-        } else {
-            (1u8 << check_bits) - 1
-        };
-        let skip = !plot_transparent && colour & check_mask == 0;
-
-        if !skip {
+        let bpp = Self::bpp_for_scmr(self.regs.scmr);
+        let colour = rf_core_api::gsu_poly::plot_colour(self.regs.colr, por, bpp, x, y);
+        if let Some(colour) = colour {
             let xi = usize::from(x & 7);
             self.regs.primary_cache.colors[xi] = colour;
             self.regs.primary_cache.pending |= 1 << (x & 7);
         }
+        self.observe_plot(x, y, colour.is_some());
 
         let new_r1 = self.regs.reg(1).wrapping_add(1);
         self.regs.commit_to(1, new_r1);
@@ -1880,6 +1865,7 @@ impl GsuState {
             0x40..=0x4B => {
                 let n = op & 0x0F;
                 let addr = self.regs.reg(n);
+                self.observe_ram_read(addr, !alt1);
                 let (v, cost) = if alt1 {
                     (u16::from(self.ram_read_byte(addr)), 2)
                 } else {
@@ -2191,6 +2177,7 @@ impl GsuState {
                 } else if alt1 || alt3 {
                     let kk = self.fetch_byte(rom);
                     let addr = u16::from(kk) * 2;
+                    self.observe_ram_read(addr, true);
                     let v = self.ram_read_word(addr);
                     self.regs.commit_to(n, v);
                     self.regs.last_ram_addr = addr;
@@ -2324,6 +2311,7 @@ impl GsuState {
                     let lo = self.fetch_byte(rom);
                     let hi = self.fetch_byte(rom);
                     let addr = u16::from_le_bytes([lo, hi]);
+                    self.observe_ram_read(addr, true);
                     let v = self.ram_read_word(addr);
                     self.regs.commit_to(n, v);
                     self.regs.last_ram_addr = addr;
@@ -2359,6 +2347,7 @@ impl GsuState {
         self.regs.sfr &= !0x0020; // GO=0
         self.regs.sfr |= 0x8000; // IRQ=1, unconditionally (see `irq_pending`'s doc)
         self.regs.reset_prefix_state();
+        self.observe_stop();
         1
     }
 
@@ -2393,6 +2382,107 @@ impl GsuState {
             self.regs.pending_jump = Some((self.regs.pbr, target));
         }
         2
+    }
+}
+
+// ============================================================================
+// Ticket W31-02: the polygon-stream observer's hooks. Every one is a single
+// `Option` check when the observer is unset, and none writes machine state.
+// ============================================================================
+impl GsuState {
+    /// Install (or, with `None`, remove) the polygon-stream observer. A
+    /// config equal to the one already installed keeps its collected jobs.
+    pub fn set_poly_observer(&mut self, cfg: Option<crate::gsu_observer::GsuPolyConfig>) {
+        match cfg {
+            None => self.poly = None,
+            Some(c) => {
+                if self.poly.as_ref().map(|o| *o.config()) != Some(c) {
+                    self.poly = Some(Box::new(crate::gsu_observer::GsuPolyObserver::new(c)));
+                }
+            }
+        }
+    }
+
+    /// The installed observer's config, if any.
+    #[must_use]
+    pub fn poly_observer_config(&self) -> Option<crate::gsu_observer::GsuPolyConfig> {
+        self.poly.as_ref().map(|o| *o.config())
+    }
+
+    /// Completed render jobs since the observer was installed.
+    #[must_use]
+    pub fn poly_jobs_completed(&self) -> u64 {
+        self.poly.as_ref().map_or(0, |o| o.completed())
+    }
+
+    /// Remove and return the completed jobs in the ring, oldest first.
+    pub fn take_poly_jobs(&mut self) -> Vec<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
+        self.poly.as_mut().map_or_else(Vec::new, |o| o.take_jobs())
+    }
+
+    fn observe_ram_read(&mut self, addr: u16, word: bool) {
+        if let Some(obs) = self.poly.as_deref_mut() {
+            obs.on_ram_read(addr, word);
+        }
+    }
+
+    fn observe_plot(&mut self, x: u8, y: u8, drawn: bool) {
+        let Some(mut obs) = self.poly.take() else {
+            return;
+        };
+        // The corner list is read at the first PLOT after the walker's reads:
+        // the low byte of each entry's x and y words.
+        let corners = obs.corner_span().map(|(base, n)| {
+            (0..n)
+                .map(|s| {
+                    let at = base.wrapping_add(4 * s);
+                    (
+                        self.ram_read_byte(at),
+                        self.ram_read_byte(at.wrapping_add(2)),
+                    )
+                })
+                .collect()
+        });
+        let bpp = Self::bpp_for_scmr(self.regs.scmr);
+        obs.on_plot((x, y), (self.regs.colr, self.regs.por, bpp), drawn, corners);
+        self.poly = Some(obs);
+    }
+
+    fn observe_stop(&mut self) {
+        let Some(mut obs) = self.poly.take() else {
+            return;
+        };
+        let cfg = *obs.config();
+        let bitmap = cfg.capture_bitmap.then(|| {
+            let (w, h) = cfg.viewport;
+            let mut img = Vec::with_capacity(usize::from(w) * usize::from(h));
+            for y in 0..h {
+                for x in 0..w {
+                    img.push(self.bitmap_pixel(x as u8, y as u8));
+                }
+            }
+            img
+        });
+        obs.on_stop(bitmap);
+        self.poly = Some(obs);
+    }
+
+    /// The colour the GSU bitmap holds at `(x, y)` right now, including a
+    /// pixel the pixel cache has not yet written to RAM. Read-only (unlike
+    /// RPIX, which flushes).
+    #[must_use]
+    pub fn bitmap_pixel(&self, x: u8, y: u8) -> u8 {
+        let cache = &self.regs;
+        for line in [&cache.primary_cache, &cache.secondary_cache] {
+            if line.valid && line.x_base == (x & 0xF8) && line.y == y {
+                let bit = 1u8 << (x & 7);
+                if line.pending & bit != 0 {
+                    return line.colors[usize::from(x & 7)];
+                }
+            }
+        }
+        let bpp = Self::bpp_for_scmr(self.regs.scmr);
+        self.read_pixel_bits(self.bitmap_row_addr(x, y), bpp, x & 7)
     }
 }
 
@@ -3057,6 +3147,7 @@ mod exec_tests {
             ram_len: g.ram_len,
             credit: g.credit,
             fetch_extra_cost: 0,
+            poly: None,
         };
         step_n(&mut g, &rom, 3);
         step_n(&mut restored_state, &rom, 3);
@@ -3383,6 +3474,7 @@ mod exec_tests {
             ram_len: a.ram_len,
             credit: a.credit,
             fetch_extra_cost: 0,
+            poly: None,
         };
 
         // Finish both the same way (three more PLOTs to fill the segment,
@@ -3570,6 +3662,7 @@ mod exec_tests {
             ram_len: a.ram_len,
             credit: a.credit,
             fetch_extra_cost: 0,
+            poly: None,
         };
 
         // Continue both for the remaining NOPs; hit/miss costs must match
@@ -3608,6 +3701,7 @@ mod exec_tests {
             ram_len: a.ram_len,
             credit: a.credit,
             fetch_extra_cost: 0,
+            poly: None,
         };
 
         step_n(&mut a, &rom, 1); // GETB: stalls
@@ -3663,5 +3757,89 @@ mod exec_tests {
             "NOP then STOP, both fetched from the SNES-preloaded cache, \
              not from the (empty) underlying ROM"
         );
+    }
+
+    // --- Ticket W31-02: the polygon-stream observer ----------------------
+
+    /// `LM R1,(0134)` (the "vertex count"), two `LM R3,(0982/0986)` (the
+    /// "walker" reading two buffer entries), then COLOR 3 and two PLOTs at
+    /// (5,5),(6,5), STOP. Each `LM` is `ALT1` (`3D`) + `F<n> lo hi`.
+    fn poly_program() -> Vec<u8> {
+        vec![
+            0x3D, 0xF1, 0x34, 0x01, // 0: LM R1,(0134)   ; opcode at PC 1
+            0x3D, 0xF3, 0x82, 0x09, // 4: LM R3,(0982)   ; opcode at PC 5
+            0x3D, 0xF3, 0x86, 0x09, // 8: LM R3,(0986)   ; opcode at PC 9
+            0xA1, 0x05, 0xA2, 0x05, // 12: IBT R1,#5 ; IBT R2,#5
+            0xA4, 0x03, 0x24, 0x4E, // 16: IBT R4,#3 ; WITH R4 ; COLOR
+            0x4C, 0x4C, // 20: PLOT ; PLOT
+            0x00, 0x01, // 22: STOP (+ prefetch byte)
+        ]
+    }
+
+    fn poly_cfg(capture_bitmap: bool) -> crate::gsu_observer::GsuPolyConfig {
+        crate::gsu_observer::GsuPolyConfig {
+            pc_bank: 0,
+            count_read_pc: 1,
+            count_addr: 0x0134,
+            buffer_addr: 0x0982,
+            walker_pcs: (4, 12),
+            viewport: (16, 16),
+            capture_bitmap,
+        }
+    }
+
+    fn run_poly(cfg: Option<crate::gsu_observer::GsuPolyConfig>) -> GsuState {
+        let (mut g, rom) = program(&poly_program());
+        g.ram[0x0982] = 3;
+        g.ram[0x0984] = 4;
+        g.ram[0x0986] = 9;
+        g.ram[0x0988] = 8;
+        g.set_poly_observer(cfg);
+        g.regs.write(0x301E, 0x00);
+        g.regs.write(0x301F, 0x00);
+        run_until_stopped(&mut g, &rom);
+        g
+    }
+
+    #[test]
+    fn poly_observer_records_the_polygon_and_its_fill() {
+        use rf_core_api::gsu_poly::PolyOp;
+        let mut g = run_poly(Some(poly_cfg(true)));
+        assert_eq!(g.poly_jobs_completed(), 1);
+        let job = g.take_poly_jobs().remove(0);
+        assert_eq!(
+            job.ops,
+            vec![PolyOp::Polygon {
+                corners: vec![(3, 4), (9, 8)],
+                colr: 3,
+                por: 0
+            }]
+        );
+        assert_eq!(job.bpp, 2);
+        let drawn: Vec<usize> = (0..256).filter(|i| job.plotted[*i]).collect();
+        assert_eq!(drawn, vec![5 * 16 + 5, 5 * 16 + 6]);
+        let bitmap = job.bitmap.as_ref().expect("capture_bitmap was on");
+        assert_eq!(
+            (bitmap[5 * 16 + 5], bitmap[5 * 16 + 6], bitmap[0]),
+            (3, 3, 0)
+        );
+        assert!(g.take_poly_jobs().is_empty(), "taking drains the ring");
+    }
+
+    /// Law 4: observing changes nothing the machine can see.
+    #[test]
+    fn poly_observer_does_not_change_the_machine() {
+        let off = run_poly(None);
+        let on = run_poly(Some(poly_cfg(true)));
+        assert_eq!(off.regs.regs, on.regs.regs);
+        assert_eq!(off.regs.sfr, on.regs.sfr);
+        assert_eq!(off.ram, on.ram);
+        assert_eq!(off.credit, on.credit);
+        assert_eq!(
+            off.regs.instructions_executed(),
+            on.regs.instructions_executed()
+        );
+        assert_eq!(off.poly_jobs_completed(), 0);
+        assert_eq!(on.poly_jobs_completed(), 1);
     }
 }
