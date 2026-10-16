@@ -56,6 +56,7 @@ pub mod hash;
 pub mod hd2d_preset;
 pub mod icons;
 pub mod input_map;
+pub mod layer_canvas;
 pub mod lens_view;
 pub mod level_view;
 pub mod library;
