@@ -727,6 +727,11 @@ pub struct RetroForgeApp {
     /// Ticket W31-05: the GPU polygon pass, built on first use from
     /// [`Self::gpu`].
     superfx_gpu: Option<rf_renderer::superfx_gpu::SuperFxGpu>,
+    /// The native frame the last Super FX HD composite was made from
+    /// (`rgba`, width, rows), so a screenshot can show both sides of the
+    /// SAME frame (`superfx_hd_native_for_test`). One reused buffer: a
+    /// ~230 KB copy per Super FX frame, no allocation.
+    superfx_hd_native: Option<(Vec<u8>, usize, usize)>,
     latest_gsu_poly_job: Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>>,
     /// Ticket W30-09: the S-DSP interpolation last sent to the core.
     interpolation_sent: Option<rf_snes::apu::dsp::Interpolation>,
@@ -1622,6 +1627,7 @@ impl RetroForgeApp {
             superfx_hd: rf_renderer::superfx_hd::SuperFxHd::default(),
             superfx_hd_readout: None,
             superfx_gpu: None,
+            superfx_hd_native: None,
             latest_gsu_poly_job: None,
             interpolation_sent: None,
             superfx_cart: false,
@@ -3943,12 +3949,12 @@ impl RetroForgeApp {
     /// latching a crash report the moment one arrives.
     fn pump_core_events(&mut self, ctx: &egui::Context) {
         let Some(core) = &self.core else { return };
-        let mut latest_frame = None;
+        let mut latest_frame: Option<Box<core_thread::FrameMsg>> = None;
         let mut latest_canvas = None;
         let mut crashed = false;
         while let Ok(evt) = core.evt_rx.try_recv() {
             match evt {
-                CoreEvent::Frame(msg) => {
+                CoreEvent::Frame(mut msg) => {
                     // Ticket W14-20 defect 1: every `CoreEvent::Frame`
                     // drained here must release one slot of
                     // `core_thread::MAX_PENDING_FRAMES` back to the
@@ -3960,6 +3966,11 @@ impl RetroForgeApp {
                     // even once the UI is repainting normally again.
                     core.pending_frames
                         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    // A frame skipped here still carries Super FX polygon
+                    // jobs the painted one needs (W31-05 fix).
+                    if let Some(older) = latest_frame.take() {
+                        core_thread::merge_skipped_frame_jobs(&mut msg, *older);
+                    }
                     latest_frame = Some(msg);
                 }
                 // Ticket W4-03e: keep only the latest, same "older ones are
@@ -4265,8 +4276,8 @@ impl RetroForgeApp {
             if msg.mode7.is_some() || msg.mode7_shown {
                 self.mode7_seen = true;
             }
-            if msg.gsu_poly_job.is_some() {
-                self.latest_gsu_poly_job = msg.gsu_poly_job.clone();
+            if let Some(job) = msg.gsu_poly_jobs.last() {
+                self.latest_gsu_poly_job = Some(job.clone());
             }
             // Ticket W16-13 acceptance 1: refresh the Diorama compositor's
             // output for THIS frame — placed BEFORE the bg/sprite-layer
@@ -12653,6 +12664,29 @@ impl RetroForgeApp {
         self.superfx_hd_effective()
     }
 
+    /// Ticket W31-05 (tests): set the Super FX HD edge smoothing (MSAA
+    /// samples: 1, 4 or 8).
+    #[doc(hidden)]
+    pub fn set_superfx_hd_msaa_for_test(&mut self, msaa: u8) {
+        self.current_game_settings.superfx_hd_msaa = msaa;
+    }
+
+    /// Ticket W31-05 (tests): the native frame (`rgba`, width, rows) the
+    /// last Super FX HD composite was made from.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn superfx_hd_native_for_test(&self) -> Option<(Vec<u8>, usize, usize)> {
+        self.superfx_hd_native.clone()
+    }
+
+    /// Ticket W31-05 (tests): the Super FX HD debug readout line, which says
+    /// whether the GPU or the CPU drew the last frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn superfx_hd_readout_for_test(&self) -> Option<String> {
+        self.superfx_hd_readout.clone()
+    }
+
     /// Ticket W16-14: feed a synthetic [`rf_core_api::Mode7Frame`] plus a
     /// VRAM/CGRAM snapshot through the SAME `refresh_diorama_render` path
     /// a real running SNES core's `FrameMsg` would — the kittest hook this
@@ -12797,7 +12831,7 @@ impl RetroForgeApp {
             hd: None,
             hd_mode7: None,
             mode7_shown: false,
-            gsu_poly_job: None,
+            gsu_poly_jobs: Vec::new(),
             rgba,
             line_palettes: Vec::new(),
             width,
@@ -15112,7 +15146,7 @@ impl RetroForgeApp {
         if self.superfx_hd_sent != Some(true) || self.widescreen_on {
             return None;
         }
-        if let Some(job) = &msg.gsu_poly_job {
+        for job in &msg.gsu_poly_jobs {
             self.superfx_hd.push_job(job.clone());
         }
         let n = u32::from(self.current_game_settings.superfx_hd_scale.clamp(
@@ -15142,6 +15176,12 @@ impl RetroForgeApp {
             _ => None,
         };
         let out = self.superfx_hd.compose_with(&frame, n, path);
+        let native = self
+            .superfx_hd_native
+            .get_or_insert_with(|| (Vec::new(), 0, 0));
+        native.0.clear();
+        native.0.extend_from_slice(frame.rgba);
+        (native.1, native.2) = (frame.width, frame.height);
         let s = self.superfx_hd.last_stats();
         let drawn_by = match (s.gpu, s.samples) {
             (true, 1) => "GPU, no smoothing".to_string(),

@@ -89,6 +89,25 @@ impl Pic {
         Pic { w, h, rgba }
     }
 
+    /// Before/after split: the left half of `self`, the right half of
+    /// `other` (same size), with a 3-px white divider.
+    fn split(&self, other: &Pic) -> Pic {
+        let mut me = self.clone();
+        let mid = self.w / 2;
+        for y in 0..self.h {
+            for x in mid..self.w {
+                let i = (y * self.w + x) * 4;
+                let px = if x < mid + 3 {
+                    [255, 255, 255, 255]
+                } else {
+                    [other.rgba[i], other.rgba[i + 1], other.rgba[i + 2], 255]
+                };
+                me.rgba[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        me
+    }
+
     /// Nearest resize to a width (box-free; used only for the contact sheet).
     fn fit_width(&self, w: usize) -> Pic {
         let h = (self.h * w / self.w).max(1);
@@ -586,6 +605,134 @@ fn shot_superfx_hd(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W31-05: the GPU path, for the product tour. Every image here is
+/// one simulated frame: the native side is the exact frame the HD composite
+/// was made from (`superfx_hd_native_for_test`), so a split lines up.
+/// Variants (4x/3x, smoothing on/off) are consecutive stepped frames.
+fn shot_superfx_gpu(readme: &mut Vec<String>) {
+    let name = "superfx-gpu";
+    if !wanted(name) {
+        return;
+    }
+    let game = ["Star Fox (USA).zip", "Star Fox (USA) (Rev 1).zip"]
+        .iter()
+        .find_map(|f| rom("snes", f).map(|p| (p, (*f).to_string())));
+    let Some((path, file)) = game else {
+        return skip(readme, name, "Star Fox (USA) not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    wait(&mut h, "starfox", 880);
+    h.state_mut()
+        .set_superfx_hd_for_test(true, 4, Mode::Enhanced, true);
+    h.state_mut().set_superfx_hd_msaa_for_test(4);
+    run_n(&mut h, 30);
+    h.state_mut().resume_for_test();
+    let t = h.state().frame_count_for_test() + 120;
+    run_frames(&mut h, t, Duration::from_secs(120));
+    let st = snapshot(&mut h, "sfx-gpu");
+    let mut shots: Vec<(&str, Pic, Pic)> = Vec::new();
+    for (tag, scale, msaa) in [
+        ("4x-smooth", 4u8, 4u8),
+        ("3x-smooth", 3, 4),
+        ("3x-sharp", 3, 1),
+    ] {
+        h.state_mut()
+            .set_superfx_hd_for_test(true, scale, Mode::Enhanced, true);
+        h.state_mut().set_superfx_hd_msaa_for_test(msaa);
+        step_from(&mut h, &st);
+        let readout = h.state().superfx_hd_readout_for_test().unwrap_or_default();
+        println!("superfx-gpu {tag}: {readout}");
+        if !readout.contains("HD (GPU") {
+            return skip(
+                readme,
+                name,
+                &format!("{tag}: not drawn by the GPU ({readout})"),
+            );
+        }
+        let (Some(hd), Some((rgba, w, hh))) = (grab(&h), h.state().superfx_hd_native_for_test())
+        else {
+            return skip(readme, name, "no frame");
+        };
+        shots.push((tag, hd, Pic { w, h: hh, rgba }));
+    }
+    let d = out_dir();
+    for (tag, hd, _) in &shots {
+        save(&d.join(format!("superfx-gpu-{tag}.png")), &hd.opaque());
+    }
+    let (_, hd4, native4) = &shots[0];
+    save(
+        &d.join("superfx-gpu-native.png"),
+        &native4.upscale(4).opaque(),
+    );
+    // Product-tour comparison: native (nearest 4x) | 4x smoothed, one frame.
+    save(
+        &d.join("compare-superfx-gpu.png"),
+        &native4.upscale(4).split(hd4).opaque(),
+    );
+    // Zoom, 64x64 native pixels at 8x: native | 3x no smoothing | 3x
+    // smoothed (the last two are one frame apart; the native one is the
+    // smoothed one's own frame).
+    let (_, sharp, _) = &shots[2];
+    let (_, smooth, native3) = &shots[1];
+    let (zx, zy) = zoom_origin(native3, 64);
+    let zoom = |p: &Pic| {
+        let k = (p.w / native3.w.max(1)).max(1);
+        p.crop(zx * k, zy * k, 64 * k, 64 * k).fit_width(512)
+    };
+    save(
+        &d.join("superfx-gpu-zoom.png"),
+        &native3
+            .crop(zx, zy, 64, 64)
+            .upscale(8)
+            .beside(&zoom(sharp), 8)
+            .beside(&zoom(smooth), 8)
+            .opaque(),
+    );
+    note(
+        readme,
+        format!(
+            "superfx-gpu|{file}|GPU path: 4x+4x smoothing, 3x+4x smoothing, 3x no smoothing, native; zoom at native ({zx},{zy}) 64x64 8x: native | 3x sharp | 3x smooth"
+        ),
+    );
+}
+
+/// Product-tour comparisons: one image per feature, OFF on the left half and
+/// ON on the right half with a white divider (pictures of different sizes,
+/// e.g. widescreen, go side by side instead).
+fn compare_images(readme: &mut Vec<String>) {
+    let d = out_dir();
+    let load = |p: PathBuf| -> Option<Pic> {
+        let img = image::open(p).ok()?.to_rgba8();
+        Some(Pic {
+            w: img.width() as usize,
+            h: img.height() as usize,
+            rgba: img.into_raw(),
+        })
+    };
+    // Only the pairs good enough for the tour: the widescreen pairs are a
+    // title screen with black margins and the HD-2D pair is a flat test
+    // fixture, so both wait for better scenes.
+    for n in ["hdmode7-4x", "lens"] {
+        let (Some(a), Some(b)) = (
+            load(d.join(format!("{n}-off.png"))),
+            load(d.join(format!("{n}-on.png"))),
+        ) else {
+            continue;
+        };
+        let out = if (a.w, a.h) == (b.w, b.h) {
+            a.split(&b)
+        } else {
+            a.beside(&b, 8)
+        };
+        save(&d.join(format!("compare-{n}.png")), &out.opaque());
+    }
+    note(
+        readme,
+        "compare-*|-|tour comparisons: OFF left half | ON right half (split), or side by side when sizes differ".to_string(),
+    );
+}
+
 /// The 64x64 window with the most edge energy: a slanted polygon edge is
 /// where horizontal and vertical neighbours differ the most.
 fn zoom_origin(p: &Pic, size: usize) -> (usize, usize) {
@@ -726,6 +873,10 @@ fn w30_w31_screens() {
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);
+    shot_superfx_gpu(&mut readme);
+    if std::env::var("RF_SCREENS_ONLY").is_err() || wanted("compare") {
+        compare_images(&mut readme);
+    }
     if std::env::var("RF_SCREENS_ONLY").is_err() {
         contact_sheet(&mut readme);
     }

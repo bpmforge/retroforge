@@ -20,3 +20,22 @@ here beyond these rendered frames.
 | `superfx-gpu-3x-msaa4-zoom.png` | Star Fox (USA), intro | W31-05: the same 64x64 crop at 8x: native (left), CPU 3x (middle), GPU 3x with 4x MSAA (right). The sawtooth is gone and edges are antialiased; loose 1-px plotted lines stay stepped. |
 | `superfx-3d-drawing.png` | Stunt Race FX (USA) (Rev 1) | A race with the 3D drawing (fixed by W30-00), native. |
 | `contact-sheet.png` | all | Rows top to bottom: HD Mode 7, widescreen 16:9, widescreen 32:9, lens, HD-2D, Super FX HD, then the Super FX zoom with the Stunt Race FX frame. Left = off, right = on. |
+
+## Product tour set (2026-10-16)
+
+Split comparisons: the left half is OFF, the right half is ON, with a white
+divider. Use these for the tour.
+
+| File | Game | What it shows |
+|---|---|---|
+| `compare-superfx-gpu.png` | Star Fox (USA), intro | Native (nearest 4x) vs Sharper Super FX 3D at 4x on the GPU with 4x edge smoothing (MSAA). Both halves are the **same frame**: the native side is the exact frame the HD picture was made from. |
+| `superfx-gpu-native.png`, `superfx-gpu-4x-smooth.png` | Star Fox (USA) | The two full frames behind that split. |
+| `superfx-gpu-3x-sharp.png`, `superfx-gpu-3x-smooth.png` | Star Fox (USA) | 3x on the GPU without and with edge smoothing (consecutive frames). |
+| `superfx-gpu-zoom.png` | Star Fox (USA) | 64x64 native pixels at 8x: native, 3x no smoothing, 3x with 4x smoothing. Edges go from steps to clean antialiased lines. Thin 1-px plotted lines stay stepped, and corners stay on the game's whole-pixel grid (W31-06). |
+| `compare-hdmode7-4x.png` | F-Zero (USA) | Native vs HD Mode 7 at 4x (consecutive frames). |
+| `compare-lens.png` | Super Mario World (USA) | Lens and lighting off vs on (subtle by design; consecutive frames). |
+
+Not in the tour yet: **widescreen** (the capture is the title-screen demo,
+so the margins are mostly black; it needs an in-level scroll so the stitched
+canvas fills them) and **HD-2D** (no game has painted heights yet; the
+fixture shot is a flat strip).

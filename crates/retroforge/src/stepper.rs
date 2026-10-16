@@ -1162,14 +1162,14 @@ impl EmuStepper {
         }
     }
 
-    /// Ticket W31-02: the most recent render job the observer completed
-    /// since the last call, if any (older ones in the ring are dropped).
-    pub fn take_gsu_poly_job(&mut self) -> Option<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
+    /// Ticket W31-02: every render job the observer completed since the
+    /// last call, oldest first (empty when none did or the observer is off).
+    /// All of them, not just the newest: the screen can still be showing an
+    /// older one (Super FX Sharper 3D matches against up to three).
+    pub fn take_gsu_poly_jobs(&mut self) -> Vec<std::sync::Arc<rf_core_api::gsu_poly::PolyJob>> {
         match &mut self.machine {
-            Machine::Snes(core) if core.gsu_poly_jobs_completed() > 0 => {
-                core.take_gsu_poly_jobs().pop()
-            }
-            _ => None,
+            Machine::Snes(core) if core.gsu_poly_jobs_completed() > 0 => core.take_gsu_poly_jobs(),
+            _ => Vec::new(),
         }
     }
 
