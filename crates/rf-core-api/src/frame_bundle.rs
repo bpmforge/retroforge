@@ -159,6 +159,12 @@ pub struct FrameBundleBuilder {
 }
 
 impl FrameBundleBuilder {
+    /// The frame width in dots (the console's own picture).
+    #[must_use]
+    pub fn width(&self) -> u16 {
+        self.width
+    }
+
     #[must_use]
     pub fn new(width: u16, height: u16) -> Self {
         FrameBundleBuilder {

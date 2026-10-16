@@ -141,6 +141,14 @@ impl CoreSink for CountingSink<'_> {
         self.inner.video_scanline(y, pixels);
     }
 
+    /// Forwarded explicitly (the default would lose the pad at this seam,
+    /// the same trap as `overlay_scanline` below).
+    fn video_scanline_widened(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel], pad: usize) {
+        self.scanlines += 1;
+        self.last_scanline = Some(y);
+        self.inner.video_scanline_widened(y, pixels, pad);
+    }
+
     /// Ticket W3-05a: MUST forward explicitly, not rely on
     /// `CoreSink::overlay_scanline`'s default no-op — this wrapper sits
     /// between every `EmuStepper` caller and the real sink (`FrameBuffer`

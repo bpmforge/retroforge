@@ -104,6 +104,19 @@ pub trait CoreSink {
     /// RGB — see [`crate::video`].
     fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]);
 
+    /// A WIDENED (widescreen) scanline: `pixels` is the console's own
+    /// picture with `pad` extra dots on each side (an opt-in presentation
+    /// overlay, never in Accuracy Mode). The default treats it as a plain
+    /// [`Self::video_scanline`]; a sink that keeps an accuracy-exact frame
+    /// (`FrameBundle`) overrides it to take only the middle, because the
+    /// first `width` dots of a widened line are NOT the console's picture
+    /// (fix 2026-10-16: stitched canvases were fed frames shifted by the
+    /// pad).
+    fn video_scanline_widened(&mut self, y: u16, pixels: &[PpuPixel], pad: usize) {
+        let _ = pad;
+        self.video_scanline(y, pixels);
+    }
+
     /// One scanline's worth of overlay-only pixels (ticket W3-05a; see
     /// [`crate::video::OverlayPixel`]'s doc) — sprites the hardware
     /// per-scanline limit dropped, for a consumer that opted into drawing

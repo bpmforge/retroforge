@@ -495,21 +495,19 @@ fn shot_widescreen(readme: &mut Vec<String>) {
         h.state_mut().set_widescreen(true);
         let t = h.state().frame_count_for_test() + 30;
         run_frames(&mut h, t, Duration::from_secs(60));
-        // The stitched canvas for this game still has flaws (offset
-        // repeats, HUD stitched in, no sky/parallax layer), so the tour
-        // shot uses the VRAM margins -- what the console itself has loaded
-        // -- and the canvas version is kept as a probe for the follow-up.
-        if let Some(p) = grab(&h) {
-            save(
-                &probe_dir().join(format!("widescreen-{tagname}-canvas.png")),
-                &p,
-            );
-        }
+        // "On" is the stitched canvas (per-layer since W31-07); the VRAM
+        // margins are kept as a probe for comparison.
+        let on = grab(&h);
+        let src = h.state().widescreen_source_for_test();
         h.state_mut().force_vram_margins_for_test(true);
         let t = h.state().frame_count_for_test() + 4;
         run_frames(&mut h, t, Duration::from_secs(60));
-        let on = grab(&h);
-        let src = h.state().widescreen_source_for_test();
+        if let Some(p) = grab(&h) {
+            save(
+                &probe_dir().join(format!("widescreen-{tagname}-vram.png")),
+                &p,
+            );
+        }
         h.state_mut().force_vram_margins_for_test(false);
         h.state_mut().set_widescreen(false);
         let t = h.state().frame_count_for_test() + 4;

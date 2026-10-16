@@ -1235,6 +1235,9 @@ pub struct RetroForgeApp {
     /// (`CoreEvent::CanvasSnapshot`), if the Ultrawide camera has ever been
     /// requested this session.
     ultrawide_canvas: Option<rf_enhance::stitcher::Canvas>,
+    /// Ticket W31-07: the per-layer canvases of the same snapshot, which the
+    /// widescreen margins prefer over the composite canvas.
+    ultrawide_layers: crate::layer_canvas::LayerCanvases,
     /// Ticket W30-03: the scene [`Self::ultrawide_canvas`] was snapshotted
     /// from. The widescreen margins use the canvas only while this equals
     /// the scene of the frame being shown.
@@ -1707,6 +1710,7 @@ impl RetroForgeApp {
             widescreen_scene: None,
             widescreen_source: rf_enhance::widescreen::MarginSource::Vram,
             ultrawide_canvas_scene: None,
+            ultrawide_layers: crate::layer_canvas::LayerCanvases::default(),
             declared_hud: None,
             force_vram_margins: false,
             keep_core_frame: false,
@@ -3891,6 +3895,7 @@ impl RetroForgeApp {
                 self.camera = CameraToggle::Original;
                 self.ultrawide_canvas = None;
                 self.ultrawide_canvas_scene = None;
+                self.ultrawide_layers = crate::layer_canvas::LayerCanvases::default();
                 self.ultrawide_render = None;
                 self.ultrawide_texture = None;
                 self.fm13_message = None;
@@ -4054,6 +4059,7 @@ impl RetroForgeApp {
             self.awaiting_canvas_snapshot = false;
             self.ultrawide_canvas = Some(snapshot.canvas);
             self.ultrawide_canvas_scene = snapshot.scene;
+            self.ultrawide_layers = *snapshot.layers;
             // Ticket W30-03: a snapshot the widescreen margins asked for
             // must not pay for a GPU compose nobody will look at.
             if self.camera == CameraToggle::Ultrawide || self.show_enhance {
@@ -4173,6 +4179,8 @@ impl RetroForgeApp {
                                 native.0,
                                 native.1,
                                 msg.canvas_frame,
+                                msg.layer_frames,
+                                &msg.backdrop_rows,
                                 &msg.line_palettes,
                             )
                         } else {
@@ -11841,6 +11849,8 @@ impl RetroForgeApp {
         rgba: Vec<u8>,
         size: (usize, usize),
         position: Option<crate::canvas_accum::FramePosition>,
+        layer_frames: Option<crate::layer_canvas::LayerFrames>,
+        backdrops: &[Option<[u8; 3]>],
         palettes: &[Option<rf_renderer::LinePalette>],
     ) -> (Vec<u8>, (usize, usize)) {
         use rf_enhance::widescreen::{
@@ -11901,6 +11911,37 @@ impl RetroForgeApp {
                     return (rgba, size);
                 };
                 let top = pos.origin.1;
+                // Ticket W31-07: per-layer canvases of this very scene win
+                // (each layer placed by its own scroll, backdrop colour
+                // where nothing is known); the composite canvas is the
+                // fallback for a scene without them.
+                if let Some(frames) = layer_frames.filter(|f| {
+                    f.scene == pos.scene
+                        && self.ultrawide_layers.any()
+                        && f.origins.iter().any(Option::is_some)
+                }) {
+                    let layers = &self.ultrawide_layers;
+                    let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
+                        let (dx, dy) = (wx - pos.origin.0, wy - top);
+                        let row = usize::try_from(dy).unwrap_or(0);
+                        let palette = palettes.get(row).and_then(Option::as_ref);
+                        let Some(cell) =
+                            crate::layer_canvas::front_layer_pixel(layers, &frames.origins, dx, dy)
+                        else {
+                            // Nothing known: the row's own backdrop colour.
+                            return Some(
+                                backdrops
+                                    .get(row)
+                                    .copied()
+                                    .flatten()
+                                    .unwrap_or_else(|| rf_renderer::resolve_index(0, palette)),
+                            );
+                        };
+                        Some(rf_renderer::resolve_index(cell.palette_index, palette))
+                    };
+                    let filled = fill_margins(&rgba, w, h, out_w, pos.origin, &world, &keep);
+                    return (filled, (out_w, h));
+                }
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
                     let cell = canvas.get(wx, wy)?;
                     let row = usize::try_from(wy - top).unwrap_or(0);
@@ -12853,6 +12894,8 @@ impl RetroForgeApp {
             sprite_height_px: 8,
             mode7,
             canvas_frame: None,
+            layer_frames: None,
+            backdrop_rows: Vec::new(),
         }
     }
 

@@ -428,6 +428,14 @@ pub struct FrameMsg {
     /// it sits on it (`CanvasAccumulator::frame_position`), for filling the
     /// widescreen margins. 24 bytes; `None` when no band could be placed.
     pub canvas_frame: Option<crate::canvas_accum::FramePosition>,
+    /// Ticket W31-07: where this frame sits on each widened background
+    /// layer's own canvas (`LayerCanvasAccumulator::frames`); `None` on the
+    /// NES or while widescreen is off. 72 bytes.
+    pub layer_frames: Option<crate::layer_canvas::LayerFrames>,
+    /// Ticket W31-07: per picture row, the colour the backdrop shows there
+    /// on screen (`layer_canvas::row_backdrops`); empty unless
+    /// `layer_frames` is set.
+    pub backdrop_rows: Vec<Option<[u8; 3]>>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
@@ -446,6 +454,28 @@ fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Op
     ))
 }
 
+/// Ticket W31-07: each background layer the widescreen policy widens, with
+/// its registers wrapped to its tilemap, for the per-layer canvases. `None`
+/// on the NES; narrow (HUD) layers are `None` inside.
+fn snes_layer_scrolls(
+    stepper: &EmuStepper,
+    req: &WidescreenRequest,
+) -> Option<[Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS]> {
+    let views = stepper.bg_layer_views()?;
+    let decisions = req.policies.decide_all(views);
+    Some(std::array::from_fn(|i| {
+        let v = views[i];
+        decisions[i]
+            .widens()
+            .then(|| crate::layer_canvas::LayerScroll {
+                hofs: v.hofs % v.tilemap_width.max(1),
+                vofs: v.vofs % v.tilemap_height.max(1),
+                tilemap_width: v.tilemap_width,
+                tilemap_height: v.tilemap_height,
+            })
+    }))
+}
+
 /// Ticket W30-03: a stitched canvas together with the scene it belongs to,
 /// so the UI thread can tell a canvas of the room being shown from one of
 /// the room it just left.
@@ -453,6 +483,9 @@ pub struct SceneCanvas {
     pub canvas: rf_enhance::stitcher::Canvas,
     /// `None` before any frame has been observed.
     pub scene: Option<u64>,
+    /// Ticket W31-07: the same scene's per-layer canvases (empty on the NES
+    /// or when nothing was stitched per layer).
+    pub layers: Box<crate::layer_canvas::LayerCanvases>,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -1122,6 +1155,19 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
         self.bundle.video_scanline(y, pixels);
     }
 
+    /// A widened line: the picture (and layer split) get all of it, the
+    /// accuracy-exact bundle only the console's own middle 256 dots.
+    fn video_scanline_widened(&mut self, y: u16, pixels: &[rf_core_api::PpuPixel], pad: usize) {
+        self.frame.video_scanline(y, pixels);
+        if let Some(layers) = self.layers.as_mut() {
+            layers.video_scanline(y, pixels);
+        }
+        let middle = pixels
+            .get(pad..pad + usize::from(self.bundle.width()))
+            .unwrap_or(pixels);
+        self.bundle.video_scanline(y, middle);
+    }
+
     /// Ticket W7-21: the sub-screen, to the frame (the layer split is a
     /// debug view of the indexed screens and does not blend).
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
@@ -1280,6 +1326,8 @@ fn core_thread_main(
     // doc), never a reason to fail loading the ROM.
     let cache = rf_cache::Cache::open(canvas_cache_root(), CANVAS_CACHE_CAP_BYTES).ok();
     let mut canvas_accum = CanvasAccumulator::new(rom_sha256, cache);
+    // Ticket W31-07: one canvas per widened background layer (SNES).
+    let mut layer_canvases = crate::layer_canvas::LayerCanvasAccumulator::new();
     // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
     let mut last_canvas_flush: Option<std::time::Instant> = None;
 
@@ -1531,6 +1579,7 @@ fn core_thread_main(
                     let snapshot = SceneCanvas {
                         canvas: canvas_accum.current_canvas().unwrap_or_default(),
                         scene: canvas_accum.current_scene_id().map(|id| id.0),
+                        layers: Box::new(layer_canvases.current_canvases()),
                     };
                     if frame_tx.send(CoreEvent::CanvasSnapshot(snapshot)).is_err() {
                         return LoopControl::Stop; // UI thread hung up.
@@ -1899,7 +1948,13 @@ fn core_thread_main(
             let scroll = widescreen
                 .as_ref()
                 .and_then(|req| snes_scroll_for_stitcher(&stepper, req));
-            canvas_accum.observe_frame_with_scroll(&bundle, &[], scroll);
+            let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], scroll);
+            // Ticket W31-07: the same frame, stitched per layer by each
+            // layer's own scroll (the margins prefer these).
+            let layer_scrolls = widescreen
+                .as_ref()
+                .and_then(|req| snes_layer_scrolls(&stepper, req));
+            layer_canvases.observe_frame(&bundle, scene, layer_scrolls.as_ref());
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
@@ -1960,6 +2015,13 @@ fn core_thread_main(
                 rf_core_api::CoreEvent::Mode7(frame) => Some(frame.clone()),
                 _ => None,
             });
+            // Ticket W31-07: the colour each row's backdrop really shows
+            // (colour math included), for margins nothing is known about.
+            let backdrop_rows = if layer_scrolls.is_some() {
+                crate::layer_canvas::row_backdrops(&bundle.video, bundle.width, &display)
+            } else {
+                Vec::new()
+            };
             bundle_writer.publish(bundle);
             let mut msg = FrameMsg {
                 governors: clocks.report(),
@@ -2060,6 +2122,8 @@ fn core_thread_main(
                 sprite_height_px: stepper.sprite_height_px(),
                 mode7: mode7_event.map(Box::new),
                 canvas_frame: canvas_accum.frame_position(),
+                layer_frames: layer_canvases.frames(),
+                backdrop_rows,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2259,6 +2323,36 @@ mod tests {
     /// to exercise [`publish_frame`]'s bookkeeping without needing a real
     /// stepped frame's actual pixels, which `publish_frame` never looks
     /// at.
+    /// A widened (widescreen) line reaches the accuracy-exact bundle as the
+    /// console's own middle 256 dots, not the first 256 (which are margin):
+    /// the shift that made stitched canvases repeat terrain (2026-10-16).
+    #[test]
+    fn a_widened_line_gives_the_bundle_its_middle() {
+        use rf_core_api::CoreSink as _;
+        let mut frame = rf_renderer::FrameBuffer::new();
+        let mut bundle = rf_core_api::FrameBundleBuilder::new(256, 1);
+        let pad = 128usize;
+        let line: Vec<rf_core_api::PpuPixel> = (0..256 + 2 * pad)
+            .map(|x| rf_core_api::PpuPixel {
+                palette_index: (x % 251) as u8,
+                layer: rf_core_api::PixelLayer::Background(0),
+                sprite_id: None,
+                priority: 0,
+            })
+            .collect();
+        FanoutSink {
+            frame: &mut frame,
+            layers: None,
+            bundle: &mut bundle,
+            audio: None,
+            overlay: None,
+        }
+        .video_scanline_widened(0, &line, pad);
+        let video = bundle.take(0).video;
+        assert_eq!(video[0].palette_index, (pad % 251) as u8);
+        assert_eq!(video[255].palette_index, ((pad + 255) % 251) as u8);
+    }
+
     /// A distinct polygon job, told apart by its `bpp`.
     fn gsu_job(tag: u8) -> Arc<rf_core_api::gsu_poly::PolyJob> {
         Arc::new(rf_core_api::gsu_poly::PolyJob {
@@ -2334,6 +2428,8 @@ mod tests {
             sprite_height_px: 8,
             mode7: None,
             canvas_frame: None,
+            layer_frames: None,
+            backdrop_rows: Vec::new(),
         }
     }
 
