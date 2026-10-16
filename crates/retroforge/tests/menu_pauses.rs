@@ -26,13 +26,32 @@ fn press(harness: &mut Harness<'_, RetroForgeApp>, key: egui::Key) {
     }
 }
 
+/// Whether the core steps a frame. Waits up to 15 s (not a fixed 200 ms):
+/// the core is its own OS thread, and on a loaded machine running other
+/// test binaries it can go that long without a timeslice (spurious
+/// "the game must be running first", 2026-10-16, load average 34).
 fn frames_advance(harness: &mut Harness<'_, RetroForgeApp>) -> bool {
+    let before = harness.state().frame_count_for_test();
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(5));
+        if harness.state().frame_count_for_test() > before {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the core stays on its frame over a short window (a paused game
+/// cannot advance, so a short window has no false "paused" result).
+fn frames_stay_put(harness: &mut Harness<'_, RetroForgeApp>) -> bool {
     let before = harness.state().frame_count_for_test();
     for _ in 0..40 {
         harness.run_steps(1);
         std::thread::sleep(Duration::from_millis(5));
     }
-    harness.state().frame_count_for_test() > before
+    harness.state().frame_count_for_test() == before
 }
 
 #[test]
@@ -69,7 +88,7 @@ fn esc_pauses_a_running_game_and_leaves_a_paused_one_paused() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(
-        !frames_advance(&mut harness),
+        frames_stay_put(&mut harness),
         "the core kept running behind the menu"
     );
 

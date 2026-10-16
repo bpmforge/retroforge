@@ -196,6 +196,16 @@ fn overwrite_modal_blocks_the_app_behind_it_and_a_toast_expires_without_pausing_
         harness.step();
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Then give the core thread up to 15 s of wall clock to show a frame:
+    // on a loaded machine running other test binaries 0.8 s was not always
+    // enough for one timeslice (spurious failure 2026-10-16, load 34).
+    let start = std::time::Instant::now();
+    while harness.state().frame_count_for_test() <= frame_before
+        && start.elapsed() < Duration::from_secs(15)
+    {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let frame_after = harness.state().frame_count_for_test();
     assert!(
