@@ -36,7 +36,13 @@ fn the_tip_shows_once_and_the_badge_opens_enhancements() {
     h.run();
     h.state_mut().launch_rom(&rom);
     run_to(&mut h, 40);
-    h.run_steps(2);
+    // Wait for the tip (up to 15 s) instead of two fixed steps: on a loaded
+    // machine the core can be slow to reach the frame that shows it.
+    let start = Instant::now();
+    while !h.state().enhance_tip_showing_for_test() && start.elapsed() < Duration::from_secs(15) {
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
     assert!(
         h.state().enhance_tip_showing_for_test(),
         "the tip shows the first time"

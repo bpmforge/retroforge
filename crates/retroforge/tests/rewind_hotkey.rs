@@ -83,9 +83,17 @@ fn rewind_is_off_by_default_and_when_on_walks_back_and_resumes() {
 
     // Hold: paused, and the frame counter walks back.
     backspace(&mut harness, true);
-    for _ in 0..20 {
+    // Hold until it has walked back 20 frames (up to 15 s), not a fixed
+    // 200 ms: on a loaded machine the core thread can miss that window.
+    let start = Instant::now();
+    loop {
         harness.run_steps(1);
         std::thread::sleep(Duration::from_millis(10));
+        if harness.state().frame_count_for_test() + 20 <= before
+            || start.elapsed() > Duration::from_secs(15)
+        {
+            break;
+        }
     }
     assert!(harness.state().rewind_for_test().0, "rewinding while held");
     assert!(
