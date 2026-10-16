@@ -4555,3 +4555,9 @@ stories, 10 decisions).
   painter's "needs a running game" test moved to its own binary (it raced
   `RETROFORGE_CONFIG_DIR`). Report: docs/research/W31-04-superfx-hd-proof.md.
   Gate: workspace **2823 passing**.
+- **Fix: widescreen lines keep colour math** (2026-10-16). The SNES core
+  sent the colour-math sub-screen only for 256-dot lines, so every widened
+  line lost colour math (Super Mario World's sky and hills vanished, centre
+  included). The sub-screen is now composed at the line's width with the same
+  widen mask; hires lines are detected separately (both can be 512 wide).
+  256-dot output unchanged. Gate: workspace **2824 passing**.

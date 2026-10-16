@@ -430,10 +430,21 @@ impl SnesCore {
             // into, on lines whose colour math can act. A true-hires line
             // already carries its sub-screen as half-dots of `line`, and
             // math on hires is not modelled.
-            if line.pixels.len() == crate::ppu::WIDTH
+            // Ticket W30-03 follow-up: a widescreen line carries its
+            // sub-screen at the same width (it is not hires, even when it
+            // is 512 dots long), or colour math silently drops on it.
+            let wide_line = width > crate::ppu::WIDTH && !self.system.bus.ppu.line_hires(y);
+            if (line.pixels.len() == crate::ppu::WIDTH || wide_line)
                 && self.system.bus.ppu.line_color_math_active(y)
             {
-                let (sub, fixed_color) = self.system.bus.ppu.render_sub_scanline(y);
+                let (sub, fixed_color) = if wide_line {
+                    self.system
+                        .bus
+                        .ppu
+                        .render_sub_scanline_width(y, width, mask)
+                } else {
+                    self.system.bus.ppu.render_sub_scanline(y)
+                };
                 sink.sub_scanline(y, &sub, fixed_color);
             }
             sink.video_scanline(y, &line.pixels);

@@ -845,6 +845,22 @@ impl Ppu {
         (math.enable != 0 && math.prevent_mode != 3) || math.clip_mode != 0
     }
 
+    /// Whether visible row `y` composes as a true/pseudo-hires line (its
+    /// latched BG mode; SETINI's pseudo-hires bit as currently set). Ticket
+    /// W30-03 follow-up: a widescreen line and a hires line can both be 512
+    /// dots long, so the length alone cannot tell them apart.
+    #[must_use]
+    pub fn line_hires(&self, y: u16) -> bool {
+        let idx = usize::from(y + 1);
+        let state = if self.line_uses_completed(idx) {
+            self.completed_line_state[idx]
+        } else {
+            self.line_state.get(idx).copied().flatten()
+        };
+        let mode = state.map_or(self.bg_mode, |s| s.bg_mode);
+        self.setini.hires_requested(mode)
+    }
+
     /// Line `y`'s palette and effective brightness (ticket W7-20), for
     /// [`rf_core_api::CoreSink::palette_scanline`]. `y` is the 0-based
     /// visible row, as [`Ppu::render_scanline`] takes it; the hardware
@@ -1167,7 +1183,29 @@ impl Ppu {
     /// the core says whether and which.
     #[must_use]
     pub fn render_sub_scanline(&mut self, y: u16) -> (Vec<rf_core_api::SubPixel>, u16) {
+        self.render_sub_scanline_width(y, WIDTH, self.widen_mask)
+    }
+
+    /// [`Self::render_sub_scanline`] for a WIDESCREEN line (ticket W30-03
+    /// follow-up): main and sub screen are composed `width` dots wide with
+    /// the same per-layer widen `mask` as the main line, so colour math
+    /// keeps working across the whole widened line. Before this, the
+    /// sub-screen was only sent for 256-dot lines, and every widescreen line
+    /// silently lost colour math -- Super Mario World's sky gradient and
+    /// hills vanished, centre included. The colour window is a 256-space
+    /// test; margin dots use the nearest on-screen column's window state.
+    /// At `width == WIDTH` this is exactly the 256-dot path.
+    pub fn render_sub_scanline_width(
+        &mut self,
+        y: u16,
+        width: usize,
+        mask: WidenMask,
+    ) -> (Vec<rf_core_api::SubPixel>, u16) {
         use rf_core_api::{ColorMathOp, SubPixel};
+        let width = width.clamp(WIDTH, MAX_WIDTH);
+        let pad = (width - WIDTH) / 2;
+        let saved_mask = self.widen_mask;
+        self.widen_mask = mask;
 
         let line = y + 1;
         let saved = LineScratch::capture(self);
@@ -1187,7 +1225,7 @@ impl Ppu {
         // The layer AND index: OBJ palettes 0-3 never take math (W7-21),
         // and only the index says which palette a sprite pixel used.
         let main_pixels: Vec<(rf_core_api::PixelLayer, u8)> = self
-            .render_scanline_live(line, main_phase, WIDTH)
+            .render_scanline_live(line, main_phase, width)
             .pixels
             .iter()
             .map(|p| (p.layer, p.palette_index))
@@ -1207,7 +1245,7 @@ impl Ppu {
         let phase = self.hires_phase(bg::HiresPhase::Even);
         // The sub screen feeds colour math, which is a 256-space
         // per-dot operation; widening is a main-screen concern.
-        let composed = self.render_scanline_live(line, phase, WIDTH);
+        let composed = self.render_scanline_live(line, phase, width);
 
         let math = self.color_math;
         let windows = self.windows;
@@ -1217,13 +1255,14 @@ impl Ppu {
         // toward the limit flags. None of that is the live PPU's: put
         // it all back before anything else reads a register.
         saved.restore(self);
+        self.widen_mask = saved_mask;
 
         let pixels = composed
             .pixels
             .iter()
             .enumerate()
             .map(|(x, px)| {
-                let inside = windows.masks(5, x as u8);
+                let inside = windows.masks(5, x.saturating_sub(pad).min(WIDTH - 1) as u8);
                 let (main_layer, main_index) = match main_pixels.get(x) {
                     Some((rf_core_api::PixelLayer::Background(n), i)) => (usize::from(*n), *i),
                     Some((rf_core_api::PixelLayer::Sprite, i)) => (4, *i),
