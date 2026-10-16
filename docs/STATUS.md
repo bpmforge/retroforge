@@ -4555,6 +4555,13 @@ stories, 10 decisions).
   painter's "needs a running game" test moved to its own binary (it raced
   `RETROFORGE_CONFIG_DIR`). Report: docs/research/W31-04-superfx-hd-proof.md.
   Gate: workspace **2823 passing**.
+- **W31-07 — Widescreen margins from per-layer stitched canvases** (2026-10-16).
+  One canvas per widened SNES background layer, each placed by its own
+  scroll; holes never erase; unknown cells take the row's backdrop colour.
+  Root cause of the old "repeated terrain" found and fixed: the accuracy
+  bundle kept the first 256 dots of a widened (512) line, i.e. the left
+  margin; `CoreSink::video_scanline_widened` now gives it the middle.
+  Also hardened badge_and_tip, rewind_hotkey, lens_reaches_the_app for load.
 - **W31-05 — Sharper Super FX 3D on the GPU** (2026-10-16). At 2-8x the
   captured polygon stream is redrawn as wgpu triangles (one WGSL shader:
   Metal on macOS, Vulkan/DX12 elsewhere) with MSAA "Edge smoothing" Off/4x/8x
