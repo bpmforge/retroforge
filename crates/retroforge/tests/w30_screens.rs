@@ -404,6 +404,140 @@ fn shot_hdmode7(readme: &mut Vec<String>) {
     );
 }
 
+/// Menus, the map, Yoshi's Island 1, and the fade-in: the shared start of
+/// the Super Mario World widescreen shots.
+fn smw_enter_yi1(h: &mut H) {
+    use egui::Key as K;
+    wait(h, "smw", 200);
+    for i in 0..10 {
+        tap(h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(h, "smw", 100);
+    }
+    wait(h, "smw", 300);
+    // Close the "Welcome to Dinosaur Land" message; the game then shows the
+    // map at Yoshi's House.
+    tap(h, K::X, 8);
+    wait(h, "smw", 400);
+    let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
+        Ok("right") => K::ArrowRight,
+        Ok("up") => K::ArrowUp,
+        _ => K::ArrowLeft,
+    };
+    tap(h, dir, 8);
+    wait(h, "smw", 150);
+    probe(h, "smw-map");
+    tap(h, K::X, 8);
+    // "MARIO START!" and the fade-in, but not long enough for the first
+    // enemy to walk into a Mario standing still.
+    let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    wait(h, "smw", enter);
+    probe(h, "smw-level-start");
+}
+
+/// Ticket W32-07: the level scout. 32:9 right after entering Yoshi's Island
+/// 1 (Mario has not moved), first WITHOUT the scout (only what the camera
+/// has shown: nothing to the right), then with it. Also measures what the
+/// scout costs: live frames per second while it runs, against without.
+fn shot_scout(readme: &mut Vec<String>) {
+    let name = "scout";
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA) not found");
+    };
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    smw_enter_yi1(&mut h);
+    let telemetry = h.state().scout_telemetry_for_test();
+    // Control: widescreen on, scout off, a few frames in (the first screen
+    // is all the camera has shown).
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    let t = h.state().frame_count_for_test() + 20;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let off = grab(&h);
+    // Scout on: re-arm widescreen with the scout enabled and let it run to
+    // the end of its passes at the real (paced) speed, as a player gets it.
+    // (Mario is left standing: the first enemy kills him ~220 frames into
+    // the level; the scout works from a snapshot and does not care.)
+    h.state_mut().set_scout_enabled_for_test(true);
+    // `RF_SCOUT_PACED=1` measures the real cost at the real speed (the game
+    // is then long over for Mario, so the picture is not the point);
+    // otherwise the scout runs flat out so Mario is still standing in the
+    // level when it ends.
+    let paced = std::env::var("RF_SCOUT_PACED").is_ok();
+    h.state_mut().set_scout_turbo_for_test(!paced);
+    if !paced {
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    }
+    h.state_mut().set_widescreen(true);
+    let t1 = Instant::now();
+    let f1 = h.state().frame_count_for_test();
+    let mut finished_at = None;
+    while t1.elapsed() < Duration::from_secs(300) {
+        let t = h.state().frame_count_for_test() + 10;
+        run_frames(&mut h, t, Duration::from_secs(10));
+        if telemetry.finished.load(Relaxed) >= 1 {
+            finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
+            break;
+        }
+    }
+    let (Some((live_frames, took)), Some(off)) = (finished_at, off) else {
+        return skip(readme, name, "the scout never finished");
+    };
+    // Settle a few frames so the margins use the merged canvases.
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let t = h.state().frame_count_for_test() + 30;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let Some(on) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    let (sf, sw, mx, sl, cells) = (
+        telemetry.frames.load(Relaxed),
+        telemetry.wall_us.load(Relaxed),
+        telemetry.max_slice_us.load(Relaxed),
+        telemetry.slices.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+    );
+    println!(
+        "SCOUT {sf} scout frames in {sl} slices over {live_frames} live frames ({:.1} s wall), \
+         {:.2} ms per scout frame, longest slice {:.1} ms, {} forced slices, budgeted slices overran \
+         by {:.1} ms in total, {cells} cells merged; scouts started {} finished {} aborted {}, \
+         passes ended {:?}",
+        took.as_secs_f64(),
+        sw as f64 / 1000.0 / sf.max(1) as f64,
+        mx as f64 / 1000.0,
+        telemetry.forced.load(Relaxed),
+        telemetry.over_us.load(Relaxed) as f64 / 1000.0,
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default()
+    );
+    if paced {
+        return; // the game is long over for Mario: no picture worth keeping
+    }
+    let d = out_dir();
+    save(&d.join("scout-32x9-off.png"), &off.opaque());
+    save(&d.join("scout-32x9-on.png"), &on.opaque());
+    note(
+        readme,
+        format!(
+            "scout-32x9|Super Mario World (USA)|{}x{}, {sf} scout frames over {live_frames} live frames",
+            on.w, on.h
+        ),
+    );
+}
+
 fn shot_widescreen(readme: &mut Vec<String>) {
     let name = "widescreen";
     if !wanted(name) {
@@ -419,33 +553,7 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     // Yoshi's Island 1 (`RF_SMW_MAP_DIR`, default left), enter it, then run
     // right with a jump now and then, so the screen scrolls and the
     // stitched canvas fills the margins.
-    wait(&mut h, "smw", 200);
-    for i in 0..10 {
-        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
-        wait(&mut h, "smw", 100);
-    }
-    wait(&mut h, "smw", 300);
-    // Close the "Welcome to Dinosaur Land" message; the game then shows the
-    // map at Yoshi's House.
-    tap(&mut h, K::X, 8);
-    wait(&mut h, "smw", 400);
-    let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
-        Ok("right") => K::ArrowRight,
-        Ok("up") => K::ArrowUp,
-        _ => K::ArrowLeft,
-    };
-    tap(&mut h, dir, 8);
-    wait(&mut h, "smw", 150);
-    probe(&h, "smw-map");
-    tap(&mut h, K::X, 8);
-    // "MARIO START!" and the fade-in, but not long enough for the first
-    // enemy to walk into a Mario standing still.
-    let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(150);
-    wait(&mut h, "smw", enter);
-    probe(&h, "smw-level-start");
+    smw_enter_yi1(&mut h);
     h.state_mut().set_widescreen(true);
     h.state_mut()
         .set_widescreen_aspect_for_test(Aspect::Wide32x9);
@@ -1089,6 +1197,7 @@ fn w30_w31_screens() {
     let mut readme: Vec<String> = Vec::new();
     shot_hdmode7(&mut readme);
     shot_widescreen(&mut readme);
+    shot_scout(&mut readme);
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
     shot_lens(&mut readme);

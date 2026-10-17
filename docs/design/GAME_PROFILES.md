@@ -268,6 +268,33 @@ for 180 frames while overclocked is returned to 100% for the rest of the
 session ("Turned off: the game stopped responding at higher speed"). That
 protects games that stall at a raised clock without any profile entry.
 
+### `[scout]` (ticket W32-07)
+
+`[scout]` (`rf_profiles::schema::Scout`) is optional. It is the recipe for the
+level scout (`crates/retroforge/src/scout.rs`): a second machine restored from
+a snapshot of the live one, driven ahead of (and behind) the camera so the
+widescreen margins show the real level, not only visited areas. It runs only
+in Game-Aware / Enhanced with widescreen on at an aspect wider than the game's
+own picture, once per scene, and its cells fill only UNKNOWN cells of the live
+canvases (live wins). Every address row needs a `source`, like
+`[[memory_map]]`, and the addresses are found by observation; the loader
+rejects a bad key or row naming it.
+
+| Key | Meaning |
+|---|---|
+| `strategy` | `"player_move"` (move the player's X words; the game's own follow logic moves the camera and streams the level) or `"camera_write"` (write the camera X words; most games snap them back). |
+| `step_px` | Pixels per scout frame, 1..=64. |
+| `frame_budget` | Most frames one pass may run, 1..=20000. |
+| `stall_frames` | A pass ends after this many frames with no new level, 1..=3000 (default 120). |
+| `settle_frames` | Live frames to wait after a scene is entered (default 90). |
+| `dirs` | Passes, `"right"` and/or `"left"` (default both); each restarts from the snapshot. |
+| `[[scout.addr]]` | Rows with `role` = `camera_x` / `player_x` (16-bit little-endian words), `hold` (a byte `value` written every scout frame: invincibility, Mario kept out of reach) or `start_when` (a byte `value` the LIVE game must hold, for 30 frames running, before a scout starts: "in a level, player alive"). |
+
+A scout stops at its frame budget, after `stall_frames` without new level, or
+when the camera jumps (a scene change). Sprites are never taken from it. See
+`docs/research/W32-07-scout-smw.md` for the evidence behind the Super Mario
+World table, and for which recipes failed there.
+
 ### `[superfx_polygons]` (ticket W31-02)
 
 `[superfx_polygons]` (`rf_profiles::schema::SuperfxPolygons`) is optional and

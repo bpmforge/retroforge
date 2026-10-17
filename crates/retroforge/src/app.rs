@@ -1280,6 +1280,16 @@ pub struct RetroForgeApp {
     /// Ticket W30-03: decoded widescreen is on (SNES only), so the
     /// presentation fills the margins.
     widescreen_on: bool,
+    /// Ticket W32-07: the matched profile's `[scout]` recipe (SNES), armed on
+    /// the core thread while widescreen is on at an aspect wider than the
+    /// game's own picture.
+    scout_plan: Option<crate::scout::ScoutPlan>,
+    /// Ticket W32-07: tests turn the scout off to take a control shot.
+    scout_enabled: bool,
+    /// Ticket W32-07: tests run the whole scout in a few live frames.
+    scout_turbo: bool,
+    /// Ticket W32-07: what the scouts have done (shared with the core thread).
+    scout_telemetry: std::sync::Arc<crate::scout::ScoutTelemetry>,
     /// Ticket W32-03: `sync_patch_widescreen` has acted on a widescreen
     /// patch being in force.
     patch_widescreen_applied: bool,
@@ -1745,6 +1755,10 @@ impl RetroForgeApp {
             level_image_tried: false,
             level_camera: None,
             widescreen_on: false,
+            scout_plan: None,
+            scout_enabled: true,
+            scout_turbo: false,
+            scout_telemetry: std::sync::Arc::default(),
             patch_widescreen_applied: false,
             widescreen_scene: None,
             widescreen_source: rf_enhance::widescreen::MarginSource::Vram,
@@ -10744,6 +10758,13 @@ impl RetroForgeApp {
             .as_ref()
             .and_then(|(p, _)| p.superfx_polygons.as_ref())
             .and_then(crate::gsu_poly::observer_config);
+        // Ticket W32-07: the `[scout]` recipe (SNES; the NES scout is the
+        // next ticket).
+        self.scout_plan = matched
+            .as_ref()
+            .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
+            .and_then(|(p, _)| p.scout.as_ref())
+            .map(crate::scout::ScoutPlan::from_profile);
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -13751,6 +13772,7 @@ impl RetroForgeApp {
         if !on {
             self.widescreen_decisions = [None; 4];
             self.send_command(CoreCommand::SetWidescreen(None));
+            self.send_command(CoreCommand::SetScout(None));
             return;
         }
         let mut policies = self
@@ -13788,6 +13810,19 @@ impl RetroForgeApp {
                 convention: self.patch_widescreen_dots().is_some(),
             },
         )));
+        // Ticket W32-07: the level scout, only where the picture is wider
+        // than the game's own and the profile has a recipe for it.
+        let wider = self.widescreen_out_width(WIDESCREEN_LINES) > rf_snes::ppu::WIDTH;
+        self.send_command(CoreCommand::SetScout(
+            self.scout_plan
+                .clone()
+                .filter(|_| wider && self.scout_enabled)
+                .map(|plan| crate::scout::ScoutSetup {
+                    plan,
+                    telemetry: self.scout_telemetry.clone(),
+                    turbo: self.scout_turbo,
+                }),
+        ));
     }
 
     /// Ticket W30-03: dots across the widescreen picture for `lines` lines
@@ -13846,6 +13881,27 @@ impl RetroForgeApp {
                     .any(|r| r.id == "widescreen_decoded" && r.effective());
             self.set_widescreen(user_wants);
         }
+    }
+
+    /// Ticket W32-07: switch the scout off/on for the NEXT `set_widescreen`
+    /// (a control shot without it).
+    #[doc(hidden)]
+    pub fn set_scout_enabled_for_test(&mut self, on: bool) {
+        self.scout_enabled = on;
+    }
+
+    /// Ticket W32-07: run the whole scout in a few live frames (for the NEXT
+    /// `set_widescreen`).
+    #[doc(hidden)]
+    pub fn set_scout_turbo_for_test(&mut self, on: bool) {
+        self.scout_turbo = on;
+    }
+
+    /// Ticket W32-07: what the level scouts have done so far.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scout_telemetry_for_test(&self) -> std::sync::Arc<crate::scout::ScoutTelemetry> {
+        self.scout_telemetry.clone()
     }
 
     /// Ticket W30-03: which source filled the margins of the last frame.

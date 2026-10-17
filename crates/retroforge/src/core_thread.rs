@@ -457,7 +457,7 @@ fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Op
 /// Ticket W31-07: each background layer the widescreen policy widens, with
 /// its registers wrapped to its tilemap, for the per-layer canvases. `None`
 /// on the NES; narrow (HUD) layers are `None` inside.
-fn snes_layer_scrolls(
+pub fn snes_layer_scrolls(
     stepper: &EmuStepper,
     req: &WidescreenRequest,
 ) -> Option<[Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS]> {
@@ -696,6 +696,10 @@ pub enum CoreCommand {
     /// core stops reaching the widening code at all rather than widening
     /// to 256 (law 6).
     SetWidescreen(Option<WidescreenRequest>),
+    /// Ticket W32-07: arm (or disarm) the level scout, whose recipe comes
+    /// from the profile's `[scout]` table. It only ever runs while
+    /// widescreen is on, and only on the scene it was started for.
+    SetScout(Option<crate::scout::ScoutSetup>),
     /// Ticket W11-05: record the tiles the PPU draws, for HD packs.
     ///
     /// **Pay-for-use, and that is why it is a command rather than always
@@ -1333,6 +1337,13 @@ fn core_thread_main(
     let mut canvas_accum = CanvasAccumulator::new(rom_sha256, cache);
     // Ticket W31-07: one canvas per widened background layer (SNES).
     let mut layer_canvases = crate::layer_canvas::LayerCanvasAccumulator::new();
+    // Ticket W32-07: the level scout (a second machine; see `crate::scout`).
+    let mut scout_driver = crate::scout::ScoutDriver::default();
+    // The scroll read after the previous frame, with that frame's number.
+    let mut prev_layer_scrolls: Option<(
+        u64,
+        [Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS],
+    )> = None;
     // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
     let mut last_canvas_flush: Option<std::time::Instant> = None;
 
@@ -1546,11 +1557,15 @@ fn core_thread_main(
                     }
                     widescreen = request;
                     if widescreen.is_none() {
+                        scout_driver.set(None);
                         stepper.set_widescreen_off();
                         // Force a re-send if it is switched back on, so the
                         // UI never shows a stale set of reasons.
                         last_decisions = None;
                     }
+                }
+                CoreCommand::SetScout(setup) => {
+                    scout_driver.set(setup);
                 }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
@@ -1960,7 +1975,20 @@ fn core_thread_main(
             let layer_scrolls = widescreen
                 .as_ref()
                 .and_then(|req| snes_layer_scrolls(&stepper, req));
-            layer_canvases.observe_frame(&bundle, scene, layer_scrolls.as_ref());
+            // The registers read now draw the NEXT frame (the game's NMI
+            // writes them in vblank, after the visible lines), so this frame
+            // is stitched at the value read after the previous one (W32-07:
+            // measured on Super Mario World, a frame stitched at its own
+            // read lands one frame of scroll too far). Only when that read
+            // was the immediately preceding frame.
+            let this_frame = stepper.frame_count();
+            let drawn_with = match prev_layer_scrolls.take() {
+                Some((n, s)) if n + 1 == this_frame => Some(s),
+                _ => None,
+            };
+            prev_layer_scrolls = layer_scrolls.map(|s| (this_frame, s));
+            layer_canvases.observe_frame(&bundle, scene, drawn_with.as_ref());
+            let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
@@ -2179,6 +2207,24 @@ fn core_thread_main(
             {
                 // UI thread hung up; nothing left to serve.
                 return LoopControl::Stop;
+            }
+            // Ticket W32-07: the level scout runs AFTER the picture is out,
+            // in the time the pacer would otherwise sleep, so a slice cannot
+            // delay a frame (it is budgeted from the pacer's own schedule).
+            // The live machine is only read (a snapshot at scout start).
+            if let (false, Some(req)) = (stepped, widescreen.as_ref()) {
+                let scrolls = |s: &EmuStepper| snes_layer_scrolls(s, req);
+                scout_driver.tick(
+                    crate::scout::LiveView {
+                        stepper: &stepper,
+                        rom: &rom,
+                        canvases: &mut layer_canvases,
+                        scene,
+                        size: bundle_size,
+                        scrolls: &scrolls,
+                    },
+                    pacer.spare(Instant::now()),
+                );
             }
         } else {
             // Paused with no pending commands: don't busy-spin a whole CPU

@@ -256,6 +256,27 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "scout",
+            Shape::Object(vec![
+                ("strategy", Shape::Leaf),
+                ("step_px", Shape::Leaf),
+                ("frame_budget", Shape::Leaf),
+                ("stall_frames", Shape::Leaf),
+                ("settle_frames", Shape::Leaf),
+                ("dirs", Shape::Leaf),
+                (
+                    "addr",
+                    Shape::ArrayOfObjects(vec![
+                        ("role", Shape::Leaf),
+                        ("addr", Shape::Leaf),
+                        ("value", Shape::Leaf),
+                        ("notes", Shape::Leaf),
+                        ("source", Shape::Leaf),
+                    ]),
+                ),
+            ]),
+        ),
+        (
             "widescreen",
             Shape::Object(vec![
                 ("bg1", Shape::Leaf),

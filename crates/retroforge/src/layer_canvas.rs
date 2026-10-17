@@ -27,6 +27,15 @@
 //! * A margin cell no layer knows shows the row's backdrop colour (palette
 //!   index 0 with the row palette), bsnes-hd's "auto" fill, not black.
 //!
+//! * **Which scroll a frame is stitched at (W32-07).** The scroll registers
+//!   read after a frame are the ones that draw the NEXT frame (the game's NMI
+//!   writes them in vblank), so callers feed `observe_frame` the values read
+//!   after the PREVIOUS frame. Measured on Super Mario World: stitched at its
+//!   own read, a frame lands one frame of scroll too far.
+//! * **The level scout (W32-07).** `crate::scout` stitches a second machine's
+//!   frames into its own accumulator (`fork_axes`: same world axes) and its
+//!   cells fill only the unknown cells of these canvases (`merge_unknown_*`).
+//!
 //! Presentation only: this reads finished `FrameBundle`s and never touches a
 //! core.
 use std::collections::HashMap;
@@ -35,6 +44,9 @@ use rf_core_api::{FrameBundle, PixelLayer, PpuPixel};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scroll_tracker::WorldAxis;
 use rf_enhance::stitcher::Canvas;
+
+/// A world-space box: `(x0, y0, x1, y1)`, the end exclusive.
+pub type Rect = (i64, i64, i64, i64);
 
 /// How many background layers the SNES has.
 pub const LAYERS: usize = 4;
@@ -81,6 +93,9 @@ pub struct LayerCanvasAccumulator {
     scenes: HashMap<u64, [Canvas; LAYERS]>,
     last: Option<LayerFrames>,
     last_scene: Option<u64>,
+    /// Per layer, the bounding box of the cells written since
+    /// [`Self::take_dirty`] (world coordinates).
+    dirty: [Option<Rect>; LAYERS],
 }
 
 impl LayerCanvasAccumulator {
@@ -123,7 +138,10 @@ impl LayerCanvasAccumulator {
                 // A row this layer did not draw at all must not grow the
                 // canvas with empty cells.
                 if row_buf.iter().any(Option::is_some) {
-                    canvases[n].blit_row(wx, wy + sy as i64, &row_buf);
+                    let y = wy + sy as i64;
+                    canvases[n].blit_row(wx, y, &row_buf);
+                    let r = (wx, y, wx + width as i64, y + 1);
+                    self.dirty[n] = Some(self.dirty[n].map_or(r, |d| union(d, r)));
                 }
             }
             origins[n] = Some((wx + pad, wy));
@@ -132,6 +150,75 @@ impl LayerCanvasAccumulator {
             scene: scene.0,
             origins,
         });
+    }
+
+    /// Ticket W32-07: a fresh accumulator that CONTINUES this one's world
+    /// axes (so its positions are in the same world coordinates) but holds
+    /// no canvases: what a scout stitches into before its cells are merged
+    /// into the live canvases with [`Self::merge_unknown_from`].
+    #[must_use]
+    pub fn fork_axes(&self) -> Self {
+        Self {
+            axes: self.axes,
+            scenes: HashMap::new(),
+            last: None,
+            last_scene: self.last_scene,
+            dirty: [None; LAYERS],
+        }
+    }
+
+    /// Ticket W32-07: put this accumulator's world axes back to `seed`'s
+    /// (a [`Self::fork_axes`] of the live one) and forget the last frame's
+    /// positions; the canvases stitched so far are kept. A scout's next pass
+    /// restarts from the snapshot, so its positions restart from the seed.
+    pub fn rewind_axes(&mut self, seed: &Self) {
+        self.axes = seed.axes;
+        self.last = None;
+    }
+
+    /// The per-layer canvases stitched for `scene`, borrowed.
+    #[must_use]
+    pub fn scene_canvases(&self, scene: u64) -> Option<&[Canvas; LAYERS]> {
+        self.scenes.get(&scene)
+    }
+
+    /// The bounding box of what was stitched per layer since the last call.
+    pub fn take_dirty(&mut self) -> [Option<Rect>; LAYERS] {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// As [`Self::merge_unknown_from`], looking only inside `within` per
+    /// layer (a scout's [`Self::take_dirty`]): the cost of a merge follows
+    /// what changed, not the size of the canvases.
+    pub fn merge_unknown_within(
+        &mut self,
+        scene: u64,
+        from: &[Canvas; LAYERS],
+        within: &[Option<Rect>; LAYERS],
+    ) -> usize {
+        let Some(live) = self.scenes.get_mut(&scene) else {
+            return 0;
+        };
+        live.iter_mut()
+            .zip(from)
+            .zip(within)
+            .map(|((live, scout), rect)| rect.map_or(0, |r| merge_unknown_in(live, scout, Some(r))))
+            .sum()
+    }
+
+    /// Ticket W32-07: fill the cells of `scene`'s canvases that are still
+    /// UNKNOWN from `from` (a scout's canvases); a cell the live game has
+    /// seen is never touched, so live always wins. A scene with no live
+    /// canvas yet takes nothing (the scout belongs to a scene the live game
+    /// has not been in: a stale scout). Returns how many cells were filled.
+    pub fn merge_unknown_from(&mut self, scene: u64, from: &[Canvas; LAYERS]) -> usize {
+        let Some(live) = self.scenes.get_mut(&scene) else {
+            return 0;
+        };
+        live.iter_mut()
+            .zip(from)
+            .map(|(live, scout)| merge_unknown(live, scout))
+            .sum()
     }
 
     /// Where the latest frame sits on each layer's canvas.
@@ -154,6 +241,56 @@ impl LayerCanvasAccumulator {
         }
         out
     }
+}
+
+/// Ticket W32-07: copy into `live` every cell `scout` knows and `live` does
+/// not (live always wins). Grows `live` to cover the scout's cells. Returns
+/// the number of cells filled.
+pub fn merge_unknown(live: &mut Canvas, scout: &Canvas) -> usize {
+    merge_unknown_in(live, scout, None)
+}
+
+fn union(a: Rect, b: Rect) -> Rect {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+/// [`merge_unknown`] restricted to the world box `within` (`None` = all).
+pub fn merge_unknown_in(live: &mut Canvas, scout: &Canvas, within: Option<Rect>) -> usize {
+    let (w, h) = (scout.width(), scout.height());
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let (ox, oy) = scout.origin();
+    // The scout's own box, clipped to `within`, in canvas indices.
+    let (x0, y0, x1, y1) = within.map_or((ox, oy, ox + w as i64, oy + h as i64), |r| {
+        (
+            r.0.max(ox),
+            r.1.max(oy),
+            r.2.min(ox + w as i64),
+            r.3.min(oy + h as i64),
+        )
+    });
+    if x0 >= x1 || y0 >= y1 {
+        return 0;
+    }
+    let mut filled = 0;
+    let mut row: Vec<Option<PpuPixel>> = Vec::with_capacity((x1 - x0) as usize);
+    // Bounded `for` over the clipped rows (law 8).
+    for wy in y0..y1 {
+        let start = (wy - oy) as usize * w + (x0 - ox) as usize;
+        let src = &scout.cells()[start..start + (x1 - x0) as usize];
+        row.clear();
+        row.extend(src.iter().enumerate().map(|(i, cell)| {
+            let cell = (*cell)?;
+            live.get(x0 + i as i64, wy).is_none().then_some(cell)
+        }));
+        let n = row.iter().flatten().count();
+        if n > 0 {
+            live.blit_row(x0, wy, &row);
+            filled += n;
+        }
+    }
+    filled
 }
 
 /// The margin pixel at `(dx, dy)` from the composite picture's left edge /
@@ -487,5 +624,131 @@ mod tests {
         );
         let last = (out_w - 1) * 4;
         assert_eq!(&out[last..last + 3], &backdrop[..], "right is backdrop");
+    }
+
+    // ---- W32-07: merging a scout's canvases into the live ones
+
+    fn row_of(c: &Canvas, y: i64, xs: std::ops::Range<i64>) -> Vec<Option<u8>> {
+        xs.map(|x| c.get(x, y).map(|p| p.palette_index)).collect()
+    }
+
+    #[test]
+    fn a_merge_fills_only_unknown_cells_and_live_wins() {
+        let mut live = canvas_with(&[(0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1)]);
+        let scout = canvas_with(&[(2, 0, 9), (3, 0, 9), (4, 0, 9), (5, 0, 9)]);
+        let filled = merge_unknown(&mut live, &scout);
+        assert_eq!(filled, 2, "only x = 4 and 5 were unknown");
+        assert_eq!(
+            row_of(&live, 0, 0..7),
+            vec![Some(1), Some(1), Some(1), Some(1), Some(9), Some(9), None]
+        );
+        // Idempotent: a second merge adds nothing.
+        assert_eq!(merge_unknown(&mut live, &scout), 0);
+    }
+
+    #[test]
+    fn a_merge_grows_the_live_canvas_to_the_scouts_cells() {
+        let mut live = canvas_with(&[(0, 0, 1)]);
+        let scout = canvas_with(&[(100, 3, 7)]);
+        assert_eq!(merge_unknown(&mut live, &scout), 1);
+        assert_eq!(live.get(100, 3).map(|p| p.palette_index), Some(7));
+        assert_eq!(live.get(0, 0).map(|p| p.palette_index), Some(1));
+    }
+
+    fn two_scenes() -> (LayerCanvasAccumulator, [Canvas; LAYERS]) {
+        let mut live = LayerCanvasAccumulator::new();
+        live.observe_frame(
+            &bundle([0, 0], |_, _, _| {}),
+            SceneId(1),
+            Some(&scrolls(0, 0)),
+        );
+        let scout = [
+            canvas_with(&[(300, 0, 5)]),
+            Canvas::new(),
+            Canvas::new(),
+            Canvas::new(),
+        ];
+        (live, scout)
+    }
+
+    #[test]
+    fn a_scout_only_fills_the_scene_it_was_started_for() {
+        let (mut live, scout) = two_scenes();
+        assert_eq!(
+            live.merge_unknown_from(2, &scout),
+            0,
+            "no canvas for scene 2"
+        );
+        assert_eq!(live.scene_canvases(1).unwrap()[0].get(300, 0), None);
+        assert_eq!(live.merge_unknown_from(1, &scout), 1);
+        let got = live.scene_canvases(1).unwrap()[0].get(300, 0);
+        assert_eq!(got.map(|p| p.palette_index), Some(5));
+    }
+
+    #[test]
+    fn a_dirty_box_limits_what_a_merge_looks_at() {
+        let (mut live, _) = two_scenes();
+        let scout = [
+            canvas_with(&[(300, 0, 5), (900, 0, 6)]),
+            Canvas::new(),
+            Canvas::new(),
+            Canvas::new(),
+        ];
+        let within = [Some((250, 0, 400, 1)), None, None, None];
+        assert_eq!(live.merge_unknown_within(1, &scout, &within), 1);
+        let bg1 = &live.scene_canvases(1).unwrap()[0];
+        assert!(bg1.get(300, 0).is_some());
+        assert_eq!(
+            bg1.get(900, 0),
+            None,
+            "outside the box: left for the next merge"
+        );
+    }
+
+    #[test]
+    fn dirty_boxes_follow_what_was_stitched_and_clear_when_taken() {
+        let mut acc = LayerCanvasAccumulator::new();
+        acc.observe_frame(
+            &bundle([0, 0], |_, _, _| {}),
+            SceneId(1),
+            Some(&scrolls(0, 0)),
+        );
+        acc.observe_frame(
+            &bundle([16, 4], |_, _, _| {}),
+            SceneId(1),
+            Some(&scrolls(16, 4)),
+        );
+        let d = acc.take_dirty();
+        // Each frame blits a full 64-wide row span (the cells the layer did
+        // not draw are skipped inside it): world x 0..64 and 16..80.
+        assert_eq!(d[0], Some((0, 0, 80, i64::from(H))));
+        assert_eq!(d[2], None, "layer 3 was never stitched");
+        assert_eq!(acc.take_dirty(), [None; LAYERS]);
+    }
+
+    #[test]
+    fn a_forked_accumulator_continues_the_live_world_axes() {
+        let mut live = LayerCanvasAccumulator::new();
+        let id = SceneId(1);
+        live.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(500, 0)));
+        live.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(508, 0)));
+        let live_x = live.frames().unwrap().origins[0].unwrap().0;
+        let mut scout = live.fork_axes();
+        // The raw register wrapped (508 -> 4): the world goes on to 516.
+        scout.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(4, 0)));
+        assert_eq!(scout.frames().unwrap().origins[0].unwrap().0, live_x + 8);
+        assert!(
+            live.current_canvases().canvases[0].is_some(),
+            "live untouched"
+        );
+        // Rewinding puts the scout back at the live position.
+        let seed = live.fork_axes();
+        scout.rewind_axes(&seed);
+        scout.observe_frame(
+            &bundle([0, 0], |_, _, _| {}),
+            id,
+            Some(&scrolls(516 % 512, 0)),
+        );
+        assert_eq!(scout.frames().unwrap().origins[0].unwrap().0, live_x + 8);
     }
 }
