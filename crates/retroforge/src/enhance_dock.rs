@@ -95,6 +95,9 @@ pub struct EnhanceCtx<'a> {
     /// Ticket W31-03: the Super FX HD compositor's last frame, as one line
     /// (score, offset, job age, masked share); `None` when it is off.
     pub superfx_hd_readout: Option<String>,
+    /// Ticket W33-04: the stitcher's placement confidence, one line, shown
+    /// under the widescreen row.
+    pub margin_readout: Option<String>,
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -649,6 +652,9 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
                 if let Some(why) = reason {
                     ui.label(format!("    BG{}: kept 4:3 \u{2014} {why}", i + 1));
                 }
+            }
+            if let Some(line) = &ctx.margin_readout {
+                ui.weak(format!("    {line}"));
             }
             // Ticket W30-03: the screen shape to aim for.
             if aspect_picker(ui, &mut ctx.settings.widescreen_aspect) {

@@ -77,3 +77,68 @@ pub fn merge_unknown_in(live: &mut Canvas, scout: &Canvas, within: Option<Rect>)
     }
     filled
 }
+
+/// Ticket W33-04: how many cells the scout and the live canvas BOTH know, and
+/// how many of those hold the same pixel (palette index and palette id),
+/// inside `within` (`None` = everywhere). The W32-07 note measured 39 110 of
+/// 39 110; this is that measurement as a function (STITCHING_PLAN §3.3).
+/// Returns `(agreed, shared)`. Reads only.
+#[must_use]
+pub fn scout_agreement(live: &Canvas, scout: &Canvas, within: Option<Rect>) -> (usize, usize) {
+    let (w, h) = (scout.width(), scout.height());
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    let (ox, oy) = scout.origin();
+    let (x0, y0, x1, y1) = within.map_or((ox, oy, ox + w as i64, oy + h as i64), |r| {
+        (
+            r.0.max(ox),
+            r.1.max(oy),
+            r.2.min(ox + w as i64),
+            r.3.min(oy + h as i64),
+        )
+    });
+    let (mut agreed, mut shared) = (0, 0);
+    // Bounded `for` over the clipped box (law 8).
+    for wy in y0..y1 {
+        for wx in x0..x1 {
+            let (Some(a), Some(b)) = (live.get(wx, wy), scout.get(wx, wy)) else {
+                continue;
+            };
+            shared += 1;
+            agreed += usize::from(a.palette_index == b.palette_index && a.sprite_id == b.sprite_id);
+        }
+    }
+    (agreed, shared)
+}
+
+/// What to do with a scout delta, by [`scout_agreement`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoutVerdict {
+    /// 99 % or more agree: merge.
+    Merge,
+    /// 95 to 99 %: merge, and take smaller scout steps next pass.
+    SlowDown,
+    /// Under 95 %: discard the delta.
+    Reject,
+}
+
+/// Fewer shared cells than this say nothing (STITCHING_PLAN §3.3).
+pub const MIN_SHARED_CELLS: usize = 2000;
+
+/// The §3.3 thresholds over `(agreed, shared)`; `None` = too few shared
+/// cells to judge. Wiring it into the scout worker (reject/slow the pass)
+/// belongs to W33-06.
+#[must_use]
+pub fn scout_verdict((agreed, shared): (usize, usize)) -> Option<ScoutVerdict> {
+    if shared < MIN_SHARED_CELLS {
+        return None;
+    }
+    Some(if agreed * 100 >= shared * 99 {
+        ScoutVerdict::Merge
+    } else if agreed * 100 >= shared * 95 {
+        ScoutVerdict::SlowDown
+    } else {
+        ScoutVerdict::Reject
+    })
+}

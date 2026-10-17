@@ -750,6 +750,10 @@ pub struct RetroForgeApp {
     superfx_hd_sent: Option<bool>,
     superfx_hd: rf_renderer::superfx_hd::SuperFxHd,
     superfx_hd_readout: Option<String>,
+    /// Ticket W33-04: the stitcher's placement confidence for the frame on
+    /// screen, as one Enhancements-panel line, and the figures behind it.
+    margin_readout: Option<String>,
+    stitch_confidence: Option<[rf_enhance::canvas::Confidence; rf_enhance::canvas::LAYERS]>,
     /// Ticket W31-05: the GPU polygon pass, built on first use from
     /// [`Self::gpu`].
     superfx_gpu: Option<rf_renderer::superfx_gpu::SuperFxGpu>,
@@ -1499,6 +1503,41 @@ pub struct RetroForgeApp {
     editor_status: Option<String>,
 }
 
+/// Ticket W33-04: one line for the Enhancements panel: each stitched layer's
+/// placement confidence (0-3), its agreement with the canvas over the scene so
+/// far, the last residual and what the check cost.
+fn stitch_readout(
+    frames: &rf_enhance::canvas::LayerFrames,
+    layers: &rf_enhance::canvas::LayerCanvases,
+) -> String {
+    let mut parts = Vec::new();
+    let mut nanos = 0u64;
+    for (n, c) in frames.confidence.iter().enumerate() {
+        if layers.canvases[n].is_none() {
+            continue;
+        }
+        nanos += u64::from(c.last.nanos);
+        let agree = c
+            .agreement_percent()
+            .map_or_else(|| "-".to_string(), |p| format!("{p:.1}%"));
+        let residual = c
+            .last
+            .residual
+            .map_or(String::new(), |r| format!(", off {r:+} px"));
+        let hud = if layers.hud[n] { " (HUD)" } else { "" };
+        parts.push(format!(
+            "BG{}{hud} {} ({agree}{residual})",
+            n + 1,
+            c.level()
+        ));
+    }
+    format!(
+        "Placement confidence: {} \u{2014} check {:.2} ms",
+        parts.join(", "),
+        nanos as f64 / 1e6
+    )
+}
+
 /// Ticket W33-02 test probe: per row, the most common displayed colour among
 /// the picture's `Backdrop` pixels (`rgba` is the frame as displayed).
 fn picture_backdrop_rows(
@@ -1720,6 +1759,8 @@ impl RetroForgeApp {
             superfx_hd_sent: None,
             superfx_hd: rf_renderer::superfx_hd::SuperFxHd::default(),
             superfx_hd_readout: None,
+            margin_readout: None,
+            stitch_confidence: None,
             superfx_gpu: None,
             superfx_hd_native: None,
             latest_gsu_poly_job: None,
@@ -3903,6 +3944,8 @@ impl RetroForgeApp {
         self.patch_widescreen_applied = false;
         self.widescreen_scene = None;
         self.widescreen_source = rf_enhance::widescreen::MarginSource::Vram;
+        self.margin_readout = None;
+        self.stitch_confidence = None;
 
         self.current_game_settings = match (&self.config_root, &self.current_game_hash) {
             (Some(root), Some(hash)) => crate::game_settings::load(root, hash),
@@ -12117,7 +12160,21 @@ impl RetroForgeApp {
                 && position.is_some(),
             scene_fresh: scene.is_some() && scene == self.ultrawide_canvas_scene,
         };
-        let source = choose_margin_source(facts);
+        // Ticket W33-04: the registration check's score for the layer the
+        // margins lean on. Confidence 0 gives the canvas up for VRAM.
+        let primary_level = layer_frames
+            .zip(self.ultrawide_layers.primary_layer())
+            .map_or(rf_enhance::canvas::MAX_LEVEL, |(f, n)| {
+                f.confidence[n].level()
+            });
+        self.stitch_confidence = layer_frames.map(|f| f.confidence);
+        self.margin_readout = layer_frames
+            .filter(|_| canvas_ready)
+            .map(|f| stitch_readout(f, &self.ultrawide_layers));
+        let source = rf_enhance::widescreen::degrade_margin_source(
+            choose_margin_source(facts),
+            primary_level,
+        );
         self.widescreen_source = source;
         if source == MarginSource::Vram && out_w <= w {
             return (rgba, size);
@@ -12948,6 +13005,24 @@ impl RetroForgeApp {
     #[must_use]
     pub fn superfx_hd_native_for_test(&self) -> Option<(Vec<u8>, usize, usize)> {
         self.superfx_hd_native.clone()
+    }
+
+    /// Ticket W31-05 (tests): the Super FX HD debug readout line, which says
+    /// whether the GPU or the CPU drew the last frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn stitch_confidence_for_test(
+        &self,
+    ) -> Option<[rf_enhance::canvas::Confidence; rf_enhance::canvas::LAYERS]> {
+        self.stitch_confidence
+    }
+
+    /// Ticket W33-04 (tests): the stitch-confidence line of the Enhancements
+    /// panel.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn margin_readout_for_test(&self) -> Option<String> {
+        self.margin_readout.clone()
     }
 
     /// Ticket W31-05 (tests): the Super FX HD debug readout line, which says
@@ -15211,6 +15286,7 @@ impl RetroForgeApp {
                     hd_unsatisfied: &self.hd_unsatisfied,
                     hd_report: self.hd_report,
                     superfx_hd_readout: self.superfx_hd_readout.clone(),
+                    margin_readout: self.margin_readout.clone(),
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session

@@ -415,6 +415,21 @@ pub fn choose_margin_source(facts: MarginFacts) -> MarginSource {
     }
 }
 
+/// Ticket W33-04: let the stitcher's placement confidence (0-3) lower the
+/// margin source. Level 0 (the registers keep contradicting the picture)
+/// gives up the canvas for VRAM margins as without the stitcher. Levels 1 and
+/// 2 keep the source but the canvas hands its cells over only at 2 and above
+/// (`LayerCanvases::usable`), so at 1 the margins are the row backdrop;
+/// "history only" and "history and scout" differ in what MERGES into a
+/// canvas (`CanvasModel::merge_unknown_from`), not in how it is read.
+#[must_use]
+pub fn degrade_margin_source(source: MarginSource, confidence: u8) -> MarginSource {
+    match source {
+        MarginSource::StitchedCanvas if confidence == 0 => MarginSource::Vram,
+        other => other,
+    }
+}
+
 /// Compose a widescreen frame of `out_w` x `h` RGBA with its margins taken
 /// from a world image rather than VRAM.
 ///
@@ -752,6 +767,18 @@ bg1 = "sideways"
             choose_margin_source(facts(false, false, false, false)),
             Vram
         );
+    }
+
+    /// Ticket W33-04: only confidence 0 gives the canvas up for VRAM.
+    #[test]
+    fn confidence_zero_gives_the_canvas_up_and_nothing_else_changes() {
+        use MarginSource::*;
+        for level in 1..=3 {
+            assert_eq!(degrade_margin_source(StitchedCanvas, level), StitchedCanvas);
+        }
+        assert_eq!(degrade_margin_source(StitchedCanvas, 0), Vram);
+        assert_eq!(degrade_margin_source(DecodedLevel, 0), DecodedLevel);
+        assert_eq!(degrade_margin_source(Vram, 0), Vram);
     }
 
     /// A 4-wide native frame of one colour, 2 rows.

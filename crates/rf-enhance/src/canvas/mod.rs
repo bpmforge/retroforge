@@ -61,16 +61,25 @@ mod hud;
 mod merge;
 mod palette_table;
 mod placement;
+mod registration;
 
 pub use compose::{
     backdrop_color, backdrop_rows, front_layer_pixel, front_layer_pixel_in, margin_color,
     margin_palette_index, margin_pixel, RowFacts,
 };
-pub use merge::{crop_into, merge_unknown, merge_unknown_in, rect_union, Rect};
+pub use merge::{
+    crop_into, merge_unknown, merge_unknown_in, rect_union, scout_agreement, scout_verdict, Rect,
+    ScoutVerdict, MIN_SHARED_CELLS,
+};
 pub use palette_table::{tag, Cgram, PaletteTable, LINE_PALETTE_ENTRIES, MAX_PALETTES};
 pub use placement::{
     band_rows, place_rows, scrolls_for, FrameScrolls, LayerFrames, LayerScroll, Pick, RowPos,
     ScrollLag,
+};
+
+pub use registration::{
+    gate_rows, guard_rows, Check, Confidence, AGREE_PERCENT, BAD_FRAMES_PER_STEP,
+    GOOD_FRAMES_PER_STEP, MAX_LEVEL, MAX_OFFSET, MIN_EVIDENCE, STALE_FRAMES,
 };
 
 use hud::{hud_layers, row_orders, Motion};
@@ -168,6 +177,11 @@ impl<'a> FrameFeed<'a> {
 pub struct SceneCanvases {
     pub layers: [Canvas; LAYERS],
     pub palettes: PaletteTable,
+    /// Ticket W33-04: per layer, how far the registers' placement is trusted.
+    pub confidence: [Confidence; LAYERS],
+    /// What frames the canvas disagreed with entirely looked like
+    /// ([`guard_rows`]).
+    candidates: [Canvas; LAYERS],
     motion: [Motion; LAYERS],
 }
 
@@ -182,6 +196,10 @@ pub struct LayerCanvases {
     /// Ticket W33-02: the palettes the cells were seen under; a cell's
     /// `sprite_id` is its id here ([`PaletteTable`]).
     pub palettes: PaletteTable,
+    /// Ticket W33-04: layers whose placement confidence fell below 2: they
+    /// keep their canvas but the margins take nothing from them (a low score
+    /// means less margin, never a wrong one).
+    pub untrusted: [bool; LAYERS],
 }
 
 impl LayerCanvases {
@@ -199,10 +217,23 @@ impl LayerCanvases {
     /// coordinates.
     #[must_use]
     pub fn map_canvas(&self) -> Option<&Canvas> {
+        self.primary_layer().and_then(|n| self.canvases[n].as_ref())
+    }
+
+    /// The layer [`Self::map_canvas`] shows, and whose confidence decides
+    /// the margin source.
+    #[must_use]
+    pub fn primary_layer(&self) -> Option<usize> {
         self.canvases
             .iter()
             .zip(self.hud)
-            .find_map(|(c, hud)| c.as_ref().filter(|_| !hud))
+            .position(|(c, hud)| c.is_some() && !hud)
+    }
+
+    /// Whether the margins may take cells from layer `n`.
+    #[must_use]
+    pub fn usable(&self, n: usize) -> bool {
+        !self.hud.get(n).copied().unwrap_or(true) && !self.untrusted.get(n).copied().unwrap_or(true)
     }
 }
 
@@ -268,6 +299,11 @@ pub struct CanvasModel {
     rom_sha256: String,
     /// The frames come by bands (the NES): only those persist.
     by_bands: bool,
+    /// Ticket W33-04: check frames against the canvas before writing them.
+    /// A scout's fork does not: its machine is the scout's own, its cells are
+    /// scored against the live canvas where they meet it (W33-06), and a
+    /// fork starts with no canvas to check against.
+    guard: bool,
 }
 
 impl Default for CanvasModel {
@@ -295,6 +331,7 @@ impl CanvasModel {
             cache,
             rom_sha256,
             by_bands: false,
+            guard: true,
         }
     }
 
@@ -360,6 +397,7 @@ impl CanvasModel {
             scenes,
             dirty,
             last,
+            guard,
             ..
         } = self;
         let Some(set) = scenes.get_mut(&scene.0) else {
@@ -368,7 +406,18 @@ impl CanvasModel {
         match feed.source {
             Source::Bands => {
                 // The NES: the whole picture is layer 0, placed by bands.
-                let rows = band_rows(bands, bundle.video.len() / width);
+                let mut rows = band_rows(bands, bundle.video.len() / width);
+                if *guard {
+                    guard_rows(
+                        &mut set.layers[0],
+                        &mut set.candidates[0],
+                        &mut set.confidence[0],
+                        &bundle.video,
+                        width,
+                        &mut rows,
+                        &Pick::Level,
+                    );
+                }
                 place_rows(
                     &mut set.layers[0],
                     &bundle.video,
@@ -401,6 +450,7 @@ impl CanvasModel {
                             None,
                         ],
                         row_dx: Vec::new(),
+                        confidence: set.confidence,
                     });
             }
             Source::Registers {
@@ -415,6 +465,7 @@ impl CanvasModel {
                     scene,
                     scrolls,
                     feed.palettes,
+                    *guard,
                 ));
             }
             Source::Registers { scrolls: None, .. } => {}
@@ -473,6 +524,7 @@ impl CanvasModel {
         if let Some(set) = self.scenes.get(&scene) {
             out.hud = hud_layers(&set.motion);
             out.palettes = set.palettes.clone();
+            out.untrusted = set.confidence.map(|c| c.level() < 2);
             for (slot, canvas) in out.canvases.iter_mut().zip(&set.layers) {
                 if canvas.width() > 0 && canvas.height() > 0 {
                     *slot = Some(canvas.clone());
@@ -516,6 +568,7 @@ impl CanvasModel {
             cache: None,
             rom_sha256: String::new(),
             by_bands: self.by_bands,
+            guard: false,
         }
     }
 
@@ -564,11 +617,20 @@ impl CanvasModel {
         let Some(live) = self.scenes.get_mut(&scene) else {
             return 0;
         };
-        live.layers
+        let SceneCanvases {
+            layers, confidence, ..
+        } = live;
+        // Ticket W33-04: scout cells only join a layer whose placement is
+        // fully trusted (confidence 3 = history AND scout).
+        layers
             .iter_mut()
+            .zip(confidence.iter())
             .zip(from)
             .zip(within)
-            .map(|((live, scout), rect)| rect.map_or(0, |r| merge_unknown_in(live, scout, Some(r))))
+            .filter(|(((_, conf), _), _)| conf.level() >= MAX_LEVEL)
+            .map(|(((live, _), scout), rect)| {
+                rect.map_or(0, |r| merge_unknown_in(live, scout, Some(r)))
+            })
             .sum()
     }
 
@@ -581,10 +643,15 @@ impl CanvasModel {
         let Some(live) = self.scenes.get_mut(&scene) else {
             return 0;
         };
-        live.layers
+        let SceneCanvases {
+            layers, confidence, ..
+        } = live;
+        layers
             .iter_mut()
+            .zip(confidence.iter())
             .zip(from)
-            .map(|(live, scout)| merge_unknown(live, scout))
+            .filter(|((_, conf), _)| conf.level() >= MAX_LEVEL)
+            .map(|((live, _), scout)| merge_unknown(live, scout))
             .sum()
     }
 }
@@ -593,6 +660,7 @@ impl CanvasModel {
 /// world-x axis per picture row once line registers have been seen, so a
 /// band keeps its world x across frames), written by [`place_rows`]. Returns
 /// where each layer's picture sits.
+#[allow(clippy::too_many_arguments)] // the model's disjoint fields, borrowed apart
 fn stitch_registers(
     set: &mut SceneCanvases,
     axes: &mut [LayerAxes; LAYERS],
@@ -601,6 +669,7 @@ fn stitch_registers(
     scene: SceneId,
     scrolls: &[Option<LayerScroll>; LAYERS],
     line_words: &[Option<&Cgram>],
+    guard: bool,
 ) -> LayerFrames {
     let width = usize::from(bundle.width);
     let height = usize::from(bundle.height).min(bundle.video.len() / width);
@@ -613,6 +682,8 @@ fn stitch_registers(
     let SceneCanvases {
         layers,
         palettes,
+        confidence,
+        candidates,
         motion,
     } = set;
     // One interned id per picture row (rows share a palette almost always;
@@ -674,6 +745,17 @@ fn stitch_registers(
             sub: &bundle.sub,
             ids: &row_ids,
         };
+        if guard {
+            guard_rows(
+                &mut layers[n],
+                &mut candidates[n],
+                &mut confidence[n],
+                &bundle.video,
+                width,
+                &mut rows,
+                &pick,
+            );
+        }
         let drawn = place_rows(
             &mut layers[n],
             &bundle.video,
@@ -689,6 +771,7 @@ fn stitch_registers(
         scene: scene.0,
         origins,
         row_dx,
+        confidence: *confidence,
     }
 }
 

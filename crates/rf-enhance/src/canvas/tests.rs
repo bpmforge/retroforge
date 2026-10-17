@@ -978,6 +978,7 @@ fn compose_fixture() -> (LayerCanvases, LayerFrames, Cgram) {
         scene: 1,
         origins: [Some((0, 0)), Some((0, 0)), None, None],
         row_dx: Vec::new(),
+        confidence: Default::default(),
     };
     (layers, frames, words)
 }
@@ -1111,6 +1112,17 @@ mod nes_layer0 {
     /// "all flat" for ANY solid colour, so it cannot tell "different scene"
     /// from "same scene, different fill".
     fn frame_bundle(frame_count: u64, shift: i64, seed: u8) -> FrameBundle {
+        frame_bundle_with_register(frame_count, shift, shift, seed)
+    }
+
+    /// As [`frame_bundle`], with the scroll register saying `register` while
+    /// the picture really is at `shift` (a mis-placed feed).
+    fn frame_bundle_with_register(
+        frame_count: u64,
+        shift: i64,
+        register: i64,
+        seed: u8,
+    ) -> FrameBundle {
         let (width, height) = (usize::from(WIDTH), usize::from(HEIGHT));
         let mut video = Vec::with_capacity(width * height);
         for y in 0..height {
@@ -1122,7 +1134,7 @@ mod nes_layer0 {
         }
         let events = vec![
             CoreEvent::ScrollWrite {
-                x: shift.rem_euclid(512) as u16,
+                x: register.rem_euclid(512) as u16,
                 y: 0,
                 layer: PixelLayer::Background(0),
             },
@@ -1176,7 +1188,9 @@ mod nes_layer0 {
         let moving = m.frames().expect("moving");
         for frame in 2..6 {
             observe(&mut m, &frame_bundle(frame, 4, 3));
-            assert_eq!(m.frames(), Some(moving.clone()), "frame {frame}");
+            let now = m.frames().expect("frame");
+            assert_eq!(now.origins, moving.origins, "frame {frame}");
+            assert_eq!(now.scene, moving.scene, "frame {frame}");
         }
     }
 
@@ -1250,6 +1264,34 @@ mod nes_layer0 {
     /// A genuine scene cut (world position jump far past
     /// `MAX_CONTINUOUS_STEP_PX`) must route later frames into a SEPARATE
     /// canvas, not corrupt the original's world-coordinate space.
+    /// Ticket W33-04: the NES bands are checked like the SNES layers: a
+    /// picture that is not where its scroll register says is not written.
+    #[test]
+    fn a_nes_band_that_disagrees_with_the_canvas_is_not_written() {
+        let mut m = CanvasModel::new();
+        for f in 0..12 {
+            observe(&mut m, &frame_bundle(f, 3 * f as i64, 3));
+        }
+        let level = |m: &CanvasModel| m.frames().unwrap().confidence[0].level();
+        assert_eq!(level(&m), 3, "a correct feed keeps full confidence");
+        let before = layer0(&m).expect("canvas");
+        // From here the register runs 5 dots ahead of the picture.
+        for f in 12..16 {
+            observe(
+                &mut m,
+                &frame_bundle_with_register(f, 3 * f as i64, 3 * f as i64 + 5, 3),
+            );
+        }
+        assert!(m.frames().unwrap().confidence[0].last.disagrees());
+        assert!(level(&m) < 3, "confidence fell");
+        assert_eq!(layer0(&m).as_ref(), Some(&before), "no cell was written");
+        // The fault clears.
+        for f in 16..16 + 3 * GOOD_FRAMES_PER_STEP as u64 {
+            observe(&mut m, &frame_bundle(f, 3 * f as i64, 3));
+        }
+        assert_eq!(level(&m), 3, "and confidence recovers");
+    }
+
     #[test]
     fn a_scene_cut_starts_a_separate_canvas_not_corrupting_the_first() {
         let mut m = CanvasModel::new();
@@ -1381,6 +1423,7 @@ mod nes_layer0 {
             scene: 1,
             origins: [Some((0, 0)), None, None, None],
             row_dx: Vec::new(),
+            confidence: Default::default(),
         };
         let facts = RowFacts {
             backdrop: Some([9, 9, 9]),
@@ -1397,6 +1440,251 @@ mod nes_layer0 {
         assert_eq!(
             margin_pixel(&layers, &frames, 0, 6, &RowFacts::default(), &nes_rgb),
             None
+        );
+    }
+}
+
+mod registration_checks {
+    use super::*;
+
+    const RW: u16 = 160;
+    const RH: u16 = 32;
+
+    /// One layer (BG1) whose pixel encodes its own world column and row, so a
+    /// picture 3 px off the registers disagrees everywhere.
+    fn ramp(hofs: u16) -> FrameBundle {
+        let mut video = Vec::new();
+        for y in 0..usize::from(RH) {
+            for c in 0..usize::from(RW) {
+                let v = ((usize::from(hofs) + c) * 7 + y * 13) as u8;
+                video.push(px(PixelLayer::Background(0), v));
+            }
+        }
+        FrameBundle::new(0, RW, RH, video, Vec::<CoreEvent>::new())
+    }
+
+    fn one_layer(hofs: u16) -> [Option<LayerScroll>; LAYERS] {
+        [scroll(hofs), None, None, None]
+    }
+
+    const ID: SceneId = SceneId(1);
+    const SPEED: u16 = 2;
+
+    /// Frame `f`: the picture is at `f * SPEED`, the registers say `claimed`.
+    fn feed_frame(m: &mut CanvasModel, f: u16, claimed: u16) {
+        m.feed(&ramp(f * SPEED), ID, Some(&one_layer(claimed)));
+    }
+
+    fn conf(m: &CanvasModel) -> Confidence {
+        m.frames().unwrap().confidence[0]
+    }
+
+    fn warmed_up(frames: u16) -> CanvasModel {
+        let mut m = CanvasModel::new();
+        for f in 0..frames {
+            feed_frame(&mut m, f, f * SPEED);
+        }
+        m
+    }
+
+    #[test]
+    fn a_correct_placement_keeps_full_confidence_and_grows_the_canvas() {
+        let m = warmed_up(60);
+        let c = conf(&m);
+        assert_eq!(c.level(), 3);
+        assert!(c.last.agrees(), "{c:?}");
+        assert_eq!(c.agreement_percent(), Some(100.0));
+        let canvas = m.current_canvases().canvases[0].clone().unwrap();
+        assert!(canvas.width() >= usize::from(RW) + 59 * usize::from(SPEED));
+    }
+
+    #[test]
+    fn the_first_frame_of_a_scene_has_no_evidence_and_is_still_written() {
+        let m = warmed_up(1);
+        let c = conf(&m);
+        assert_eq!((c.level(), c.last.judged_bands), (3, 0));
+        assert!(m.current_canvases().canvases[0].is_some());
+    }
+
+    /// A register read 3 px off the picture: detected within 10 frames, no
+    /// cell written, confidence drops, and a clean feed recovers.
+    #[test]
+    fn a_mis_placed_feed_is_detected_withheld_and_recovers() {
+        let mut m = warmed_up(20);
+        let before = m.current_canvases();
+        let mut detected_at = None;
+        for (i, f) in (20..30).enumerate() {
+            feed_frame(&mut m, f, f * SPEED + 3);
+            if detected_at.is_none() && conf(&m).last.disagrees() {
+                detected_at = Some(i);
+            }
+        }
+        assert_eq!(detected_at, Some(0), "detected on the first bad frame");
+        assert!(conf(&m).level() < 3, "{:?}", conf(&m));
+        assert_eq!(
+            m.current_canvases().canvases,
+            before.canvases,
+            "nothing written"
+        );
+        // The residual says where the picture really sits.
+        assert_eq!(conf(&m).last.residual, Some(-3));
+        // Fault clears: the next frames agree, and confidence climbs back.
+        for f in 30..30 + 3 * GOOD_FRAMES_PER_STEP as u16 + 4 {
+            feed_frame(&mut m, f, f * SPEED);
+        }
+        assert!(conf(&m).last.agrees());
+        assert_eq!(conf(&m).level(), 3);
+        let canvas = m.current_canvases().canvases[0].clone().unwrap();
+        let probe = 10 + i64::from(30 * SPEED);
+        let want = (probe as usize * 7) as u8;
+        assert_eq!(canvas.get(probe, 0).map(|p| p.palette_index), Some(want));
+    }
+
+    /// The scroll registers read one frame late (the old lag bug).
+    #[test]
+    fn a_one_frame_lag_is_detected() {
+        let mut m = warmed_up(20);
+        let before = m.current_canvases();
+        for f in 20..26 {
+            feed_frame(&mut m, f, (f - 1) * SPEED);
+        }
+        assert!(conf(&m).last.disagrees());
+        assert!(conf(&m).level() < 3);
+        assert_eq!(m.current_canvases().canvases, before.canvases);
+    }
+
+    /// A gross error (the old widened-line bundle bug was 128 px): outside
+    /// the +-8 search, so no residual is offered, but the rows are withheld
+    /// all the same. Only caught where the canvas already knows the ground
+    /// the picture lands on; a fresh stretch is no evidence.
+    #[test]
+    fn a_gross_error_over_known_ground_is_detected() {
+        let mut m = warmed_up(70);
+        let before = m.current_canvases();
+        feed_frame(&mut m, 70, 70 * SPEED + 100);
+        assert!(conf(&m).last.disagrees());
+        assert_eq!(conf(&m).last.residual, None, "out of search range");
+        assert_eq!(m.current_canvases().canvases, before.canvases);
+    }
+
+    #[test]
+    fn a_distrusted_layer_gives_the_margins_nothing_and_takes_no_scout_cells() {
+        let mut m = warmed_up(20);
+        for f in 20..26 {
+            feed_frame(&mut m, f, f * SPEED + 3);
+        }
+        assert!(conf(&m).level() < 3);
+        let mut scout: [Canvas; LAYERS] = std::array::from_fn(|_| Canvas::new());
+        scout[0] = canvas_with(&[(5000, 0, 9)]);
+        assert_eq!(m.merge_unknown_from(ID.0, &scout), 0, "no scout cell joins");
+        // Two more disagreeing frames take it below 2: no margin cells.
+        for f in 26..30 {
+            feed_frame(&mut m, f, f * SPEED + 3);
+        }
+        let set = m.current_canvases();
+        assert_eq!(set.untrusted[0], conf(&m).level() < 2);
+        assert!(set.untrusted[0], "{:?}", conf(&m));
+        assert!(!set.usable(0));
+    }
+
+    /// A screen the scene tracker did not cut: the canvas is stale, not the
+    /// placement wrong. Writes are withheld for a while, then the canvas is
+    /// dropped and the new picture is learned (no permanent freeze).
+    #[test]
+    fn a_canvas_the_picture_never_agrees_with_again_is_dropped_and_relearned() {
+        let mut m = warmed_up(20);
+        // A different picture (offset ramp) with consistent registers.
+        let other = |f: u16| {
+            let mut b = ramp(f * SPEED);
+            for p in &mut b.video {
+                p.palette_index = p.palette_index.wrapping_add(101);
+            }
+            b
+        };
+        for f in 20..20 + STALE_FRAMES as u16 + 1 {
+            m.feed(&other(f), ID, Some(&one_layer(f * SPEED)));
+        }
+        assert_eq!(conf(&m).resets, 1, "{:?}", conf(&m));
+        assert_eq!(conf(&m).level(), 3, "starts over");
+        for f in 66..80 {
+            m.feed(&other(f), ID, Some(&one_layer(f * SPEED)));
+        }
+        let canvas = m.current_canvases().canvases[0].clone().unwrap();
+        let x = i64::from(70 * SPEED) + 5;
+        assert_eq!(
+            canvas.get(x, 0).map(|p| p.palette_index),
+            Some(((x as usize * 7) as u8).wrapping_add(101)),
+            "the new picture was written"
+        );
+        assert!(conf(&m).last.agrees());
+    }
+
+    #[test]
+    fn confidence_steps_follow_the_streaks() {
+        let mut c = Confidence::default();
+        let bad = Check {
+            withheld_rows: 4,
+            judged_rows: 4,
+            picture_rows: 4,
+            judged_bands: 1,
+            ..Check::default()
+        };
+        let good = Check {
+            judged_bands: 1,
+            agreed: 40,
+            compared: 40,
+            ..Check::default()
+        };
+        for _ in 0..BAD_FRAMES_PER_STEP {
+            c.observe(bad);
+        }
+        assert_eq!(c.level(), 2);
+        // A frame with no verdict counts toward recovery (nothing was
+        // contradicted), and an isolated bad frame never steps down.
+        c.observe(Check::default());
+        for _ in 0..GOOD_FRAMES_PER_STEP - 2 {
+            c.observe(good);
+        }
+        assert_eq!(c.level(), 2);
+        c.observe(good);
+        assert_eq!(c.level(), 3);
+        c.observe(good);
+        assert_eq!(c.level(), 3, "capped");
+    }
+}
+
+mod scout_agreement_checks {
+    use super::*;
+
+    fn filled(v: impl Fn(i64) -> u8) -> Canvas {
+        let mut c = Canvas::new();
+        let row: Vec<_> = (0..3000)
+            .map(|x| Some(px(PixelLayer::Background(0), v(x))))
+            .collect();
+        c.blit_row(0, 0, &row);
+        c
+    }
+
+    #[test]
+    fn identical_cells_merge_and_a_shifted_scout_is_rejected() {
+        let live = filled(|x| (x * 7) as u8);
+        let same = scout_agreement(&live, &filled(|x| (x * 7) as u8), None);
+        assert_eq!(same, (3000, 3000));
+        assert_eq!(scout_verdict(same), Some(ScoutVerdict::Merge));
+        let shifted = scout_agreement(&live, &filled(|x| ((x + 3) * 7) as u8), None);
+        assert_eq!(scout_verdict(shifted), Some(ScoutVerdict::Reject));
+    }
+
+    #[test]
+    fn the_thresholds_are_99_and_95_percent_over_2000_shared_cells() {
+        assert_eq!(scout_verdict((2970, 3000)), Some(ScoutVerdict::Merge));
+        assert_eq!(scout_verdict((2969, 3000)), Some(ScoutVerdict::SlowDown));
+        assert_eq!(scout_verdict((2850, 3000)), Some(ScoutVerdict::SlowDown));
+        assert_eq!(scout_verdict((2849, 3000)), Some(ScoutVerdict::Reject));
+        assert_eq!(
+            scout_verdict((1999, 1999)),
+            None,
+            "too few shared cells to judge"
         );
     }
 }

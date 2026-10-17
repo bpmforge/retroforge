@@ -22,6 +22,7 @@ use rf_core_api::{FrameBundle, PixelLayer, PpuPixel, SubLine};
 
 use super::merge::{rect_union, Rect};
 use super::palette_table;
+use super::registration::Confidence;
 use super::LAYERS;
 use crate::scroll_tracker::{BandWorldPos, ScanlineBand, WorldAxis};
 use crate::stitcher::{stitchable_pixel, Canvas};
@@ -116,6 +117,9 @@ pub struct LayerFrames {
     /// no row carried line registers (and always on the NES): every row sits
     /// at the origin.
     pub row_dx: Vec<[i32; LAYERS]>,
+    /// Ticket W33-04: each layer's placement confidence after this frame's
+    /// registration check ([`super::registration`]).
+    pub confidence: [Confidence; LAYERS],
 }
 
 impl LayerFrames {
@@ -201,6 +205,30 @@ pub enum Pick<'a> {
     },
 }
 
+/// The pixel of layer `wanted` at column `c` of a row whose main-screen dot is
+/// `p`, tagged with the row's palette id: the main screen's own, else the sub
+/// screen's pixel of THIS layer where the main screen showed something else
+/// (W33-01). Shared by placement and the registration check, so both look at
+/// the same pixels.
+pub(crate) fn layer_pixel(
+    wanted: PixelLayer,
+    sub: Option<&SubLine>,
+    id: Option<u8>,
+    c: usize,
+    p: &PpuPixel,
+) -> Option<PpuPixel> {
+    if p.layer == wanted {
+        return Some(palette_table::tag(*p, id));
+    }
+    let sp = sub?.pixels.get(c).filter(|sp| sp.layer == wanted)?;
+    Some(PpuPixel {
+        palette_index: sp.palette_index,
+        layer: wanted,
+        sprite_id: id,
+        priority: 0,
+    })
+}
+
 /// The one placement function: write the rows of `video` (`width` dots per
 /// row) that have a position into `canvas`, picking pixels with `pick`.
 /// `dirty` is grown by the box of every row written. Returns the first and
@@ -245,20 +273,11 @@ pub fn place_rows(
             Pick::Layer { wanted, sub, ids } => {
                 let sub = sub.get(sy).and_then(Option::as_ref);
                 let id = ids.get(sy).copied().flatten();
-                buf.extend(row.iter().enumerate().map(|(c, p)| {
-                    if p.layer == *wanted {
-                        return Some(palette_table::tag(*p, id));
-                    }
-                    // The sub screen's pixel of THIS layer where the main
-                    // screen showed something else (W33-01).
-                    let sp = sub?.pixels.get(c).filter(|sp| sp.layer == *wanted)?;
-                    Some(PpuPixel {
-                        palette_index: sp.palette_index,
-                        layer: *wanted,
-                        sprite_id: id,
-                        priority: 0,
-                    })
-                }));
+                buf.extend(
+                    row.iter()
+                        .enumerate()
+                        .map(|(c, p)| layer_pixel(*wanted, sub, id, c, p)),
+                );
                 if buf.iter().all(Option::is_none) {
                     continue;
                 }
