@@ -43,8 +43,11 @@
 //!   (its scroll never moved while another layer's did, and it only draws a
 //!   band of rows) keeps its canvas but is left out of the margins
 //!   ([`LayerCanvases::hud`]).
-//! * A margin cell no layer knows shows the row's backdrop colour (palette
-//!   index 0 with the row palette), bsnes-hd's "auto" fill, not black.
+//! * A margin cell no layer knows shows the row's backdrop colour, bsnes-hd's
+//!   "auto" fill, not black. Since W33-02 that colour is RECONSTRUCTED from
+//!   the row's registers ([`backdrop_color`]), not voted from the picture.
+//! * A remembered cell is resolved with the palette it was seen under
+//!   ([`crate::palette_table`]), not the palette of the row being drawn now.
 //!
 //! * **Which scroll a frame is stitched at (W32-07, W32-08).** The scroll
 //!   registers read after a frame are the ones that draw the NEXT frame (the
@@ -65,6 +68,8 @@ use rf_core_api::{FrameBundle, LineRegisters, PixelLayer, PpuPixel};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scroll_tracker::WorldAxis;
 use rf_enhance::stitcher::Canvas;
+
+use crate::palette_table::{self, PaletteTable};
 
 /// A world-space box: `(x0, y0, x1, y1)`, the end exclusive.
 pub type Rect = (i64, i64, i64, i64);
@@ -229,6 +234,9 @@ pub struct LayerCanvases {
     /// Layers that are HUD (see [`LayerCanvasAccumulator::hud_layers`]): they
     /// keep their canvas but give the margins nothing.
     pub hud: [bool; LAYERS],
+    /// Ticket W33-02: the palettes the cells were seen under; a cell's
+    /// `sprite_id` is its id here ([`crate::palette_table`]).
+    pub palettes: PaletteTable,
 }
 
 impl LayerCanvases {
@@ -263,6 +271,8 @@ pub struct LayerCanvasAccumulator {
     dirty: [Option<Rect>; LAYERS],
     /// Per scene and layer, the scroll/rows evidence for the HUD test.
     motion: HashMap<u64, [Motion; LAYERS]>,
+    /// Ticket W33-02: per scene, the palettes its cells were seen under.
+    palettes: HashMap<u64, PaletteTable>,
 }
 
 impl LayerCanvasAccumulator {
@@ -281,6 +291,20 @@ impl LayerCanvasAccumulator {
         scene: SceneId,
         scrolls: Option<&[Option<LayerScroll>; LAYERS]>,
     ) {
+        self.observe_frame_with_palettes(bundle, scene, scrolls, &[]);
+    }
+
+    /// [`Self::observe_frame`] with the palette each picture row was drawn
+    /// with (ticket W33-02): the cells written are tagged with the id of
+    /// their row's palette in the scene's [`PaletteTable`]. A row with no
+    /// palette (NES, or `&[]`) writes cells with no id.
+    pub fn observe_frame_with_palettes(
+        &mut self,
+        bundle: &FrameBundle,
+        scene: SceneId,
+        scrolls: Option<&[Option<LayerScroll>; LAYERS]>,
+        line_palettes: &[Option<rf_renderer::LinePalette>],
+    ) {
         self.last = None;
         self.last_scene = Some(scene.0);
         let Some(scrolls) = scrolls else { return };
@@ -297,6 +321,17 @@ impl LayerCanvasAccumulator {
         let line0 = bundle.lines.first().copied().flatten();
         let canvases = self.scenes.entry(scene.0).or_default();
         let motion = self.motion.entry(scene.0).or_default();
+        let table = self.palettes.entry(scene.0).or_default();
+        // One interned id per picture row (rows share a palette almost
+        // always; `intern` is a hash lookup either way).
+        let row_ids: Vec<Option<u8>> = (0..height)
+            .map(|sy| {
+                line_palettes
+                    .get(sy)
+                    .and_then(Option::as_ref)
+                    .and_then(|p| table.intern(&p.words))
+            })
+            .collect();
         let mut origins = [None; LAYERS];
         let mut row_dx: Vec<[i32; LAYERS]> = if has_lines {
             vec![[0; LAYERS]; height]
@@ -334,10 +369,11 @@ impl LayerCanvasAccumulator {
                     row_dx[sy][n] = i32::try_from(wx - base_x).unwrap_or(0);
                 }
                 let sub = bundle.sub.get(sy).and_then(Option::as_ref);
+                let id = row_ids.get(sy).copied().flatten();
                 row_buf.clear();
                 row_buf.extend(row.iter().enumerate().map(|(c, p)| {
                     if p.layer == wanted {
-                        return Some(*p);
+                        return Some(palette_table::tag(*p, id));
                     }
                     // The sub screen's pixel of THIS layer where the main
                     // screen showed something else (W33-01).
@@ -345,7 +381,7 @@ impl LayerCanvasAccumulator {
                     Some(PpuPixel {
                         palette_index: sp.palette_index,
                         layer: wanted,
-                        sprite_id: None,
+                        sprite_id: id,
                         priority: 0,
                     })
                 }));
@@ -382,6 +418,7 @@ impl LayerCanvasAccumulator {
             last_scene: self.last_scene,
             dirty: [None; LAYERS],
             motion: HashMap::new(),
+            palettes: HashMap::new(),
         }
     }
 
@@ -549,6 +586,9 @@ impl LayerCanvasAccumulator {
         let mut out = LayerCanvases::default();
         if let Some(set) = self.last_scene.and_then(|s| self.scenes.get(&s)) {
             out.hud = self.hud_layers(self.last_scene.unwrap_or_default());
+            if let Some(t) = self.last_scene.and_then(|s| self.palettes.get(&s)) {
+                out.palettes = t.clone();
+            }
             for (slot, canvas) in out.canvases.iter_mut().zip(set) {
                 if canvas.width() > 0 && canvas.height() > 0 {
                     *slot = Some(canvas.clone());
@@ -707,11 +747,12 @@ pub fn margin_color(
     let at = |screen: u8| {
         front_layer_pixel_in(layers, |n| frames.origin_at(n, row), dx, dy, order, screen)
     };
-    let word = |i: u8| palette.words[usize::from(i)];
+    // W33-02: a remembered cell shows under the palette it was seen with.
+    let word = |p: &PpuPixel| layers.palettes.word(p, palette);
     let main = at(regs.tm & 0x0F);
-    let (mut main_word, main_bit) = match main {
+    let (main_word, main_bit) = match main {
         Some(p) => (
-            word(p.palette_index),
+            word(&p),
             match p.layer {
                 PixelLayer::Background(n) => u32::from(n),
                 _ => 5,
@@ -719,11 +760,23 @@ pub fn margin_color(
         ),
         None => (regs.backdrop_color, 5),
     };
-    let sub = regs.use_subscreen.then(|| at(regs.ts & 0x0F)).flatten();
+    let sub = regs
+        .use_subscreen
+        .then(|| at(regs.ts & 0x0F))
+        .flatten()
+        .map(|p| word(&p));
+    shade(regs, main_word, main_bit, sub)
+}
+
+/// One dot's final colour: the row's colour math over `main_word` (a
+/// BGR555 word whose source is `main_bit` of `$2131`: BG1-4 = 0-3, OBJ = 4,
+/// backdrop = 5) and the second operand (`sub`, the sub-screen's word, or
+/// `None` for a transparent sub screen = the fixed colour `$2132`), then
+/// brightness. The rules are fullsnes "SNES PPU Color-Math" (see
+/// [`margin_color`]); shared so the backdrop and the cells agree.
+fn shade(regs: &LineRegisters, main_word: u16, main_bit: u32, sub: Option<u16>) -> [u8; 3] {
     let main_black = regs.clip_mode == 3;
-    if main_black {
-        main_word = 0;
-    }
+    let main_word = if main_black { 0 } else { main_word };
     let op = if regs.prevent_mode == 3 || regs.math_enable & (1 << main_bit) == 0 {
         rf_core_api::ColorMathOp::None
     } else {
@@ -735,51 +788,99 @@ pub fn margin_color(
             (true, true) => rf_core_api::ColorMathOp::SubtractHalf,
         }
     };
-    let sub_word = sub.map_or(regs.fixed_color, |p| word(p.palette_index));
-    let shown = rf_renderer::palette::color_math_bgr555(main_word, sub_word, op);
+    let shown =
+        rf_renderer::palette::color_math_bgr555(main_word, sub.unwrap_or(regs.fixed_color), op);
     rf_renderer::bgr555_to_rgb(shown, regs.brightness)
 }
 
-/// Per picture row, the colour the backdrop shows on screen: the most
-/// common displayed colour among the row's `Backdrop` pixels, `None` for a
-/// row with none. The most common, not the first: with colour math the
-/// first backdrop pixel can sit on a cloud or hill edge of the sub-screen,
-/// which streaked the margins (W31-07 probe, 2026-10-16).
+/// Ticket W33-02: the colour the BACKDROP shows on a row, reconstructed from
+/// the registers the row was drawn with (fullsnes "SNES PPU Color-Math" and
+/// "2100h - INIDISP"): CGRAM entry 0 as the main source (black when `$2130`
+/// bits 6-7 force the main screen black), combined with the fixed colour
+/// `$2132` when `$2131` bit 5 enables math for the backdrop (add/subtract
+/// per bit 7, halved per bit 6 EXCEPT that a half is not applied when the
+/// main screen is forced black), unless `$2130` bits 4-5 = 3 turn math off,
+/// then scaled by the row's brightness (0 = force-blank = black).
 ///
-/// Why not just palette index 0: games like Super Mario World draw their sky
-/// through colour math, so the row's backdrop ON SCREEN differs from
-/// CGRAM entry 0 (black there). The displayed pixel is the honest answer.
-/// `rgba` is the frame as displayed, `width` columns wide.
+/// This is what Super Mario World's HDMA sky gradient is: the fixed colour
+/// changes per row, the backdrop is black, math adds them. No voting over
+/// the picture, so a row nothing was drawn on still has an exact colour.
+/// The sub screen is taken as transparent (the fixed colour): a layer on the
+/// sub screen is a CELL, not the backdrop (see [`margin_color`]).
 #[must_use]
-pub fn row_backdrops(video: &[PpuPixel], width: u16, rgba: &[u8]) -> Vec<Option<[u8; 3]>> {
-    let width = usize::from(width);
+pub fn backdrop_color(regs: &LineRegisters) -> [u8; 3] {
+    shade(regs, regs.backdrop_color, 5, None)
+}
+
+/// Ticket W33-02: per picture row, the colour the backdrop shows there:
+/// [`backdrop_color`] of the row's registers when it has them (SNES);
+/// otherwise the palette index the picture's own `Backdrop` pixels carry
+/// (the NES emits the already-resolved palette-RAM value for every dot,
+/// `rf_nes::ppu` module doc, so its backdrop is exact too), resolved with the
+/// row's line palette or the fixed NES table. `None` when no row has any
+/// backdrop pixel and none has registers.
+///
+/// A row with fewer than `width / 8` backdrop pixels (a platform or a wall
+/// covers it) is too thin to say anything and takes the nearest row above
+/// with evidence, else the nearest below: the universal backdrop colour
+/// (nesdev.org "PPU palettes", `$3F00`) changes on a split, not per row, and a
+/// vote over a handful of dots streaked Mega Man 2's margins.
+#[must_use]
+pub fn backdrop_rows(
+    bundle: &FrameBundle,
+    line_palettes: &[Option<rf_renderer::LinePalette>],
+) -> Vec<Option<[u8; 3]>> {
+    let width = usize::from(bundle.width);
     if width == 0 {
         return Vec::new();
     }
-    // Bounded `for`-style walk over the rows (law 8).
-    video
+    let enough = u32::try_from((width / 8).max(1)).unwrap_or(u32::MAX);
+    // Per row: the registers' exact colour, or the winning backdrop index
+    // when it has enough pixels to be believed.
+    let votes: Vec<Result<[u8; 3], Option<u8>>> = bundle
+        .video
         .chunks_exact(width)
         .enumerate()
         .map(|(y, row)| {
-            let mut counts: std::collections::HashMap<[u8; 3], u32> =
-                std::collections::HashMap::new();
-            for (x, _) in row
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| p.layer == PixelLayer::Backdrop)
-            {
-                let at = (y * width + x) * 4;
-                if let Some(p) = rgba.get(at..at + 3) {
-                    *counts.entry([p[0], p[1], p[2]]).or_default() += 1;
-                }
+            if let Some(regs) = bundle.lines.get(y).and_then(Option::as_ref) {
+                return Ok(backdrop_color(regs));
             }
-            // Ties break on the colour itself, so the pick is deterministic.
-            counts
+            let mut counts: HashMap<u8, u32> = HashMap::new();
+            for p in row.iter().filter(|p| p.layer == PixelLayer::Backdrop) {
+                *counts.entry(p.palette_index).or_default() += 1;
+            }
+            // Ties break on the index, so the pick is deterministic.
+            Err(counts
                 .into_iter()
-                .max_by_key(|&(c, n)| (n, c))
-                .map(|(c, _)| c)
+                .max_by_key(|&(i, n)| (n, i))
+                .filter(|&(_, n)| n >= enough)
+                .map(|(i, _)| i))
         })
-        .collect()
+        .collect();
+    let rgb = |y: usize, v: &Result<[u8; 3], Option<u8>>| match v {
+        Ok(c) => Some(*c),
+        Err(idx) => idx
+            .map(|i| rf_renderer::resolve_index(i, line_palettes.get(y).and_then(Option::as_ref))),
+    };
+    let mut out: Vec<Option<[u8; 3]>> = votes.iter().enumerate().map(|(y, v)| rgb(y, v)).collect();
+    // Thin rows: carry the previous row's colour down, then the next row's
+    // up for any still unset at the top. Each pass is one `for` over the
+    // rows (law 8).
+    let mut carry = None;
+    for slot in &mut out {
+        match slot {
+            Some(c) => carry = Some(*c),
+            None => *slot = carry,
+        }
+    }
+    let mut carry = None;
+    for slot in out.iter_mut().rev() {
+        match slot {
+            Some(c) => carry = Some(*c),
+            None => *slot = carry,
+        }
+    }
+    out
 }
 
 /// The palette index a margin cell shows: the front-most known layer's, else
@@ -1014,17 +1115,215 @@ mod tests {
         );
     }
 
+    fn bw(r: u16, g: u16, b: u16) -> u16 {
+        r | (g << 5) | (b << 10)
+    }
+
+    /// Hand values from fullsnes "SNES PPU Color-Math" / "2100h - INIDISP":
+    /// the SMW sky is a black backdrop plus a per-row fixed colour.
     #[test]
-    fn row_backdrops_read_the_displayed_colour_of_a_backdrop_pixel() {
-        // Row 0: BG, backdrop (displayed blue), BG. Row 1: no backdrop.
-        let bg = px(PixelLayer::Background(0), 3);
-        let back = px(PixelLayer::Backdrop, 0);
-        let video = vec![bg, back, bg, bg, bg, bg];
-        let mut rgba = vec![0u8; 6 * 4];
-        rgba[4..7].copy_from_slice(&[0, 98, 189]);
-        let rows = row_backdrops(&video, 3, &rgba);
-        assert_eq!(rows, vec![Some([0, 98, 189]), None]);
-        assert!(row_backdrops(&video, 0, &rgba).is_empty());
+    fn the_backdrop_is_cgram_zero_through_the_rows_colour_math() {
+        let sky = bw(5, 12, 20);
+        let base = LineRegisters {
+            math_enable: 0x20, // $2131 bit 5: math for the backdrop
+            fixed_color: sky,
+            backdrop_color: 0,
+            brightness: 15,
+            ..LineRegisters::default()
+        };
+        let rgb = |w: u16, b: u8| rf_renderer::bgr555_to_rgb(w, b);
+        // Black + fixed colour = the fixed colour (the HDMA sky gradient).
+        assert_eq!(backdrop_color(&base), rgb(sky, 15));
+        // Another row, another fixed colour: no vote, no memory.
+        let next = LineRegisters {
+            fixed_color: bw(6, 13, 21),
+            ..base
+        };
+        assert_eq!(backdrop_color(&next), rgb(bw(6, 13, 21), 15));
+        // A lit CGRAM 0 adds per channel and clamps at 31.
+        let lit = LineRegisters {
+            backdrop_color: bw(30, 0, 12),
+            ..base
+        };
+        assert_eq!(backdrop_color(&lit), rgb(bw(31, 12, 31), 15));
+        // Half ($2131 bit 6) with the fixed colour as the operand.
+        let half = LineRegisters { half: true, ..lit };
+        assert_eq!(backdrop_color(&half), rgb(bw(17, 6, 16), 15));
+        // ...but a selected, transparent sub screen is not halved.
+        let sub = LineRegisters {
+            use_subscreen: true,
+            ..half
+        };
+        assert_eq!(backdrop_color(&sub), rgb(bw(31, 12, 31), 15));
+        // Subtract ($2131 bit 7) clamps at 0.
+        let subtract = LineRegisters {
+            subtract: true,
+            ..lit
+        };
+        assert_eq!(backdrop_color(&subtract), rgb(bw(25, 0, 0), 15));
+        // Math not enabled for the backdrop, or never ($2130 bits 4-5 = 3):
+        // CGRAM 0 alone.
+        let off = LineRegisters {
+            math_enable: 0x1F,
+            ..lit
+        };
+        assert_eq!(backdrop_color(&off), rgb(bw(30, 0, 12), 15));
+        let never = LineRegisters {
+            prevent_mode: 3,
+            ..lit
+        };
+        assert_eq!(backdrop_color(&never), rgb(bw(30, 0, 12), 15));
+        // Main forced black ($2130 bits 6-7 = 3): fixed colour alone, no half.
+        let black = LineRegisters {
+            clip_mode: 3,
+            half: true,
+            ..lit
+        };
+        assert_eq!(backdrop_color(&black), rgb(sky, 15));
+        // Brightness scales last; 0 (force blank) is black.
+        let dim = LineRegisters {
+            brightness: 7,
+            ..base
+        };
+        assert_eq!(backdrop_color(&dim), rgb(sky, 7));
+        let blank = LineRegisters {
+            brightness: 0,
+            ..base
+        };
+        assert_eq!(backdrop_color(&blank), [0, 0, 0]);
+    }
+
+    #[test]
+    fn backdrop_rows_come_from_registers_else_from_the_pictures_backdrop_index() {
+        let back = |i: u8| px(PixelLayer::Backdrop, i);
+        let bg = px(PixelLayer::Background(0), 9);
+        // Row 0 (registers): drawn bg only, still has an exact backdrop.
+        // Row 1 (no registers, NES-like): mostly index 0x21, one 0x11.
+        // Row 2: no backdrop pixel and no registers (takes row 1's).
+        let video = vec![bg, bg, bg, back(0x21), back(0x21), back(0x11), bg, bg, bg];
+        let mut b = FrameBundle::new(0, 3, 3, video, Vec::<CoreEvent>::new());
+        let regs = LineRegisters {
+            math_enable: 0x20,
+            fixed_color: bw(1, 2, 3),
+            brightness: 15,
+            ..LineRegisters::default()
+        };
+        b.lines = vec![Some(regs), None, None];
+        let rows = backdrop_rows(&b, &[]);
+        assert_eq!(rows[0], Some(rf_renderer::bgr555_to_rgb(bw(1, 2, 3), 15)));
+        assert_eq!(rows[1], Some(rf_renderer::resolve_index(0x21, None)));
+        // Row 2 has nothing of its own: it takes the row above.
+        assert_eq!(rows[2], rows[1]);
+        // No evidence anywhere: nothing to say.
+        let none = FrameBundle::new(0, 2, 1, vec![bg, bg], Vec::<CoreEvent>::new());
+        assert_eq!(backdrop_rows(&none, &[]), vec![None]);
+        let empty = FrameBundle::new(0, 0, 0, Vec::new(), Vec::<CoreEvent>::new());
+        assert!(backdrop_rows(&empty, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_row_with_too_few_backdrop_pixels_takes_its_neighbours_colour() {
+        // Width 16: a row needs 2 backdrop pixels. Row 0 has 1 (thin), row 1
+        // has 9 of 0x21, row 2 has 1 of 0x05 (thin), row 3 none.
+        let back = |i: u8| px(PixelLayer::Backdrop, i);
+        let bg = px(PixelLayer::Background(0), 9);
+        let mut video = Vec::new();
+        for (n, i) in [(1, 0x30), (9, 0x21), (1, 0x05), (0, 0)] {
+            video.extend((0..16).map(|c| if c < n { back(i) } else { bg }));
+        }
+        let b = FrameBundle::new(0, 16, 4, video, Vec::<CoreEvent>::new());
+        let want = Some(rf_renderer::resolve_index(0x21, None));
+        assert_eq!(backdrop_rows(&b, &[]), vec![want; 4]);
+    }
+
+    fn pal_words(index: u8, w: u16) -> [u16; 256] {
+        let mut words = [0u16; 256];
+        words[usize::from(index)] = w;
+        words
+    }
+
+    /// A cell stitched under one palette keeps that palette after CGRAM
+    /// changes (a per-area load, palette cycling): STITCHING_PLAN F4.
+    #[test]
+    fn a_remembered_cell_resolves_with_the_palette_it_was_seen_under() {
+        let old = pal_words(9, bw(31, 0, 0));
+        let new = pal_words(9, bw(0, 0, 31));
+        let line = |w: &[u16; 256], b: u8| rf_renderer::LinePalette::from_words(w, b);
+        // Frame 1: BG1 everywhere with palette index 9, CGRAM = `old`.
+        let mut acc = LayerCanvasAccumulator::new();
+        let frame = |hofs: u16| bundle([hofs, 0], |_, _, p| *p = px(PixelLayer::Background(0), 9));
+        let b1 = frame(0);
+        let scrolls = [scroll(0), None, None, None];
+        let old_rows = vec![Some(line(&old, 15)); usize::from(H)];
+        acc.observe_frame_with_palettes(&b1, SceneId(1), Some(&scrolls), &old_rows);
+        // Frame 2: the game loaded a new palette; the camera moved on.
+        let b2 = frame(0);
+        let scrolls2 = [scroll(W), None, None, None];
+        let new_rows = vec![Some(line(&new, 15)); usize::from(H)];
+        acc.observe_frame_with_palettes(&b2, SceneId(1), Some(&scrolls2), &new_rows);
+        let layers = acc.current_canvases();
+        assert_eq!(layers.palettes.len(), 2, "two distinct CGRAM states");
+        let frames = acc.frames().expect("placed");
+        let regs = LineRegisters {
+            tm: 0x01,
+            brightness: 15,
+            ..LineRegisters::default()
+        };
+        // The current row palette is `new`: a cell from frame 1 (world x 0,
+        // before the origin of frame 2) must still come out RED.
+        let cur = line(&new, 15);
+        let (ox, _) = frames.origins[0].expect("origin");
+        let dx_old = -ox + 3; // world x 3: frame 1 only
+        let dx_new = 3; // frame 2's own cell
+        let at = |dx: i64| margin_color(&layers, &frames, 0, dx, None, &regs, &cur);
+        assert_eq!(at(dx_old), rf_renderer::bgr555_to_rgb(bw(31, 0, 0), 15));
+        assert_eq!(at(dx_new), rf_renderer::bgr555_to_rgb(bw(0, 0, 31), 15));
+    }
+
+    /// A fade-in: the cell was remembered at brightness 4 and the picture is
+    /// at brightness 4 now, then 12: brightness is applied to both alike,
+    /// so the margin never lags the picture.
+    #[test]
+    fn a_fade_leaves_remembered_margin_colours_consistent_with_the_picture() {
+        let words = pal_words(9, bw(20, 10, 30));
+        let mut acc = LayerCanvasAccumulator::new();
+        let b = bundle([0, 0], |_, _, p| *p = px(PixelLayer::Background(0), 9));
+        let rows = vec![Some(rf_renderer::LinePalette::from_words(&words, 4)); usize::from(H)];
+        acc.observe_frame_with_palettes(
+            &b,
+            SceneId(1),
+            Some(&[scroll(0), None, None, None]),
+            &rows,
+        );
+        let layers = acc.current_canvases();
+        let frames = acc.frames().expect("placed");
+        assert_eq!(
+            layers.palettes.len(),
+            1,
+            "brightness is not part of the key"
+        );
+        for brightness in [4u8, 8, 15] {
+            let regs = LineRegisters {
+                tm: 0x01,
+                brightness,
+                ..LineRegisters::default()
+            };
+            let cur = rf_renderer::LinePalette::from_words(&words, brightness);
+            let got = margin_color(&layers, &frames, 0, 5, None, &regs, &cur);
+            // The picture's own colour for that index at that brightness.
+            assert_eq!(got, cur.rgb(9), "brightness {brightness}");
+        }
+    }
+
+    #[test]
+    fn rows_without_a_line_palette_write_cells_with_no_id() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let b = bundle([0, 0], |_, _, p| *p = px(PixelLayer::Background(0), 9));
+        acc.observe_frame(&b, SceneId(1), Some(&[scroll(0), None, None, None]));
+        let layers = acc.current_canvases();
+        assert!(layers.palettes.is_empty());
+        let cell = layers.canvases[0].as_ref().and_then(|c| c.get(5, 0));
+        assert_eq!(cell.map(|c| c.sprite_id), Some(None));
     }
 
     #[test]
@@ -1304,6 +1603,7 @@ mod tests {
                 None,
             ],
             hud: [false, false, true, false],
+            ..Default::default()
         };
         let o = Some((0, 0));
         let origins = [None, o, o, None];

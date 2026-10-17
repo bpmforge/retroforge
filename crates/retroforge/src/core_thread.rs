@@ -433,7 +433,7 @@ pub struct FrameMsg {
     /// NES or while widescreen is off. 72 bytes.
     pub layer_frames: Option<crate::layer_canvas::LayerFrames>,
     /// Ticket W31-07: per picture row, the colour the backdrop shows there
-    /// on screen (`layer_canvas::row_backdrops`); empty unless
+    /// on screen (`layer_canvas::backdrop_rows`, W33-02); empty unless
     /// `layer_frames` is set.
     pub backdrop_rows: Vec<Option<[u8; 3]>>,
     /// Ticket W32-08: per picture row, the layers front to back by the
@@ -2016,10 +2016,11 @@ fn core_thread_main(
             let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], drawn_with.composite);
             // Ticket W31-07: the same frame, stitched per layer by each
             // layer's own scroll (the margins prefer these).
-            layer_canvases.observe_frame(
+            layer_canvases.observe_frame_with_palettes(
                 &bundle,
                 scene,
                 crate::layer_canvas::scrolls_for(&bundle, &drawn_with, &read_now),
+                sink.line_palettes(),
             );
             let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
@@ -2082,10 +2083,13 @@ fn core_thread_main(
                 rf_core_api::CoreEvent::Mode7(frame) => Some(frame.clone()),
                 _ => None,
             });
-            // Ticket W31-07: the colour each row's backdrop really shows
-            // (colour math included), for margins nothing is known about.
-            let backdrop_rows = if layer_scrolls.is_some() {
-                crate::layer_canvas::row_backdrops(&bundle.video, bundle.width, &display)
+            // Ticket W33-02: the colour each row's backdrop really shows
+            // (colour math included), reconstructed from the row's
+            // registers, for margins nothing is known about.
+            // The NES has no layer canvases but its composite canvas has
+            // unknown cells too, so it gets the rows whenever widescreen is on.
+            let backdrop_rows = if layer_scrolls.is_some() || widescreen.is_some() {
+                crate::layer_canvas::backdrop_rows(&bundle, sink.line_palettes())
             } else {
                 Vec::new()
             };

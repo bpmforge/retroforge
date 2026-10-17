@@ -171,6 +171,7 @@ fn bundle_channels_cost_per_frame() {
     let layers = LayerCanvases {
         canvases,
         hud: [false; LAYERS],
+        ..Default::default()
     };
     let frames = LayerFrames {
         scene: 1,

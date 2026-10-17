@@ -699,6 +699,52 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
     }
 }
 
+/// Ticket W33-02 acceptance, measured on the shot: for every picture row
+/// that shows backdrop, the margins either carry that exact colour (sky) or
+/// something else entirely (ground, hills, pipes), but never a NEAR miss
+/// (banding: a sky one colour step off the picture's). Also counts pure black
+/// pixels in the margins (the pre-W33-02 below-ground fill).
+fn backdrop_agreement(readme: &mut Vec<String>, tag: &str, on: &Pic, rows: &[Option<[u8; 3]>]) {
+    let pad = on.w.saturating_sub(256) / 2;
+    if pad == 0 {
+        return;
+    }
+    let (mut exact, mut near, mut none, mut skipped) = (0, 0, 0, 0);
+    let mut black = 0usize;
+    let mut sky_cols = 0usize;
+    for y in 0..on.h.min(rows.len()) {
+        let Some(c) = rows[y] else {
+            skipped += 1;
+            continue;
+        };
+        let (mut has_exact, mut has_near) = (false, false);
+        let cols = (0..pad).chain(on.w - pad..on.w);
+        for x in cols {
+            let i = (y * on.w + x) * 4;
+            let p = [on.rgba[i], on.rgba[i + 1], on.rgba[i + 2]];
+            if p == [0, 0, 0] {
+                black += 1;
+            }
+            if p == c {
+                has_exact = true;
+                sky_cols += 1;
+            } else if p.iter().zip(&c).all(|(a, b)| a.abs_diff(*b) <= 12) {
+                has_near = true;
+            }
+        }
+        match (has_exact, has_near) {
+            (true, _) => exact += 1,
+            (false, true) => near += 1,
+            (false, false) => none += 1,
+        }
+    }
+    let line = format!(
+        "backdrop-{tag}|rows with backdrop: exact {exact}, near-miss (banding) {near}, no sky in margin {none}, no backdrop in picture {skipped}; black margin px {black}; sky margin px {sky_cols}"
+    );
+    println!("{line}");
+    note(readme, line);
+}
+
 fn shot_widescreen(readme: &mut Vec<String>) {
     let name = "widescreen";
     if !wanted(name) {
@@ -715,6 +761,7 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     // right with a jump now and then, so the screen scrolls and the
     // stitched canvas fills the margins.
     smw_enter_yi1(&mut h);
+    h.state_mut().enable_backdrop_probe_for_test();
     h.state_mut().set_widescreen(true);
     h.state_mut()
         .set_widescreen_aspect_for_test(Aspect::Wide32x9);
@@ -767,6 +814,10 @@ fn shot_widescreen(readme: &mut Vec<String>) {
         // "On" is the stitched canvas (per-layer since W31-07); the VRAM
         // margins are kept as a probe for comparison.
         let on = grab(&h);
+        let probe_rows = h.state().backdrop_probe_for_test();
+        if let (Some(on), Some(rows)) = (on.as_ref(), probe_rows) {
+            backdrop_agreement(readme, tagname, on, &rows);
+        }
         let src = h.state().widescreen_source_for_test();
         h.state_mut().force_vram_margins_for_test(true);
         let t = h.state().frame_count_for_test() + 4;
