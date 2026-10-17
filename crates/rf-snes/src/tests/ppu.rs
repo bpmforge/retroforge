@@ -1829,3 +1829,175 @@ fn widescreen_lines_keep_colour_math_at_their_own_width() {
     );
     assert!(!p.line_hires(0), "a widescreen line is not a hires line");
 }
+
+// ---------------------------------------------------------------------
+// bsnes-hd widescreen convention (ticket W32-03)
+// ---------------------------------------------------------------------
+
+/// A PPU with sprite `0` (8x8, solid colour 1) parked at the 9-bit OAM X
+/// `x9` on line 0 and nothing else on the line; backgrounds off.
+fn ppu_with_one_sprite_at(x9: u16) -> Ppu {
+    let mut p = ppu_with_sprites(0, 0, false);
+    p.write_register(0x212C, 0x10); // TM: OBJ only
+    p.oam[0] = (x9 & 0xFF) as u8;
+    p.oam[1] = 0;
+    p.oam[2] = 1;
+    p.oam[3] = 0;
+    if x9 & 0x100 != 0 {
+        p.oam[0x0200] |= 0x01;
+    }
+    p
+}
+
+fn sprite_dots(line: &crate::ppu::Scanline) -> Vec<usize> {
+    line.pixels
+        .iter()
+        .enumerate()
+        .filter(|(_, px)| px.layer == PixelLayer::Sprite)
+        .map(|(x, _)| x)
+        .collect()
+}
+
+/// The X mapping itself: -128..=383 instead of -256..=255.
+#[test]
+fn convention_sprite_x_reads_nine_bits_as_minus_128_to_383() {
+    use crate::ppu::obj::convention_sprite_x;
+    // Hardware-decoded values (-256..=255) go in, as `decode_sprite` makes.
+    let from_x9 = |x9: i16| convention_sprite_x(if x9 >= 256 { x9 - 512 } else { x9 });
+    assert_eq!(from_x9(0), 0);
+    assert_eq!(from_x9(255), 255);
+    assert_eq!(from_x9(256), 256, "was -256: now the right margin");
+    assert_eq!(from_x9(383), 383);
+    assert_eq!(from_x9(384), -128, "values >= 384 wrap by -512");
+    assert_eq!(from_x9(511), -1);
+}
+
+/// A sprite at OAM X 300 (needs the ninth bit) shows in the RIGHT margin
+/// under the convention and is off the left edge in ordinary widescreen.
+#[test]
+fn convention_sprite_at_300_shows_in_the_right_margin() {
+    let width = 384; // 256 + 2 * 64
+    let pad = (width - WIDTH) / 2;
+
+    let mut wide = ppu_with_one_sprite_at(300);
+    wide.wide_convention = true;
+    let dots = sprite_dots(&wide.render_scanline_at(0, width));
+    assert_eq!(dots, (300 + pad..308 + pad).collect::<Vec<_>>());
+    assert!(dots.iter().all(|&x| x >= WIDTH + pad), "right margin only");
+
+    // Ordinary widescreen: 300 is -212, far off the left edge.
+    let mut plain = ppu_with_one_sprite_at(300);
+    assert!(sprite_dots(&plain.render_scanline_at(0, width)).is_empty());
+}
+
+/// A sprite at X = -100 shows in the LEFT margin (wide enough to hold it).
+#[test]
+fn convention_sprite_at_minus_100_shows_in_the_left_margin() {
+    let width = 480; // 256 + 2 * 112
+    let pad = (width - WIDTH) / 2;
+    let mut p = ppu_with_one_sprite_at(512 - 100);
+    p.wide_convention = true;
+    let dots = sprite_dots(&p.render_scanline_at(0, width));
+    assert_eq!(dots, (pad - 100..pad - 92).collect::<Vec<_>>());
+    assert!(dots.iter().all(|&x| x < pad), "left margin only");
+}
+
+/// The window position mapping `f(v) = 2v - 128`: 00, 80 and FF.
+#[test]
+fn convention_window_positions_map_two_v_minus_128() {
+    use crate::ppu::window::{convention_window_pos, Windows};
+    assert_eq!(convention_window_pos(0x00), -128);
+    assert_eq!(convention_window_pos(0x80), 128);
+    assert_eq!(convention_window_pos(0xFF), 382);
+
+    let span = |l: u8, r: u8| {
+        let mut w = Windows::default();
+        w.write_register(0x2123, 0x02); // BG1: window 1 on
+        w.write_register(0x2126, l);
+        w.write_register(0x2127, r);
+        w
+    };
+    // 00..=00 covers the two dots of the first unit: -128 and -127.
+    let w = span(0x00, 0x00);
+    assert!(!w.masks_wide(0, -129));
+    assert!(w.masks_wide(0, -128) && w.masks_wide(0, -127));
+    assert!(!w.masks_wide(0, -126));
+    // 80 starts at +128.
+    let w = span(0x80, 0xFF);
+    assert!(!w.masks_wide(0, 127));
+    assert!(w.masks_wide(0, 128));
+    // FF's right edge reaches +383 and stops there.
+    assert!(w.masks_wide(0, 383));
+    assert!(!w.masks_wide(0, 384));
+    // The full-width window 00..FF covers the whole 512-dot output.
+    let w = span(0x00, 0xFF);
+    assert!(w.masks_wide(0, -128) && w.masks_wide(0, 383));
+    // The ordinary test is untouched.
+    assert!(w.masks(0, 0) && w.masks(0, 255));
+}
+
+/// Through the renderer: a window on BG1 from 80 to FF hides BG1 from
+/// +128 on, margin included, and only under the convention.
+#[test]
+fn convention_window_masks_the_background_in_picture_coordinates() {
+    let width = 352;
+    let pad = (width - WIDTH) / 2;
+    let build = |convention: bool| {
+        let mut p = ppu_full_line();
+        p.write_register(0x212E, 0x01); // window applies to BG1 on the main screen
+        p.write_register(0x2123, 0x02); // BG1: window 1 enabled
+        p.write_register(0x2126, 0x80);
+        p.write_register(0x2127, 0xFF);
+        p.wide_convention = convention;
+        p.render_scanline_at(0, width)
+    };
+    let line = build(true);
+    assert_eq!(line.pixels[pad + 127].layer, PixelLayer::Background(0));
+    assert_eq!(line.pixels[pad + 128].layer, PixelLayer::Backdrop);
+    assert_eq!(
+        line.pixels[width - 1].layer,
+        PixelLayer::Backdrop,
+        "the right margin is inside a window that runs to FF"
+    );
+    // Ordinary widescreen reads 80 as dot 128 of the 256 picture's index.
+    let line = build(false);
+    assert_ne!(
+        line.pixels[pad + 127].layer,
+        PixelLayer::Background(0),
+        "ordinary widescreen compares the output index, so it differs"
+    );
+}
+
+/// The convention ignores the per-layer widen policy: the game drew its
+/// margins on purpose.
+#[test]
+fn convention_widens_every_layer_whatever_the_mask_says() {
+    use crate::ppu::WidenMask;
+    let width = 400;
+    let mut p = ppu_full_line();
+    let refused = p.render_scanline_masked(0, width, WidenMask::NONE);
+    assert_eq!(refused.pixels[0].layer, PixelLayer::Backdrop);
+    p.wide_convention = true;
+    let line = p.render_scanline_masked(0, width, WidenMask::NONE);
+    assert_eq!(line.pixels[0].layer, PixelLayer::Background(0));
+    assert_eq!(line.pixels[width - 1].layer, PixelLayer::Background(0));
+}
+
+/// Convention OFF is the existing behaviour, and the flag is inert at
+/// the hardware width (law 6).
+#[test]
+fn convention_is_inert_off_and_at_256() {
+    let reference = ppu_with_one_sprite_at(300).render_scanline_at(0, 400);
+    let mut off = ppu_with_one_sprite_at(300);
+    off.wide_convention = false;
+    let line = off.render_scanline_at(0, 400);
+    assert_eq!(sprite_dots(&line), sprite_dots(&reference));
+
+    let mut a = ppu_full_line();
+    let mut b = ppu_full_line();
+    b.wide_convention = true;
+    let (pa, pb) = (a.render_scanline(0), b.render_scanline(0));
+    for (l, r) in pa.pixels.iter().zip(pb.pixels.iter()) {
+        assert_eq!((l.palette_index, l.layer), (r.palette_index, r.layer));
+    }
+}

@@ -543,6 +543,125 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     }
 }
 
+/// Ticket W32-03: the real wide-snes Super Mario World patch (`.bps` +
+/// `.bso`, W48 -> 352 wide) under the bsnes-hd convention. The ROM and
+/// patch are the user's own files in `RF_WIDESNES_DIR` (`rom/Super Mario
+/// World (USA).sfc`, `smw-widescreen.bps`, `smw-widescreen.bso`), copied to
+/// a scratch dir as `SMW.sfc/.bps/.bso`; nothing is written back.
+fn shot_widesnes(readme: &mut Vec<String>) {
+    let name = "widesnes";
+    if !wanted(name) {
+        return;
+    }
+    let Ok(src) = std::env::var("RF_WIDESNES_DIR") else {
+        return skip(readme, name, "RF_WIDESNES_DIR not set");
+    };
+    let src = PathBuf::from(src);
+    let work = std::env::temp_dir().join(format!("rf_widesnes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("scratch");
+    for (from, to) in [
+        (src.join("rom/Super Mario World (USA).sfc"), "SMW.sfc"),
+        (src.join("smw-widescreen.bps"), "SMW.bps"),
+        (src.join("smw-widescreen.bso"), "SMW.bso"),
+    ] {
+        if std::fs::copy(&from, work.join(to)).is_err() {
+            return skip(readme, name, &format!("{} missing", from.display()));
+        }
+    }
+    let path = work.join("SMW.sfc");
+    use egui::Key as K;
+    let mut h = new_harness();
+    // First open: opt in to the patch and Enhanced mode (persisted per
+    // game), then reopen so the patch applies.
+    h.state_mut().open_rom_path(&path);
+    run_n(&mut h, 3);
+    // `RF_WIDESNES_MODE=accuracy` keeps the patch but drops the convention,
+    // to tell a patch that does not boot from a convention that draws nothing.
+    let mode = if std::env::var("RF_WIDESNES_MODE").as_deref() == Ok("accuracy") {
+        Mode::Accuracy
+    } else {
+        Mode::Enhanced
+    };
+    h.state_mut().set_mode_for_test(mode);
+    h.state_mut().enable_patch_and_save_for_test("SMW.bps");
+    open_and_run(&mut h, &path);
+    println!(
+        "widesnes: reference={} convention={:?} dots={:?}",
+        h.state().is_reference_session(),
+        h.state().widescreen_convention(),
+        h.state().patch_widescreen_dots()
+    );
+    wait(&mut h, "widesnes", 200);
+    probe(&h, "widesnes-title");
+    if let Some(p) = grab(&h) {
+        println!("widesnes title frame {}x{}", p.w, p.h);
+    }
+    for i in 0..10 {
+        tap(&mut h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(&mut h, "widesnes", 100);
+    }
+    wait(&mut h, "widesnes", 300);
+    tap(&mut h, K::X, 8);
+    wait(&mut h, "widesnes", 400);
+    let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
+        Ok("right") => K::ArrowRight,
+        Ok("up") => K::ArrowUp,
+        _ => K::ArrowLeft,
+    };
+    tap(&mut h, dir, 8);
+    wait(&mut h, "widesnes", 150);
+    probe(&h, "widesnes-map");
+    tap(&mut h, K::X, 8);
+    let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    wait(&mut h, "widesnes", enter);
+    probe(&h, "widesnes-level-start");
+    // Walk right, hopping, so enemies and items come into the margins.
+    let run_s: u64 = std::env::var("RF_SMW_RUN_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    key_event(&mut h, K::ArrowRight, true);
+    let mut ran = 0;
+    while ran < run_s {
+        hold_for(&mut h, &[K::X], 18);
+        let t = h.state().frame_count_for_test() + 22;
+        run_frames(&mut h, t, Duration::from_secs(120));
+        ran += 40;
+        probe(&h, &format!("widesnes-run-{ran:04}"));
+    }
+    key_event(&mut h, K::ArrowRight, false);
+    run_n(&mut h, 6);
+    let t = h.state().frame_count_for_test() + 30;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let Some(on) = grab(&h) else {
+        return skip(readme, name, "no frame");
+    };
+    println!(
+        "widesnes: frame {}x{} source {:?}",
+        on.w,
+        on.h,
+        h.state().widescreen_source_for_test()
+    );
+    save(&out_dir().join("widesnes-352.png"), &on.opaque());
+    // A wider aspect fills beyond the patch's own width.
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    let t = h.state().frame_count_for_test() + 30;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    probe(&h, "widesnes-32x9");
+    note(
+        readme,
+        format!(
+            "widesnes-352|Super Mario World + wide-snes patch|{}x{}, bsnes-hd convention",
+            on.w, on.h
+        ),
+    );
+}
+
 fn shot_hd2d(readme: &mut Vec<String>) {
     use egui::Key as K;
     let name = "hd2d-look";
@@ -970,6 +1089,7 @@ fn w30_w31_screens() {
     let mut readme: Vec<String> = Vec::new();
     shot_hdmode7(&mut readme);
     shot_widescreen(&mut readme);
+    shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);

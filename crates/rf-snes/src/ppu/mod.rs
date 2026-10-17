@@ -435,6 +435,14 @@ pub struct Ppu {
     /// [`Ppu::render_scanline_masked`] and reset to [`WidenMask::ALL`]
     /// by every accuracy render, so it cannot leak between frames.
     pub widen_mask: WidenMask,
+    /// Ticket W32-03: render under the bsnes-hd widescreen convention (see
+    /// `Ppu::set_wide_convention`). Presentation only and off by default;
+    /// not part of the saved machine.
+    pub wide_convention: bool,
+    /// Dots of margin per side while a convention line is being composed,
+    /// `None` otherwise. Set by `render_scanline_live` so the window tests
+    /// can work in the picture's own coordinates.
+    convention_pad: Option<i32>,
     pub vram: Vec<u8>,
     pub cgram: [u16; CGRAM_ENTRIES],
     pub oam: [u8; OAM_LEN],
@@ -588,6 +596,8 @@ impl Ppu {
     pub fn new() -> Self {
         Self {
             widen_mask: WidenMask::ALL,
+            wide_convention: false,
+            convention_pad: None,
             vram: vec![0; 64 * 1024],
             cgram: [0; CGRAM_ENTRIES],
             oam: [0; OAM_LEN],
@@ -1204,8 +1214,13 @@ impl Ppu {
         use rf_core_api::{ColorMathOp, SubPixel};
         let width = width.clamp(WIDTH, MAX_WIDTH);
         let pad = (width - WIDTH) / 2;
+        let convention = self.wide_convention && width > WIDTH;
         let saved_mask = self.widen_mask;
-        self.widen_mask = mask;
+        self.widen_mask = if self.wide_convention {
+            WidenMask::ALL
+        } else {
+            mask
+        };
 
         let line = y + 1;
         let saved = LineScratch::capture(self);
@@ -1262,7 +1277,11 @@ impl Ppu {
             .iter()
             .enumerate()
             .map(|(x, px)| {
-                let inside = windows.masks(5, x.saturating_sub(pad).min(WIDTH - 1) as u8);
+                let inside = if convention {
+                    windows.masks_wide(5, x as i32 - pad as i32)
+                } else {
+                    windows.masks(5, x.saturating_sub(pad).min(WIDTH - 1) as u8)
+                };
                 let (main_layer, main_index) = match main_pixels.get(x) {
                     Some((rf_core_api::PixelLayer::Background(n), i)) => (usize::from(*n), *i),
                     Some((rf_core_api::PixelLayer::Sprite, i)) => (4, *i),
@@ -1384,7 +1403,13 @@ impl Ppu {
     /// failure bsnes-hd's per-layer policies exist to prevent.
     pub fn render_scanline_masked(&mut self, y: u16, width: usize, mask: WidenMask) -> Scanline {
         let width = width.clamp(WIDTH, MAX_WIDTH);
-        self.widen_mask = mask;
+        // The convention's game drew its margins on purpose: the per-layer
+        // auto policies are ignored (ticket W32-03).
+        self.widen_mask = if self.wide_convention {
+            WidenMask::ALL
+        } else {
+            mask
+        };
         // **`y` is a 0-based VISIBLE ROW; the hardware scanline is one
         // more** (ticket W7-13). fullsnes: the V counter runs 0-261 with
         // "1-224 (or 1-239 if overscan is enabled) visible on the
@@ -1563,6 +1588,8 @@ impl Ppu {
             sprite_id: None,
             priority: 0,
         };
+        self.convention_pad =
+            (self.wide_convention && width > WIDTH).then(|| ((width - WIDTH) / 2) as i32);
         let mut pixels = vec![backdrop; width];
         let mut overlay = vec![
             OverlayPixel {
@@ -1617,10 +1644,7 @@ impl Ppu {
             // Colour math's "clip main screen to black" IS expressible on
             // an indexed path, because black is palette index 0. The
             // add/sub blend is not — see the window module doc.
-            if self
-                .color_math
-                .clip_to_black(self.windows.masks(5, x as u8))
-            {
+            if self.color_math.clip_to_black(self.window_hit(5, x)) {
                 pixels[x] = backdrop;
             }
 
@@ -1699,7 +1723,17 @@ impl Ppu {
     /// main screen — checking only the first makes content vanish.
     #[must_use]
     fn layer_masked(&self, layer: usize, x: usize) -> bool {
-        self.windows.main_mask & (1 << layer) != 0 && self.windows.masks(layer, x as u8)
+        self.windows.main_mask & (1 << layer) != 0 && self.window_hit(layer, x)
+    }
+
+    /// Does `layer`'s window cover output dot `x`? Under the bsnes-hd
+    /// convention (ticket W32-03) positions are read as `2v - 128` against
+    /// the picture's own coordinates; otherwise it is the 256-dot test.
+    fn window_hit(&self, layer: usize, x: usize) -> bool {
+        match self.convention_pad {
+            Some(pad) => self.windows.masks_wide(layer, x as i32 - pad),
+            None => self.windows.masks(layer, x as u8),
+        }
     }
 
     /// The mode's layer priority, front to back.

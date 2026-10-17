@@ -76,6 +76,22 @@ pub fn obj_sizes(select: u8) -> ((u16, u16), (u16, u16)) {
     }
 }
 
+/// Ticket W32-03: a sprite's X under the bsnes-hd widescreen convention.
+///
+/// sneslab "Widescreen": the 9-bit OAM X is read as signed in `-128..=383`
+/// instead of `-256..=255`, so values 256-383 show in the right margin and
+/// 384-511 wrap to -128..-1 in the left. `x` is the hardware-decoded value
+/// (`-256..=255`).
+#[must_use]
+pub const fn convention_sprite_x(x: i16) -> i16 {
+    let x9 = x & 0x1FF;
+    if x9 >= 384 {
+        x9 - 512
+    } else {
+        x9
+    }
+}
+
 /// Decode sprite `index` from OAM.
 #[must_use]
 pub fn decode_sprite(ppu: &Ppu, index: u8) -> Sprite {
@@ -155,6 +171,7 @@ pub fn render_objects(ppu: &Ppu, y: u16, width: usize, widen: bool) -> ObjScanli
     // honest consequence of showing more of the world, and exactly the
     // kind of thing a game's own profile may decline.
     let span = crate::ppu::bg::Span { width, widen };
+    let convention = ppu.wide_convention && width > WIDTH;
     let mut out = ObjScanline::default();
     if !ppu.obj_enabled {
         return out;
@@ -172,7 +189,10 @@ pub fn render_objects(ppu: &Ppu, y: u16, width: usize, widen: bool) -> ObjScanli
     let mut range_dropped: Vec<Sprite> = Vec::new();
     for step in 0..128u16 {
         let index = ((u16::from(first) + step) % 128) as u8;
-        let s = decode_sprite(ppu, index);
+        let mut s = decode_sprite(ppu, index);
+        if convention {
+            s.x = convention_sprite_x(s.x);
+        }
         if !intersects(&s, y) {
             continue;
         }

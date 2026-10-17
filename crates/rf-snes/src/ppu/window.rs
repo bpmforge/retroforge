@@ -93,6 +93,14 @@ impl WindowLogic {
     }
 }
 
+/// Ticket W32-03: where a window register value lands under the bsnes-hd
+/// widescreen convention (sneslab "Widescreen"): `2v - 128`, in dots from
+/// the left edge of the 256-dot picture.
+#[must_use]
+pub const fn convention_window_pos(v: u8) -> i32 {
+    2 * v as i32 - 128
+}
+
 impl Windows {
     /// Is `x` inside a layer's combined window?
     ///
@@ -101,10 +109,34 @@ impl Windows {
     /// only be tested with both.
     #[must_use]
     pub fn masks(&self, layer: usize, x: u8) -> bool {
+        let in1 = x >= self.w1_left && x <= self.w1_right;
+        let in2 = x >= self.w2_left && x <= self.w2_right;
+        self.combine(layer, in1, in2)
+    }
+
+    /// Ticket W32-03: [`Self::masks`] under the bsnes-hd widescreen
+    /// convention. `x` is a dot in the picture's own coordinates (0 is the
+    /// left edge of the 256-dot picture, so the left margin is negative and
+    /// the right margin runs past 255).
+    ///
+    /// sneslab "Widescreen": a patched game writes window positions that
+    /// the widescreen output reads as `f(v) = 2v - 128` (`00` = -128,
+    /// `80` = +128, `FF` = +383). The right edge is inclusive on hardware,
+    /// so it covers both dots of the doubled unit: `f(v) + 1`.
+    #[must_use]
+    pub fn masks_wide(&self, layer: usize, x: i32) -> bool {
+        let span = |left: u8, right: u8| {
+            x >= convention_window_pos(left) && x <= convention_window_pos(right) + 1
+        };
+        let in1 = span(self.w1_left, self.w1_right);
+        let in2 = span(self.w2_left, self.w2_right);
+        self.combine(layer, in1, in2)
+    }
+
+    fn combine(&self, layer: usize, in1: bool, in2: bool) -> bool {
         let (e1, e2) = self.enable[layer];
         let (i1, i2) = self.invert[layer];
-        let in1 = (x >= self.w1_left && x <= self.w1_right) != i1;
-        let in2 = (x >= self.w2_left && x <= self.w2_right) != i2;
+        let (in1, in2) = (in1 != i1, in2 != i2);
         match (e1, e2) {
             (false, false) => false,
             (true, false) => in1,

@@ -617,6 +617,11 @@ pub struct WidescreenRequest {
     pub width: usize,
     /// The profile's `[widescreen]` policies.
     pub policies: rf_enhance::widescreen::WidescreenPolicies,
+    /// Ticket W32-03: the game is a bsnes-hd-convention widescreen patch
+    /// that drew its own margins, so the PPU renders under that convention
+    /// (sprite X, window positions, every layer widened) and `policies`
+    /// are not consulted for layers.
+    pub convention: bool,
 }
 
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
@@ -1741,6 +1746,7 @@ fn core_thread_main(
                 // inside to qualify.
                 let obj = req.policies.obj != rf_enhance::widescreen::ObjPolicy::Clip;
                 stepper.set_widescreen(req.width, bg, obj);
+                stepper.set_wide_convention(req.convention);
                 let reasons: [Option<&'static str>; 4] =
                     std::array::from_fn(|i| decisions[i].reason());
                 // Only on change: this is a UI explanation, not telemetry.
