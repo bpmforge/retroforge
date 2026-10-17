@@ -607,3 +607,31 @@ fn apu_port_window_is_the_mirrored_range_in_system_banks() {
     assert!(!is_apu_port(0x7E_2140), "bank $7E is WRAM");
     assert!(!is_apu_port(0x40_2140));
 }
+
+/// A second Reset pulse on `$2200` (CCNT bit 5) reboots the SA-1 at the new
+/// reset vector instead of leaving it in its old code (wide-snes Super Mario
+/// World re-points the SA-1 this way at boot and hung without it).
+#[test]
+fn a_second_sa1_reset_pulse_reboots_at_the_new_vector() {
+    use crate::cpu::CpuBus;
+    // $8200: enable SA-1 I-RAM writes, store $11 to I-RAM $00, idle.
+    let mut program = vec![
+        0xA9, 0xFF, 0x8D, 0x2A, 0x22, 0xA9, 0x11, 0x85, 0x00, 0x80, 0xFE,
+    ];
+    program.resize(0x10, 0xEA);
+    // $8210: store $22 to I-RAM $01, idle.
+    program.extend_from_slice(&[0xA9, 0x22, 0x85, 0x01, 0x80, 0xFE]);
+    let mut core = sa1_core(&program, |_| {});
+    let iram = |core: &SnesCore, i: usize| core.system().bus.sa1.as_ref().unwrap().iram[i];
+    sa1_ops(&mut core, 2);
+    assert_eq!(iram(&core, 0), 0x11, "first boot ran");
+    assert_eq!(iram(&core, 1), 0x00);
+    let bus = &mut core.system_mut().bus;
+    bus.write(0x00_2200, 0x20); // hold Reset
+    bus.write(0x00_2203, 0x10);
+    bus.write(0x00_2204, 0x82); // new vector $8210
+    sa1_ops(&mut core, 1);
+    core.system_mut().bus.write(0x00_2200, 0x00); // release
+    sa1_ops(&mut core, 2);
+    assert_eq!(iram(&core, 1), 0x22, "rebooted at the new vector");
+}

@@ -751,6 +751,12 @@ impl SnesSystem {
             }
             if sa1.regs.sa1_reset_asserted() {
                 sa1.credit = 0;
+                // A held SA-1 must reboot at the (possibly new) reset
+                // vector when Reset is released, even though `step` is
+                // never called while it is held (fullsnes `$2200` CCNT
+                // bit 5). Without this a second Reset pulse left it
+                // running its old code (wide-snes SMW hung at boot).
+                sa1.booted = false;
             } else {
                 // Ticket W30-08: the overclock multiplies the credit, like the
                 // GSU's below; the timer above stays on the real master clock.
