@@ -65,6 +65,12 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
         // this bump ships a migration (`rf_nes::ppu::migrate_ppu_payload`,
         // registered by `retroforge::save_state::nes_migrations`) instead
         // of refusing version-3 files.
+        //
+        // **This is the NES (console 0) version.** The SNES `PPU_`
+        // payload is an unrelated layout that shares the tag, so it
+        // carries its own number in [`CONSOLE_VERSION_OVERRIDES`]
+        // (SNES v5 appends `$212D` TS) -- a SNES-only change must not
+        // force a bump, and a migration, on every NES state.
         required: true,
         current_version: 4,
     },
@@ -185,4 +191,34 @@ mod tests {
     fn unknown_tag_is_not_in_registry() {
         assert!(tag_info(*b"ZZZZ").is_none());
     }
+}
+
+/// Header `console` byte for NES states.
+pub const CONSOLE_NES: u8 = 0;
+/// Header `console` byte for SNES states.
+pub const CONSOLE_SNES: u8 = 1;
+
+/// Per-console payload versions that differ from [`TagInfo::current_version`].
+///
+/// A tag's payload layout belongs to the console that wrote it, so the
+/// `PPU_` chunk of a SNES state and of a NES state evolve independently.
+/// A `(console, tag)` pair listed here overrides the registry number for
+/// that console only; every other pair uses the registry's. `rf-state`
+/// still interprets none of the bytes -- these are just numbers.
+///
+/// - `(SNES, PPU_) = 5`: v4 was the shared number the SNES inherited from
+///   the NES; v5 appends `$212D` TS (the sub-screen layer enables), which
+///   v4 never stored. Migrate v4 -> v5 with
+///   `rf_snes::ppu::migrate_ppu_payload`.
+pub const CONSOLE_VERSION_OVERRIDES: &[(u8, [u8; 4], u16)] = &[(CONSOLE_SNES, *b"PPU_", 5)];
+
+/// The payload version this build writes and expects for `tag` in a
+/// container whose header says `console`, or `None` for an unknown tag.
+#[must_use]
+pub fn current_version_for(console: u8, tag: [u8; 4]) -> Option<u16> {
+    CONSOLE_VERSION_OVERRIDES
+        .iter()
+        .find(|(c, t, _)| *c == console && *t == tag)
+        .map(|(_, _, v)| *v)
+        .or_else(|| tag_info(tag).map(|i| i.current_version))
 }

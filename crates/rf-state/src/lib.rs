@@ -34,7 +34,10 @@ pub use header::Header;
 pub use migrate::{MigrateFn, MigrationRegistry};
 pub use payload::{decode_payload, encode_payload, ReplayCursor};
 pub use rewind::{RewindConfig, RewindRing};
-pub use tags::{is_required, tag_info, TagInfo, TAG_REGISTRY};
+pub use tags::{
+    current_version_for, is_required, tag_info, TagInfo, CONSOLE_NES, CONSOLE_SNES,
+    CONSOLE_VERSION_OVERRIDES, TAG_REGISTRY,
+};
 
 /// Crate marker used by the test harness to confirm workspace wiring.
 pub const CRATE_NAME: &str = "rf-state";

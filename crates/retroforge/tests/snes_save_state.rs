@@ -290,3 +290,97 @@ fn a_pending_write_twice_latch_survives_the_round_trip() {
         "sanity: the two halves should combine to $01C0"
     );
 }
+
+/// `$212D` TS survives a real container round trip (encode -> decode ->
+/// load). Before `PPU_` v5 the PPU payload dropped it, so a restored
+/// machine kept its pre-restore TS.
+#[test]
+fn ts_round_trips_through_a_snes_container() {
+    let rom = test_rom();
+    let mut s = SnesSystem::load(&rom).expect("loads");
+    s.bus.ppu.write_register(0x212D, 0x13);
+    let bytes = snes_save_state::save_state(&s, rom_hash(&rom), 0)
+        .expect("saves")
+        .encode()
+        .expect("encodes");
+    let (decoded, warnings) = rf_state::Container::decode_default(&bytes).expect("v5 decodes");
+    assert!(warnings.is_empty(), "a current state needs no migration");
+    assert_eq!(decoded.chunk(*b"PPU_").unwrap().version, 5);
+
+    let mut other = SnesSystem::load(&rom).expect("loads");
+    assert_eq!(other.bus.ppu.ts, 0);
+    snes_save_state::load_state(&mut other, rom_hash(&rom), &decoded).expect("restores");
+    assert_eq!(other.bus.ppu.ts, 0x13);
+}
+
+/// A state written before the bump (`PPU_` v4, no TS byte) still loads
+/// through `snes_migrations` / `nes_migrations`, with TS = 0, and is
+/// refused by name -- not misparsed -- where no migration is registered.
+#[test]
+fn an_old_v4_snes_state_still_loads_with_ts_zero() {
+    let rom = test_rom();
+    let mut s = SnesSystem::load(&rom).expect("loads");
+    s.bus.ppu.write_register(0x212D, 0x13);
+    let mut c = snes_save_state::save_state(&s, rom_hash(&rom), 0).expect("saves");
+
+    // Rebuild the container with the v4 PPU_ shape: one byte shorter.
+    let mut old = rf_state::Container::new(CONSOLE_SNES, rom_hash(&rom), "0.9.1", 0);
+    for chunk in c.chunks() {
+        if &chunk.tag == b"PPU_" {
+            let mut p = chunk.payload.clone();
+            p.pop();
+            old.add_chunk(chunk.tag, 4, p).unwrap();
+        } else {
+            old.add_chunk(chunk.tag, chunk.version, chunk.payload.clone())
+                .unwrap();
+        }
+    }
+    c = old;
+    let bytes = c.encode().unwrap();
+
+    assert!(matches!(
+        rf_state::Container::decode_default(&bytes),
+        Err(rf_state::ContainerError::CannotMigrate {
+            found: 4,
+            expected: 5,
+            ..
+        })
+    ));
+    for reg in [
+        snes_save_state::snes_migrations(),
+        retroforge::save_state::nes_migrations(),
+    ] {
+        let (decoded, warnings) = rf_state::Container::decode(&bytes, &reg).expect("migrates");
+        assert_eq!(
+            warnings,
+            vec![rf_state::LoadWarning::Migrated {
+                tag: *b"PPU_",
+                from: 4,
+                to: 5
+            }]
+        );
+        let mut other = SnesSystem::load(&rom).expect("loads");
+        other.bus.ppu.ts = 0x1F;
+        snes_save_state::load_state(&mut other, rom_hash(&rom), &decoded).expect("restores");
+        assert_eq!(other.bus.ppu.ts, 0, "v4 cannot say; power-on value");
+    }
+}
+
+/// The SNES bump must not move the NES: its `PPU_` stays at the registry
+/// version and a NES container is decoded against it, not SNES's.
+#[test]
+fn the_snes_ppu_version_does_not_move_the_nes() {
+    assert_eq!(rf_state::tag_info(*b"PPU_").unwrap().current_version, 4);
+    assert_eq!(
+        rf_state::current_version_for(rf_state::CONSOLE_NES, *b"PPU_"),
+        Some(4)
+    );
+    assert_eq!(
+        rf_state::current_version_for(CONSOLE_SNES, *b"PPU_"),
+        Some(5)
+    );
+    assert_eq!(
+        rf_state::current_version_for(CONSOLE_SNES, *b"CPU_"),
+        Some(2)
+    );
+}

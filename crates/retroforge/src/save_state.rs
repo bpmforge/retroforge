@@ -203,11 +203,18 @@ impl rf_core_api::StateReader for PayloadCursor<'_> {
 /// The chunk migrations a NES `.rfstate` load runs (ticket W2-22).
 ///
 /// `PPU_` 3 -> 4 appends the partly drawn scanline; see
-/// [`rf_nes::ppu::migrate_ppu_payload`].
+/// [`rf_nes::ppu::migrate_ppu_payload`]. Also carries the console-scoped
+/// SNES `PPU_` v4 -> v5 migration, because the app loads either console's
+/// slot through this one registry (a scoped entry never fires for NES).
 #[must_use]
 pub fn nes_migrations() -> rf_state::MigrationRegistry {
     let mut reg = rf_state::MigrationRegistry::new();
     reg.register(*b"PPU_", rf_nes::ppu::migrate_ppu_payload);
+    reg.register_for_console(
+        crate::snes_save_state::CONSOLE_SNES,
+        *b"PPU_",
+        rf_snes::ppu::migrate_ppu_payload,
+    );
     reg
 }
 

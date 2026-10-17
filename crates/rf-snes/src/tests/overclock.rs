@@ -188,11 +188,16 @@ fn core_with(program: &[u8], configure: impl FnOnce(&mut SnesCore)) -> SnesCore 
 /// "byte-identical to today" proof law 6 asks for, not a self-comparison:
 /// state (every save-state region), video, audio, and the NMI count, work
 /// done and master cycles after 30 frames of four different programs.
+///
+/// The FIRST column (state) was re-pinned when `PPU_` gained the `$212D` TS
+/// byte: it hashes the save regions, and the PPU region is one byte longer.
+/// Video, audio, NMI count, work done and master cycles are the original
+/// pre-overclock values, unchanged.
 #[test]
 fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
     const PINNED: [(u64, u64, u64, usize, u8, u8, u64); 4] = [
         (
-            11488497832890241292,
+            2451760302275872460,
             17085499001889628965,
             3322592713610917373,
             23931,
@@ -201,7 +206,7 @@ fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
             10721070,
         ),
         (
-            13794981079484296859,
+            5708542737912139829,
             17085499001889628965,
             3322592713610917373,
             23931,
@@ -210,7 +215,7 @@ fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
             10721040,
         ),
         (
-            6191143624038179030,
+            1073815201929143042,
             17085499001889628965,
             3322592713610917373,
             23931,
@@ -219,7 +224,7 @@ fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
             10721060,
         ),
         (
-            13435566711524898573,
+            7211123268812950589,
             17085499001889628965,
             3322592713610917373,
             23931,

@@ -837,4 +837,53 @@ mod tests {
             .expect("load");
         assert!(system.bus.gsu.is_none());
     }
+
+    /// `$212D` TS (the sub-screen layer enables) round-trips through the
+    /// `Ppu` region: before PPU_ v5 `Ppu::save` dropped it, so a restore
+    /// kept the machine's pre-restore TS and a game that sets TS once
+    /// lost its sub screen. Also pins that v4 is a strict prefix of v5
+    /// and that the migration appends the power-on TS.
+    #[test]
+    fn ts_survives_a_ppu_region_round_trip_and_v4_migrates_to_zero() {
+        let mut system =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        system.bus.ppu.write_register(0x212D, 0x16);
+        let mut stream = MemStream {
+            buf: Vec::new(),
+            at: 0,
+        };
+        system
+            .save_region(StateRegion::Ppu, &mut stream)
+            .expect("save");
+
+        let mut fresh =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        assert_eq!(fresh.bus.ppu.ts, 0);
+        let v5 = stream.buf.clone();
+        fresh
+            .load_region(StateRegion::Ppu, &mut stream)
+            .expect("load");
+        assert_eq!(fresh.bus.ppu.ts, 0x16);
+
+        // A v4 payload is the v5 payload minus its last byte; migrating
+        // it appends TS = 0 and then loads whole.
+        let v4 = &v5[..v5.len() - 1];
+        assert_eq!(*v5.last().unwrap(), 0x16);
+        let migrated = crate::ppu::migrate_ppu_payload(4, v4).expect("4 -> 5");
+        assert_eq!(&migrated[..v4.len()], v4);
+        assert_eq!(*migrated.last().unwrap(), 0);
+        assert!(crate::ppu::migrate_ppu_payload(3, v4)
+            .unwrap_err()
+            .contains("version 3"));
+        let mut stream = MemStream {
+            buf: migrated,
+            at: 0,
+        };
+        let mut old =
+            crate::SnesSystem::from_rom(vec![0u8; 32 * 1024], rf_cart::SnesMapMode::LoRom, 0);
+        old.load_region(StateRegion::Ppu, &mut stream)
+            .expect("load");
+        assert_eq!(old.bus.ppu.ts, 0);
+        assert_eq!(stream.at, stream.buf.len());
+    }
 }

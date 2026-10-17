@@ -17,13 +17,19 @@
 //! cross-console mix-up unreachable in practice — a state's hash cannot
 //! match a cartridge from the other machine.
 //!
-//! **A wrinkle worth knowing before changing a payload**: `TagInfo`
-//! carries ONE `current_version` per tag, not one per (console, tag). A
-//! future change to the SNES `PPU_` payload therefore has to bump a number
-//! the NES `PPU_` payload also reads, forcing NES states to migrate for a
-//! change that did not touch them. Recorded rather than worked around,
-//! because the fix is a format decision (a per-console version, or
-//! console-specific tags) and not this ticket's to take.
+//! **Versions are per console.** `TagInfo` carries one `current_version`
+//! per tag, which the NES owns; the SNES `PPU_` payload is an unrelated
+//! layout, so `rf_state::current_version_for(CONSOLE_SNES, tag)` consults
+//! `CONSOLE_VERSION_OVERRIDES`. SNES `PPU_` is **v5** (v4 + `$212D` TS) while
+//! NES `PPU_` stays v4 and byte-identical. SNES loads need
+//! [`snes_migrations`] (or `save_state::nes_migrations`, which includes it)
+//! to read v4 states.
+//!
+//! **State hash**: `Container::state_hash` digests `tag || version || len ||
+//! payload`, so a SNES state hash changes with this format bump (new
+//! version and one more payload byte). That is intended: the hash now also
+//! covers TS. SNES hashes are not comparable across the bump; NES hashes
+//! are untouched. Migrated v4 states hash as the v5 they become.
 
 use rf_core_api::StateError;
 use rf_snes::state::StateRegion;
@@ -57,15 +63,22 @@ const REGION_TAGS: [(StateRegion, [u8; 4]); 9] = [
 ];
 
 fn chunk_version(tag: [u8; 4]) -> u16 {
-    rf_state::tag_info(tag)
-        .unwrap_or_else(|| {
-            panic!(
-                "chunk tag {} is not in rf-state's registry — REGION_TAGS and TAG_REGISTRY \
+    rf_state::current_version_for(CONSOLE_SNES, tag).unwrap_or_else(|| {
+        panic!(
+            "chunk tag {} is not in rf-state's registry — REGION_TAGS and TAG_REGISTRY \
                  have drifted",
-                String::from_utf8_lossy(&tag)
-            )
-        })
-        .current_version
+            String::from_utf8_lossy(&tag)
+        )
+    })
+}
+
+/// The chunk migrations a SNES `.rfstate` load runs: `PPU_` v4 -> v5
+/// appends `$212D` TS as `0x00`; see [`rf_snes::ppu::migrate_ppu_payload`].
+#[must_use]
+pub fn snes_migrations() -> rf_state::MigrationRegistry {
+    let mut reg = rf_state::MigrationRegistry::new();
+    reg.register_for_console(CONSOLE_SNES, *b"PPU_", rf_snes::ppu::migrate_ppu_payload);
+    reg
 }
 
 #[derive(Default)]
