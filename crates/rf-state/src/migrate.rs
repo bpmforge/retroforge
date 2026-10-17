@@ -25,6 +25,10 @@ pub type MigrateFn = fn(found_version: u16, payload: &[u8]) -> Result<Vec<u8>, S
 #[derive(Default)]
 pub struct MigrationRegistry {
     fns: HashMap<[u8; 4], MigrateFn>,
+    /// Migrations that apply to one console's payload only (the header's
+    /// `console` byte). Consulted before `fns`, so a tag whose NES and
+    /// SNES layouts differ can carry a function for each.
+    scoped: HashMap<(u8, [u8; 4]), MigrateFn>,
 }
 
 impl MigrationRegistry {
@@ -38,14 +42,26 @@ impl MigrationRegistry {
         self.fns.insert(tag, f);
     }
 
+    /// Register (or replace) the migration for `tag` in containers whose
+    /// header `console` byte is `console`. Takes precedence over a
+    /// console-agnostic [`register`](Self::register)ed function.
+    pub fn register_for_console(&mut self, console: u8, tag: [u8; 4], f: MigrateFn) {
+        self.scoped.insert((console, tag), f);
+    }
+
     /// Run the registered migration for `tag`, if any.
     pub(crate) fn migrate(
         &self,
+        console: u8,
         tag: [u8; 4],
         found_version: u16,
         payload: &[u8],
     ) -> Option<Result<Vec<u8>, ContainerError>> {
-        self.fns.get(&tag).map(|f| {
+        let f = self
+            .scoped
+            .get(&(console, tag))
+            .or_else(|| self.fns.get(&tag));
+        f.map(|f| {
             f(found_version, payload)
                 .map_err(|message| ContainerError::MigrationFailed { tag, message })
         })
@@ -59,7 +75,7 @@ mod tests {
     #[test]
     fn empty_registry_has_no_migration_for_any_tag() {
         let reg = MigrationRegistry::new();
-        assert!(reg.migrate(*b"CPU_", 0, &[]).is_none());
+        assert!(reg.migrate(0, *b"CPU_", 0, &[]).is_none());
     }
 
     #[test]
@@ -74,12 +90,12 @@ mod tests {
         let mut reg = MigrationRegistry::new();
         reg.register(*b"CPU_", ok_migration);
         assert_eq!(
-            reg.migrate(*b"CPU_", 0, &[1, 2]).unwrap().unwrap(),
+            reg.migrate(0, *b"CPU_", 0, &[1, 2]).unwrap().unwrap(),
             vec![1, 2]
         );
 
         reg.register(*b"CPU_", failing_migration);
-        let err = reg.migrate(*b"CPU_", 0, &[]).unwrap().unwrap_err();
+        let err = reg.migrate(0, *b"CPU_", 0, &[]).unwrap().unwrap_err();
         assert_eq!(
             err,
             ContainerError::MigrationFailed {
@@ -87,5 +103,23 @@ mod tests {
                 message: "cannot bridge this gap".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn a_console_scoped_migration_wins_over_the_agnostic_one() {
+        fn agnostic(_: u16, _: &[u8]) -> Result<Vec<u8>, String> {
+            Ok(vec![0])
+        }
+        fn snes(_: u16, _: &[u8]) -> Result<Vec<u8>, String> {
+            Ok(vec![1])
+        }
+        let mut reg = MigrationRegistry::new();
+        reg.register(*b"PPU_", agnostic);
+        reg.register_for_console(1, *b"PPU_", snes);
+        assert_eq!(reg.migrate(0, *b"PPU_", 4, &[]).unwrap().unwrap(), vec![0]);
+        assert_eq!(reg.migrate(1, *b"PPU_", 4, &[]).unwrap().unwrap(), vec![1]);
+        let mut only_snes = MigrationRegistry::new();
+        only_snes.register_for_console(1, *b"PPU_", snes);
+        assert!(only_snes.migrate(0, *b"PPU_", 4, &[]).is_none());
     }
 }

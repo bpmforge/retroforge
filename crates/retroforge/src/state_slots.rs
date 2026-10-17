@@ -304,12 +304,13 @@ pub fn scan(dir: &Path) -> Vec<SlotInfo> {
 fn read_slot(dir: &Path, slot: SlotId) -> Option<SavedState> {
     let path = state_path(dir, slot);
     let bytes = std::fs::read(&path).ok()?;
-    // `decode_default` registers no migrations, so a state at an older
-    // chunk version is a hard error here. That is the right behaviour for
-    // a LISTING: it must not silently migrate anything on disk. The
-    // actual load path (`load`, below) is where migration and its warning
-    // belong.
-    let (container, _) = Container::decode_default(&bytes).ok()?;
+    // Only the SNES `PPU_` v4 -> v5 migration is registered here, so old
+    // SNES slots keep listing after the format bump; any other older chunk
+    // version is a hard error (NES behaviour is unchanged). Decoding is in
+    // memory: nothing on disk is rewritten, and the warning belongs to the
+    // actual load path (`load`, below).
+    let (container, _) =
+        Container::decode(&bytes, &crate::snes_save_state::snes_migrations()).ok()?;
     let mut saved = describe(&container, path, thumb_path(dir, slot));
     saved.name = std::fs::read_to_string(name_path(dir, slot))
         .ok()

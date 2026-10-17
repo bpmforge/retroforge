@@ -1902,7 +1902,12 @@ impl Ppu {
         o.u8(self.bghofs_latch)?;
         o.u8(self.cgram_addr)?;
         o.opt_u8(self.cgram_latch)?;
-        o.opt_u8(self.oam_latch)
+        o.opt_u8(self.oam_latch)?;
+        // `$212D` TS, appended LAST so a v4 payload is a strict prefix of
+        // a v5 one (`PPU_` v5, SNES only; see `migrate_ppu_payload`). It
+        // was the one register `write_register` stored that this method
+        // dropped, so a restored machine kept its pre-restore TS.
+        o.u8(self.ts)
     }
 
     pub(crate) fn load(
@@ -1942,10 +1947,34 @@ impl Ppu {
         self.cgram_addr = i.u8()?;
         self.cgram_latch = i.opt_u8()?;
         self.oam_latch = i.opt_u8()?;
+        self.ts = i.u8()?;
         // A restored PPU must not serve last frame's latched lines.
         self.clear_line_state();
         Ok(())
     }
+}
+
+/// Upgrade an older SNES `PPU_` payload to the current version, for
+/// `rf_state::MigrationRegistry::register_for_console`.
+///
+/// Version 4 is the payload before `$212D` TS was stored; version 5 appends
+/// that one byte. A v4 state cannot say what TS was, so it is filled with
+/// `0x00`: the register's power-on value here (`Ppu::new`; fullsnes lists
+/// `$212D` TS among the write-only PPU registers) and exactly what loading
+/// a v4 state into a fresh machine produced before. Older versions
+/// were never loadable (no migration existed) and are refused by name.
+///
+/// # Errors
+/// A message naming the version when it cannot be upgraded.
+pub fn migrate_ppu_payload(found_version: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if found_version != 4 {
+        return Err(format!(
+            "SNES PPU_ version {found_version} cannot be upgraded; only version 4 can"
+        ));
+    }
+    let mut out = payload.to_vec();
+    out.push(0x00);
+    Ok(out)
 }
 
 impl SetIni {

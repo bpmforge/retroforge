@@ -66,6 +66,15 @@ Rules:
 - Chunk `version` bump requires a migration fn or an explicit
   "cannot migrate" error message. Golden `.rfstate` fixtures from each
   release are kept in the test suite; CI loads all of them.
+- **Per-console payload versions.** A tag's registry `current_version` is the
+  NES number; `rf_state::CONSOLE_VERSION_OVERRIDES` gives a console its own
+  (the header's `console` byte selects it), and `MigrationRegistry::
+  register_for_console` scopes a migration the same way. SNES `PPU_` is **v5**
+  (v4 + `$212D` TS, previously not stored, so a restore kept the machine's old
+  TS); NES `PPU_` stays v4 and byte-identical. A v4 SNES state migrates with
+  TS = 0 (`rf_snes::ppu::migrate_ppu_payload`). `state_hash` includes the
+  version and payload, so SNES state hashes (and pinned SNES state digests)
+  changed once at this bump; NES hashes did not.
 - Payload encoding: bincode **2** (`Encode`/`Decode` derives — NOT the 1.x
   serde API; see docs/research/rust-stack.md) wrapped by the hand-rolled
   envelope above, so the *container* is stable even if the codec changes.

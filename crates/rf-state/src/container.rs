@@ -10,7 +10,7 @@ use crate::cursor::Cursor;
 use crate::error::{ContainerError, LoadWarning};
 use crate::header::Header;
 use crate::migrate::MigrationRegistry;
-use crate::tags::{is_required, tag_info, TAG_REGISTRY};
+use crate::tags::{current_version_for, is_required, tag_info, TAG_REGISTRY};
 
 const ZSTD_LEVEL: i32 = 3;
 
@@ -142,27 +142,29 @@ impl Container {
 
         let mut warnings = Vec::new();
         for c in &mut chunks {
-            match tag_info(c.tag) {
-                Some(info) if c.version == info.current_version => {}
-                Some(info) => match migrations.migrate(c.tag, c.version, &c.payload) {
-                    Some(Ok(migrated)) => {
-                        warnings.push(LoadWarning::Migrated {
-                            tag: c.tag,
-                            from: c.version,
-                            to: info.current_version,
-                        });
-                        c.payload = migrated;
-                        c.version = info.current_version;
+            match tag_info(c.tag).and_then(|_| current_version_for(header.console, c.tag)) {
+                Some(expected) if c.version == expected => {}
+                Some(expected) => {
+                    match migrations.migrate(header.console, c.tag, c.version, &c.payload) {
+                        Some(Ok(migrated)) => {
+                            warnings.push(LoadWarning::Migrated {
+                                tag: c.tag,
+                                from: c.version,
+                                to: expected,
+                            });
+                            c.payload = migrated;
+                            c.version = expected;
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => {
+                            return Err(ContainerError::CannotMigrate {
+                                tag: c.tag,
+                                found: c.version,
+                                expected,
+                            })
+                        }
                     }
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        return Err(ContainerError::CannotMigrate {
-                            tag: c.tag,
-                            found: c.version,
-                            expected: info.current_version,
-                        })
-                    }
-                },
+                }
                 None => warnings.push(LoadWarning::UnknownChunk { tag: c.tag }),
             }
         }
