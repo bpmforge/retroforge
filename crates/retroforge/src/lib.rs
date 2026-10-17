@@ -67,6 +67,7 @@ pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod overclock_ui;
 pub mod pacer;
+pub mod palette_table;
 pub mod play_view;
 pub mod profile_builder;
 pub mod profile_editor;

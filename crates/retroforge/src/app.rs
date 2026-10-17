@@ -1335,6 +1335,11 @@ pub struct RetroForgeApp {
     /// when compare mode is on, or for the single frame a screenshot is
     /// pending.
     compare_buffers: Option<CompareBuffers>,
+    /// Ticket W33-02 test probe: per picture row, the most common displayed
+    /// colour of the picture's own `Backdrop` pixels (only while
+    /// `backdrop_probe_on`).
+    backdrop_probe_on: bool,
+    backdrop_probe: Option<Vec<Option<[u8; 3]>>>,
     /// Set by the Screenshot action; consumed by the next frame, which is
     /// the first one whose buffers are guaranteed to exist.
     screenshot_pending: bool,
@@ -1493,6 +1498,39 @@ pub struct RetroForgeApp {
     editor_path: String,
     /// The last save's outcome, shown next to the button that caused it.
     editor_status: Option<String>,
+}
+
+/// Ticket W33-02 test probe: per row, the most common displayed colour among
+/// the picture's `Backdrop` pixels (`rgba` is the frame as displayed).
+fn picture_backdrop_rows(
+    video: &[rf_core_api::PpuPixel],
+    width: usize,
+    rgba: &[u8],
+) -> Vec<Option<[u8; 3]>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    video
+        .chunks_exact(width)
+        .enumerate()
+        .map(|(y, row)| {
+            let mut counts: std::collections::HashMap<[u8; 3], u32> = Default::default();
+            for (x, _) in row
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.layer == rf_core_api::PixelLayer::Backdrop)
+            {
+                let at = (y * width + x) * 4;
+                if let Some(p) = rgba.get(at..at + 3) {
+                    *counts.entry([p[0], p[1], p[2]]).or_default() += 1;
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|&(c, n)| (n, c))
+                .map(|(c, _)| c)
+        })
+        .collect()
 }
 
 /// The per-row facts a widened frame's margins are composed from:
@@ -1875,6 +1913,8 @@ impl RetroForgeApp {
             compare_mode: rf_renderer::CompareMode::Off,
             compare_divider: 0.5,
             compare_buffers: None,
+            backdrop_probe_on: false,
+            backdrop_probe: None,
             screenshot_pending: false,
             ultrawide_render: None,
             ultrawide_texture: None,
@@ -4173,7 +4213,8 @@ impl RetroForgeApp {
         // pressed — including while paused, when no new frame will come.
         let want_compare_buffers = self.compare_mode != rf_renderer::CompareMode::Off
             || self.screenshot_pending
-            || self.enhancement_visible();
+            || self.enhancement_visible()
+            || self.backdrop_probe_on;
         let latest_bundle_video = if want_compare_buffers {
             let b = core.frame_bundle.latest();
             Some((b.video.clone(), u32::from(b.width), u32::from(b.height)))
@@ -4240,6 +4281,11 @@ impl RetroForgeApp {
             self.awaiting_stepped_frame = false;
             self.capture_hud_band(&msg.rgba, msg.width, msg.height, &latest_bundle_events);
             // Ticket W3-04: pair the two renderings of THIS frame.
+            if self.backdrop_probe_on {
+                self.backdrop_probe = latest_bundle_video
+                    .as_ref()
+                    .map(|(v, bw, _)| picture_backdrop_rows(v, *bw as usize, &msg.rgba));
+            }
             self.compare_buffers = latest_bundle_video.and_then(|(video, bw, bh)| {
                 // Geometry must agree, or there is a scaling decision to
                 // make that this ticket deliberately does not guess at —
@@ -12158,16 +12204,29 @@ impl RetroForgeApp {
                                     .unwrap_or_else(|| rf_renderer::resolve_index(0, palette)),
                             );
                         };
-                        Some(rf_renderer::resolve_index(cell.palette_index, palette))
+                        // Ticket W33-02: with the palette the cell was seen
+                        // under, not the row's current one.
+                        Some(match palette {
+                            Some(pal) => rf_renderer::bgr555_to_rgb(
+                                layers.palettes.word(&cell, pal),
+                                pal.brightness,
+                            ),
+                            None => rf_renderer::resolve_index(cell.palette_index, None),
+                        })
                     };
                     let filled =
                         fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w);
                     return (filled, (out_w, h));
                 }
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
-                    let cell = canvas.get(wx, wy)?;
                     let row = usize::try_from(wy - top).unwrap_or(0);
                     let palette = palettes.get(row).and_then(Option::as_ref);
+                    // Ticket W33-02: nothing known here shows the row's own
+                    // backdrop colour, not black (a NES cell is already a
+                    // master-colour value, so it needs no palette snapshot).
+                    let Some(cell) = canvas.get(wx, wy) else {
+                        return backdrops.get(row).copied().flatten();
+                    };
                     Some(rf_renderer::resolve_index(cell.palette_index, palette))
                 };
                 fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w)
@@ -14062,6 +14121,21 @@ impl RetroForgeApp {
 
     pub fn last_frame_rgba_for_test(&self) -> Option<Vec<u8>> {
         self.last_frame_rgba.clone()
+    }
+
+    /// Ticket W33-02: start recording, per frame, the colour the picture's
+    /// own backdrop pixels show on each row (the acceptance test compares the
+    /// margins with it).
+    #[doc(hidden)]
+    pub fn enable_backdrop_probe_for_test(&mut self) {
+        self.backdrop_probe_on = true;
+    }
+
+    /// The probe of the latest frame (see [`Self::enable_backdrop_probe_for_test`]).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn backdrop_probe_for_test(&self) -> Option<Vec<Option<[u8; 3]>>> {
+        self.backdrop_probe.clone()
     }
 
     /// The core's crash message, if it reported one.
