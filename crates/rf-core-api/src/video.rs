@@ -114,6 +114,67 @@ pub struct SubPixel {
     pub main_black: bool,
 }
 
+/// One scanline's sub-screen, as [`crate::CoreSink::sub_scanline`] delivered
+/// it, kept whole by a consumer that wants to know what the sub screen
+/// showed (ticket W33-01: `FrameBundle::sub`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubLine {
+    /// The line's sub-screen pixels, exactly `SubPixel`'s contract. In a
+    /// `FrameBundle` these are the console's own 256 dots (a widened line's
+    /// margins are cut off, as for `FrameBundle::video`).
+    pub pixels: Vec<SubPixel>,
+    /// `$2132` fixed colour for the line, BGR555.
+    pub fixed_color: u16,
+}
+
+/// The register state one scanline was drawn with, for a consumer that
+/// wants to REPRODUCE how the line was composed rather than only see its
+/// pixels (ticket W33-01; the widescreen stitcher places each layer by its
+/// own per-line scroll and rebuilds colour math in the margins).
+///
+/// Pure metadata, law 4: a core emits what it latched, the consumer does the
+/// arithmetic. It is a separate channel from the pixels
+/// ([`crate::CoreSink::line_registers`]), sent only to a sink that asked
+/// ([`crate::CoreSink::wants_line_registers`]), so Accuracy Mode pays
+/// nothing and `FrameBundle::video` is untouched.
+///
+/// Field semantics follow fullsnes: `$210D-$2114` BGnHOFS/BGnVOFS,
+/// `$212C/$212D` TM/TS, `$2130-$2132` colour math, `$2100` INIDISP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineRegisters {
+    /// Per-layer scroll in force on this line (BG1-BG4), as latched: the
+    /// 10-bit register values, not wrapped to any tilemap.
+    pub hofs: [u16; 4],
+    pub vofs: [u16; 4],
+    /// `$212C` main-screen designation: BG1-4 in bits 0-3, OBJ in bit 4.
+    pub tm: u8,
+    /// `$212D` sub-screen designation, same layout.
+    pub ts: u8,
+    /// `$2131` bits 0-5: colour math enabled per layer (BG1-4, OBJ,
+    /// backdrop), as written.
+    pub math_enable: u8,
+    /// `$2131` bit 7: subtract instead of add.
+    pub subtract: bool,
+    /// `$2131` bit 6: halve the result.
+    pub half: bool,
+    /// `$2130` bit 1: the sub screen is the second operand (else the fixed
+    /// colour).
+    pub use_subscreen: bool,
+    /// `$2130` bits 4-5 (0 always, 1 inside the colour window, 2 outside,
+    /// 3 never): when colour math is prevented.
+    pub prevent_mode: u8,
+    /// `$2130` bits 6-7 (0 never, 1 outside, 2 inside, 3 always): when the
+    /// main screen is forced to black before math.
+    pub clip_mode: u8,
+    /// `$2132` fixed colour, BGR555.
+    pub fixed_color: u16,
+    /// CGRAM entry 0 (the backdrop colour) as the line was drawn, BGR555.
+    pub backdrop_color: u16,
+    /// Master brightness in force on the line, `0..=15` (`0` when the line
+    /// is force-blanked).
+    pub brightness: u8,
+}
+
 /// One console's Mode 7 affine-transform register file for one frame
 /// (ticket W16-09; `docs/design/ENHANCEMENT_WAVE_16.md` §9; snesdev wiki
 /// "Mode 7" for the matrix/offset semantics; `rf_snes::ppu::mode7::Mode7`

@@ -758,6 +758,41 @@ fn sprites_draw_over_the_mode_7_playfield() {
 ///
 /// The golden that caught it is `#[ignore]`d and needs fetched ROMs, so
 /// this is the version that runs in `cargo test --workspace`.
+/// Ticket W33-01: `Ppu::line_registers` hands out what each line was DRAWN
+/// with (an HDMA scroll band), not what the registers say now, and carries
+/// the colour-math facts the widescreen margin compose rebuilds from.
+#[test]
+fn line_registers_report_the_per_line_scroll_and_colour_math() {
+    let mut ppu = Ppu::new();
+    ppu.forced_blank = false;
+    ppu.brightness = 0x0F;
+    ppu.write_register(0x212C, 0x11); // TM: BG1 + OBJ
+    ppu.write_register(0x212D, 0x02); // TS: BG2
+    ppu.write_register(0x2130, 0x02); // use the sub screen
+    ppu.write_register(0x2131, 0x60 | 0x20); // half, backdrop enabled
+    ppu.write_register(0x2132, 0x20 | 0x0B); // fixed red 11
+    ppu.cgram[0] = 0x1234;
+    // BG1HOFS = 0x0123 (low byte then high byte), latched as line 1.
+    ppu.write_register(0x210D, 0x23);
+    ppu.write_register(0x210D, 0x01);
+    ppu.latch_line(1);
+    // An HDMA write moves it to 0x0040 before line 2.
+    ppu.write_register(0x210D, 0x40);
+    ppu.write_register(0x210D, 0x00);
+    ppu.latch_line(2);
+    let (r0, r1) = (ppu.line_registers(0), ppu.line_registers(1));
+    assert_eq!((r0.hofs[0], r1.hofs[0]), (0x0123, 0x0040), "per line");
+    // The live register moving on afterwards rewrites nothing.
+    ppu.write_register(0x210D, 0xFF);
+    assert_eq!(ppu.line_registers(0).hofs[0], 0x0123);
+    assert_eq!((r0.tm, r0.ts), (0x11, 0x02));
+    assert!(r0.use_subscreen && r0.half && !r0.subtract);
+    assert_eq!(r0.math_enable, 0x20, "backdrop bit only");
+    assert_eq!(r0.fixed_color, 0x000B, "red 11, as BGR555");
+    assert_eq!(r0.backdrop_color, 0x1234);
+    assert_eq!(r0.brightness, 15);
+}
+
 #[test]
 fn window_and_mosaic_registers_are_latched_per_scanline() {
     let mut ppu = Ppu::new();

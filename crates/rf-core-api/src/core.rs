@@ -151,6 +151,26 @@ pub trait CoreSink {
     /// the sub-screen vanishes at the wrapper exactly as the overlay would.
     fn sub_scanline(&mut self, _y: u16, _pixels: &[SubPixel], _fixed_color: u16) {}
 
+    /// Ticket W33-01: whether this sink wants [`Self::line_registers`].
+    ///
+    /// Defaulted to `false`, and a core asks ONCE per frame and skips the
+    /// per-line call entirely when it is `false`, so every existing sink
+    /// (Accuracy Mode included) costs exactly what it did. A sink that
+    /// WRAPS another must forward this together with
+    /// [`Self::line_registers`].
+    fn wants_line_registers(&self) -> bool {
+        false
+    }
+
+    /// Ticket W33-01: the register state scanline `y` was drawn with (see
+    /// [`crate::video::LineRegisters`]), sent before that line's
+    /// [`Self::video_scanline`], only when [`Self::wants_line_registers`].
+    ///
+    /// A fourth parallel channel with the same rules as
+    /// [`Self::sub_scanline`]: it never replaces or alters the main screen.
+    /// Defaulted to a no-op; a sink that WRAPS another must forward it.
+    fn line_registers(&mut self, _y: u16, _regs: &crate::video::LineRegisters) {}
+
     /// The palette scanline `y` is to be coloured with, sent before that
     /// line's [`Self::video_scanline`] (ticket W7-20).
     ///

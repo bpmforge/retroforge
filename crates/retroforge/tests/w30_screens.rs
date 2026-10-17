@@ -812,6 +812,97 @@ fn shot_widescreen(readme: &mut Vec<String>) {
     }
 }
 
+/// Ticket W33-00: live frames per second, unpaced, release, back to back on
+/// one machine and one session: 4:3 (widescreen off), 32:9 with the scout
+/// off, 32:9 with the scout on. `RF_FPS_GAME=smw|smb3|mm2` (default smw).
+/// Each figure is the MEDIAN over 20 chunks of 30 frames (600 frames) so a
+/// load spike on the shared machine moves one chunk, not the number; the
+/// load average is printed with it. The game is not held in one scene (a
+/// standing player dies ~220 frames in), so compare the figures to each other
+/// only through the repeated 4:3 control.
+fn shot_fps(readme: &mut Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "fps";
+    if !wanted(name) {
+        return;
+    }
+    let game = std::env::var("RF_FPS_GAME").unwrap_or_else(|_| "smw".into());
+    let (console, file, enter): (&str, &str, fn(&mut H)) = match game.as_str() {
+        "smb3" => ("nes", "Super Mario Bros. 3 (USA).zip", smb3_enter_level),
+        "mm2" => ("nes", "Mega Man 2 (USA).zip", mm2_enter_level),
+        _ => ("snes", "Super Mario World (USA).zip", smw_enter_yi1),
+    };
+    let Some(path) = rom(console, file) else {
+        return skip(readme, name, &format!("{file} not found"));
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    enter(&mut h);
+    let load = || {
+        std::process::Command::new("uptime")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let measure = |h: &mut H| -> (f64, f64) {
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        let mut fps = Vec::new();
+        let t_all = Instant::now();
+        let f_all = h.state().frame_count_for_test();
+        for _ in 0..20 {
+            let f0 = h.state().frame_count_for_test();
+            let t0 = Instant::now();
+            run_frames(h, f0 + 30, Duration::from_secs(120));
+            let n = h.state().frame_count_for_test() - f0;
+            fps.push(n as f64 / t0.elapsed().as_secs_f64());
+        }
+        let total =
+            (h.state().frame_count_for_test() - f_all) as f64 / t_all.elapsed().as_secs_f64();
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        fps.sort_by(|a, b| a.total_cmp(b));
+        (fps[fps.len() / 2], total)
+    };
+    let telemetry = h.state().scout_telemetry_for_test();
+    let mut line = format!("FPS {game}:");
+    // Scout ON first: it needs the player in the level to start.
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    let (med, all) = measure(&mut h);
+    line += &format!(
+        " [32:9 scout ON] median {med:.1} overall {all:.1} (scouts started {} finished {} aborted {}; {})",
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        load()
+    );
+    h.state_mut().set_scout_enabled_for_test(false);
+    let (med, all) = measure(&mut h);
+    line += &format!(
+        " [32:9 scout off] median {med:.1} overall {all:.1} ({})",
+        load()
+    );
+    h.state_mut().set_widescreen(false);
+    let (med, all) = measure(&mut h);
+    line += &format!(" [4:3 off] median {med:.1} overall {all:.1} ({})", load());
+    h.state_mut().set_widescreen(true);
+    let (med, all) = measure(&mut h);
+    line += &format!(
+        " [32:9 scout off again] median {med:.1} overall {all:.1} ({})",
+        load()
+    );
+    h.state_mut().set_widescreen(false);
+    let (med, all) = measure(&mut h);
+    line += &format!(
+        " [4:3 off again] median {med:.1} overall {all:.1} ({})",
+        load()
+    );
+    note(readme, line);
+}
+
 /// Ticket W32-03: the real wide-snes Super Mario World patch (`.bps` +
 /// `.bso`, W48 -> 352 wide) under the bsnes-hd convention. The ROM and
 /// patch are the user's own files in `RF_WIDESNES_DIR` (`rom/Super Mario
@@ -1360,6 +1451,7 @@ fn w30_w31_screens() {
     shot_widescreen(&mut readme);
     shot_scout(&mut readme);
     shot_scout_nes(&mut readme);
+    shot_fps(&mut readme);
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
     shot_lens(&mut readme);

@@ -36,7 +36,8 @@ pub use input::{InputFrame, MAX_INPUT_PORTS};
 pub use state_view::{StateReader, StateView, StateWriter};
 pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 pub use video::{
-    ColorMathOp, Mode7Frame, Mode7Registers, OverlayPixel, PixelLayer, PpuPixel, SubPixel,
+    ColorMathOp, LineRegisters, Mode7Frame, Mode7Registers, OverlayPixel, PixelLayer, PpuPixel,
+    SubLine, SubPixel,
 };
 pub use watch::{MemWatch, WatchAccess, WatchSpace, WatchTable, MAX_WATCHES};
 

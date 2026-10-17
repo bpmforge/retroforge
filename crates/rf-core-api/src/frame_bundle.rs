@@ -43,7 +43,7 @@
 //!   ticket's own escalation clause).
 use crate::core::CoreSink;
 use crate::event::CoreEvent;
-use crate::video::{PixelLayer, PpuPixel};
+use crate::video::{LineRegisters, PixelLayer, PpuPixel, SubLine, SubPixel};
 
 /// One frame's worth of assembled [`CoreSink`] output, ready to cross a
 /// thread boundary via [`crate::triple_buffer`] (ARCHITECTURE §6).
@@ -82,6 +82,17 @@ pub struct FrameBundle {
     /// nothing extra in that case: there is nothing in this `Vec` to
     /// filter.
     pub events: Vec<CoreEvent>,
+    /// Ticket W33-01: per visible line, the sub-screen exactly as
+    /// [`CoreSink::sub_scanline`] delivered it (the console's own dots
+    /// only). `height` entries, `None` on a line with no colour math, or
+    /// EMPTY when the builder was not asked to capture
+    /// ([`FrameBundleBuilder::set_capture_wide`]): Accuracy Mode never sets
+    /// it and nothing reads it there. Not part of the accuracy-exact stream:
+    /// [`Self::video`] (and any hash over it) is unaffected.
+    pub sub: Vec<Option<SubLine>>,
+    /// Ticket W33-01: per visible line, the registers it was drawn with
+    /// ([`LineRegisters`]). Same shape and gating as [`Self::sub`].
+    pub lines: Vec<Option<LineRegisters>>,
 }
 
 impl FrameBundle {
@@ -111,6 +122,8 @@ impl FrameBundle {
             height,
             video,
             events,
+            sub: Vec::new(),
+            lines: Vec::new(),
         }
     }
 
@@ -126,6 +139,8 @@ impl FrameBundle {
             height: 0,
             video: Vec::new(),
             events: Vec::new(),
+            sub: Vec::new(),
+            lines: Vec::new(),
         }
     }
 }
@@ -156,6 +171,11 @@ pub struct FrameBundleBuilder {
     height: u16,
     pixels: Vec<PpuPixel>,
     events: Vec<CoreEvent>,
+    /// Ticket W33-01: keep the sub-screen and per-line registers (the
+    /// widescreen stitcher's inputs). Off by default.
+    capture_wide: bool,
+    sub: Vec<Option<SubLine>>,
+    lines: Vec<Option<LineRegisters>>,
 }
 
 impl FrameBundleBuilder {
@@ -172,7 +192,34 @@ impl FrameBundleBuilder {
             height,
             pixels: vec![BLANK_PIXEL; width as usize * height as usize],
             events: Vec::new(),
+            capture_wide: false,
+            sub: Vec::new(),
+            lines: Vec::new(),
         }
+    }
+
+    /// Ticket W33-01: start or stop keeping the sub-screen and per-line
+    /// registers in the bundles [`Self::take`] returns (what the widescreen
+    /// stitcher needs; the app turns it on only while widescreen is on).
+    /// Off, [`FrameBundle::sub`]/[`FrameBundle::lines`] are empty and the
+    /// core is told this sink does not want line registers.
+    pub fn set_capture_wide(&mut self, on: bool) {
+        if on == self.capture_wide {
+            return;
+        }
+        self.capture_wide = on;
+        self.sub = if on { self.blank_rows() } else { Vec::new() };
+        self.lines = if on { self.blank_rows() } else { Vec::new() };
+    }
+
+    /// Whether the sub-screen and per-line registers are being kept.
+    #[must_use]
+    pub fn capture_wide(&self) -> bool {
+        self.capture_wide
+    }
+
+    fn blank_rows<T: Clone>(&self) -> Vec<Option<T>> {
+        vec![None; usize::from(self.height)]
     }
 
     /// Snapshot the accumulated frame into an owned [`FrameBundle`] and
@@ -183,13 +230,21 @@ impl FrameBundleBuilder {
     /// steady-state running frame overwrites every row regardless.
     #[must_use]
     pub fn take(&mut self, frame_count: u64) -> FrameBundle {
-        FrameBundle::new(
+        let mut bundle = FrameBundle::new(
             frame_count,
             self.width,
             self.height,
             self.pixels.clone(),
             std::mem::take(&mut self.events),
-        )
+        );
+        if self.capture_wide {
+            // Moved, not cloned, and reset: unlike the pixels, a line whose
+            // colour math switched off must not keep last frame's sub-screen.
+            let (fresh_sub, fresh_lines) = (self.blank_rows(), self.blank_rows());
+            bundle.sub = std::mem::replace(&mut self.sub, fresh_sub);
+            bundle.lines = std::mem::replace(&mut self.lines, fresh_lines);
+        }
+        bundle
     }
 }
 
@@ -219,6 +274,35 @@ impl CoreSink for FrameBundleBuilder {
 
     fn audio(&mut self, _samples: &[i16]) {
         // No `audio` field on FrameBundle yet -- see module doc.
+    }
+
+    fn wants_line_registers(&self) -> bool {
+        self.capture_wide
+    }
+
+    fn line_registers(&mut self, y: u16, regs: &LineRegisters) {
+        if let Some(slot) = self.lines.get_mut(usize::from(y)) {
+            *slot = Some(*regs);
+        }
+    }
+
+    /// Ticket W33-01: keep the line's sub-screen when capturing. A widened
+    /// line's sub-screen is `width + 2 * pad` dots long, the same shape as
+    /// the main line ([`Self::video_scanline_widened`] takes its middle), so
+    /// the console's own dots are the middle `width` here too.
+    fn sub_scanline(&mut self, y: u16, pixels: &[SubPixel], fixed_color: u16) {
+        if !self.capture_wide {
+            return;
+        }
+        let width = usize::from(self.width);
+        let pad = pixels.len().saturating_sub(width) / 2;
+        let middle = pixels.get(pad..pad + width).unwrap_or(pixels);
+        if let Some(slot) = self.sub.get_mut(usize::from(y)) {
+            *slot = Some(SubLine {
+                pixels: middle.to_vec(),
+                fixed_color,
+            });
+        }
     }
 
     fn event(&mut self, ev: CoreEvent) {

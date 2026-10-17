@@ -312,6 +312,19 @@ impl CoreSink for ScoutSink {
         self.bundle
             .video_scanline(y, pixels.get(pad..pad + w).unwrap_or(pixels));
     }
+    /// Ticket W33-01: the scout stitches with the same sub-screen and
+    /// per-line registers the live path does (its bundle builder captures
+    /// them), so a hill the live game only ever drew on the sub screen is
+    /// scouted too.
+    fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
+        self.bundle.sub_scanline(y, pixels, fixed_color);
+    }
+    fn wants_line_registers(&self) -> bool {
+        self.bundle.wants_line_registers()
+    }
+    fn line_registers(&mut self, y: u16, regs: &rf_core_api::LineRegisters) {
+        self.bundle.line_registers(y, regs);
+    }
     fn audio(&mut self, _samples: &[i16]) {}
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
         if self.keep_events {
@@ -402,7 +415,13 @@ impl Scout {
             acc: seed.fork_axes(),
             seed,
             sink: ScoutSink {
-                bundle: FrameBundleBuilder::new(size.0, size.1),
+                bundle: {
+                    // W33-01: the scout stitches with the same sub-screen and
+                    // per-line registers as the live path.
+                    let mut b = FrameBundleBuilder::new(size.0, size.1);
+                    b.set_capture_wide(true);
+                    b
+                },
                 keep_events: false,
             },
             comp: None,
@@ -646,15 +665,16 @@ impl Scout {
             return self.status;
         }
         let bundle = self.sink.bundle.take(self.stepper.frame_count());
-        let drawn_with = self.lag.drawn_with(
-            self.stepper.frame_count(),
-            FrameScrolls {
-                composite: None,
-                layers: scrolls(&self.stepper),
-            },
+        let read = FrameScrolls {
+            composite: None,
+            layers: scrolls(&self.stepper),
+        };
+        let drawn_with = self.lag.drawn_with(self.stepper.frame_count(), read);
+        self.acc.observe_frame(
+            &bundle,
+            self.scene,
+            crate::layer_canvas::scrolls_for(&bundle, &drawn_with, &read),
         );
-        self.acc
-            .observe_frame(&bundle, self.scene, drawn_with.layers.as_ref());
         self.since_merge += 1;
         let extent = self.extent();
         if let Some(why) = self.rule.observe(&self.plan, after, extent) {

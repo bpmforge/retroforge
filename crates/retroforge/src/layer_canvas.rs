@@ -15,11 +15,23 @@
 //! * Same world convention as `canvas_accum::FramePosition`: bundle column
 //!   `c` of row `sy` lands on world `(world_x + c, world_y + sy)` and the
 //!   256-dot picture's left edge is `world_x + pad`.
-//! * Positions come from the per-frame `hofs`/`vofs` registers (one sample
-//!   per frame, wrapped to the tilemap, accumulated with
-//!   `rf_enhance::scroll_tracker::WorldAxis`). A game that changes a layer's
-//!   scroll mid-frame (HDMA parallax) is stitched at its first value:
-//!   fullsnes does not let us do better from register snapshots.
+//! * Positions come from the scroll registers, wrapped to the tilemap and
+//!   accumulated with `rf_enhance::scroll_tracker::WorldAxis`. **Per line
+//!   (W33-01):** when the bundle carries the registers each line was drawn
+//!   with (`FrameBundle::lines`, widescreen on), every picture row of every
+//!   layer has its OWN x axis, so an HDMA parallax band lands at the world x
+//!   its rows were really drawn at, and no scroll-timing guess is needed
+//!   (the registers are the ones that drew the line). A row's y comes from
+//!   one axis per layer fed with the first line's `vofs` (vertical HDMA
+//!   parallax is not modelled). Without line data (an old bundle, widescreen
+//!   off) the per-frame registers are used as before, through [`ScrollLag`].
+//! * **Sub-screen (W33-01).** A layer that is on the SUB screen at a dot the
+//!   main screen gave to something else (Super Mario World's far hills are
+//!   BG2 on the sub screen) still draws its pixel into its own canvas from
+//!   `FrameBundle::sub`: the main winner is written first, a sub-screen
+//!   pixel fills its own layer's canvas only where the main winner is a
+//!   different layer. The margin compose ([`margin_color`]) then puts the
+//!   sub-screen layer behind the main layers through the row's colour math.
 //! * Margin order, front to back (W32-08): per picture row, by the 4:3
 //!   picture's own evidence ([`LayerCanvasAccumulator::row_orders`]: where the
 //!   picture shows layer A at a spot layer B also has a known cell, A is in
@@ -49,7 +61,7 @@
 //! core.
 use std::collections::HashMap;
 
-use rf_core_api::{FrameBundle, PixelLayer, PpuPixel};
+use rf_core_api::{FrameBundle, LineRegisters, PixelLayer, PpuPixel};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scroll_tracker::WorldAxis;
 use rf_enhance::stitcher::Canvas;
@@ -120,6 +132,25 @@ impl ScrollLag {
     }
 }
 
+/// Ticket W33-01: the per-layer scroll [`LayerCanvasAccumulator::observe_frame`]
+/// is given for `bundle`. A bundle that carries the registers each line was
+/// drawn with needs no scroll-timing rule (the registers ARE the ones that
+/// drew it), so it gets the current read, whose layer set and tilemap sizes
+/// are all `observe_frame` takes from it; a bundle without them gets the read
+/// that drew the frame ([`ScrollLag`]), or nothing when that is unknown.
+#[must_use]
+pub fn scrolls_for<'a>(
+    bundle: &FrameBundle,
+    drawn: &'a FrameScrolls,
+    read: &'a FrameScrolls,
+) -> Option<&'a [Option<LayerScroll>; LAYERS]> {
+    if bundle.lines.iter().any(Option::is_some) {
+        read.layers.as_ref()
+    } else {
+        drawn.layers.as_ref()
+    }
+}
+
 /// Per scene, what a layer's scroll and picture rows have done so far (the
 /// evidence for [`LayerCanvasAccumulator::hud_layers`]).
 #[derive(Debug, Clone, Copy, Default)]
@@ -168,10 +199,26 @@ const MOVED_PX: i64 = 8;
 
 /// Where each widened layer's 256-dot picture sits in its own world this
 /// frame (same convention as `canvas_accum::FramePosition::origin`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerFrames {
     pub scene: u64,
+    /// Where row 0 of the picture sits on each layer's canvas.
     pub origins: [Option<(i64, i64)>; LAYERS],
+    /// Per picture row, how far that row's world x differs from
+    /// `origins[n].0` for layer `n` (HDMA scroll bands, W33-01). Empty when
+    /// no row carried line registers: every row sits at the origin.
+    pub row_dx: Vec<[i32; LAYERS]>,
+}
+
+impl LayerFrames {
+    /// Layer `n`'s origin for picture row `row`: the row's own world x (a
+    /// per-line scroll) and the layer's y.
+    #[must_use]
+    pub fn origin_at(&self, n: usize, row: usize) -> Option<(i64, i64)> {
+        let (ox, oy) = (*self.origins.get(n)?)?;
+        let dx = self.row_dx.get(row).map_or(0, |r| r[n]);
+        Some((ox + i64::from(dx), oy))
+    }
 }
 
 /// A scene's per-layer canvases, shipped to the UI thread. `None` = the
@@ -192,12 +239,22 @@ impl LayerCanvases {
     }
 }
 
+/// One layer's world axes: the per-frame pair (registers read once per
+/// frame) and, once line registers have been seen, one x axis per picture
+/// row (a band's rows keep their own world x across frames, which a single
+/// axis fed with varying rows would read as camera jumps).
+#[derive(Debug, Clone, Default)]
+struct LayerAxes {
+    frame: (WorldAxis, WorldAxis),
+    rows: Vec<WorldAxis>,
+}
+
 /// Stateful per-ROM accumulator; driven on the core thread for every frame,
 /// right after `CanvasAccumulator::observe_frame_with_scroll` (it shares
 /// that call's scene id, so the two never disagree on the scene).
 #[derive(Default)]
 pub struct LayerCanvasAccumulator {
-    axes: [(WorldAxis, WorldAxis); LAYERS],
+    axes: [LayerAxes; LAYERS],
     scenes: HashMap<u64, [Canvas; LAYERS]>,
     last: Option<LayerFrames>,
     last_scene: Option<u64>,
@@ -231,22 +288,67 @@ impl LayerCanvasAccumulator {
         if width == 0 {
             return;
         }
+        let height = usize::from(bundle.height);
         let pad = i64::from(bundle.width.saturating_sub(256) / 2);
+        // W33-01: the registers each line was drawn with, when the bundle
+        // has them. Then `scrolls` only says WHICH layers to stitch and at
+        // what tilemap size; the positions come from the lines.
+        let has_lines = bundle.lines.iter().any(Option::is_some);
+        let line0 = bundle.lines.first().copied().flatten();
         let canvases = self.scenes.entry(scene.0).or_default();
         let motion = self.motion.entry(scene.0).or_default();
         let mut origins = [None; LAYERS];
+        let mut row_dx: Vec<[i32; LAYERS]> = if has_lines {
+            vec![[0; LAYERS]; height]
+        } else {
+            Vec::new()
+        };
         let mut row_buf: Vec<Option<PpuPixel>> = Vec::with_capacity(width);
         for (n, scroll) in scrolls.iter().enumerate() {
             let Some(scroll) = scroll else { continue };
-            let (ax, ay) = &mut self.axes[n];
-            let wx = ax.advance(scroll.hofs, i64::from(scroll.tilemap_width.max(1)));
-            let wy = ay.advance(scroll.vofs, i64::from(scroll.tilemap_height.max(1)));
+            let (tw, th) = (scroll.tilemap_width.max(1), scroll.tilemap_height.max(1));
+            let axes = &mut self.axes[n];
+            // The per-frame read keeps its axis current: it is the fallback
+            // for rows with no line registers.
+            let wx_frame = axes.frame.0.advance(scroll.hofs, i64::from(tw));
+            let vofs = line0.map_or(scroll.vofs, |l| l.vofs[n] % th);
+            let wy = axes.frame.1.advance(vofs, i64::from(th));
+            if has_lines && axes.rows.len() < height {
+                axes.rows.resize(height, WorldAxis::new());
+            }
             let wanted = PixelLayer::Background(n as u8);
             let mut rows_drawn: Option<(usize, usize)> = None;
+            let mut base_x = wx_frame;
             // Bounded `for` over the frame's rows (law 8).
             for (sy, row) in bundle.video.chunks_exact(width).enumerate() {
+                // Every row's own axis advances every frame, drawn or not,
+                // so its deltas stay one frame apart.
+                let wx = match bundle.lines.get(sy).copied().flatten() {
+                    Some(l) => axes.rows[sy].advance(l.hofs[n] % tw, i64::from(tw)),
+                    None => wx_frame,
+                };
+                if sy == 0 {
+                    base_x = wx;
+                }
+                if has_lines {
+                    row_dx[sy][n] = i32::try_from(wx - base_x).unwrap_or(0);
+                }
+                let sub = bundle.sub.get(sy).and_then(Option::as_ref);
                 row_buf.clear();
-                row_buf.extend(row.iter().map(|p| (p.layer == wanted).then_some(*p)));
+                row_buf.extend(row.iter().enumerate().map(|(c, p)| {
+                    if p.layer == wanted {
+                        return Some(*p);
+                    }
+                    // The sub screen's pixel of THIS layer where the main
+                    // screen showed something else (W33-01).
+                    let sp = sub?.pixels.get(c).filter(|sp| sp.layer == wanted)?;
+                    Some(PpuPixel {
+                        palette_index: sp.palette_index,
+                        layer: wanted,
+                        sprite_id: None,
+                        priority: 0,
+                    })
+                }));
                 // A row this layer did not draw at all must not grow the
                 // canvas with empty cells.
                 if row_buf.iter().any(Option::is_some) {
@@ -257,12 +359,13 @@ impl LayerCanvasAccumulator {
                     rows_drawn = Some(rows_drawn.map_or((sy, sy), |(lo, _)| (lo, sy)));
                 }
             }
-            motion[n].observe(wx, wy, rows_drawn, usize::from(bundle.height));
-            origins[n] = Some((wx + pad, wy));
+            motion[n].observe(base_x, wy, rows_drawn, height);
+            origins[n] = Some((base_x + pad, wy));
         }
         self.last = Some(LayerFrames {
             scene: scene.0,
             origins,
+            row_dx,
         });
     }
 
@@ -273,7 +376,7 @@ impl LayerCanvasAccumulator {
     #[must_use]
     pub fn fork_axes(&self) -> Self {
         Self {
-            axes: self.axes,
+            axes: self.axes.clone(),
             scenes: HashMap::new(),
             last: None,
             last_scene: self.last_scene,
@@ -287,7 +390,7 @@ impl LayerCanvasAccumulator {
     /// positions; the canvases stitched so far are kept. A scout's next pass
     /// restarts from the snapshot, so its positions restart from the seed.
     pub fn rewind_axes(&mut self, seed: &Self) {
-        self.axes = seed.axes;
+        self.axes = seed.axes.clone();
         self.last = None;
     }
 
@@ -313,7 +416,7 @@ impl LayerCanvasAccumulator {
     /// order (BG1 first). Empty before a frame has been placed.
     #[must_use]
     pub fn row_orders(&self, bundle: &FrameBundle) -> Vec<[u8; LAYERS]> {
-        let (Some(frames), width) = (self.last, usize::from(bundle.width)) else {
+        let (Some(frames), width) = (self.last.as_ref(), usize::from(bundle.width)) else {
             return Vec::new();
         };
         let Some(set) = self.scenes.get(&frames.scene) else {
@@ -322,7 +425,8 @@ impl LayerCanvasAccumulator {
         let pad = i64::from(bundle.width.saturating_sub(256) / 2);
         let hud = self.hud_layers(frames.scene);
         let known = |n: usize, c: usize, y: usize| -> bool {
-            frames.origins[n]
+            frames
+                .origin_at(n, y)
                 .is_some_and(|(ox, oy)| set[n].get(ox - pad + c as i64, oy + y as i64).is_some())
         };
         let default: [u8; LAYERS] = std::array::from_fn(|i| i as u8);
@@ -435,7 +539,7 @@ impl LayerCanvasAccumulator {
     /// Where the latest frame sits on each layer's canvas.
     #[must_use]
     pub fn frames(&self) -> Option<LayerFrames> {
-        self.last
+        self.last.clone()
     }
 
     /// A clone of the current scene's non-empty layer canvases, for the UI
@@ -540,16 +644,100 @@ pub fn front_layer_pixel(
     dy: i64,
     order: Option<&[u8; LAYERS]>,
 ) -> Option<PpuPixel> {
+    front_layer_pixel_in(layers, |n| origins[n], dx, dy, order, 0x0F)
+}
+
+/// [`front_layer_pixel`] with each layer's origin from `origin_of` (the
+/// per-line scroll makes it depend on the row, [`LayerFrames::origin_at`])
+/// and only the layers whose bit is set in `screen` (a `$212C`/`$212D`
+/// mask, BG1 = bit 0).
+#[must_use]
+pub fn front_layer_pixel_in(
+    layers: &LayerCanvases,
+    origin_of: impl Fn(usize) -> Option<(i64, i64)>,
+    dx: i64,
+    dy: i64,
+    order: Option<&[u8; LAYERS]>,
+    screen: u8,
+) -> Option<PpuPixel> {
     const DEFAULT: [u8; LAYERS] = [0, 1, 2, 3];
     order.unwrap_or(&DEFAULT).iter().find_map(|&n| {
         let n = usize::from(n);
-        if *layers.hud.get(n)? {
+        if screen & (1 << n) == 0 || *layers.hud.get(n)? {
             return None;
         }
         let canvas = layers.canvases.get(n)?.as_ref()?;
-        let (ox, oy) = (*origins.get(n)?)?;
+        let (ox, oy) = origin_of(n)?;
         canvas.get(ox + dx, oy + dy)
     })
+}
+
+/// Ticket W33-01: one margin pixel composed the way the picture is.
+///
+/// For the dot `dx` columns from the picture's left edge on picture row
+/// `row`: the MAIN source is the front-most known cell of a layer on the
+/// main screen on that row (`regs.tm`), else the row's backdrop colour; the
+/// SUB source is the front-most known cell of a layer on the sub screen
+/// (`regs.ts`) when the row's `$2130` bit 1 selects the sub screen, else the
+/// fixed colour (`$2132`). Then the row's colour math runs exactly as the
+/// picture's does: fullsnes "SNES PPU Color-Math": per 5-bit channel add or
+/// subtract (`$2131` bit 7), clamp to 0..31, halve when `$2131` bit 6 says so
+/// EXCEPT where the sub screen is selected but transparent (the fixed colour
+/// stands in, and hardware does not halve it), and only where `$2131` enables
+/// math for the main source (BG1-4 bits 0-3, backdrop bit 5). `$2130` bits
+/// 6-7 = 3 force the main screen black first; bits 4-5 = 3 turn math off.
+/// The colour WINDOW cases (modes 1 and 2 of either) cannot be evaluated off
+/// the 256-dot picture, so a margin treats them as "no window effect".
+/// Sprites are never known in a margin. Brightness (`$2100`) last.
+///
+/// Why this is what the hills need: Super Mario World keeps its far hills
+/// (BG2) on the sub screen only and shows them through colour math over the
+/// backdrop. A compose that only looks at main-screen layers draws sky there.
+#[must_use]
+pub fn margin_color(
+    layers: &LayerCanvases,
+    frames: &LayerFrames,
+    row: usize,
+    dx: i64,
+    order: Option<&[u8; LAYERS]>,
+    regs: &LineRegisters,
+    palette: &rf_renderer::LinePalette,
+) -> [u8; 3] {
+    let dy = row as i64;
+    let at = |screen: u8| {
+        front_layer_pixel_in(layers, |n| frames.origin_at(n, row), dx, dy, order, screen)
+    };
+    let word = |i: u8| palette.words[usize::from(i)];
+    let main = at(regs.tm & 0x0F);
+    let (mut main_word, main_bit) = match main {
+        Some(p) => (
+            word(p.palette_index),
+            match p.layer {
+                PixelLayer::Background(n) => u32::from(n),
+                _ => 5,
+            },
+        ),
+        None => (regs.backdrop_color, 5),
+    };
+    let sub = regs.use_subscreen.then(|| at(regs.ts & 0x0F)).flatten();
+    let main_black = regs.clip_mode == 3;
+    if main_black {
+        main_word = 0;
+    }
+    let op = if regs.prevent_mode == 3 || regs.math_enable & (1 << main_bit) == 0 {
+        rf_core_api::ColorMathOp::None
+    } else {
+        let half = regs.half && !main_black && !(regs.use_subscreen && sub.is_none());
+        match (regs.subtract, half) {
+            (false, false) => rf_core_api::ColorMathOp::Add,
+            (false, true) => rf_core_api::ColorMathOp::AddHalf,
+            (true, false) => rf_core_api::ColorMathOp::Subtract,
+            (true, true) => rf_core_api::ColorMathOp::SubtractHalf,
+        }
+    };
+    let sub_word = sub.map_or(regs.fixed_color, |p| word(p.palette_index));
+    let shown = rf_renderer::palette::color_math_bgr555(main_word, sub_word, op);
+    rf_renderer::bgr555_to_rgb(shown, regs.brightness)
 }
 
 /// Per picture row, the colour the backdrop shows on screen: the most
@@ -1174,5 +1362,289 @@ mod tests {
         assert!(live.merge_unknown_from(1, &second) > 0);
         assert!(live.scene_canvases(1).unwrap()[0].get(100, 0).is_some());
         assert!(acc.take_delta(2).is_none(), "no such scene");
+    }
+
+    // ---- W33-01: per-line scroll, sub-screen pixels, margin colour math
+
+    /// BG1 left half, BG2 right half; each pixel's value is its own world x
+    /// (`row_hofs[y][layer] + c`), with the registers each line was drawn
+    /// with attached as line data.
+    fn line_bundle(row_hofs: [[u16; 2]; H as usize]) -> FrameBundle {
+        let mut video = Vec::new();
+        for hofs in &row_hofs {
+            for c in 0..usize::from(W) {
+                let n = usize::from(c >= usize::from(W) / 2);
+                video.push(px(
+                    PixelLayer::Background(n as u8),
+                    (usize::from(hofs[n]) + c) as u8,
+                ));
+            }
+        }
+        let mut b = FrameBundle::new(0, W, H, video, Vec::new());
+        b.lines = row_hofs
+            .iter()
+            .map(|h| {
+                Some(LineRegisters {
+                    hofs: [h[0], h[1], 0, 0],
+                    ..LineRegisters::default()
+                })
+            })
+            .collect();
+        b
+    }
+
+    /// Per canvas row, the set of `world x - value` of its known cells.
+    fn row_offsets(c: &Canvas, y: i64) -> std::collections::BTreeSet<i64> {
+        let (ox, _) = c.origin();
+        (0..c.width() as i64)
+            .filter_map(|x| {
+                c.get(ox + x, y)
+                    .map(|p| ox + x - i64::from(p.palette_index))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_layer_with_a_different_scroll_on_each_line_lands_each_row_at_its_own_world_x() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let id = SceneId(1);
+        // BG2 has an HDMA band: rows 1 and 3 are drawn 8 px further along.
+        // The per-frame registers say 0 (the value at the start of the
+        // frame); the lines say what really drew them.
+        let f1 = line_bundle([[0, 0], [0, 8], [0, 0], [0, 8]]);
+        acc.observe_frame(&f1, id, Some(&scrolls(0, 0)));
+        let first = acc.frames().unwrap();
+        assert_eq!(
+            first.origin_at(1, 1).unwrap().0 - first.origin_at(1, 0).unwrap().0,
+            8,
+            "row 1 of BG2 sits 8 px right of row 0"
+        );
+        assert_eq!(first.origin_at(0, 1), first.origin_at(0, 0), "BG1 is flat");
+        // The next frame everything moved on: BG1 by 16, BG2's rows by 4.
+        let f2 = line_bundle([[16, 4], [16, 12], [16, 4], [16, 12]]);
+        acc.observe_frame(&f2, id, Some(&scrolls(16, 4)));
+        let set = acc.current_canvases();
+        let bg2 = set.canvases[1].as_ref().unwrap();
+        for y in 0..i64::from(H) {
+            assert_eq!(
+                row_offsets(bg2, y),
+                [0].into(),
+                "BG2 row {y}: every cell at the world x its content encodes"
+            );
+        }
+        let bg1 = set.canvases[0].as_ref().unwrap();
+        assert!((0..i64::from(H)).all(|y| row_offsets(bg1, y) == [0].into()));
+    }
+
+    #[test]
+    fn without_line_registers_the_per_frame_scroll_is_used_as_before() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let mut b = line_bundle([[0, 0]; H as usize]);
+        b.lines.clear();
+        acc.observe_frame(&b, SceneId(1), Some(&scrolls(0, 0)));
+        assert!(acc.frames().unwrap().row_dx.is_empty());
+        assert_eq!(acc.frames().unwrap().origin_at(1, 3).unwrap().0, 0);
+    }
+
+    fn sub_px(layer: PixelLayer, index: u8) -> rf_core_api::SubPixel {
+        rf_core_api::SubPixel {
+            palette_index: index,
+            layer,
+            op: rf_core_api::ColorMathOp::AddHalf,
+            fixed: false,
+            main_black: false,
+        }
+    }
+
+    #[test]
+    fn a_sub_screen_layer_fills_its_own_canvas_where_the_main_screen_showed_another() {
+        let mut acc = LayerCanvasAccumulator::new();
+        // The whole picture is BG1 (value = column); BG2 is on the sub
+        // screen only. Row 1's sub line: BG2 (palette 77) on columns 10..20,
+        // BG1 (palette 55) on column 30, nothing (backdrop) elsewhere.
+        let mut b = bundle([0, 0], |_, _, p| {
+            *p = px(PixelLayer::Background(0), 5);
+        });
+        for (y, c, v) in [(1usize, 30usize, 30u8)] {
+            b.video[y * usize::from(W) + c].palette_index = v;
+        }
+        b.lines = vec![
+            Some(LineRegisters {
+                hofs: [0, 100, 0, 0],
+                ..LineRegisters::default()
+            });
+            usize::from(H)
+        ];
+        let line: Vec<_> = (0..usize::from(W))
+            .map(|c| match c {
+                10..=19 => sub_px(PixelLayer::Background(1), 77),
+                30 => sub_px(PixelLayer::Background(0), 55),
+                _ => sub_px(PixelLayer::Backdrop, 0),
+            })
+            .collect();
+        b.sub = vec![
+            None,
+            Some(rf_core_api::SubLine {
+                pixels: line,
+                fixed_color: 0,
+            }),
+            None,
+            None,
+        ];
+        acc.observe_frame(&b, SceneId(1), Some(&scrolls(0, 100)));
+        let set = acc.current_canvases();
+        let bg2 = set.canvases[1].as_ref().expect("BG2 got cells");
+        for c in 0..usize::from(W) {
+            let got = bg2.get(100 + c as i64, 1).map(|p| p.palette_index);
+            assert_eq!(got, (10..20).contains(&c).then_some(77), "column {c}");
+        }
+        assert_eq!(bg2.get(110, 0), None, "row 0 had no sub-screen line");
+        // The main winner is written first and never overwritten by the
+        // sub screen's pixel of the SAME layer, which is the same dot.
+        let bg1 = set.canvases[0].as_ref().unwrap();
+        assert_eq!(bg1.get(30, 1).map(|p| p.palette_index), Some(30));
+        assert!(
+            (0..i64::from(W)).all(|x| bg1.get(x, 1).is_none_or(|p| p.palette_index != 77)),
+            "BG1 holds no BG2 pixel"
+        );
+    }
+
+    fn word(r: u16, g: u16, b: u16) -> u16 {
+        r | (g << 5) | (b << 10)
+    }
+
+    fn compose_fixture() -> (LayerCanvases, LayerFrames, rf_renderer::LinePalette) {
+        let mut words = [0u16; 256];
+        words[9] = word(20, 0, 0); // a hill colour
+        words[3] = word(1, 2, 3); // a ground colour
+        let layers = LayerCanvases {
+            canvases: [
+                Some(canvas_with(&[(7, 0, 3)])),
+                Some(canvas_with(&[(5, 0, 9)])),
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let frames = LayerFrames {
+            scene: 1,
+            origins: [Some((0, 0)), Some((0, 0)), None, None],
+            row_dx: Vec::new(),
+        };
+        (
+            layers,
+            frames,
+            rf_renderer::LinePalette::from_words(&words, 15),
+        )
+    }
+
+    fn regs() -> LineRegisters {
+        LineRegisters {
+            tm: 0x01,
+            ts: 0x02,
+            math_enable: 0x20,
+            half: true,
+            use_subscreen: true,
+            fixed_color: word(4, 4, 4),
+            backdrop_color: word(10, 10, 10),
+            brightness: 15,
+            ..LineRegisters::default()
+        }
+    }
+
+    fn rgb(w: u16) -> [u8; 3] {
+        rf_renderer::bgr555_to_rgb(w, 15)
+    }
+
+    #[test]
+    fn the_margin_shows_a_sub_screen_layer_behind_the_backdrop_through_colour_math() {
+        let (layers, frames, pal) = compose_fixture();
+        let at = |dx: i64, r: &LineRegisters| margin_color(&layers, &frames, 0, dx, None, r, &pal);
+        // Nothing on the main screen at x = 5, BG2's hill on the sub screen:
+        // (backdrop + hill) / 2, per channel (fullsnes SNES PPU Color-Math).
+        assert_eq!(at(5, &regs()), rgb(word(15, 5, 5)));
+        // Hill unknown at x = 6: the sub source is the fixed colour, and the
+        // half is NOT applied to a transparent sub screen: backdrop + fixed.
+        assert_eq!(at(6, &regs()), rgb(word(14, 14, 14)));
+        // The sub screen not selected ($2130 bit 1 clear): fixed colour, and
+        // now the half applies.
+        let fixed_only = LineRegisters {
+            use_subscreen: false,
+            ..regs()
+        };
+        assert_eq!(at(5, &fixed_only), rgb(word(7, 7, 7)));
+        // Subtract: (backdrop - hill), clamped at 0, halved.
+        let sub = LineRegisters {
+            subtract: true,
+            ..regs()
+        };
+        assert_eq!(at(5, &sub), rgb(word(0, 5, 5)));
+        // Math not enabled for the backdrop: the backdrop alone.
+        let off = LineRegisters {
+            math_enable: 0,
+            ..regs()
+        };
+        assert_eq!(at(5, &off), rgb(word(10, 10, 10)));
+        // $2130 bits 4-5 = 3: math never.
+        let never = LineRegisters {
+            prevent_mode: 3,
+            ..regs()
+        };
+        assert_eq!(at(5, &never), rgb(word(10, 10, 10)));
+        // Force main black: the hill alone (0 + 20) / 1, no half on a black
+        // main screen.
+        let black = LineRegisters {
+            clip_mode: 3,
+            ..regs()
+        };
+        assert_eq!(at(5, &black), rgb(word(20, 0, 0)));
+        // Brightness scales the result last.
+        let dim = LineRegisters {
+            brightness: 7,
+            ..regs()
+        };
+        assert_eq!(at(5, &dim), rf_renderer::bgr555_to_rgb(word(15, 5, 5), 7));
+    }
+
+    #[test]
+    fn math_applies_to_the_main_layer_only_when_its_own_enable_bit_is_set() {
+        let (layers, frames, pal) = compose_fixture();
+        // BG1 known at x = 7 on the main screen.
+        let at = |r: &LineRegisters| margin_color(&layers, &frames, 0, 7, None, r, &pal);
+        // Enable bit for the backdrop only: BG1 is shown as it is.
+        assert_eq!(at(&regs()), rgb(word(1, 2, 3)));
+        // Enable bit 0 (BG1): the ground blends with the fixed colour
+        // ((1+4)/2 per channel, BG2 unknown at x = 7 so a transparent sub).
+        let on = LineRegisters {
+            math_enable: 0x01,
+            half: false,
+            ..regs()
+        };
+        assert_eq!(at(&on), rgb(word(5, 6, 7)));
+        // A layer only on the sub screen is never the main source.
+        let ts_only = LineRegisters {
+            tm: 0x00,
+            ts: 0x01,
+            ..regs()
+        };
+        assert_eq!(
+            at(&ts_only),
+            rgb(word(5, 6, 6)),
+            "backdrop + BG1 on the sub screen, halved"
+        );
+    }
+
+    #[test]
+    fn the_margin_reads_each_rows_own_world_x() {
+        let (mut layers, mut frames, pal) = compose_fixture();
+        layers.canvases[1] = Some(canvas_with(&[(5, 0, 9), (5, 1, 9)]));
+        // Row 1 of BG2 was drawn 8 px further along than row 0: its hill
+        // (world x 5) is 8 columns further left of the origin.
+        frames.row_dx = vec![[0; LAYERS], [0, 8, 0, 0]];
+        let r = regs();
+        let hill = rgb(word(15, 5, 5));
+        assert_eq!(margin_color(&layers, &frames, 0, 5, None, &r, &pal), hill);
+        assert_ne!(margin_color(&layers, &frames, 1, 5, None, &r, &pal), hill);
+        assert_eq!(margin_color(&layers, &frames, 1, -3, None, &r, &pal), hill);
     }
 }
