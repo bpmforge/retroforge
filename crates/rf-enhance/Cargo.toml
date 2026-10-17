@@ -17,3 +17,5 @@ rf-cache = { path = "../rf-cache" }
 # loaded `Profile`. ARCHITECTURE.md §3's graph has this edge explicitly
 # (`ENH --> PRO`); it is not a new boundary.
 rf-profiles = { path = "../rf-profiles" }
+# crc32fast: the CRC32 footers of BPS and UPS patches (soft-patching, W32-01).
+crc32fast = "1.5"

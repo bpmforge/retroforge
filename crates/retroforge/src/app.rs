@@ -1161,6 +1161,15 @@ pub struct RetroForgeApp {
     /// the per-game settings key, which is a different job: one identity
     /// per game, chosen once.
     current_game_hashes: Option<rf_cart::RomHashes>,
+    /// Ticket W32-01: the soft-patch state of the running session. Its
+    /// `session_sha256` keys save states; `base_sha256` (= `current_game_hash`)
+    /// keys settings and profile matching.
+    soft_patch: crate::soft_patch::SoftPatchSession,
+    /// Ticket W32-01: patch files found for the open ROM (the Patches list).
+    patch_discovery: crate::soft_patch::Discovery,
+    /// Ticket W32-01: what applying the enabled patches said (failures,
+    /// header notes), shown under the Patches list.
+    patch_messages: Vec<String>,
     /// The current game's settings, loaded on open and written back the
     /// moment one changes.
     current_game_settings: crate::game_settings::GameSettings,
@@ -1791,6 +1800,9 @@ impl RetroForgeApp {
             library: None,
             library_scan: None,
             current_game_hash: None,
+            soft_patch: crate::soft_patch::SoftPatchSession::default(),
+            patch_discovery: crate::soft_patch::Discovery::default(),
+            patch_messages: Vec::new(),
             current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
             awaiting_key: None,
@@ -2937,12 +2949,37 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W32-01: the hash save states are keyed by -- the patched
+    /// image's when patches are applied, else the base ROM's.
+    fn session_identity(&self) -> Option<&String> {
+        if self.soft_patch.is_reference() {
+            self.current_game_hash.as_ref()
+        } else {
+            Some(&self.soft_patch.session_sha256)
+        }
+    }
+
+    /// Ticket W32-01: is this session the unmodified cartridge (law 6)?
+    /// False once any soft patch is applied.
+    #[must_use]
+    pub fn is_reference_session(&self) -> bool {
+        self.soft_patch.is_reference()
+    }
+
+    /// Ticket W32-01: the widescreen convention a `.bso` declared for the
+    /// applied patches (W32-03 acts on it).
+    #[must_use]
+    pub fn widescreen_convention(&self) -> rf_enhance::patch::bso::WidescreenConvention {
+        self.soft_patch.widescreen_convention
+    }
+
     /// Where this game's states live, or `None` with no config dir or no
     /// ROM open.
     fn states_dir(&self) -> Option<std::path::PathBuf> {
         Some(crate::state_slots::slots_dir(
             self.config_root.as_ref()?,
-            self.current_game_hash.as_ref()?,
+            // Ticket W32-01: a patched session keeps its own states.
+            self.session_identity()?,
         ))
     }
 
@@ -3630,6 +3667,63 @@ impl RetroForgeApp {
                 return;
             }
         };
+        // Ticket W32-01: identify the BASE rom first, then apply whichever
+        // soft patches the player enabled for it, in memory. Settings and
+        // profile matching below still name the base; only the bytes the
+        // core boots (and the save-state key) become the patched image's.
+        let base_identity = match rf_cart::Cartridge::load(&bytes) {
+            Ok(
+                rf_cart::Cartridge::Nes { identity, .. }
+                | rf_cart::Cartridge::Snes { identity, .. },
+            ) => Some(identity.normalized),
+            Err(_) => None,
+        };
+        let base_sha = base_identity.as_ref().map(|h| h.sha256.clone());
+        self.soft_patch =
+            crate::soft_patch::SoftPatchSession::unpatched(base_sha.as_deref().unwrap_or_default());
+        self.patch_discovery = crate::soft_patch::Discovery::default();
+        self.patch_messages.clear();
+        let bytes = if let Some(base_sha) = &base_sha {
+            self.patch_discovery =
+                crate::soft_patch::discover(path, self.config_root.as_deref(), base_sha);
+            let enabled = match &self.config_root {
+                Some(root) => crate::game_settings::load(root, base_sha).patches_enabled,
+                None => Vec::new(),
+            };
+            if enabled.is_empty() {
+                bytes
+            } else {
+                let outcome =
+                    crate::soft_patch::apply_enabled(bytes, &self.patch_discovery, &enabled);
+                self.patch_messages = outcome
+                    .failures
+                    .iter()
+                    .map(|f| format!("Patch failed: {f}"))
+                    .chain(outcome.notes.iter().cloned())
+                    .collect();
+                if let Some(first) = outcome.failures.first() {
+                    self.status = format!("Patch failed: {first}");
+                }
+                if !outcome.applied.is_empty() {
+                    let session_sha = match rf_cart::Cartridge::load(&outcome.image) {
+                        Ok(
+                            rf_cart::Cartridge::Nes { identity, .. }
+                            | rf_cart::Cartridge::Snes { identity, .. },
+                        ) => identity.normalized.sha256,
+                        Err(_) => crate::hash::sha256_hex(&outcome.image),
+                    };
+                    self.soft_patch = crate::soft_patch::SoftPatchSession {
+                        base_sha256: base_sha.clone(),
+                        session_sha256: session_sha,
+                        applied: outcome.applied,
+                        widescreen_convention: outcome.widescreen,
+                    };
+                }
+                outcome.image
+            }
+        } else {
+            bytes
+        };
         // Ticket W4-06a: extract CHR *before* `bytes` moves into
         // `core_thread::spawn` below — the pattern viewer's only in-scope
         // data path (`rf_debugger::pattern`'s module doc: rf-debugger may
@@ -3650,13 +3744,8 @@ impl RetroForgeApp {
         // Ticket W2-07 (FR-FE-002): identify the ROM and load its settings
         // BEFORE the core starts, so a game configured for Enhanced mode
         // opens in it rather than flipping a frame later.
-        self.current_game_hashes = match rf_cart::Cartridge::load(&bytes) {
-            Ok(
-                rf_cart::Cartridge::Nes { identity, .. }
-                | rf_cart::Cartridge::Snes { identity, .. },
-            ) => Some(identity.normalized),
-            Err(_) => None,
-        };
+        // Ticket W32-01: the BASE rom's identity (profiles match it).
+        self.current_game_hashes = base_identity;
         self.current_game_hash = self.current_game_hashes.as_ref().map(|h| h.sha256.clone());
         self.console_label = match rf_cart::Cartridge::load(&bytes) {
             Ok(rf_cart::Cartridge::Snes { .. }) => "SNES",
@@ -4744,10 +4833,15 @@ impl RetroForgeApp {
         // see, so the badge says so (principle 2) — until W20-09 a loaded
         // pack changed the picture with the badge still reading
         // "Accuracy".
-        if self.hd_pack.is_some() {
+        let badge = if self.hd_pack.is_some() {
             format!("{badge} · HD pack")
         } else {
             badge
+        };
+        // Ticket W32-01: a patched game is not the cartridge (law 6).
+        match self.soft_patch.badge() {
+            Some(patched) if self.core.is_some() => format!("{badge} · {patched}"),
+            _ => badge,
         }
     }
 
@@ -7361,6 +7455,9 @@ impl RetroForgeApp {
                             if Self::heuristics_panel(ui, &mut self.current_game_settings) {
                                 changed = true;
                             }
+                            if self.patches_section(ui) {
+                                changed = true;
+                            }
                             if changed {
                                 // No Apply button anywhere in this app's settings —
                                 // see `save_current_game_settings`'s own doc.
@@ -7373,6 +7470,38 @@ impl RetroForgeApp {
         if !open {
             self.game_settings_target = None;
         }
+    }
+
+    /// Ticket W32-01: the Patches list -- every patch file found for the
+    /// open ROM with an on/off box, persisted per game. Off by default; a
+    /// change applies the next time the game is opened (the running image
+    /// is never swapped under a live core). Returns whether the list changed.
+    fn patches_section(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.core.is_none() || self.patch_discovery.patches.is_empty() {
+            return false;
+        }
+        ui.separator();
+        ui.strong("Patches");
+        ui.label("Patched games are not the original cartridge and keep their own save states.");
+        let mut changed = false;
+        for c in &self.patch_discovery.patches {
+            let mut on = self.current_game_settings.patches_enabled.contains(&c.key);
+            if ui.checkbox(&mut on, &c.key).changed() {
+                let list = &mut self.current_game_settings.patches_enabled;
+                list.retain(|k| k != &c.key);
+                if on {
+                    list.push(c.key.clone());
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            ui.label("Takes effect the next time this game is opened.");
+        }
+        for m in &self.patch_messages {
+            ui.label(m);
+        }
+        changed
     }
 
     /// The Esc overlay menu (ticket W2-08; FRONTEND_UI §2: "resume · states
