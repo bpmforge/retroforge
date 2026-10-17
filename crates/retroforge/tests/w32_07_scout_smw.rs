@@ -271,6 +271,8 @@ fn plan(strategy: ScoutStrategy, player: &[u32], camera: &[u32], step: u16) -> S
         strategy,
         camera: camera.to_vec(),
         player_x: player.to_vec(),
+        player_x_hi: Vec::new(),
+        composite: false,
         step_px: step,
         frame_budget: 1500,
         stall_frames: 60,

@@ -92,6 +92,7 @@ pub const MAX_CONTINUOUS_STEP_PX: i64 = 64;
 /// Stateful scene identity (module doc). One instance tracks one play
 /// session; construct a fresh one per ROM/run, same lifetime shape as
 /// [`ScrollTracker`] itself.
+#[derive(Clone)]
 pub struct SceneTracker {
     scroll: ScrollTracker,
     current_id: Option<SceneId>,

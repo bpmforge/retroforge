@@ -582,6 +582,123 @@ fn shot_scout(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W32-09: Super Mario Bros. 3, to World 1-1 (NES: Enter = Start, X = A).
+fn smb3_enter_level(h: &mut H) {
+    use egui::Key as K;
+    wait(h, "smb3", 300);
+    tap(h, K::Enter, 6);
+    wait(h, "smb3", 120);
+    tap(h, K::Enter, 6);
+    wait(h, "smb3", 400);
+    tap(h, K::ArrowRight, 8);
+    wait(h, "smb3", 60);
+    tap(h, K::ArrowUp, 8);
+    wait(h, "smb3", 60);
+    tap(h, K::X, 8);
+    // The level loads and fades in (the scout's start gate, $000F, turns 1
+    // 80 frames after the A press, and Mario stands unhurt for 300+).
+    wait(h, "smb3", 100);
+    probe(h, "smb3-level-start");
+}
+
+/// Ticket W32-09: Mega Man 2, to the start of Air Man's stage.
+fn mm2_enter_level(h: &mut H) {
+    use egui::Key as K;
+    wait(h, "mm2", 400);
+    tap(h, K::Enter, 6);
+    wait(h, "mm2", 120);
+    tap(h, K::Enter, 6);
+    wait(h, "mm2", 300);
+    tap(h, K::Enter, 6);
+    wait(h, "mm2", 300);
+    // The stage select opens on Dr. Wily's square; up is Air Man.
+    tap(h, K::ArrowUp, 8);
+    wait(h, "mm2", 20);
+    tap(h, K::Enter, 6);
+    wait(h, "mm2", 800);
+    probe(h, "mm2-level-start");
+}
+
+/// Ticket W32-09: the level scout on the NES. 32:9 right after entering the
+/// level (the player has not moved), scout off and then on; the live game is
+/// paused once the worker runs so the player is still at the start when the
+/// picture is taken.
+fn shot_scout_nes(readme: &mut Vec<String>) {
+    let name = "scout-nes";
+    if !wanted(name) {
+        return;
+    }
+    for (tag, file, enter) in [
+        (
+            "smb3",
+            "Super Mario Bros. 3 (USA).zip",
+            smb3_enter_level as fn(&mut H),
+        ),
+        ("mm2", "Mega Man 2 (USA).zip", mm2_enter_level as fn(&mut H)),
+    ] {
+        let Some(path) = rom("nes", file) else {
+            skip(
+                readme,
+                &format!("scout-{tag}"),
+                &format!("{file} not found"),
+            );
+            continue;
+        };
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut h = new_harness();
+        open_and_run(&mut h, &path);
+        enter(&mut h);
+        let telemetry = h.state().scout_telemetry_for_test();
+        h.state_mut().set_scout_enabled_for_test(false);
+        h.state_mut()
+            .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+        h.state_mut().set_widescreen(true);
+        let t = h.state().frame_count_for_test() + 20;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        let off = grab(&h);
+        h.state_mut().set_scout_enabled_for_test(true);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        h.state_mut().set_widescreen(true);
+        let t1 = Instant::now();
+        while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+        }
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        let mut finished = false;
+        while t1.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(100));
+            if telemetry.finished.load(Relaxed) >= 1 {
+                finished = true;
+                break;
+            }
+        }
+        h.state().send_core_command_for_test(CoreCommand::Resume);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        let t = h.state().frame_count_for_test() + 90;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        let (Some(off), Some(on)) = (off, grab(&h)) else {
+            skip(readme, &format!("scout-{tag}"), "no frame");
+            continue;
+        };
+        println!(
+            "SCOUT-NES {tag}: finished {finished}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}",
+            telemetry.frames.load(Relaxed),
+            telemetry.cells.load(Relaxed),
+            telemetry.started.load(Relaxed),
+            telemetry.finished.load(Relaxed),
+            telemetry.aborted.load(Relaxed),
+            telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        );
+        let d = out_dir();
+        save(&d.join(format!("scout-{tag}-32x9-off.png")), &off.opaque());
+        save(&d.join(format!("scout-{tag}-32x9-on.png")), &on.opaque());
+        note(readme, format!("scout-{tag}-32x9|{file}|{}x{}", on.w, on.h));
+    }
+}
+
 fn shot_widescreen(readme: &mut Vec<String>) {
     let name = "widescreen";
     if !wanted(name) {
@@ -1242,6 +1359,7 @@ fn w30_w31_screens() {
     shot_hdmode7(&mut readme);
     shot_widescreen(&mut readme);
     shot_scout(&mut readme);
+    shot_scout_nes(&mut readme);
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
     shot_lens(&mut readme);

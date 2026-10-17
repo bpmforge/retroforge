@@ -253,7 +253,7 @@ impl LayerCanvasAccumulator {
                     let y = wy + sy as i64;
                     canvases[n].blit_row(wx, y, &row_buf);
                     let r = (wx, y, wx + width as i64, y + 1);
-                    self.dirty[n] = Some(self.dirty[n].map_or(r, |d| union(d, r)));
+                    self.dirty[n] = Some(self.dirty[n].map_or(r, |d| rect_union(d, r)));
                     rows_drawn = Some(rows_drawn.map_or((sy, sy), |(lo, _)| (lo, sy)));
                 }
             }
@@ -380,22 +380,8 @@ impl LayerCanvasAccumulator {
         let set = self.scenes.get(&scene)?;
         let mut out: [Canvas; LAYERS] = std::array::from_fn(|_| Canvas::new());
         for ((from, rect), to) in set.iter().zip(dirty).zip(out.iter_mut()) {
-            let Some((rx0, ry0, rx1, ry1)) = rect else {
-                continue;
-            };
-            let (w, h) = (from.width(), from.height());
-            if w == 0 || h == 0 {
-                continue;
-            }
-            let (ox, oy) = from.origin();
-            let (x0, x1) = (rx0.max(ox), rx1.min(ox + w as i64));
-            let (y0, y1) = (ry0.max(oy), ry1.min(oy + h as i64));
-            if x0 >= x1 || y0 >= y1 {
-                continue;
-            }
-            for wy in y0..y1 {
-                let start = (wy - oy) as usize * w + (x0 - ox) as usize;
-                to.blit_row(x0, wy, &from.cells()[start..start + (x1 - x0) as usize]);
+            if let Some(rect) = rect {
+                crop_into(to, from, rect);
             }
         }
         Some(out)
@@ -469,6 +455,26 @@ impl LayerCanvasAccumulator {
     }
 }
 
+/// Copy the cells of `from` inside the world box `rect` into `to` (what a
+/// scout ships as a delta).
+pub fn crop_into(to: &mut Canvas, from: &Canvas, rect: Rect) {
+    let (w, h) = (from.width(), from.height());
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (ox, oy) = from.origin();
+    let (x0, x1) = (rect.0.max(ox), rect.2.min(ox + w as i64));
+    let (y0, y1) = (rect.1.max(oy), rect.3.min(oy + h as i64));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    // Bounded `for` over the clipped rows (law 8).
+    for wy in y0..y1 {
+        let start = (wy - oy) as usize * w + (x0 - ox) as usize;
+        to.blit_row(x0, wy, &from.cells()[start..start + (x1 - x0) as usize]);
+    }
+}
+
 /// Ticket W32-07: copy into `live` every cell `scout` knows and `live` does
 /// not (live always wins). Grows `live` to cover the scout's cells. Returns
 /// the number of cells filled.
@@ -476,7 +482,8 @@ pub fn merge_unknown(live: &mut Canvas, scout: &Canvas) -> usize {
     merge_unknown_in(live, scout, None)
 }
 
-fn union(a: Rect, b: Rect) -> Rect {
+/// The smallest box holding both.
+pub fn rect_union(a: Rect, b: Rect) -> Rect {
     (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 

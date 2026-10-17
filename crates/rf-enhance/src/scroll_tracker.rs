@@ -156,6 +156,24 @@ pub fn compute_bands(
 const X_WRAP: i64 = 512;
 const Y_WRAP: i64 = 480;
 
+/// Ticket W32-09: a non-primary band shorter than this is a split's
+/// transition line, not content.
+const MIN_BAND_ROWS: u16 = 8;
+
+/// Ticket W32-09: the most a scroll can plausibly move in one frame when it
+/// is read as a wrap of the LOW BYTE alone (see [`WorldAxis::advance_x`]).
+const BYTE_WRAP_MAX_STEP_PX: i64 = 32;
+
+/// `delta` folded into `(-modulus/2, modulus/2]`: the shortest way round.
+fn shortest(delta: i64, modulus: i64) -> i64 {
+    let d = delta.rem_euclid(modulus);
+    if d > modulus / 2 {
+        d - modulus
+    } else {
+        d
+    }
+}
+
 /// Wraparound-aware accumulator: converts a sequence of raw (wrapping)
 /// hardware scroll values into a continuously growing world-space
 /// position, per axis. This is the "wraparound heuristic" acceptance
@@ -210,6 +228,36 @@ impl WorldAxis {
         world
     }
 
+    /// Ticket W32-09: [`Self::advance`] for the NES's horizontal register
+    /// (`modulus` 512), for games whose `ScrollWrite` x never carries the
+    /// nametable bit: Super Mario Bros. 3's x runs 0..255 and starts over
+    /// (`253 -> 3` while walking right), which the 512 wrap reads as 250 px
+    /// BACKWARDS, so every 256 px of level landed on top of the last. When the
+    /// shortest 512-path is implausibly long (more than half a screen) but
+    /// the move is small as a wrap of the low byte alone (at most
+    /// [`BYTE_WRAP_MAX_STEP_PX`]), the low-byte step is the one the game
+    /// made. A real scene cut (a jump of 300) is not a small low-byte step
+    /// and still reads as the jump it is.
+    pub fn advance_x(&mut self, raw: u16, modulus: i64) -> i64 {
+        let raw = i64::from(raw).rem_euclid(modulus);
+        let world = match (self.world, self.last_raw) {
+            (Some(prev_world), Some(prev_raw)) => {
+                let full = shortest(raw - prev_raw, modulus);
+                let byte = shortest(raw - prev_raw, 256);
+                let delta = if full.abs() > modulus / 8 && byte.abs() <= BYTE_WRAP_MAX_STEP_PX {
+                    byte
+                } else {
+                    full
+                };
+                prev_world + delta
+            }
+            _ => raw,
+        };
+        self.world = Some(world);
+        self.last_raw = Some(raw);
+        world
+    }
+
     #[must_use]
     pub fn position(&self) -> Option<i64> {
         self.world
@@ -230,6 +278,7 @@ pub struct BandWorldPos {
 /// single frame's events can't provide alone: HUD classification
 /// (needs the previous frame's bands) and world-space accumulation
 /// (needs history, via [`WorldAxis`]).
+#[derive(Clone)]
 pub struct ScrollTracker {
     carry_scroll: (u16, u16),
     previous_bands: Vec<ScanlineBand>,
@@ -335,14 +384,23 @@ impl ScrollTracker {
             // match, unaffected by primary/size at all.
             let unproven_secondary_on_first_ever_frame =
                 previous_bands_is_empty && Some(i) != primary_index;
-            band.is_hud = matched_previous_zero_delta || unproven_secondary_on_first_ever_frame;
+            // Ticket W32-09: a non-primary band only a few rows high is a
+            // scroll split's transition line (Super Mario Bros. 3 rewrites the
+            // scroll for one row before its status bar, with a different fine
+            // x every frame): never level, and stitched at the primary band's
+            // position it painted a dotted line across the canvas's top row.
+            let transition_line =
+                Some(i) != primary_index && band.end.saturating_sub(band.start) < MIN_BAND_ROWS;
+            band.is_hud = matched_previous_zero_delta
+                || unproven_secondary_on_first_ever_frame
+                || transition_line;
         }
 
         let mut result = Vec::with_capacity(bands.len());
         for (i, band) in bands.iter().enumerate() {
             let world_pos = if Some(i) == primary_index {
                 BandWorldPos {
-                    world_x: self.world_x.advance(band.x(), X_WRAP),
+                    world_x: self.world_x.advance_x(band.x(), X_WRAP),
                     world_y_at_start: self.world_y.advance(band.base_scroll.1, Y_WRAP),
                 }
             } else {
@@ -482,6 +540,29 @@ mod tests {
         // Player backs up across the boundary: raw wraps 4 -> 500 (delta -16, not +496).
         let world = axis.advance(500, 512);
         assert_eq!(world, -12);
+    }
+
+    #[test]
+    fn advance_x_reads_a_byte_wide_register_wrapping_at_256_as_a_forward_step() {
+        // Super Mario Bros. 3's scroll x: 253 -> 3 while walking right.
+        let mut axis = WorldAxis::new();
+        axis.advance_x(250, 512);
+        assert_eq!(axis.advance_x(253, 512), 253);
+        assert_eq!(axis.advance_x(3, 512), 259);
+        assert_eq!(axis.advance_x(5, 512), 261);
+        // And back over the same boundary.
+        assert_eq!(axis.advance_x(254, 512), 254);
+    }
+
+    #[test]
+    fn advance_x_still_reads_a_true_512_wrap_and_a_big_jump_as_before() {
+        let mut axis = WorldAxis::new();
+        axis.advance_x(500, 512);
+        assert_eq!(axis.advance_x(4, 512), 516);
+        // A jump of 300 is a cut, not a 44 px low-byte step.
+        let mut cut = WorldAxis::new();
+        cut.advance_x(0, 512);
+        assert_eq!(cut.advance_x(300, 512), -212);
     }
 
     #[test]

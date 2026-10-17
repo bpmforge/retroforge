@@ -289,11 +289,17 @@ fn parse_major_minor(s: &str) -> Result<(u64, u64), ProfileError> {
 /// cited, each inside the console's RAM, the roles the strategy needs).
 fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), ProfileError> {
     let bad = |why: String| ProfileError::ScoutInvalid(why);
-    if !matches!(scout.strategy.as_str(), "player_move" | "camera_write") {
+    if !matches!(
+        scout.strategy.as_str(),
+        "player_move" | "camera_write" | "walk"
+    ) {
         return Err(bad(format!(
-            "strategy `{}` (valid: player_move, camera_write)",
+            "strategy `{}` (valid: player_move, camera_write, walk)",
             scout.strategy
         )));
+    }
+    if scout.strategy == "walk" && console != Console::Nes {
+        return Err(bad("strategy walk is for NES profiles".into()));
     }
     for (key, v, lo, hi) in [
         ("step_px", u32::from(scout.step_px), 1, 64),
@@ -319,10 +325,10 @@ fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), 
     for (i, row) in scout.addr.iter().enumerate() {
         if !matches!(
             row.role.as_str(),
-            "camera_x" | "player_x" | "hold" | "start_when"
+            "camera_x" | "player_x" | "player_x_hi" | "hold" | "start_when"
         ) {
             return Err(bad(format!(
-                "addr row {i}: role `{}` (valid: camera_x, player_x, hold, start_when)",
+                "addr row {i}: role `{}` (valid: camera_x, player_x, player_x_hi, hold, start_when)",
                 row.role
             )));
         }
@@ -346,7 +352,9 @@ fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), 
         }
     }
     let has = |role: &str| scout.addr.iter().any(|r| r.role == role);
-    if !has("camera_x") {
+    // The SNES scout reads a 16-bit camera word; the NES one watches the
+    // composite stitcher's own world x (W32-09), so a NES table may omit it.
+    if console == Console::Snes && !has("camera_x") {
         return Err(bad("needs a camera_x row (the stop rules read it)".into()));
     }
     if scout.strategy == "player_move" && !has("player_x") {
@@ -676,8 +684,14 @@ mod tests {
 
     #[test]
     fn a_scout_table_needs_a_camera_row() {
-        let text = SCOUT.replacen("role = \"camera_x\"", "role = \"player_x\"", 1);
-        let err = load_str(&format!("{VALID}\n{text}")).expect_err("no camera_x");
+        // The SNES scout reads a camera word (the NES one watches the stitcher).
+        let snes = VALID.replacen("console = \"nes\"", "console = \"snes\"", 1);
+        let text = SCOUT
+            .replacen("role = \"camera_x\"", "role = \"player_x\"", 1)
+            .replace("addr = 0x6B", "addr = 0x7E006B")
+            .replace("addr = 0x6D", "addr = 0x7E006D")
+            .replace("addr = 0x70", "addr = 0x7E0070");
+        let err = load_str(&format!("{snes}\n{text}")).expect_err("no camera_x");
         assert!(err.to_string().contains("camera_x"), "{err}");
     }
 
@@ -939,5 +953,22 @@ mod tests {
             load_str(&dup).unwrap_err(),
             ProfileError::HeightsInvalid { .. }
         ));
+    }
+
+    #[test]
+    fn a_nes_scout_table_may_omit_camera_x_and_use_walk_and_player_x_hi() {
+        let text = format!("{VALID}\n{SCOUT}")
+            .replacen("role = \"camera_x\"", "role = \"player_x_hi\"", 1)
+            .replacen("strategy = \"player_move\"", "strategy = \"walk\"", 1);
+        // VALID is a NES profile: no camera_x row, walk strategy, hi byte row.
+        load_str(&text).expect("a NES walk table loads");
+    }
+
+    #[test]
+    fn the_walk_strategy_is_rejected_on_the_snes() {
+        let snes = VALID.replacen("console = \"nes\"", "console = \"snes\"", 1);
+        let text = format!("{snes}\n{SCOUT}").replacen("player_move", "walk", 1);
+        let err = load_str(&text).expect_err("walk is NES only");
+        assert!(matches!(err, ProfileError::ScoutInvalid(_)), "{err}");
     }
 }

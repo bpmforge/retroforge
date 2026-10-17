@@ -39,12 +39,16 @@
 //! the profile's `[scout]` table; the pure rules (what to poke, when to stop)
 //! are plain functions so they are tested without a ROM.
 
-use rf_core_api::{CoreSink, FrameBundleBuilder, InputFrame, PpuPixel};
+use rf_core_api::{CoreSink, EventMask, FrameBundleBuilder, InputFrame, PpuPixel};
 use rf_enhance::scene_identity::SceneId;
 
 use rf_enhance::stitcher::Canvas;
 
-use crate::layer_canvas::{FrameScrolls, LayerCanvasAccumulator, LayerScroll, ScrollLag, LAYERS};
+use crate::canvas_accum::CanvasAccumulator;
+use crate::layer_canvas::{
+    crop_into, rect_union, FrameScrolls, LayerCanvasAccumulator, LayerScroll, Rect, ScrollLag,
+    LAYERS,
+};
 use crate::stepper::{EmuStepper, MachineSnapshot};
 
 /// How the scout moves the camera.
@@ -55,6 +59,10 @@ pub enum ScoutStrategy {
     /// Move the player X words; the game's own follow logic moves the camera
     /// and streams the level.
     PlayerMove,
+    /// Ticket W32-09 (NES): poke nothing of the player's; the scout's pad
+    /// holds the pass's direction, because the camera of some games (Mega Man
+    /// 2) only follows a player who walks.
+    Walk,
 }
 
 /// Which way a pass walks.
@@ -83,6 +91,15 @@ pub struct ScoutPlan {
     /// Bus addresses of 16-bit little-endian player X words (the first is
     /// read; all are written by [`ScoutStrategy::PlayerMove`]).
     pub player_x: Vec<u32>,
+    /// Bus addresses of the HIGH bytes of the player X words, one per
+    /// `player_x` address, for a game that keeps the two bytes apart (the NES
+    /// games of W32-09). Empty: the high byte is the next address.
+    pub player_x_hi: Vec<u32>,
+    /// Ticket W32-09 (NES): stitch with the composite canvas
+    /// ([`CanvasAccumulator`]: the core's own `ScrollWrite`/`Scanline` bands,
+    /// HUD bands left out) instead of per-layer canvases read off the PPU.
+    /// The camera the stop rules watch is then the stitcher's own world x.
+    pub composite: bool,
     /// Pixels per scout frame.
     pub step_px: u16,
     /// Most frames one pass may run.
@@ -103,6 +120,9 @@ pub struct ScoutPlan {
     /// own restart timer).
     pub start_when: Vec<(u32, u8)>,
 }
+
+/// No addresses (the walk strategy pokes none).
+static NO_ADDRS: Vec<u32> = Vec::new();
 
 impl ScoutPlan {
     /// Build the plan from a (validated) profile `[scout]` table.
@@ -137,13 +157,15 @@ impl ScoutPlan {
             },
         );
         Self {
-            strategy: if t.strategy == "camera_write" {
-                ScoutStrategy::CameraWrite
-            } else {
-                ScoutStrategy::PlayerMove
+            strategy: match t.strategy.as_str() {
+                "camera_write" => ScoutStrategy::CameraWrite,
+                "walk" => ScoutStrategy::Walk,
+                _ => ScoutStrategy::PlayerMove,
             },
             camera: words("camera_x"),
             player_x: words("player_x"),
+            player_x_hi: words("player_x_hi"),
+            composite: false,
             step_px: t.step_px,
             frame_budget: t.frame_budget,
             stall_frames: t.stall_frames.unwrap_or(120),
@@ -152,6 +174,23 @@ impl ScoutPlan {
             hold: valued("hold"),
             start_when: valued("start_when"),
         }
+    }
+
+    /// The same plan stitched with the composite canvas (the NES, W32-09).
+    #[must_use]
+    pub fn composite(mut self) -> Self {
+        self.composite = true;
+        self
+    }
+
+    /// The player's X word as the scout's machine holds it: the first
+    /// `player_x` address, with its high byte at the matching `player_x_hi`
+    /// address (else the next one).
+    fn player_word(&self, st: &EmuStepper) -> u16 {
+        self.player_x.first().map_or(0, |&a| {
+            let hi = self.player_x_hi.first().copied().unwrap_or(a + 1);
+            u16::from(st.peek_bus(a)) | (u16::from(st.peek_bus(hi)) << 8)
+        })
     }
 
     /// The camera moved by more than this in one frame is a scene change
@@ -165,12 +204,17 @@ impl ScoutPlan {
         let (addrs, from) = match self.strategy {
             ScoutStrategy::CameraWrite => (&self.camera, camera),
             ScoutStrategy::PlayerMove => (&self.player_x, player),
+            ScoutStrategy::Walk => (&NO_ADDRS, 0),
         };
         let to = (i32::from(from) + step).clamp(0, i32::from(u16::MAX)) as u16;
         let mut out: Vec<(u32, u8)> = Vec::with_capacity(addrs.len() * 2 + self.hold.len());
-        for &a in addrs {
+        for (i, &a) in addrs.iter().enumerate() {
             out.push((a, to as u8));
-            out.push((a + 1, (to >> 8) as u8));
+            let hi = match self.strategy {
+                ScoutStrategy::PlayerMove => self.player_x_hi.get(i).copied().unwrap_or(a + 1),
+                ScoutStrategy::CameraWrite | ScoutStrategy::Walk => a + 1,
+            };
+            out.push((hi, (to >> 8) as u8));
         }
         out.extend(self.hold.iter().copied());
         out
@@ -195,20 +239,20 @@ pub struct StopRule {
     frames: u32,
     still: u32,
     extent: usize,
-    last_camera: Option<u16>,
+    last_camera: Option<i64>,
 }
 
 impl StopRule {
     /// Whether `camera` is a jump from the last frame's (a scene change).
     #[must_use]
-    pub fn jumped(&self, camera: u16) -> bool {
+    pub fn jumped(&self, camera: i64) -> bool {
         self.last_camera
-            .is_some_and(|prev| (i32::from(camera) - i32::from(prev)).abs() > ScoutPlan::JUMP_PX)
+            .is_some_and(|prev| (camera - prev).abs() > i64::from(ScoutPlan::JUMP_PX))
     }
 
     /// Feed one frame: the camera word read after it and the canvases'
     /// total extent (cells in their bounding boxes). `Some` ends the pass.
-    pub fn observe(&mut self, plan: &ScoutPlan, camera: u16, extent: usize) -> Option<ScoutEnd> {
+    pub fn observe(&mut self, plan: &ScoutPlan, camera: i64, extent: usize) -> Option<ScoutEnd> {
         if self.jumped(camera) {
             return Some(ScoutEnd::SceneChanged);
         }
@@ -250,10 +294,13 @@ fn word(st: &EmuStepper, addr: u32) -> u16 {
     u16::from(st.peek_bus(addr)) | (u16::from(st.peek_bus(addr + 1)) << 8)
 }
 
-/// Collects a frame as a bundle; audio and events are dropped (events are
-/// not kept: the scout's stitcher reads scroll registers, not event logs).
+/// Collects a frame as a bundle; audio is dropped, and events are kept only
+/// for the composite stitcher (the per-layer one reads scroll registers).
 struct ScoutSink {
     bundle: FrameBundleBuilder,
+    /// The composite stitcher places frames by the core's own scroll and
+    /// scanline events; the per-layer one reads registers and wants none.
+    keep_events: bool,
 }
 
 impl CoreSink for ScoutSink {
@@ -266,12 +313,27 @@ impl CoreSink for ScoutSink {
             .video_scanline(y, pixels.get(pad..pad + w).unwrap_or(pixels));
     }
     fn audio(&mut self, _samples: &[i16]) {}
-    fn event(&mut self, _ev: rf_core_api::CoreEvent) {}
+    fn event(&mut self, ev: rf_core_api::CoreEvent) {
+        if self.keep_events {
+            self.bundle.event(ev);
+        }
+    }
 }
 
 /// Reads the per-layer scroll the stitcher needs off the scout's machine
 /// (the same function the live path uses, so the two agree on layers).
 pub type ScrollFn<'a> = &'a dyn Fn(&EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]>;
+
+/// Ticket W32-09: what a composite (NES) scout stitches with.
+struct Composite {
+    acc: CanvasAccumulator,
+    /// The live accumulator's trackers at the snapshot (a pass restarts here).
+    seed: CanvasAccumulator,
+    /// The world box of what was stitched since the last delta.
+    dirty: Option<Rect>,
+    /// World x of the last frame's picture (the camera the stop rules watch).
+    camera: Option<i64>,
+}
 
 pub struct Scout {
     stepper: EmuStepper,
@@ -292,6 +354,8 @@ pub struct Scout {
     lag: ScrollLag,
     /// The lag holds the restored registers' read (set at a pass start).
     primed: bool,
+    /// `Some` on the NES: the composite stitcher (W32-09).
+    comp: Option<Composite>,
     /// How the passes ended, in order.
     pub ends: Vec<ScoutEnd>,
 }
@@ -339,7 +403,9 @@ impl Scout {
             seed,
             sink: ScoutSink {
                 bundle: FrameBundleBuilder::new(size.0, size.1),
+                keep_events: false,
             },
+            comp: None,
             pass: 0,
             rule: StopRule::default(),
             status: ScoutStatus::Running,
@@ -350,6 +416,61 @@ impl Scout {
             ends: Vec::new(),
             plan,
         }
+    }
+
+    /// Ticket W32-09: as [`Self::start`] for a NES machine, stitched with the
+    /// composite canvas. `live` is the live accumulator at the snapshot (its
+    /// scroll and scene tracking are copied, no canvases).
+    ///
+    /// # Errors
+    /// The ROM cannot be opened, or the snapshot cannot be restored.
+    pub fn start_composite(
+        rom: &[u8],
+        snapshot: MachineSnapshot,
+        plan: ScoutPlan,
+        live: &CanvasAccumulator,
+        scene: SceneId,
+        size: (u16, u16),
+    ) -> Result<Self, ScoutError> {
+        let mut stepper = EmuStepper::open(rom).map_err(|e| ScoutError::Open(format!("{e:?}")))?;
+        stepper
+            .restore(&snapshot)
+            .map_err(|e| ScoutError::Restore(format!("{e:?}")))?;
+        Ok(Self::from_stepper_composite(
+            stepper, snapshot, plan, live, scene, size,
+        ))
+    }
+
+    /// As [`Self::start_composite`] with a machine the caller already restored.
+    #[must_use]
+    pub fn from_stepper_composite(
+        mut stepper: EmuStepper,
+        snapshot: MachineSnapshot,
+        plan: ScoutPlan,
+        live: &CanvasAccumulator,
+        scene: SceneId,
+        size: (u16, u16),
+    ) -> Self {
+        // The scroll/scanline events the stitcher reads (the stepper always
+        // keeps this baseline, whatever the mask asked for).
+        stepper.set_event_mask(EventMask::NONE);
+        let mut scout = Self::from_stepper(
+            stepper,
+            snapshot,
+            plan,
+            &LayerCanvasAccumulator::new(),
+            scene,
+            size,
+        );
+        scout.sink.keep_events = true;
+        let seed = live.fork_for_scout();
+        scout.comp = Some(Composite {
+            acc: seed.fork_for_scout(),
+            seed,
+            dirty: None,
+            camera: None,
+        });
+        scout
     }
 
     #[must_use]
@@ -376,11 +497,14 @@ impl Scout {
                 .camera
                 .first()
                 .map_or(0, |&a| word(&self.stepper, a)),
-            self.plan
-                .player_x
-                .first()
-                .map_or(0, |&a| word(&self.stepper, a)),
+            self.plan.player_word(&self.stepper),
         )
+    }
+
+    /// Where the composite stitcher put the last frame (diagnostics, tests).
+    #[must_use]
+    pub fn frame_position(&self) -> Option<crate::canvas_accum::FramePosition> {
+        self.comp.as_ref().and_then(|c| c.acc.frame_position())
     }
 
     /// Read any work-RAM word on the scout's machine (diagnostics, tests).
@@ -417,10 +541,31 @@ impl Scout {
     /// that merges it.
     pub fn take_delta(&mut self) -> Option<[Canvas; LAYERS]> {
         self.since_merge = 0;
+        if let Some(comp) = self.comp.as_mut() {
+            // Composite: the one canvas rides in slot 0.
+            let rect = comp.dirty.take()?;
+            let from = comp.acc.scene_canvas(self.scene)?;
+            let mut out: [Canvas; LAYERS] = std::array::from_fn(|_| Canvas::new());
+            crop_into(&mut out[0], from, rect);
+            return Some(out);
+        }
         self.acc.take_delta(self.scene.0)
     }
 
+    /// Ticket W32-09: fill the unknown cells of the live composite canvas for
+    /// this scout's scene; returns the number of cells filled.
+    pub fn merge_into_composite(&mut self, live: &mut CanvasAccumulator) -> usize {
+        self.take_delta()
+            .map_or(0, |d| live.merge_unknown_from(self.scene, &d[0]))
+    }
+
     fn extent(&self) -> usize {
+        if let Some(comp) = self.comp.as_ref() {
+            return comp
+                .acc
+                .scene_canvas(self.scene)
+                .map_or(0, |c| c.width() * c.height());
+        }
         self.acc
             .scene_canvases(self.scene.0)
             .map_or(0, |set| set.iter().map(|c| c.width() * c.height()).sum())
@@ -439,6 +584,11 @@ impl Scout {
             self.status = ScoutStatus::Finished(why);
             return;
         }
+        if let Some(comp) = self.comp.as_mut() {
+            self.stepper.set_event_mask(EventMask::NONE);
+            comp.acc.rewind_trackers(&comp.seed);
+            comp.camera = None;
+        }
         self.acc.rewind_axes(&self.seed);
         self.rule = StopRule::default();
         self.lag.forget();
@@ -450,6 +600,9 @@ impl Scout {
     pub fn step(&mut self, scrolls: ScrollFn<'_>) -> ScoutStatus {
         if let ScoutStatus::Finished(_) = self.status {
             return self.status;
+        }
+        if self.comp.is_some() {
+            return self.step_composite();
         }
         let dir = self.plan.dirs[self.pass];
         // The scroll registers read AFTER a frame are the ones that draw the
@@ -471,11 +624,7 @@ impl Scout {
             .camera
             .first()
             .map_or(0, |&a| word(&self.stepper, a));
-        let player = self
-            .plan
-            .player_x
-            .first()
-            .map_or(0, |&a| word(&self.stepper, a));
+        let player = self.plan.player_word(&self.stepper);
         for (addr, value) in self.plan.pokes(dir, cam, player) {
             self.stepper.poke_ram(addr, value);
         }
@@ -490,6 +639,7 @@ impl Scout {
             .map_or(0, |&a| word(&self.stepper, a));
         // A jump ends the pass BEFORE this frame is stitched: it may already
         // be a different scene's picture.
+        let after = i64::from(after);
         if self.rule.jumped(after) {
             drop(self.sink.bundle.take(self.stepper.frame_count()));
             self.end_pass(ScoutEnd::SceneChanged);
@@ -508,6 +658,67 @@ impl Scout {
         self.since_merge += 1;
         let extent = self.extent();
         if let Some(why) = self.rule.observe(&self.plan, after, extent) {
+            self.end_pass(why);
+        }
+        self.status
+    }
+}
+
+impl Scout {
+    /// Ticket W32-09: one scout frame on the NES. The composite stitcher
+    /// ([`CanvasAccumulator::observe_frame`]) places the frame from the core's
+    /// own `ScrollWrite`/`Scanline` events. Those need no [`ScrollLag`]: the
+    /// scroll the game writes in vblank, at the END of frame `n`'s slice,
+    /// draws frame `n + 1`, and the tracker already carries a frame's last
+    /// write into the next frame's first band (observed on Super Mario Bros.
+    /// 3: `$00FD` equals the trailing write on 103 of 103 moving frames).
+    fn step_composite(&mut self) -> ScoutStatus {
+        let dir = self.plan.dirs[self.pass];
+        let cam = self
+            .plan
+            .camera
+            .first()
+            .map_or(0, |&a| word(&self.stepper, a));
+        let player = self.plan.player_word(&self.stepper);
+        for (addr, value) in self.plan.pokes(dir, cam, player) {
+            self.stepper.poke_ram(addr, value);
+        }
+        let mut input = InputFrame::empty();
+        if self.plan.strategy == ScoutStrategy::Walk {
+            // NES port 0 bits (nesdev "Controller reading"): Left 6, Right 7.
+            input.ports[0] = match dir {
+                ScoutDir::Right => 1 << 7,
+                ScoutDir::Left => 1 << 6,
+            };
+        }
+        self.stepper.latch_and_advance_frame(input, &mut self.sink);
+        self.frames_total += 1;
+        let bundle = self.sink.bundle.take(self.stepper.frame_count());
+        let (width, height) = (i64::from(bundle.width), i64::from(bundle.height));
+        let pad = i64::from(bundle.width.saturating_sub(256) / 2);
+        let Some(comp) = self.comp.as_mut() else {
+            return self.status;
+        };
+        let scene = comp.acc.observe_frame(&bundle, &[]);
+        if scene != self.scene {
+            // The game cut to another scene (a respawn, a transition).
+            self.end_pass(ScoutEnd::SceneChanged);
+            return self.status;
+        }
+        if let Some(pos) = comp.acc.frame_position().filter(|p| p.scene == scene.0) {
+            let x = pos.origin.0 - pad;
+            comp.camera = Some(x);
+            let r = (x, pos.origin.1, x + width, pos.origin.1 + height);
+            comp.dirty = Some(comp.dirty.map_or(r, |d| rect_union(d, r)));
+        }
+        let camera = comp.camera.unwrap_or(0);
+        self.since_merge += 1;
+        if self.rule.jumped(camera) {
+            self.end_pass(ScoutEnd::SceneChanged);
+            return self.status;
+        }
+        let extent = self.extent();
+        if let Some(why) = self.rule.observe(&self.plan, camera, extent) {
             self.end_pass(why);
         }
         self.status
@@ -607,6 +818,8 @@ struct ScoutJob {
     snapshot: MachineSnapshot,
     plan: ScoutPlan,
     seed: LayerCanvasAccumulator,
+    /// W32-09: the live composite accumulator's trackers (NES).
+    comp_seed: Option<CanvasAccumulator>,
     scene: SceneId,
     size: (u16, u16),
     reader: ScrollReader,
@@ -664,6 +877,7 @@ fn run_worker(
         snapshot,
         plan,
         seed,
+        comp_seed,
         scene,
         size,
         reader,
@@ -672,7 +886,11 @@ fn run_worker(
     // A pass ends by its frame budget at the latest, so this cap is only a
     // backstop for law 8.
     let cap = (plan.frame_budget as usize + 1) * plan.dirs.len().max(1) + 1;
-    let Ok(mut scout) = Scout::start(&rom, snapshot, plan, &seed, scene, size) else {
+    let started = match comp_seed {
+        Some(live) => Scout::start_composite(&rom, snapshot, plan, &live, scene, size),
+        None => Scout::start(&rom, snapshot, plan, &seed, scene, size),
+    };
+    let Ok(mut scout) = started else {
         let _ = send_or_cancel(tx, cancel, ScoutMsg::Failed);
         return;
     };
@@ -732,6 +950,8 @@ pub struct LiveView<'a> {
     pub stepper: &'a EmuStepper,
     pub rom: &'a [u8],
     pub canvases: &'a mut LayerCanvasAccumulator,
+    /// W32-09: the live composite canvases (the NES merges into these).
+    pub composite: Option<&'a mut CanvasAccumulator>,
     pub scene: SceneId,
     /// The live frame's `(width, height)`.
     pub size: (u16, u16),
@@ -781,17 +1001,21 @@ impl ScoutDriver {
                 return;
             }
         }
-        self.pump(&setup, live.canvases, live.scene);
+        self.pump(&setup, live.canvases, live.composite, live.scene);
     }
 
     /// Merge what a running worker has sent without a live frame (the game
     /// is paused: the worker goes on, its deltas should not pile up). Never
     /// starts a scout.
-    pub fn poll(&mut self, canvases: &mut LayerCanvasAccumulator) {
+    pub fn poll(
+        &mut self,
+        canvases: &mut LayerCanvasAccumulator,
+        composite: Option<&mut CanvasAccumulator>,
+    ) {
         let (Some(setup), Some(scene)) = (self.setup.clone(), self.scene) else {
             return;
         };
-        self.pump(&setup, canvases, SceneId(scene));
+        self.pump(&setup, canvases, composite, SceneId(scene));
     }
 
     /// Try to start the scene's scout; `false` = not now.
@@ -811,7 +1035,16 @@ impl ScoutDriver {
         if self.ready < READY_FRAMES {
             return false;
         }
-        if !camera_matches(&setup.plan, live.stepper, live.scrolls) {
+        // The composite stitcher needs the live accumulator to fork from.
+        let comp_seed = if setup.plan.composite {
+            let Some(c) = live.composite.as_deref() else {
+                return false;
+            };
+            Some(c.fork_for_scout())
+        } else {
+            None
+        };
+        if !setup.plan.composite && !camera_matches(&setup.plan, live.stepper, live.scrolls) {
             self.retry();
             return false;
         }
@@ -824,6 +1057,7 @@ impl ScoutDriver {
             snapshot,
             plan: setup.plan.clone(),
             seed: live.canvases.fork_axes(),
+            comp_seed,
             scene: live.scene,
             size: live.size,
             reader: live.scrolls,
@@ -859,7 +1093,13 @@ impl ScoutDriver {
 
     /// Merge what the worker has sent (a couple of messages per live frame:
     /// the core thread's only scout work).
-    fn pump(&mut self, setup: &ScoutSetup, live: &mut LayerCanvasAccumulator, scene: SceneId) {
+    fn pump(
+        &mut self,
+        setup: &ScoutSetup,
+        live: &mut LayerCanvasAccumulator,
+        mut composite: Option<&mut CanvasAccumulator>,
+        scene: SceneId,
+    ) {
         use std::sync::mpsc::TryRecvError;
         let t = &setup.telemetry;
         // Bounded: MSGS_PER_TICK iterations.
@@ -873,7 +1113,12 @@ impl ScoutDriver {
                         continue;
                     }
                     let t0 = std::time::Instant::now();
-                    let merged = live.merge_unknown_from(s, &canvases);
+                    let merged = match composite.as_deref_mut() {
+                        Some(c) if setup.plan.composite => {
+                            c.merge_unknown_from(SceneId(s), &canvases[0])
+                        }
+                        _ => live.merge_unknown_from(s, &canvases),
+                    };
                     let us = t0.elapsed().as_micros() as u64;
                     ScoutTelemetry::add(&t.cells, merged as u64);
                     ScoutTelemetry::add(&t.slices, 1);
@@ -933,6 +1178,8 @@ mod tests {
             strategy,
             camera: vec![0x7E_001A, 0x7E_1462],
             player_x: vec![0x7E_0094],
+            player_x_hi: Vec::new(),
+            composite: false,
             step_px: 4,
             frame_budget: 10,
             stall_frames: 3,
@@ -989,7 +1236,7 @@ mod tests {
         let mut r = StopRule::default();
         let mut last = None;
         for i in 0..20u32 {
-            last = r.observe(&pl, (i * 4) as u16, 100 + i as usize);
+            last = r.observe(&pl, i64::from(i * 4), 100 + i as usize);
             if last.is_some() {
                 assert_eq!(i + 1, pl.frame_budget);
                 break;
@@ -1057,6 +1304,7 @@ mod tests {
         let mut live_st = EmuStepper::open(&rom).expect("fixture opens");
         let mut sink = ScoutSink {
             bundle: FrameBundleBuilder::new(256, 240),
+            keep_events: false,
         };
         let scene = SceneId(1);
         let mut live = LayerCanvasAccumulator::new();
@@ -1083,6 +1331,8 @@ mod tests {
             strategy: ScoutStrategy::PlayerMove,
             camera: vec![NES_CAMERA_X],
             player_x: vec![NES_PLAYER_X],
+            player_x_hi: Vec::new(),
+            composite: false,
             step_px: 4,
             frame_budget: 400,
             stall_frames: 60,
@@ -1133,6 +1383,7 @@ mod tests {
         let mut st = EmuStepper::open(&rom).expect("opens");
         let mut sink = ScoutSink {
             bundle: FrameBundleBuilder::new(256, 240),
+            keep_events: false,
         };
         let scene = SceneId(7);
         let mut live = LayerCanvasAccumulator::new();
@@ -1143,6 +1394,8 @@ mod tests {
                 strategy: ScoutStrategy::PlayerMove,
                 camera: vec![NES_CAMERA_X],
                 player_x: vec![NES_PLAYER_X],
+                player_x_hi: Vec::new(),
+                composite: false,
                 step_px: 4,
                 frame_budget: 300,
                 stall_frames: 40,
@@ -1168,6 +1421,7 @@ mod tests {
                 stepper: &st,
                 rom: &rom,
                 canvases: &mut live,
+                composite: None,
                 scene,
                 size: (256, 240),
                 scrolls: nes_scrolls,
@@ -1188,6 +1442,7 @@ mod tests {
                 stepper: &st,
                 rom: &rom,
                 canvases: &mut live,
+                composite: None,
                 scene,
                 size: (256, 240),
                 scrolls: nes_scrolls,
@@ -1210,6 +1465,7 @@ mod tests {
         let mut st = EmuStepper::open(&rom).expect("opens");
         let mut sink = ScoutSink {
             bundle: FrameBundleBuilder::new(256, 240),
+            keep_events: false,
         };
         let mut live = LayerCanvasAccumulator::new();
         let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
@@ -1218,6 +1474,8 @@ mod tests {
                 strategy: ScoutStrategy::PlayerMove,
                 camera: vec![NES_CAMERA_X],
                 player_x: vec![NES_PLAYER_X],
+                player_x_hi: Vec::new(),
+                composite: false,
                 step_px: 1,
                 // Long enough that only cancelling can stop it soon.
                 frame_budget: 100_000,
@@ -1240,6 +1498,7 @@ mod tests {
                 stepper: st,
                 rom: &rom,
                 canvases: live,
+                composite: None,
                 scene,
                 size: (256, 240),
                 scrolls: nes_scrolls,
@@ -1319,6 +1578,7 @@ mod tests {
         let mut st = EmuStepper::open(&rom).expect("opens");
         let mut sink = ScoutSink {
             bundle: FrameBundleBuilder::new(256, 240),
+            keep_events: false,
         };
         let scene = SceneId(1);
         let mut live = LayerCanvasAccumulator::new();
@@ -1331,6 +1591,8 @@ mod tests {
                 strategy: ScoutStrategy::PlayerMove,
                 camera: vec![NES_CAMERA_X],
                 player_x: vec![NES_PLAYER_X],
+                player_x_hi: Vec::new(),
+                composite: false,
                 step_px: 4,
                 frame_budget: 100,
                 stall_frames: 20,
@@ -1353,6 +1615,7 @@ mod tests {
                 stepper: &st,
                 rom: &rom,
                 canvases: &mut live,
+                composite: None,
                 scene,
                 size: (256, 240),
                 scrolls: nes_scrolls,
@@ -1360,5 +1623,152 @@ mod tests {
         }
         assert_eq!(ScoutTelemetry::get(&telemetry.started), 0);
         assert!(!driver.running());
+    }
+
+    // ---- W32-09: the NES composite mode on the RF-Scroller fixture.
+
+    /// Run `frames` live frames of RF-Scroller (Right held from frame 60),
+    /// feeding a composite accumulator the way the core thread does.
+    fn nes_live(rom: &[u8], frames: u32) -> (EmuStepper, CanvasAccumulator, SceneId) {
+        let mut st = EmuStepper::open(rom).expect("fixture opens");
+        let mut sink = ScoutSink {
+            bundle: FrameBundleBuilder::new(256, 240),
+            keep_events: true,
+        };
+        let mut live = CanvasAccumulator::new("rf-scroller".into(), None);
+        let mut scene = SceneId(0);
+        for f in 0..frames {
+            let mut input = InputFrame::empty();
+            if f >= 60 {
+                input.ports[0] = RIGHT;
+            }
+            st.latch_and_advance_frame(input, &mut sink);
+            let bundle = sink.bundle.take(st.frame_count());
+            scene = live.observe_frame(&bundle, &[]);
+        }
+        (st, live, scene)
+    }
+
+    fn nes_plan() -> ScoutPlan {
+        ScoutPlan {
+            strategy: ScoutStrategy::PlayerMove,
+            camera: Vec::new(),
+            player_x: vec![NES_PLAYER_X],
+            player_x_hi: Vec::new(),
+            composite: true,
+            step_px: 4,
+            frame_budget: 400,
+            stall_frames: 60,
+            settle_frames: 0,
+            dirs: vec![ScoutDir::Right],
+            hold: Vec::new(),
+            start_when: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_composite_scout_on_rf_scroller_extends_the_canvas_and_leaves_live_cells_and_the_hud_alone()
+    {
+        let Some(rom) = fixture() else { return };
+        let (live_st, mut live, scene) = nes_live(&rom, 200);
+        let before = live.scene_canvas(scene).expect("live canvas").clone();
+        let cam_now = word(&live_st, NES_CAMERA_X);
+        let snapshot = live_st.snapshot().expect("snapshot");
+        let mut scout =
+            Scout::start_composite(&rom, snapshot, nes_plan(), &live, scene, (256, 240))
+                .expect("starts");
+        // Law 8: bounded; the plan's own budget ends the pass well before.
+        for _ in 0..2_000 {
+            if scout.step(&|_: &EmuStepper| None) != ScoutStatus::Running {
+                break;
+            }
+        }
+        assert!(
+            matches!(scout.status(), ScoutStatus::Finished(_)),
+            "ended: {:?}",
+            scout.ends
+        );
+        let origin_y = scout.frame_position().map(|p| p.origin.1);
+        let delta = scout.take_delta().expect("a delta");
+        // The HUD band (the fixture's two top rows of tiles) is never stitched
+        // by the scout: the cells of those rows, past the live canvas, are
+        // unknown, while the playfield rows below are known.
+        let oy = origin_y.expect("the last frame was placed");
+        let far = before.origin().0 + before.width() as i64 + 40;
+        let known = |y: i64| (far..far + 200).any(|x| delta[0].get(x, y).is_some());
+        assert!(known(oy + 100), "the scout stitched the playfield");
+        assert!(!known(oy + 4), "the HUD band was left out");
+        let merged = live.merge_unknown_from(scene, &delta[0]);
+        assert!(merged > 0, "the scout found unknown cells");
+        let after = live.scene_canvas(scene).unwrap();
+        assert!(
+            after.width() > before.width(),
+            "canvas {} -> {} wide (camera was at {cam_now})",
+            before.width(),
+            after.width()
+        );
+        let (ox, oy) = before.origin();
+        for y in 0..before.height() as i64 {
+            for x in 0..before.width() as i64 {
+                if let Some(p) = before.get(ox + x, oy + y) {
+                    assert_eq!(after.get(ox + x, oy + y), Some(p), "cell ({x},{y}) changed");
+                }
+            }
+        }
+        // The live machine was only read.
+        assert_eq!(word(&live_st, NES_CAMERA_X), cam_now);
+    }
+
+    #[test]
+    fn the_walk_strategy_pokes_only_the_hold_table() {
+        let mut plan = nes_plan();
+        plan.strategy = ScoutStrategy::Walk;
+        plan.hold = vec![(0x04A0, 0x20)];
+        assert_eq!(plan.pokes(ScoutDir::Right, 0, 0), vec![(0x04A0, 0x20)]);
+    }
+
+    #[test]
+    fn a_player_x_hi_row_splits_the_poke_across_two_addresses() {
+        let mut plan = nes_plan();
+        plan.player_x = vec![0x0090];
+        plan.player_x_hi = vec![0x0075];
+        assert_eq!(
+            plan.pokes(ScoutDir::Right, 0, 0x01FE),
+            vec![(0x0090, 0x02), (0x0075, 0x02)]
+        );
+    }
+
+    fn profile_plan_of(rel: &str) -> ScoutPlan {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let outcome = rf_profiles::load_file(&path).expect("the profile loads");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        ScoutPlan::from_profile(outcome.profile.scout.as_ref().expect("[scout]")).composite()
+    }
+
+    #[test]
+    fn the_smb3_profile_scout_table_loads_into_the_observed_plan() {
+        let plan = profile_plan_of("../../profiles/nes/super-mario-bros-3/profile.toml");
+        assert_eq!(plan.strategy, ScoutStrategy::PlayerMove);
+        assert_eq!(
+            (plan.player_x.clone(), plan.player_x_hi.clone()),
+            (vec![0x90], vec![0x75])
+        );
+        assert_eq!(plan.hold, vec![(0x00A2, 0x28)]);
+        assert_eq!(plan.start_when, vec![(0x000F, 1)]);
+        assert_eq!(
+            (plan.step_px, plan.frame_budget, plan.stall_frames),
+            (4, 1500, 60)
+        );
+        assert!(plan.composite);
+    }
+
+    #[test]
+    fn the_mm2_profile_scout_table_loads_into_the_observed_plan() {
+        let plan = profile_plan_of("../../profiles/nes/mega-man-2/profile.toml");
+        assert_eq!(plan.strategy, ScoutStrategy::Walk);
+        assert_eq!(plan.hold, vec![(0x04A0, 0x20)]);
+        assert_eq!(plan.start_when, vec![(0x06C0, 0x1C)]);
+        assert_eq!(plan.dirs, vec![ScoutDir::Right]);
+        assert_eq!(plan.frame_budget, 3000);
     }
 }
