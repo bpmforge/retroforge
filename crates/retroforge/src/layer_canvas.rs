@@ -20,18 +20,27 @@
 //!   `rf_enhance::scroll_tracker::WorldAxis`). A game that changes a layer's
 //!   scroll mid-frame (HDMA parallax) is stitched at its first value:
 //!   fullsnes does not let us do better from register snapshots.
-//! * Margin order, front to back: BG1 > BG2 > BG3 > BG4. The PPU's real
-//!   order depends on the BG mode and per-tile priority bits; a fixed order
-//!   is right for the common two-layer scrollers (ground over hills) and is
-//!   a documented simplification.
+//! * Margin order, front to back (W32-08): per picture row, by the 4:3
+//!   picture's own evidence ([`LayerCanvasAccumulator::row_orders`]: where the
+//!   picture shows layer A at a spot layer B also has a known cell, A is in
+//!   front of B); BG1 > BG2 > BG3 > BG4 where a row has no evidence.
+//! * Which layers get a canvas (W32-08): every background layer that is on
+//!   the main screen, whatever the widescreen policy says -- the policy is
+//!   about what the PPU draws, the canvas is about what we remember (SMW's
+//!   far hills are BG2 and the default policy keeps them narrow). A HUD layer
+//!   (its scroll never moved while another layer's did, and it only draws a
+//!   band of rows) keeps its canvas but is left out of the margins
+//!   ([`LayerCanvases::hud`]).
 //! * A margin cell no layer knows shows the row's backdrop colour (palette
 //!   index 0 with the row palette), bsnes-hd's "auto" fill, not black.
 //!
-//! * **Which scroll a frame is stitched at (W32-07).** The scroll registers
-//!   read after a frame are the ones that draw the NEXT frame (the game's NMI
-//!   writes them in vblank), so callers feed `observe_frame` the values read
-//!   after the PREVIOUS frame. Measured on Super Mario World: stitched at its
-//!   own read, a frame lands one frame of scroll too far.
+//! * **Which scroll a frame is stitched at (W32-07, W32-08).** The scroll
+//!   registers read after a frame are the ones that draw the NEXT frame (the
+//!   game's NMI writes them in vblank), so every stitcher is fed the values
+//!   read after the PREVIOUS frame. Measured on Super Mario World: stitched
+//!   at its own read, a frame lands one frame of scroll too far. [`ScrollLag`]
+//!   is the one place that rule lives: the composite canvas, the layer
+//!   canvases and the scout all go through it.
 //! * **The level scout (W32-07).** `crate::scout` stitches a second machine's
 //!   frames into its own accumulator (`fork_axes`: same world axes) and its
 //!   cells fill only the unknown cells of these canvases (`merge_unknown_*`).
@@ -61,6 +70,102 @@ pub struct LayerScroll {
     pub tilemap_height: u16,
 }
 
+/// What the scroll registers said at one read: the scroll the composite
+/// (single-layer) stitcher wants and the per-layer scrolls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameScrolls {
+    /// The first widened layer's `(hofs, vofs)`, wrapped to its tilemap
+    /// ([`crate::canvas_accum::CanvasAccumulator::observe_frame_with_scroll`]).
+    pub composite: Option<(u16, u16)>,
+    /// Every stitched layer's scroll ([`LayerCanvasAccumulator::observe_frame`]).
+    pub layers: Option<[Option<LayerScroll>; LAYERS]>,
+}
+
+/// Ticket W32-08: the scroll a frame was DRAWN with.
+///
+/// The registers read after a frame draw the NEXT one (the game's NMI writes
+/// them in vblank, after the visible lines; measured on Super Mario World in
+/// W32-07), so frame `n` is stitched at the read taken after frame `n - 1`.
+/// One helper for all stitchers: before this, the composite canvas used the
+/// same-frame read and the layer canvases the previous one, a scroll step
+/// apart.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollLag {
+    prev: Option<(u64, FrameScrolls)>,
+}
+
+impl ScrollLag {
+    /// Record `read` as taken after frame `frame` without asking for a drawn
+    /// scroll (a scout pass starts from the restored registers).
+    pub fn prime(&mut self, frame: u64, read: FrameScrolls) {
+        self.prev = Some((frame, read));
+    }
+
+    /// Frame `frame` has just run and `read` is what the registers hold now.
+    /// Returns the scroll that drew `frame`: the previous read, if it was
+    /// taken right after frame `frame - 1` (otherwise nothing is known and
+    /// the frame must not be placed).
+    pub fn drawn_with(&mut self, frame: u64, read: FrameScrolls) -> FrameScrolls {
+        let drawn = match self.prev.take() {
+            Some((n, s)) if n + 1 == frame => s,
+            _ => FrameScrolls::default(),
+        };
+        self.prev = Some((frame, read));
+        drawn
+    }
+
+    /// Forget the last read.
+    pub fn forget(&mut self) {
+        self.prev = None;
+    }
+}
+
+/// Per scene, what a layer's scroll and picture rows have done so far (the
+/// evidence for [`LayerCanvasAccumulator::hud_layers`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Motion {
+    seen: bool,
+    x: (i64, i64),
+    y: (i64, i64),
+    /// First and last picture row the layer drew a pixel on.
+    rows: (usize, usize),
+    height: usize,
+}
+
+impl Motion {
+    fn observe(&mut self, wx: i64, wy: i64, rows: Option<(usize, usize)>, height: usize) {
+        if self.seen {
+            self.x = (self.x.0.min(wx), self.x.1.max(wx));
+            self.y = (self.y.0.min(wy), self.y.1.max(wy));
+        } else {
+            self.seen = true;
+            self.x = (wx, wx);
+            self.y = (wy, wy);
+            self.rows = (usize::MAX, 0);
+        }
+        self.height = height;
+        if let Some((lo, hi)) = rows {
+            self.rows = (self.rows.0.min(lo), self.rows.1.max(hi));
+        }
+    }
+
+    fn moved(&self) -> bool {
+        self.seen && (self.x.1 - self.x.0 >= MOVED_PX || self.y.1 - self.y.0 >= MOVED_PX)
+    }
+
+    /// Draws only a band of the picture (less than three quarters of the
+    /// rows) and has drawn something at all.
+    fn fixed_band(&self) -> bool {
+        self.seen
+            && self.rows.0 <= self.rows.1
+            && (self.rows.1 - self.rows.0 + 1) * 4 < self.height * 3
+    }
+}
+
+/// A layer's world position must have spanned this many pixels to count as
+/// having scrolled (a one pixel wobble is not a camera).
+const MOVED_PX: i64 = 8;
+
 /// Where each widened layer's 256-dot picture sits in its own world this
 /// frame (same convention as `canvas_accum::FramePosition::origin`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +179,9 @@ pub struct LayerFrames {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LayerCanvases {
     pub canvases: [Option<Canvas>; LAYERS],
+    /// Layers that are HUD (see [`LayerCanvasAccumulator::hud_layers`]): they
+    /// keep their canvas but give the margins nothing.
+    pub hud: [bool; LAYERS],
 }
 
 impl LayerCanvases {
@@ -96,6 +204,8 @@ pub struct LayerCanvasAccumulator {
     /// Per layer, the bounding box of the cells written since
     /// [`Self::take_dirty`] (world coordinates).
     dirty: [Option<Rect>; LAYERS],
+    /// Per scene and layer, the scroll/rows evidence for the HUD test.
+    motion: HashMap<u64, [Motion; LAYERS]>,
 }
 
 impl LayerCanvasAccumulator {
@@ -104,9 +214,9 @@ impl LayerCanvasAccumulator {
         Self::default()
     }
 
-    /// Feed one frame. `scrolls[n]` is `Some` for each layer the widescreen
-    /// policy widens this frame; `None` for narrow (HUD) layers, which are
-    /// not stitched. `scrolls == None` (NES, widescreen off) records no
+    /// Feed one frame. `scrolls[n]` is `Some` for each layer to stitch this
+    /// frame (every layer on the main screen, W32-08); `None` for a layer
+    /// that is not stitched. `scrolls == None` (NES, widescreen off) records no
     /// positions but keeps what was stitched.
     pub fn observe_frame(
         &mut self,
@@ -123,6 +233,7 @@ impl LayerCanvasAccumulator {
         }
         let pad = i64::from(bundle.width.saturating_sub(256) / 2);
         let canvases = self.scenes.entry(scene.0).or_default();
+        let motion = self.motion.entry(scene.0).or_default();
         let mut origins = [None; LAYERS];
         let mut row_buf: Vec<Option<PpuPixel>> = Vec::with_capacity(width);
         for (n, scroll) in scrolls.iter().enumerate() {
@@ -131,6 +242,7 @@ impl LayerCanvasAccumulator {
             let wx = ax.advance(scroll.hofs, i64::from(scroll.tilemap_width.max(1)));
             let wy = ay.advance(scroll.vofs, i64::from(scroll.tilemap_height.max(1)));
             let wanted = PixelLayer::Background(n as u8);
+            let mut rows_drawn: Option<(usize, usize)> = None;
             // Bounded `for` over the frame's rows (law 8).
             for (sy, row) in bundle.video.chunks_exact(width).enumerate() {
                 row_buf.clear();
@@ -142,8 +254,10 @@ impl LayerCanvasAccumulator {
                     canvases[n].blit_row(wx, y, &row_buf);
                     let r = (wx, y, wx + width as i64, y + 1);
                     self.dirty[n] = Some(self.dirty[n].map_or(r, |d| union(d, r)));
+                    rows_drawn = Some(rows_drawn.map_or((sy, sy), |(lo, _)| (lo, sy)));
                 }
             }
+            motion[n].observe(wx, wy, rows_drawn, usize::from(bundle.height));
             origins[n] = Some((wx + pad, wy));
         }
         self.last = Some(LayerFrames {
@@ -164,6 +278,7 @@ impl LayerCanvasAccumulator {
             last: None,
             last_scene: self.last_scene,
             dirty: [None; LAYERS],
+            motion: HashMap::new(),
         }
     }
 
@@ -174,6 +289,116 @@ impl LayerCanvasAccumulator {
     pub fn rewind_axes(&mut self, seed: &Self) {
         self.axes = seed.axes;
         self.last = None;
+    }
+
+    /// Ticket W32-08: which layers of `scene` are HUD: their scroll never
+    /// moved while another layer's did, and they only draw a band of rows.
+    /// Judged on everything seen so far, so a layer stitched before the
+    /// camera first moved is left out of the margins as soon as it is known.
+    #[must_use]
+    pub fn hud_layers(&self, scene: u64) -> [bool; LAYERS] {
+        let Some(m) = self.motion.get(&scene) else {
+            return [false; LAYERS];
+        };
+        std::array::from_fn(|n| {
+            let other_moved = m.iter().enumerate().any(|(i, o)| i != n && o.moved());
+            other_moved && !m[n].moved() && m[n].fixed_band()
+        })
+    }
+
+    /// Ticket W32-08: for each picture row of the frame just observed, the
+    /// layers front to back, by the picture's own evidence. Where the
+    /// picture shows layer A at a spot layer B also has a known cell for, A
+    /// is in front of B; layers the picture says nothing about stay in layer
+    /// order (BG1 first). Empty before a frame has been placed.
+    #[must_use]
+    pub fn row_orders(&self, bundle: &FrameBundle) -> Vec<[u8; LAYERS]> {
+        let (Some(frames), width) = (self.last, usize::from(bundle.width)) else {
+            return Vec::new();
+        };
+        let Some(set) = self.scenes.get(&frames.scene) else {
+            return Vec::new();
+        };
+        let pad = i64::from(bundle.width.saturating_sub(256) / 2);
+        let hud = self.hud_layers(frames.scene);
+        let known = |n: usize, c: usize, y: usize| -> bool {
+            frames.origins[n]
+                .is_some_and(|(ox, oy)| set[n].get(ox - pad + c as i64, oy + y as i64).is_some())
+        };
+        let default: [u8; LAYERS] = std::array::from_fn(|i| i as u8);
+        if width == 0 {
+            return Vec::new();
+        }
+        // Bounded `for` over rows and columns (law 8).
+        bundle
+            .video
+            .chunks_exact(width)
+            .enumerate()
+            .map(|(y, row)| {
+                let mut wins = [[0i32; LAYERS]; LAYERS];
+                for (c, p) in row.iter().enumerate() {
+                    let PixelLayer::Background(a) = p.layer else {
+                        continue;
+                    };
+                    let a = usize::from(a);
+                    if a >= LAYERS || hud[a] {
+                        continue;
+                    }
+                    for b in (0..LAYERS).filter(|&b| b != a && !hud[b]) {
+                        if known(b, c, y) {
+                            wins[a][b] += 1;
+                        }
+                    }
+                }
+                // Insertion sort by pairwise evidence: a layer moves in front
+                // of the one before it only when the picture showed it
+                // winning against that one. `j` drops on every iteration, so
+                // the inner walk ends (law 8).
+                let mut order = default;
+                for i in 1..LAYERS {
+                    let mut j = i;
+                    while j > 0 {
+                        let (front, back) = (usize::from(order[j - 1]), usize::from(order[j]));
+                        if wins[back][front] <= wins[front][back] {
+                            break;
+                        }
+                        order.swap(j - 1, j);
+                        j -= 1;
+                    }
+                }
+                order
+            })
+            .collect()
+    }
+
+    /// Ticket W32-08: what was stitched since the last call, cut out of the
+    /// canvases of `scene` into canvases of their own (the dirty boxes'
+    /// cells only), for a worker to ship to the thread that merges them
+    /// ([`Self::merge_unknown_from`]).
+    pub fn take_delta(&mut self, scene: u64) -> Option<[Canvas; LAYERS]> {
+        let dirty = self.take_dirty();
+        let set = self.scenes.get(&scene)?;
+        let mut out: [Canvas; LAYERS] = std::array::from_fn(|_| Canvas::new());
+        for ((from, rect), to) in set.iter().zip(dirty).zip(out.iter_mut()) {
+            let Some((rx0, ry0, rx1, ry1)) = rect else {
+                continue;
+            };
+            let (w, h) = (from.width(), from.height());
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let (ox, oy) = from.origin();
+            let (x0, x1) = (rx0.max(ox), rx1.min(ox + w as i64));
+            let (y0, y1) = (ry0.max(oy), ry1.min(oy + h as i64));
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            for wy in y0..y1 {
+                let start = (wy - oy) as usize * w + (x0 - ox) as usize;
+                to.blit_row(x0, wy, &from.cells()[start..start + (x1 - x0) as usize]);
+            }
+        }
+        Some(out)
     }
 
     /// The per-layer canvases stitched for `scene`, borrowed.
@@ -233,6 +458,7 @@ impl LayerCanvasAccumulator {
     pub fn current_canvases(&self) -> LayerCanvases {
         let mut out = LayerCanvases::default();
         if let Some(set) = self.last_scene.and_then(|s| self.scenes.get(&s)) {
+            out.hud = self.hud_layers(self.last_scene.unwrap_or_default());
             for (slot, canvas) in out.canvases.iter_mut().zip(set) {
                 if canvas.width() > 0 && canvas.height() > 0 {
                     *slot = Some(canvas.clone());
@@ -294,24 +520,29 @@ pub fn merge_unknown_in(live: &mut Canvas, scout: &Canvas, within: Option<Rect>)
 }
 
 /// The margin pixel at `(dx, dy)` from the composite picture's left edge /
-/// top row: the front-most layer (BG1 first) with a known cell at that
-/// layer's own world position, else `None`. `origins` are this frame's
-/// [`LayerFrames::origins`].
+/// top row: the front-most layer with a known cell at that layer's own world
+/// position, else `None`. `origins` are this frame's
+/// [`LayerFrames::origins`]; HUD layers give nothing; `order` is the row's
+/// front-to-back order ([`LayerCanvasAccumulator::row_orders`]), BG1 first
+/// when `None`.
 #[must_use]
 pub fn front_layer_pixel(
     layers: &LayerCanvases,
     origins: &[Option<(i64, i64)>; LAYERS],
     dx: i64,
     dy: i64,
+    order: Option<&[u8; LAYERS]>,
 ) -> Option<PpuPixel> {
-    layers
-        .canvases
-        .iter()
-        .zip(origins)
-        .find_map(|(canvas, origin)| {
-            let (canvas, (ox, oy)) = (canvas.as_ref()?, (*origin)?);
-            canvas.get(ox + dx, oy + dy)
-        })
+    const DEFAULT: [u8; LAYERS] = [0, 1, 2, 3];
+    order.unwrap_or(&DEFAULT).iter().find_map(|&n| {
+        let n = usize::from(n);
+        if *layers.hud.get(n)? {
+            return None;
+        }
+        let canvas = layers.canvases.get(n)?.as_ref()?;
+        let (ox, oy) = (*origins.get(n)?)?;
+        canvas.get(ox + dx, oy + dy)
+    })
 }
 
 /// Per picture row, the colour the backdrop shows on screen: the most
@@ -365,7 +596,7 @@ pub fn margin_palette_index(
     dx: i64,
     dy: i64,
 ) -> u8 {
-    front_layer_pixel(layers, origins, dx, dy).map_or(0, |p| p.palette_index)
+    front_layer_pixel(layers, origins, dx, dy, None).map_or(0, |p| p.palette_index)
 }
 
 #[cfg(test)]
@@ -551,6 +782,7 @@ mod tests {
                 None,
                 None,
             ],
+            ..Default::default()
         };
         // BG1's world is offset by 100, BG2's by 0: dx -> own coordinates.
         let origins = [Some((100, 0)), Some((0, 0)), None, None];
@@ -571,9 +803,10 @@ mod tests {
     fn an_unknown_margin_cell_falls_back_to_the_backdrop_colour() {
         let layers = LayerCanvases {
             canvases: [Some(canvas_with(&[(0, 0, 5)])), None, None, None],
+            ..Default::default()
         };
         let origins = [Some((0, 0)), None, None, None];
-        assert_eq!(front_layer_pixel(&layers, &origins, 40, 3), None);
+        assert_eq!(front_layer_pixel(&layers, &origins, 40, 3, None), None);
         let idx = margin_palette_index(&layers, &origins, 40, 3);
         assert_eq!(idx, 0);
         let mut words = [0u16; 256];
@@ -603,6 +836,7 @@ mod tests {
     fn margins_compose_through_fill_margins() {
         let layers = LayerCanvases {
             canvases: [Some(canvas_with(&[(-1, 0, 7)])), None, None, None],
+            ..Default::default()
         };
         let origins = [Some((0, 0)), None, None, None];
         let (h, out_w) = (1usize, 258usize);
@@ -750,5 +984,188 @@ mod tests {
             Some(&scrolls(516 % 512, 0)),
         );
         assert_eq!(scout.frames().unwrap().origins[0].unwrap().0, live_x + 8);
+    }
+
+    // ---- W32-08: shared scroll timing, parallax layers, HUD, layer order
+
+    #[test]
+    fn the_lag_hands_a_frame_the_read_taken_after_the_one_before_it() {
+        let read = |x: u16| FrameScrolls {
+            composite: Some((x, 0)),
+            layers: Some(scrolls(x, x)),
+        };
+        let mut lag = ScrollLag::default();
+        // Nothing known before any read: the frame is not placed.
+        assert_eq!(lag.drawn_with(1, read(10)), FrameScrolls::default());
+        // Frame 2 was drawn with what was read after frame 1.
+        assert_eq!(lag.drawn_with(2, read(20)), read(10));
+        // A gap (frame 5 after frame 2): unknown again, then consecutive.
+        assert_eq!(lag.drawn_with(5, read(50)), FrameScrolls::default());
+        assert_eq!(lag.drawn_with(6, read(60)), read(50));
+        // A primed read (a scout pass start) serves the next frame.
+        lag.prime(100, read(7));
+        assert_eq!(lag.drawn_with(101, read(8)), read(7));
+        lag.forget();
+        assert_eq!(lag.drawn_with(102, read(9)), FrameScrolls::default());
+    }
+
+    /// Picture whose BG1 pixel at screen column `c` holds `hofs + c`, i.e.
+    /// its own world x, so any misplacement shows in the stitched cells.
+    fn world_x_bundle(hofs: u16) -> FrameBundle {
+        let mut video = Vec::new();
+        for _ in 0..usize::from(H) {
+            for c in 0..usize::from(W) {
+                video.push(px(PixelLayer::Background(0), (usize::from(hofs) + c) as u8));
+            }
+        }
+        let events = vec![
+            rf_core_api::CoreEvent::Scanline(0),
+            rf_core_api::CoreEvent::Scanline(H - 1),
+        ];
+        FrameBundle::new(0, W, H, video, events)
+    }
+
+    /// The set of `world x - value` over every known cell of a canvas: one
+    /// element means every cell sits at the world x its content encodes.
+    fn placement_offsets(c: &Canvas) -> std::collections::BTreeSet<i64> {
+        let (ox, oy) = c.origin();
+        let mut out = std::collections::BTreeSet::new();
+        for y in 0..c.height() as i64 {
+            for x in 0..c.width() as i64 {
+                if let Some(p) = c.get(ox + x, oy + y) {
+                    out.insert(ox + x - i64::from(p.palette_index));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_composite_and_layer_canvases_place_the_same_content_at_the_same_world_x() {
+        use crate::canvas_accum::CanvasAccumulator;
+        // A camera with uneven steps, so a one-frame error cannot hide in a
+        // constant offset. Frame k is drawn at DRAW[k]; the registers read
+        // after frame k hold DRAW[k + 1] (they draw the next frame).
+        const DRAW: [u16; 9] = [10, 13, 18, 20, 29, 31, 40, 41, 52];
+        let read = |x: u16| FrameScrolls {
+            composite: Some((x, 0)),
+            layers: Some([scroll(x), None, None, None]),
+        };
+        let mut composite = CanvasAccumulator::new("w32-08".into(), None);
+        let mut layers = LayerCanvasAccumulator::new();
+        let mut lag = ScrollLag::default();
+        lag.prime(0, read(DRAW[1]));
+        for k in 1..DRAW.len() {
+            let bundle = world_x_bundle(DRAW[k]);
+            let drawn = lag.drawn_with(k as u64, read(DRAW.get(k + 1).copied().unwrap_or(0)));
+            let scene = composite.observe_frame_with_scroll(&bundle, &[], drawn.composite);
+            layers.observe_frame(&bundle, scene, drawn.layers.as_ref());
+        }
+        let comp = composite.current_canvas().expect("composite canvas");
+        let lay = layers.current_canvases();
+        let lay = lay.canvases[0].as_ref().expect("layer canvas");
+        let (a, b) = (placement_offsets(&comp), placement_offsets(lay));
+        assert_eq!(a.len(), 1, "composite: every cell at its world x: {a:?}");
+        assert_eq!(b.len(), 1, "layer: every cell at its world x: {b:?}");
+        assert_eq!(a, b, "the two canvases use the same world x");
+    }
+
+    #[test]
+    fn a_layer_that_never_moves_while_another_does_is_hud_only_when_it_is_a_band() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let id = SceneId(1);
+        // BG1 scrolls; BG2 (right half) is full height at a fixed scroll;
+        // BG3 is a one-row band at a fixed scroll.
+        let band = |y: usize, _c: usize, p: &mut PpuPixel| {
+            if y == 0 {
+                *p = px(PixelLayer::Background(2), 9);
+            }
+        };
+        let s = |h: u16| [scroll(h), scroll(4), scroll(0), None];
+        acc.observe_frame(&bundle([0, 0], band), id, Some(&s(0)));
+        assert_eq!(acc.hud_layers(1), [false; LAYERS], "nothing has moved yet");
+        for h in [8u16, 16, 24] {
+            acc.observe_frame(&bundle([h, 0], band), id, Some(&s(h)));
+        }
+        assert_eq!(
+            acc.hud_layers(1),
+            [false, false, true, false],
+            "the band is HUD; the full-height static layer is not"
+        );
+        assert!(acc.current_canvases().hud[2]);
+        assert!(
+            acc.current_canvases().canvases[2].is_some(),
+            "the HUD layer keeps its canvas"
+        );
+    }
+
+    #[test]
+    fn a_hud_layer_gives_the_margins_nothing_and_a_parallax_layer_does() {
+        let layers = LayerCanvases {
+            canvases: [
+                None,
+                Some(canvas_with(&[(5, 0, 22)])),
+                Some(canvas_with(&[(5, 0, 33)])),
+                None,
+            ],
+            hud: [false, false, true, false],
+        };
+        let o = Some((0, 0));
+        let origins = [None, o, o, None];
+        // BG2 (hills) shows although the policy never widened it; BG3 is HUD.
+        assert_eq!(
+            front_layer_pixel(&layers, &origins, 5, 0, None).map(|p| p.palette_index),
+            Some(22)
+        );
+        let hud_first = [2u8, 1, 0, 3];
+        assert_eq!(
+            front_layer_pixel(&layers, &origins, 5, 0, Some(&hud_first)).map(|p| p.palette_index),
+            Some(22),
+            "even when the order puts the HUD layer in front"
+        );
+    }
+
+    #[test]
+    fn the_picture_decides_which_layer_is_in_front_row_by_row() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let id = SceneId(1);
+        let s = scrolls(0, 0);
+        // Frame 1: BG1 left, BG2 right (each layer's cells become known).
+        acc.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&s));
+        // Frame 2: BG2 shows EVERYWHERE, also where BG1 is known: BG2 is in
+        // front of BG1 on every row.
+        let all_bg2 = |_: usize, c: usize, p: &mut PpuPixel| {
+            *p = px(PixelLayer::Background(1), c as u8);
+        };
+        let b2 = bundle([0, 0], all_bg2);
+        acc.observe_frame(&b2, id, Some(&s));
+        let orders = acc.row_orders(&b2);
+        assert_eq!(orders.len(), usize::from(H));
+        assert!(orders.iter().all(|o| o[..2] == [1, 0]), "{orders:?}");
+        // No evidence (a single known layer): the default order.
+        let mut fresh = LayerCanvasAccumulator::new();
+        let b1 = bundle([0, 0], |_, _, p| *p = px(PixelLayer::Background(0), 1));
+        fresh.observe_frame(&b1, id, Some(&s));
+        assert!(fresh.row_orders(&b1).iter().all(|o| *o == [0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn a_delta_carries_only_what_was_stitched_since_the_last_one() {
+        let mut acc = LayerCanvasAccumulator::new();
+        let id = SceneId(1);
+        acc.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(0, 0)));
+        let first = acc.take_delta(1).expect("scene has canvases");
+        assert!(first[0].get(0, 0).is_some());
+        acc.observe_frame(&bundle([100, 0], |_, _, _| {}), id, Some(&scrolls(100, 0)));
+        let second = acc.take_delta(1).unwrap();
+        assert!(second[0].get(0, 0).is_none(), "already delivered");
+        assert!(second[0].get(100, 0).is_some());
+        // Merging the deltas into a live accumulator rebuilds the canvases.
+        let mut live = LayerCanvasAccumulator::new();
+        live.observe_frame(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(0, 0)));
+        assert_eq!(live.merge_unknown_from(1, &first), 0, "live already knows");
+        assert!(live.merge_unknown_from(1, &second) > 0);
+        assert!(live.scene_canvases(1).unwrap()[0].get(100, 0).is_some());
+        assert!(acc.take_delta(2).is_none(), "no such scene");
     }
 }

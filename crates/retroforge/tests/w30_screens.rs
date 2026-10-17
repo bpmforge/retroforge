@@ -463,6 +463,16 @@ fn shot_scout(readme: &mut Vec<String>) {
     let t = h.state().frame_count_for_test() + 20;
     run_frames(&mut h, t, Duration::from_secs(60));
     let off = grab(&h);
+    // `RF_SCOUT_PACED=1`: the live fps of 150 paced frames with the scout
+    // OFF, the control for the scout-on figure below (W32-08). 150, not
+    // more: a standing Mario dies ~220 frames into the level.
+    let paced = std::env::var("RF_SCOUT_PACED").is_ok();
+    let fps_off = paced.then(|| {
+        let f0 = h.state().frame_count_for_test();
+        let t0 = Instant::now();
+        run_frames(&mut h, f0 + 150, Duration::from_secs(120));
+        (h.state().frame_count_for_test() - f0) as f64 / t0.elapsed().as_secs_f64()
+    });
     // Scout on: re-arm widescreen with the scout enabled and let it run to
     // the end of its passes at the real (paced) speed, as a player gets it.
     // (Mario is left standing: the first enemy kills him ~220 frames into
@@ -470,10 +480,8 @@ fn shot_scout(readme: &mut Vec<String>) {
     h.state_mut().set_scout_enabled_for_test(true);
     // `RF_SCOUT_PACED=1` measures the real cost at the real speed (the game
     // is then long over for Mario, so the picture is not the point);
-    // otherwise the scout runs flat out so Mario is still standing in the
-    // level when it ends.
-    let paced = std::env::var("RF_SCOUT_PACED").is_ok();
-    h.state_mut().set_scout_turbo_for_test(!paced);
+    // otherwise the live loop is unpaced and paused once the worker is
+    // running, so Mario is still standing in the level when it ends.
     if !paced {
         h.state()
             .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
@@ -481,14 +489,35 @@ fn shot_scout(readme: &mut Vec<String>) {
     h.state_mut().set_widescreen(true);
     let t1 = Instant::now();
     let f1 = h.state().frame_count_for_test();
+    // The scout runs on its own thread beside the live loop (W32-08), and a
+    // standing Mario dies ~220 frames into the level, which sends the game
+    // back to the map. So for the PICTURE the live game is paused as soon as
+    // the worker has started (the worker goes on, the paused core keeps
+    // merging its deltas); a paced run lets the game run for the fps figure.
     let mut finished_at = None;
-    while t1.elapsed() < Duration::from_secs(300) {
-        let t = h.state().frame_count_for_test() + 10;
-        run_frames(&mut h, t, Duration::from_secs(10));
-        if telemetry.finished.load(Relaxed) >= 1 {
-            finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
-            break;
+    if paced {
+        while t1.elapsed() < Duration::from_secs(300) {
+            let t = h.state().frame_count_for_test() + 10;
+            run_frames(&mut h, t, Duration::from_secs(10));
+            if telemetry.finished.load(Relaxed) >= 1 {
+                finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
+                break;
+            }
         }
+    } else {
+        while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+        }
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        while t1.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(100));
+            if telemetry.finished.load(Relaxed) >= 1 {
+                finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
+                break;
+            }
+        }
+        h.state().send_core_command_for_test(CoreCommand::Resume);
     }
     let (Some((live_frames, took)), Some(off)) = (finished_at, off) else {
         return skip(readme, name, "the scout never finished");
@@ -508,20 +537,35 @@ fn shot_scout(readme: &mut Vec<String>) {
         telemetry.slices.load(Relaxed),
         telemetry.cells.load(Relaxed),
     );
+    // A second control, after the scout is done (the game is on the map by
+    // now, so this is not the same scene, only the same machine load).
+    let fps_after = paced.then(|| {
+        let f0 = h.state().frame_count_for_test();
+        let t0 = Instant::now();
+        run_frames(&mut h, f0 + 300, Duration::from_secs(120));
+        (h.state().frame_count_for_test() - f0) as f64 / t0.elapsed().as_secs_f64()
+    });
+    let load = std::process::Command::new("uptime")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     println!(
-        "SCOUT {sf} scout frames in {sl} slices over {live_frames} live frames ({:.1} s wall), \
-         {:.2} ms per scout frame, longest slice {:.1} ms, {} forced slices, budgeted slices overran \
-         by {:.1} ms in total, {cells} cells merged; scouts started {} finished {} aborted {}, \
-         passes ended {:?}",
+        "SCOUT {sf} scout frames over {live_frames} live frames ({:.1} s wall; worker ran {:.1} s), \
+         {sl} deltas merged on the core thread ({:.2} ms in total, longest {:.2} ms), {cells} cells \
+         merged; scouts started {} finished {} aborted {}, passes ended {:?}; live fps with the \
+         scout ON {:.1} ({}), OFF before {} / after {}; {load}",
         took.as_secs_f64(),
-        sw as f64 / 1000.0 / sf.max(1) as f64,
+        sw as f64 / 1e6,
+        telemetry.core_us.load(Relaxed) as f64 / 1000.0,
         mx as f64 / 1000.0,
-        telemetry.forced.load(Relaxed),
-        telemetry.over_us.load(Relaxed) as f64 / 1000.0,
         telemetry.started.load(Relaxed),
         telemetry.finished.load(Relaxed),
         telemetry.aborted.load(Relaxed),
-        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default()
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        live_frames as f64 / took.as_secs_f64(),
+        if paced { "paced" } else { "UNPACED, not comparable" },
+        fps_off.map_or("n/a".to_string(), |f| format!("{f:.1}")),
+        fps_after.map_or("n/a".to_string(), |f| format!("{f:.1}")),
     );
     if paced {
         return; // the game is long over for Mario: no picture worth keeping

@@ -21,9 +21,19 @@
 //! player does to the game -- enemies waking, items spawning -- must not
 //! appear in the live picture.
 //!
-//! Everything here runs on the core thread (the only thread that may touch a
-//! machine); `Scout::step` runs one frame and returns, so the caller decides
-//! how many to run per live frame (wall-time budget).
+//! **Threads (W32-08).** The scout used to run in slices on the core thread
+//! and cost about a quarter of the live fps under load. Now the core thread
+//! only DECIDES (when to start, the snapshot of the live machine, merging)
+//! and a worker thread ([`ScoutDriver`] spawns one per scout) does the
+//! stepping: it opens its own machine from the ROM bytes, restores the
+//! snapshot, runs the passes and ships canvas deltas (the dirty boxes) back
+//! over a bounded channel. The live core is still only ever READ (one
+//! `snapshot`, on the core thread); the scout machine is a separate instance
+//! that nothing else can reach, so law 4 (nothing mutates core state off the
+//! core thread) concerns the live machine, which no scout code touches. A
+//! scene change, a new setup, widescreen off or shutdown cancels the worker
+//! (a flag it checks every frame). `Scout::step` still runs one frame and
+//! returns, so tests drive a `Scout` directly without a thread.
 //!
 //! The recipe (which RAM words, how far per frame) is per game and comes from
 //! the profile's `[scout]` table; the pure rules (what to poke, when to stop)
@@ -32,7 +42,9 @@
 use rf_core_api::{CoreSink, FrameBundleBuilder, InputFrame, PpuPixel};
 use rf_enhance::scene_identity::SceneId;
 
-use crate::layer_canvas::{LayerCanvasAccumulator, LayerScroll, LAYERS};
+use rf_enhance::stitcher::Canvas;
+
+use crate::layer_canvas::{FrameScrolls, LayerCanvasAccumulator, LayerScroll, ScrollLag, LAYERS};
 use crate::stepper::{EmuStepper, MachineSnapshot};
 
 /// How the scout moves the camera.
@@ -275,9 +287,11 @@ pub struct Scout {
     status: ScoutStatus,
     frames_total: u64,
     since_merge: u32,
-    /// The scroll the machine's registers hold right now: what draws its
-    /// NEXT frame (see [`Self::step`]). `None` at the start of a pass.
-    next_scrolls: Option<[Option<LayerScroll>; LAYERS]>,
+    /// The scroll read after the previous frame: what drew the frame being
+    /// stitched (the shared [`ScrollLag`] rule, W32-08).
+    lag: ScrollLag,
+    /// The lag holds the restored registers' read (set at a pass start).
+    primed: bool,
     /// How the passes ended, in order.
     pub ends: Vec<ScoutEnd>,
 }
@@ -331,7 +345,8 @@ impl Scout {
             status: ScoutStatus::Running,
             frames_total: 0,
             since_merge: 0,
-            next_scrolls: None,
+            lag: ScrollLag::default(),
+            primed: false,
             ends: Vec::new(),
             plan,
         }
@@ -397,6 +412,14 @@ impl Scout {
         live.merge_unknown_within(self.scene.0, from, &dirty)
     }
 
+    /// Ticket W32-08: what was stitched since the last call, as canvases of
+    /// their own (see [`LayerCanvasAccumulator::take_delta`]), for the thread
+    /// that merges it.
+    pub fn take_delta(&mut self) -> Option<[Canvas; LAYERS]> {
+        self.since_merge = 0;
+        self.acc.take_delta(self.scene.0)
+    }
+
     fn extent(&self) -> usize {
         self.acc
             .scene_canvases(self.scene.0)
@@ -418,7 +441,8 @@ impl Scout {
         }
         self.acc.rewind_axes(&self.seed);
         self.rule = StopRule::default();
-        self.next_scrolls = None;
+        self.lag.forget();
+        self.primed = false;
     }
 
     /// Run ONE scout frame: poke, step, stitch, apply the stop rules.
@@ -429,13 +453,19 @@ impl Scout {
         }
         let dir = self.plan.dirs[self.pass];
         // The scroll registers read AFTER a frame are the ones that draw the
-        // NEXT frame (the game's NMI writes them in vblank, after the visible
-        // lines): observed on Super Mario World, a frame stitched at the
-        // value read after it lands exactly one frame of scroll too far
-        // (W32-07 note). So a frame is stitched at the value read after the
-        // one before it; at the start of a pass that is what the restored
-        // registers hold now.
-        let drawn_with = self.next_scrolls.take().or_else(|| scrolls(&self.stepper));
+        // NEXT frame (W32-07), the rule `ScrollLag` holds for every stitcher
+        // (W32-08). At the start of a pass the restored registers are that
+        // read.
+        if !self.primed {
+            self.lag.prime(
+                self.stepper.frame_count(),
+                FrameScrolls {
+                    composite: None,
+                    layers: scrolls(&self.stepper),
+                },
+            );
+            self.primed = true;
+        }
         let cam = self
             .plan
             .camera
@@ -466,9 +496,15 @@ impl Scout {
             return self.status;
         }
         let bundle = self.sink.bundle.take(self.stepper.frame_count());
-        self.next_scrolls = scrolls(&self.stepper);
+        let drawn_with = self.lag.drawn_with(
+            self.stepper.frame_count(),
+            FrameScrolls {
+                composite: None,
+                layers: scrolls(&self.stepper),
+            },
+        );
         self.acc
-            .observe_frame(&bundle, self.scene, drawn_with.as_ref());
+            .observe_frame(&bundle, self.scene, drawn_with.layers.as_ref());
         self.since_merge += 1;
         let extent = self.extent();
         if let Some(why) = self.rule.observe(&self.plan, after, extent) {
@@ -489,22 +525,19 @@ pub struct ScoutTelemetry {
     /// Scouts that ended almost at once (they began mid-transition) and were
     /// retried.
     pub aborted: std::sync::atomic::AtomicU64,
-    /// Scout frames run, over all scouts.
+    /// Scout frames run (on the worker), over all scouts.
     pub frames: std::sync::atomic::AtomicU64,
     /// Cells merged into the live canvases.
     pub cells: std::sync::atomic::AtomicU64,
-    /// Wall time spent in scout slices, microseconds.
+    /// Wall time the workers spent running, microseconds.
     pub wall_us: std::sync::atomic::AtomicU64,
-    /// Slices whose first frame ran although it did not fit the budget (the
-    /// loop was behind, or not paced): the starvation guard.
-    pub forced: std::sync::atomic::AtomicU64,
-    /// Microseconds by which budgeted (non-forced) slices overran their
-    /// budget, summed. The budget exists to keep this near zero.
-    pub over_us: std::sync::atomic::AtomicU64,
-    /// The longest single slice, microseconds.
-    pub max_slice_us: std::sync::atomic::AtomicU64,
-    /// Live frames on which a slice ran.
+    /// Deltas merged on the core thread.
     pub slices: std::sync::atomic::AtomicU64,
+    /// Time the CORE thread spent on scout work (merging deltas), summed,
+    /// microseconds: the whole of the scout's cost to the live loop.
+    pub core_us: std::sync::atomic::AtomicU64,
+    /// The longest single core-thread merge, microseconds.
+    pub max_slice_us: std::sync::atomic::AtomicU64,
     /// How the passes of the most recent finished scout ended.
     pub last_ends: std::sync::Mutex<Vec<ScoutEnd>>,
 }
@@ -526,20 +559,8 @@ impl ScoutTelemetry {
 pub struct ScoutSetup {
     pub plan: ScoutPlan,
     pub telemetry: std::sync::Arc<ScoutTelemetry>,
-    /// Run [`MAX_FRAMES_PER_TICK`] scout frames per live frame, whatever the
-    /// pacer's spare time says (tests that want the whole scout in a few
-    /// live frames). Never set by the app.
-    pub turbo: bool,
 }
 
-/// Most scout frames one live frame carries, whatever the budget says.
-pub const MAX_FRAMES_PER_TICK: u32 = 16;
-/// A starved scout gets one frame this often (see `ScoutDriver::run_slice`).
-const STARVE_TICKS: u32 = 3;
-/// The slice budget when the loop is not paced (fast-forward, tests).
-pub const UNPACED_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
-/// Idle time left over for the pacer's own sleep and jitter.
-pub const PACED_MARGIN: std::time::Duration = std::time::Duration::from_millis(3);
 /// Camera words are compared with the live layer scroll to this tolerance
 /// before a scout starts (the game may still be loading).
 const CAMERA_TOLERANCE_PX: i64 = 8;
@@ -553,12 +574,146 @@ const READY_FRAMES: u32 = 30;
 /// A scout that ends having run fewer frames than this started in the middle
 /// of a transition: it is retried, not counted as the scene's scout.
 const MIN_USEFUL_FRAMES: u64 = 60;
-/// Scout frames between merges into the live canvases (each merge scans
-/// the scout canvases once).
-const MERGE_EVERY: u32 = 60;
+/// Scout frames between deltas sent to the core thread.
+const DELTA_EVERY: u32 = 60;
+/// Messages the worker may have in flight; it waits when the core thread has
+/// not merged them yet (a scout has no real-time need).
+const CHANNEL_DEPTH: usize = 4;
+/// Most messages the core thread takes from the worker per live frame.
+const MSGS_PER_TICK: usize = 2;
 
-/// Decides WHEN to scout and how much to run per live frame; owns the
-/// running [`Scout`]. Driven once per live frame from the core thread.
+/// Reads the per-layer scroll the stitcher needs off a scout's machine (the
+/// same function the live path uses, so the two agree on layers). A plain
+/// `fn` so it can go to the worker thread.
+pub type ScrollReader = fn(&EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]>;
+
+/// What the worker sends the core thread.
+enum ScoutMsg {
+    /// Cells stitched since the last delta (see `LayerCanvasAccumulator::take_delta`).
+    Delta {
+        scene: u64,
+        canvases: Box<[Canvas; LAYERS]>,
+    },
+    /// Every pass is over.
+    Done { ends: Vec<ScoutEnd>, frames: u64 },
+    /// The machine could not be opened or restored.
+    Failed,
+}
+
+/// All the worker needs, owned (the scout machine is built ON the worker
+/// from the ROM bytes and the snapshot).
+struct ScoutJob {
+    rom: Vec<u8>,
+    snapshot: MachineSnapshot,
+    plan: ScoutPlan,
+    seed: LayerCanvasAccumulator,
+    scene: SceneId,
+    size: (u16, u16),
+    reader: ScrollReader,
+    telemetry: std::sync::Arc<ScoutTelemetry>,
+}
+
+/// A running worker. Dropping it cancels the worker (it notices within a
+/// frame, and a worker blocked on a full channel within a few ms) and lets
+/// it go: nothing it still holds is shared with anything.
+struct ScoutRun {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<ScoutMsg>,
+}
+
+impl Drop for ScoutRun {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Send, waiting while the channel is full; `false` = cancelled or the core
+/// thread is gone.
+fn send_or_cancel(
+    tx: &std::sync::mpsc::SyncSender<ScoutMsg>,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut msg: ScoutMsg,
+) -> bool {
+    use std::sync::mpsc::TrySendError;
+    // Bounded: every iteration either returns or sleeps until cancelled.
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        match tx.try_send(msg) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(m)) => {
+                msg = m;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
+        }
+    }
+}
+
+/// The worker body: open, restore, run the passes, ship deltas.
+fn run_worker(
+    job: ScoutJob,
+    tx: &std::sync::mpsc::SyncSender<ScoutMsg>,
+    cancel: &std::sync::atomic::AtomicBool,
+) {
+    let t0 = std::time::Instant::now();
+    let ScoutJob {
+        rom,
+        snapshot,
+        plan,
+        seed,
+        scene,
+        size,
+        reader,
+        telemetry,
+    } = job;
+    // A pass ends by its frame budget at the latest, so this cap is only a
+    // backstop for law 8.
+    let cap = (plan.frame_budget as usize + 1) * plan.dirs.len().max(1) + 1;
+    let Ok(mut scout) = Scout::start(&rom, snapshot, plan, &seed, scene, size) else {
+        let _ = send_or_cancel(tx, cancel, ScoutMsg::Failed);
+        return;
+    };
+    let mut counted = 0u64;
+    for _ in 0..cap {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let status = scout.step(&reader);
+        let finished = matches!(status, ScoutStatus::Finished(_));
+        if finished || scout.frames_since_merge() >= DELTA_EVERY {
+            let run = scout.frames_run();
+            ScoutTelemetry::add(&telemetry.frames, run - counted);
+            counted = run;
+            if let Some(canvases) = scout.take_delta() {
+                let msg = ScoutMsg::Delta {
+                    scene: scene.0,
+                    canvases: Box::new(canvases),
+                };
+                if !send_or_cancel(tx, cancel, msg) {
+                    return;
+                }
+            }
+        }
+        if finished {
+            ScoutTelemetry::add(&telemetry.wall_us, t0.elapsed().as_micros() as u64);
+            let done = ScoutMsg::Done {
+                ends: scout.ends.clone(),
+                frames: scout.frames_run(),
+            };
+            let _ = send_or_cancel(tx, cancel, done);
+            return;
+        }
+        // Lower priority: a scout has no real-time need, so give the core
+        // thread's core back after every frame.
+        std::thread::yield_now();
+    }
+}
+
+/// Decides WHEN to scout, hands the work to a worker thread and merges what
+/// it sends back. Driven once per live frame from the core thread.
 #[derive(Default)]
 pub struct ScoutDriver {
     setup: Option<ScoutSetup>,
@@ -567,13 +722,9 @@ pub struct ScoutDriver {
     attempts: u32,
     /// This scene's scout has finished (or been given up): never again.
     done: bool,
-    scout: Option<Scout>,
+    run: Option<ScoutRun>,
     /// Live frames the start conditions have held, running.
     ready: u32,
-    /// Smoothed cost of one scout frame, microseconds.
-    frame_us: u64,
-    /// Consecutive ticks that ran no scout frame.
-    starved: u32,
 }
 
 /// The live machine and its surroundings, for one [`ScoutDriver::tick`].
@@ -584,16 +735,16 @@ pub struct LiveView<'a> {
     pub scene: SceneId,
     /// The live frame's `(width, height)`.
     pub size: (u16, u16),
-    pub scrolls: ScrollFn<'a>,
+    pub scrolls: ScrollReader,
 }
 
 impl ScoutDriver {
     /// Arm (or, with `None`, disarm) scouting. Forgets the scene, so the
-    /// current one is scouted afresh.
+    /// current one is scouted afresh; a running worker is cancelled.
     pub fn set(&mut self, setup: Option<ScoutSetup>) {
         self.setup = setup;
         self.scene = None;
-        self.scout = None;
+        self.run = None;
         self.done = false;
         self.ready = 0;
     }
@@ -601,19 +752,18 @@ impl ScoutDriver {
     /// Whether a scout is running now.
     #[must_use]
     pub fn running(&self) -> bool {
-        self.scout.is_some()
+        self.run.is_some()
     }
 
-    /// One live frame has just run. `spare` is the time the loop can lend
-    /// (`None` when it is not paced).
-    pub fn tick(&mut self, live: LiveView<'_>, spare: Option<std::time::Duration>) {
+    /// One live frame has just run.
+    pub fn tick(&mut self, live: LiveView<'_>) {
         let Some(setup) = self.setup.clone() else {
             return;
         };
         if self.scene != Some(live.scene.0) {
             // A new scene: whatever ran belongs to the old one.
             self.scene = Some(live.scene.0);
-            self.scout = None;
+            self.run = None;
             self.done = false;
             self.attempts = 0;
             self.ready = 0;
@@ -622,7 +772,7 @@ impl ScoutDriver {
         if self.done {
             return;
         }
-        if self.scout.is_none() {
+        if self.run.is_none() {
             if self.settle_left > 0 {
                 self.settle_left -= 1;
                 return;
@@ -631,25 +781,21 @@ impl ScoutDriver {
                 return;
             }
         }
-        // Paced: only the time the loop would sleep anyway (less a margin).
-        // Not paced (fast-forward, tests): a small fixed slice.
-        let budget = if setup.turbo {
-            std::time::Duration::from_secs(1)
-        } else {
-            spare.map_or(UNPACED_SLICE, |s| s.saturating_sub(PACED_MARGIN))
+        self.pump(&setup, live.canvases, live.scene);
+    }
+
+    /// Merge what a running worker has sent without a live frame (the game
+    /// is paused: the worker goes on, its deltas should not pile up). Never
+    /// starts a scout.
+    pub fn poll(&mut self, canvases: &mut LayerCanvasAccumulator) {
+        let (Some(setup), Some(scene)) = (self.setup.clone(), self.scene) else {
+            return;
         };
-        self.run_slice(&setup, live, budget, spare.is_none());
+        self.pump(&setup, canvases, SceneId(scene));
     }
 
     /// Try to start the scene's scout; `false` = not now.
     fn start(&mut self, setup: &ScoutSetup, live: &LiveView<'_>) -> bool {
-        let retry = |me: &mut Self| {
-            me.attempts += 1;
-            me.settle_left = RETRY_FRAMES;
-            if me.attempts >= MAX_ATTEMPTS {
-                me.done = true;
-            }
-        };
         // Not ready (the player is dead, in a cutscene): wait, without
         // using up a retry; the live game will get there or it will not.
         if setup
@@ -666,114 +812,106 @@ impl ScoutDriver {
             return false;
         }
         if !camera_matches(&setup.plan, live.stepper, live.scrolls) {
-            retry(self);
+            self.retry();
             return false;
         }
         let Ok(snapshot) = live.stepper.snapshot() else {
-            retry(self);
+            self.retry();
             return false;
         };
-        match Scout::start(
-            live.rom,
+        let job = ScoutJob {
+            rom: live.rom.to_vec(),
             snapshot,
-            setup.plan.clone(),
-            live.canvases_ref(),
-            live.scene,
-            live.size,
-        ) {
-            Ok(scout) => {
+            plan: setup.plan.clone(),
+            seed: live.canvases.fork_axes(),
+            scene: live.scene,
+            size: live.size,
+            reader: live.scrolls,
+            telemetry: setup.telemetry.clone(),
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_DEPTH);
+        let worker_cancel = cancel.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rf-scout".into())
+            .spawn(move || run_worker(job, &tx, &worker_cancel));
+        match spawned {
+            Ok(_) => {
                 ScoutTelemetry::add(&setup.telemetry.started, 1);
-                self.scout = Some(scout);
+                self.run = Some(ScoutRun { cancel, rx });
                 true
             }
             Err(_) => {
-                retry(self);
+                self.retry();
                 false
             }
         }
     }
 
-    fn run_slice(
-        &mut self,
-        setup: &ScoutSetup,
-        live: LiveView<'_>,
-        budget: std::time::Duration,
-        unpaced: bool,
-    ) {
-        let Some(scout) = self.scout.as_mut() else {
-            return;
-        };
-        let t0 = std::time::Instant::now();
-        let mut ran = 0u32;
-        // A frame runs only if the cost of the last ones says it fits the
-        // budget, so a slice never makes a live frame late. A loop that is
-        // already behind (no spare) would starve the scout for good, so
-        // every STARVE_TICKS-th tick it gets one frame anyway; unpaced
-        // loops (nothing to be late for) always get one.
-        let forced_first = unpaced || self.starved >= STARVE_TICKS;
-        let mut forced = false;
-        // Bounded: at most MAX_FRAMES_PER_TICK iterations, each of which
-        // either runs a frame or leaves the loop.
-        while ran < MAX_FRAMES_PER_TICK && scout.status() == ScoutStatus::Running {
-            let est = std::time::Duration::from_micros(self.frame_us);
-            let fits = t0.elapsed() + est <= budget;
-            if !(fits || ran == 0 && forced_first) {
-                break;
-            }
-            forced |= !fits;
-            let f0 = std::time::Instant::now();
-            scout.step(live.scrolls);
-            let us = f0.elapsed().as_micros() as u64;
-            self.frame_us = (self.frame_us * 3 + us) / 4;
-            ran += 1;
-        }
-        self.starved = if ran == 0 { self.starved + 1 } else { 0 };
-        let finished = matches!(scout.status(), ScoutStatus::Finished(_));
-        let mut merged = 0;
-        if finished || scout.frames_since_merge() >= MERGE_EVERY {
-            merged = scout.merge_into(live.canvases);
-        }
-        let us = t0.elapsed().as_micros() as u64;
-        let t = &setup.telemetry;
-        ScoutTelemetry::add(&t.frames, u64::from(ran));
-        ScoutTelemetry::add(&t.cells, merged as u64);
-        ScoutTelemetry::add(&t.wall_us, us);
-        ScoutTelemetry::add(&t.slices, u64::from(ran > 0));
-        ScoutTelemetry::add(&t.forced, u64::from(forced));
-        if ran > 0 && !forced {
-            ScoutTelemetry::add(&t.over_us, us.saturating_sub(budget.as_micros() as u64));
-        }
-        t.max_slice_us
-            .fetch_max(us, std::sync::atomic::Ordering::Relaxed);
-        if finished {
-            let useful = scout.frames_run() >= MIN_USEFUL_FRAMES;
-            if useful {
-                if let Ok(mut ends) = t.last_ends.lock() {
-                    ends.clone_from(&scout.ends);
-                }
-                ScoutTelemetry::add(&t.finished, 1);
-            } else {
-                // It began in the middle of a transition: try again later.
-                ScoutTelemetry::add(&t.aborted, 1);
-                self.attempts += 1;
-                self.settle_left = RETRY_FRAMES;
-                self.ready = 0;
-            }
-            self.scout = None;
-            self.done = useful || self.attempts >= MAX_ATTEMPTS;
+    fn retry(&mut self) {
+        self.attempts += 1;
+        self.settle_left = RETRY_FRAMES;
+        self.ready = 0;
+        if self.attempts >= MAX_ATTEMPTS {
+            self.done = true;
         }
     }
-}
 
-impl LiveView<'_> {
-    fn canvases_ref(&self) -> &LayerCanvasAccumulator {
-        self.canvases
+    /// Merge what the worker has sent (a couple of messages per live frame:
+    /// the core thread's only scout work).
+    fn pump(&mut self, setup: &ScoutSetup, live: &mut LayerCanvasAccumulator, scene: SceneId) {
+        use std::sync::mpsc::TryRecvError;
+        let t = &setup.telemetry;
+        // Bounded: MSGS_PER_TICK iterations.
+        for _ in 0..MSGS_PER_TICK {
+            let Some(run) = self.run.as_ref() else {
+                return;
+            };
+            match run.rx.try_recv() {
+                Ok(ScoutMsg::Delta { scene: s, canvases }) => {
+                    if s != scene.0 {
+                        continue;
+                    }
+                    let t0 = std::time::Instant::now();
+                    let merged = live.merge_unknown_from(s, &canvases);
+                    let us = t0.elapsed().as_micros() as u64;
+                    ScoutTelemetry::add(&t.cells, merged as u64);
+                    ScoutTelemetry::add(&t.slices, 1);
+                    ScoutTelemetry::add(&t.core_us, us);
+                    t.max_slice_us
+                        .fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(ScoutMsg::Done { ends, frames }) => {
+                    self.run = None;
+                    if frames >= MIN_USEFUL_FRAMES {
+                        if let Ok(mut last) = t.last_ends.lock() {
+                            *last = ends;
+                        }
+                        ScoutTelemetry::add(&t.finished, 1);
+                        self.done = true;
+                    } else {
+                        // It began in the middle of a transition: try again later.
+                        ScoutTelemetry::add(&t.aborted, 1);
+                        self.retry();
+                    }
+                    return;
+                }
+                Ok(ScoutMsg::Failed) | Err(TryRecvError::Disconnected) => {
+                    // Could not start, or the worker died without finishing.
+                    ScoutTelemetry::add(&t.aborted, 1);
+                    self.run = None;
+                    self.retry();
+                    return;
+                }
+                Err(TryRecvError::Empty) => return,
+            }
+        }
     }
 }
 
 /// Whether the game's camera word agrees with the first stitched layer's
 /// live scroll (the game is in a level and the recipe's address is right).
-fn camera_matches(plan: &ScoutPlan, stepper: &EmuStepper, scrolls: ScrollFn<'_>) -> bool {
+fn camera_matches(plan: &ScoutPlan, stepper: &EmuStepper, scrolls: ScrollReader) -> bool {
     let Some(&addr) = plan.camera.first() else {
         return true;
     };
@@ -1014,7 +1152,6 @@ mod tests {
                 start_when: Vec::new(),
             },
             telemetry: telemetry.clone(),
-            turbo: false,
         }));
         let mut prev = nes_scrolls(&st);
         let mut first_run_tick = None;
@@ -1027,20 +1164,34 @@ mod tests {
             let now = nes_scrolls(&st);
             let drawn_with = std::mem::replace(&mut prev, now);
             live.observe_frame(&bundle, scene, drawn_with.as_ref());
-            driver.tick(
-                LiveView {
-                    stepper: &st,
-                    rom: &rom,
-                    canvases: &mut live,
-                    scene,
-                    size: (256, 240),
-                    scrolls: &nes_scrolls,
-                },
-                None,
-            );
+            driver.tick(LiveView {
+                stepper: &st,
+                rom: &rom,
+                canvases: &mut live,
+                scene,
+                size: (256, 240),
+                scrolls: nes_scrolls,
+            });
             if first_run_tick.is_none() && driver.running() {
                 first_run_tick = Some(f);
             }
+        }
+        // The worker runs beside the live loop: keep ticking (the machine
+        // stands still, the scene is the same) until its deltas are merged.
+        // Bounded: 3000 x 10 ms.
+        for _ in 0..3_000u32 {
+            if ScoutTelemetry::get(&telemetry.finished) >= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            driver.tick(LiveView {
+                stepper: &st,
+                rom: &rom,
+                canvases: &mut live,
+                scene,
+                size: (256, 240),
+                scrolls: nes_scrolls,
+            });
         }
         let first = first_run_tick.expect("a scout started");
         assert!(
@@ -1051,6 +1202,96 @@ mod tests {
         assert_eq!(ScoutTelemetry::get(&telemetry.finished), 1);
         assert!(ScoutTelemetry::get(&telemetry.cells) > 0);
         assert!(!driver.running());
+    }
+
+    #[test]
+    fn a_scene_change_cancels_the_worker_and_widescreen_off_does_too() {
+        let Some(rom) = fixture() else { return };
+        let mut st = EmuStepper::open(&rom).expect("opens");
+        let mut sink = ScoutSink {
+            bundle: FrameBundleBuilder::new(256, 240),
+        };
+        let mut live = LayerCanvasAccumulator::new();
+        let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
+        let setup = ScoutSetup {
+            plan: ScoutPlan {
+                strategy: ScoutStrategy::PlayerMove,
+                camera: vec![NES_CAMERA_X],
+                player_x: vec![NES_PLAYER_X],
+                step_px: 1,
+                // Long enough that only cancelling can stop it soon.
+                frame_budget: 100_000,
+                stall_frames: 100_000,
+                settle_frames: 0,
+                dirs: vec![ScoutDir::Right],
+                hold: Vec::new(),
+                start_when: Vec::new(),
+            },
+            telemetry: telemetry.clone(),
+        };
+        let mut driver = ScoutDriver::default();
+        driver.set(Some(setup.clone()));
+        let mut prev = nes_scrolls(&st);
+        let tick = |driver: &mut ScoutDriver,
+                    st: &EmuStepper,
+                    live: &mut LayerCanvasAccumulator,
+                    scene: SceneId| {
+            driver.tick(LiveView {
+                stepper: st,
+                rom: &rom,
+                canvases: live,
+                scene,
+                size: (256, 240),
+                scrolls: nes_scrolls,
+            });
+        };
+        // Bounded: 200 live frames.
+        for _ in 0..200u32 {
+            st.latch_and_advance_frame(InputFrame::empty(), &mut sink);
+            let bundle = sink.bundle.take(st.frame_count());
+            let now = nes_scrolls(&st);
+            let drawn_with = std::mem::replace(&mut prev, now);
+            live.observe_frame(&bundle, SceneId(1), drawn_with.as_ref());
+            tick(&mut driver, &st, &mut live, SceneId(1));
+            if driver.running() {
+                break;
+            }
+        }
+        assert!(driver.running(), "a worker started");
+        // The worker runs on its own thread: its frames count up with no
+        // further ticks.
+        let frames = || ScoutTelemetry::get(&telemetry.frames);
+        let stopped = |what: &str| {
+            // Bounded: 5 s. The worker reports its frames in batches, so
+            // wait until two looks 150 ms apart agree.
+            for _ in 0..100u32 {
+                let a = frames();
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if frames() == a {
+                    return;
+                }
+            }
+            panic!("the worker kept running after {what}");
+        };
+        // A new scene: the old worker is dropped (cancelled).
+        tick(&mut driver, &st, &mut live, SceneId(2));
+        assert!(!driver.running(), "the new scene starts unscouted");
+        stopped("a scene change");
+        // Disarming also cancels (what turning widescreen off does).
+        driver.set(Some(setup));
+        // The scene is forgotten, so scene 2 is scouted afresh.
+        for _ in 0..200u32 {
+            st.latch_and_advance_frame(InputFrame::empty(), &mut sink);
+            let _ = sink.bundle.take(st.frame_count());
+            tick(&mut driver, &st, &mut live, SceneId(2));
+            if driver.running() {
+                break;
+            }
+        }
+        assert!(driver.running(), "a second worker started");
+        driver.set(None);
+        assert!(!driver.running());
+        stopped("being disarmed");
     }
 
     #[test]
@@ -1099,7 +1340,6 @@ mod tests {
                 start_when: vec![never],
             },
             telemetry: telemetry.clone(),
-            turbo: false,
         }));
         let mut prev = nes_scrolls(&st);
         // Bounded: 150 live frames.
@@ -1109,17 +1349,14 @@ mod tests {
             let now = nes_scrolls(&st);
             let drawn_with = std::mem::replace(&mut prev, now);
             live.observe_frame(&bundle, scene, drawn_with.as_ref());
-            driver.tick(
-                LiveView {
-                    stepper: &st,
-                    rom: &rom,
-                    canvases: &mut live,
-                    scene,
-                    size: (256, 240),
-                    scrolls: &nes_scrolls,
-                },
-                None,
-            );
+            driver.tick(LiveView {
+                stepper: &st,
+                rom: &rom,
+                canvases: &mut live,
+                scene,
+                size: (256, 240),
+                scrolls: nes_scrolls,
+            });
         }
         assert_eq!(ScoutTelemetry::get(&telemetry.started), 0);
         assert!(!driver.running());

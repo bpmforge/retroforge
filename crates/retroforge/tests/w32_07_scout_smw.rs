@@ -259,22 +259,12 @@ fn observe_camera() {
 
 // ----------------------------------------------------------- scout runs
 
-use retroforge::core_thread::{snes_layer_scrolls, WidescreenRequest};
+use retroforge::core_thread::snes_layer_scrolls;
 use retroforge::layer_canvas::{LayerCanvasAccumulator, LayerScroll};
 use retroforge::scout::{Scout, ScoutDir, ScoutPlan, ScoutStatus, ScoutStrategy};
 use rf_enhance::scene_identity::SceneId;
 
 type Scrolls = Option<[Option<LayerScroll>; 4]>;
-
-fn request() -> WidescreenRequest {
-    let mut policies = rf_enhance::widescreen::WidescreenPolicies::default();
-    policies.enabled = true;
-    WidescreenRequest {
-        width: 400,
-        policies,
-        convention: false,
-    }
-}
 
 fn plan(strategy: ScoutStrategy, player: &[u32], camera: &[u32], step: u16) -> ScoutPlan {
     ScoutPlan {
@@ -310,7 +300,7 @@ fn live_frame(
 ) {
     st.latch_and_advance_frame(pad(keys), sink);
     let bundle = sink.bundle.take(st.frame_count());
-    let now = snes_layer_scrolls(st, &request());
+    let now = snes_layer_scrolls(st);
     let drawn_with = std::mem::replace(prev, now);
     acc.observe_frame(&bundle, SceneId(1), drawn_with.as_ref());
 }
@@ -346,8 +336,7 @@ fn run_scout(rom: &[u8], st: &EmuStepper, live: &LayerCanvasAccumulator, p: Scou
     let snap = st.snapshot().expect("snapshot");
     let t0 = std::time::Instant::now();
     let mut scout = Scout::start(rom, snap, p, live, SceneId(1), (W, H)).expect("scout");
-    let req = request();
-    let scrolls = move |s: &EmuStepper| snes_layer_scrolls(s, &req);
+    let scrolls = snes_layer_scrolls;
     // Bounded by the plan's own frame budget per pass (law 8); the cap here
     // is a backstop.
     for _ in 0..10_000 {
@@ -378,7 +367,7 @@ fn scout_strategies() {
     let (mut st, mut sink) = open().unwrap();
     reach_yi1(&mut st, &mut sink);
     let mut live = LayerCanvasAccumulator::new();
-    let mut prev: Scrolls = snes_layer_scrolls(&st, &request());
+    let mut prev: Scrolls = snes_layer_scrolls(&st);
     // Frame 0 of the reference walk: the walk below replays the observed
     // run exactly (an enemy stands next to Mario at the start).
     live_frame(
@@ -601,4 +590,70 @@ fn observe_game_mode() {
         }
     }
     println!("  (end) frames {since}..{frames}");
+}
+
+/// W32-08: every layer on the main screen gets a canvas whatever the
+/// widescreen policy says (the status bar, BG3, is kept narrow by the default
+/// `auto` policy yet is stitched here, and flagged HUD from its motion).
+///
+/// **Finding: the far hills are NOT on the main screen.** On Yoshi's Island 1
+/// BG2 is never on TM (`layers on the main screen` below), the frame holds no
+/// `Background(1)` pixel at all, and 72 % of its pixels are labelled
+/// `Backdrop`: the hills reach the picture through colour math with the SUB
+/// screen, and `PpuPixel::layer` names only the main-screen winner. So no
+/// stitcher can see them in the bundle; the BG2 canvas stays empty here.
+/// Prints what each layer holds and dumps BG1 under `target/screens-probe/`.
+#[test]
+#[ignore = "needs the SMW ROM"]
+fn parallax_layers_get_canvases() {
+    let Some(path) = rom_path() else {
+        println!("SKIP: no ROM");
+        return;
+    };
+    let rom = retroforge::rom_open::load_rom_bytes(&path).expect("rom");
+    let (mut st, mut sink) = open().unwrap();
+    reach_yi1(&mut st, &mut sink);
+    let views = st.bg_layer_views().expect("snes");
+    let enabled: Vec<bool> = views.iter().map(|v| v.enabled).collect();
+    println!("layers on the main screen: {enabled:?}");
+    let mut live = LayerCanvasAccumulator::new();
+    let mut prev: Scrolls = snes_layer_scrolls(&st);
+    live_frame(
+        &mut st,
+        &mut sink,
+        &mut live,
+        &mut prev,
+        &[SnesButton::Right, SnesButton::B],
+    );
+    let r = run_scout(&rom, &st, &live, profile_plan());
+    let acc = r.scout.accumulator();
+    {
+        // What the picture itself labels: which layer each pixel's winner is.
+        let b = sink.bundle.take(st.frame_count());
+        let mut hist = std::collections::BTreeMap::new();
+        for p in &b.video {
+            *hist.entry(format!("{:?}", p.layer)).or_insert(0usize) += 1;
+        }
+        println!("pixel layers on the level's first frame: {hist:?}");
+    }
+    let set = acc.scene_canvases(1).expect("scout canvases");
+    for (n, c) in set.iter().enumerate() {
+        println!(
+            "BG{} scout canvas {}x{} px, {} known cells",
+            n + 1,
+            c.width(),
+            c.height(),
+            c.cells().iter().flatten().count()
+        );
+    }
+    dump_canvas(&set[0], "w32_08_bg1");
+    let hud = acc.hud_layers(1);
+    println!("HUD layers by the scout's own motion evidence: {hud:?}");
+    assert!(set[0].width() > 1000, "BG1 stitched across the level");
+    assert!(
+        set[2].width() > 0,
+        "BG3 has a canvas although the policy keeps it narrow"
+    );
+    assert!(!hud[0] && !hud[1], "the level layers are not HUD: {hud:?}");
+    assert!(hud[2], "the status bar is: {hud:?}");
 }
