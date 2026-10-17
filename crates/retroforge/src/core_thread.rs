@@ -440,6 +440,10 @@ pub struct FrameMsg {
     /// picture's own evidence (`LayerCanvasAccumulator::row_orders`); empty
     /// unless `layer_frames` is set.
     pub layer_order: Vec<[u8; crate::layer_canvas::LAYERS]>,
+    /// Ticket W33-01: per picture row, the registers it was drawn with
+    /// (`FrameBundle::lines`), for composing the margins through the row's
+    /// colour math; empty unless `layer_frames` is set.
+    pub line_regs: Vec<Option<rf_core_api::LineRegisters>>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
@@ -470,9 +474,12 @@ pub fn snes_layer_scrolls(
     stepper: &EmuStepper,
 ) -> Option<[Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS]> {
     let views = stepper.bg_layer_views()?;
+    // W33-01: a layer on the SUB screen is stitched too (Super Mario World's
+    // far hills are BG2 on the sub screen and never on the main one).
+    let sub = stepper.sub_screen_bg_mask().unwrap_or(0);
     Some(std::array::from_fn(|i| {
         let v = views[i];
-        v.enabled.then(|| crate::layer_canvas::LayerScroll {
+        (v.enabled || sub & (1 << i) != 0).then(|| crate::layer_canvas::LayerScroll {
             hofs: v.hofs % v.tilemap_width.max(1),
             vofs: v.vofs % v.tilemap_height.max(1),
             tilemap_width: v.tilemap_width,
@@ -1199,6 +1206,18 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     /// debug view of the indexed screens and does not blend).
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
         self.frame.sub_scanline(y, pixels, fixed_color);
+        // Ticket W33-01: the bundle keeps it only while widescreen is on.
+        self.bundle.sub_scanline(y, pixels, fixed_color);
+    }
+
+    /// Ticket W33-01: the per-line registers go to the bundle alone, and
+    /// only when it was asked to capture them (widescreen on).
+    fn wants_line_registers(&self) -> bool {
+        self.bundle.wants_line_registers()
+    }
+
+    fn line_registers(&mut self, y: u16, regs: &rf_core_api::LineRegisters) {
+        self.bundle.line_registers(y, regs);
     }
 
     /// Ticket W7-20: the SNES line palette, to both RGB sinks.
@@ -1571,6 +1590,9 @@ fn core_thread_main(
                         );
                     }
                     widescreen = request;
+                    // Ticket W33-01: the bundle keeps the sub-screen and the
+                    // per-line registers only while widescreen is on.
+                    bundle_builder.set_capture_wide(widescreen.is_some());
                     if widescreen.is_none() {
                         scout_driver.set(None);
                         stepper.set_widescreen_off();
@@ -1994,7 +2016,11 @@ fn core_thread_main(
             let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], drawn_with.composite);
             // Ticket W31-07: the same frame, stitched per layer by each
             // layer's own scroll (the margins prefer these).
-            layer_canvases.observe_frame(&bundle, scene, drawn_with.layers.as_ref());
+            layer_canvases.observe_frame(
+                &bundle,
+                scene,
+                crate::layer_canvas::scrolls_for(&bundle, &drawn_with, &read_now),
+            );
             let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
@@ -2066,6 +2092,11 @@ fn core_thread_main(
             // Ticket W32-08: which layer is in front, row by row.
             let layer_order = if layer_scrolls.is_some() {
                 layer_canvases.row_orders(&bundle)
+            } else {
+                Vec::new()
+            };
+            let line_regs = if layer_scrolls.is_some() {
+                bundle.lines.clone()
             } else {
                 Vec::new()
             };
@@ -2172,6 +2203,7 @@ fn core_thread_main(
                 layer_frames: layer_canvases.frames(),
                 backdrop_rows,
                 layer_order,
+                line_regs,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2497,6 +2529,7 @@ mod tests {
             layer_frames: None,
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
+            line_regs: Vec::new(),
         }
     }
 

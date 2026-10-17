@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::thread;
 
 use rf_core_api::{
-    triple_buffer, CoreEvent, CoreSink, EventMask, FrameBundle, FrameBundleBuilder, PixelLayer,
-    PpuPixel,
+    triple_buffer, ColorMathOp, CoreEvent, CoreSink, EventMask, FrameBundle, FrameBundleBuilder,
+    LineRegisters, PixelLayer, PpuPixel, SubPixel,
 };
 
 fn pixel(palette_index: u8) -> PpuPixel {
@@ -128,6 +128,90 @@ fn builder_take_clears_events_but_persists_pixels_across_calls() {
     let second = builder.take(1);
     assert_eq!(second.video[0].palette_index, 9);
     assert!(second.events.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// W33-01: the widescreen channels (sub-screen, per-line registers)
+// ---------------------------------------------------------------------
+
+fn sub_px(index: u8) -> SubPixel {
+    SubPixel {
+        palette_index: index,
+        layer: PixelLayer::Background(1),
+        op: ColorMathOp::AddHalf,
+        fixed: false,
+        main_black: false,
+    }
+}
+
+fn regs(hofs0: u16) -> LineRegisters {
+    LineRegisters {
+        hofs: [hofs0, 0, 0, 0],
+        tm: 0x11,
+        ts: 0x02,
+        ..LineRegisters::default()
+    }
+}
+
+/// Feed the same frame to a builder, with the widescreen channels either
+/// offered (always) and the capture either on or off.
+fn frame_with_channels(capture: bool) -> FrameBundle {
+    let mut b = FrameBundleBuilder::new(4, 2);
+    b.set_capture_wide(capture);
+    for y in 0..2u16 {
+        // A widened line: 4 console dots + 2 pad dots each side.
+        let wide: Vec<SubPixel> = (0..8).map(sub_px).collect();
+        if y == 1 {
+            b.sub_scanline(y, &wide, 0x1234);
+        }
+        if b.wants_line_registers() {
+            b.line_registers(y, &regs(100 + y));
+        }
+        b.video_scanline(y, &[pixel(1), pixel(2), pixel(3), pixel(4)]);
+    }
+    b.take(0)
+}
+
+#[test]
+fn the_widescreen_channels_are_empty_unless_the_builder_was_asked() {
+    let off = frame_with_channels(false);
+    assert!(off.sub.is_empty() && off.lines.is_empty());
+    assert!(!FrameBundleBuilder::new(4, 2).wants_line_registers());
+    let on = frame_with_channels(true);
+    assert_eq!((on.sub.len(), on.lines.len()), (2, 2), "one slot per line");
+    // The accuracy-exact stream is the same either way.
+    assert_eq!(on.video, off.video);
+}
+
+#[test]
+fn captured_sub_lines_are_cropped_to_the_consoles_own_dots_and_lines_are_kept() {
+    let on = frame_with_channels(true);
+    assert_eq!(on.sub[0], None, "no sub-screen was sent for line 0");
+    let sub = on.sub[1].as_ref().expect("line 1 has a sub-screen");
+    // 8 wide dots, width 4: the middle 4 are dots 2..6.
+    let idx: Vec<u8> = sub.pixels.iter().map(|p| p.palette_index).collect();
+    assert_eq!(idx, vec![2, 3, 4, 5]);
+    assert_eq!(sub.fixed_color, 0x1234);
+    assert_eq!(on.lines[0].map(|l| l.hofs[0]), Some(100));
+    assert_eq!(on.lines[1].map(|l| l.hofs[0]), Some(101));
+}
+
+#[test]
+fn a_taken_frames_sub_screen_does_not_leak_into_the_next() {
+    let mut b = FrameBundleBuilder::new(4, 2);
+    b.set_capture_wide(true);
+    b.sub_scanline(0, &[sub_px(1); 4], 0);
+    b.line_registers(0, &regs(1));
+    let first = b.take(0);
+    assert!(first.sub[0].is_some() && first.lines[0].is_some());
+    // Nothing sent for the next frame: a line whose colour math switched off
+    // must read `None`, unlike the persistent pixels.
+    let second = b.take(1);
+    assert!(second.sub.iter().all(Option::is_none));
+    assert!(second.lines.iter().all(Option::is_none));
+    // Switching the capture off drops them altogether.
+    b.set_capture_wide(false);
+    assert!(b.take(2).sub.is_empty());
 }
 
 // ---------------------------------------------------------------------

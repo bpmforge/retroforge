@@ -855,6 +855,48 @@ impl Ppu {
         (math.enable != 0 && math.prevent_mode != 3) || math.clip_mode != 0
     }
 
+    /// The register state visible row `y` was drawn with, for
+    /// [`rf_core_api::CoreSink::line_registers`] (ticket W33-01).
+    ///
+    /// Reads the same set composition and [`Self::line_palette`] do
+    /// (completed frame first, then live, then the current registers), at
+    /// hardware line `y + 1`. Metadata only: nothing here renders.
+    #[must_use]
+    pub fn line_registers(&self, y: u16) -> rf_core_api::LineRegisters {
+        let idx = usize::from(y + 1);
+        let state = if self.line_uses_completed(idx) {
+            self.completed_line_state[idx]
+        } else {
+            self.line_state.get(idx).copied().flatten()
+        };
+        let (palette, brightness) = self.line_palette(y);
+        let (hofs, vofs, tm, ts, math) = state.map_or(
+            (
+                std::array::from_fn(|i| self.bgs[i].hofs),
+                std::array::from_fn(|i| self.bgs[i].vofs),
+                self.tm_bits(),
+                self.ts,
+                self.color_math,
+            ),
+            |s| (s.hofs, s.vofs, s.tm, s.ts, s.color_math),
+        );
+        rf_core_api::LineRegisters {
+            hofs,
+            vofs,
+            tm,
+            ts,
+            math_enable: math.enable,
+            subtract: math.subtract,
+            half: math.half,
+            use_subscreen: math.use_subscreen,
+            prevent_mode: math.prevent_mode,
+            clip_mode: math.clip_mode,
+            fixed_color: math.fixed_bgr555(),
+            backdrop_color: palette[0],
+            brightness,
+        }
+    }
+
     /// Whether visible row `y` composes as a true/pseudo-hires line (its
     /// latched BG mode; SETINI's pseudo-hires bit as currently set). Ticket
     /// W30-03 follow-up: a widescreen line and a hires line can both be 512

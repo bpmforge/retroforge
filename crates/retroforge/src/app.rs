@@ -1495,6 +1495,14 @@ pub struct RetroForgeApp {
     editor_status: Option<String>,
 }
 
+/// The per-row facts a widened frame's margins are composed from:
+/// backdrop colours (W31-07), layer order (W32-08), registers (W33-01).
+type MarginRows<'a> = (
+    &'a [Option<[u8; 3]>],
+    &'a [[u8; crate::layer_canvas::LAYERS]],
+    &'a [Option<rf_core_api::LineRegisters>],
+);
+
 impl RetroForgeApp {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -4310,8 +4318,8 @@ impl RetroForgeApp {
                                 native.0,
                                 native.1,
                                 msg.canvas_frame,
-                                msg.layer_frames,
-                                (&msg.backdrop_rows, &msg.layer_order),
+                                msg.layer_frames.as_ref(),
+                                (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
                                 &msg.line_palettes,
                             )
                         } else {
@@ -12025,15 +12033,15 @@ impl RetroForgeApp {
     ///
     /// The frame is the post-crop, native-scale picture; `palettes` are its
     /// rows' palettes, used to resolve canvas cells (which are indexed).
-    /// `(backdrops, order)` are its per-row backdrop colours and per-row
-    /// layer order (W32-08).
+    /// `(backdrops, order, line_regs)` are its per-row backdrop colours, per-row
+    /// layer order (W32-08) and per-row registers (W33-01).
     fn widen_margins(
         &mut self,
         rgba: Vec<u8>,
         size: (usize, usize),
         position: Option<crate::canvas_accum::FramePosition>,
-        layer_frames: Option<crate::layer_canvas::LayerFrames>,
-        (backdrops, order): (&[Option<[u8; 3]>], &[[u8; crate::layer_canvas::LAYERS]]),
+        layer_frames: Option<&crate::layer_canvas::LayerFrames>,
+        (backdrops, order, line_regs): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
     ) -> (Vec<u8>, (usize, usize)) {
         use rf_enhance::widescreen::{
@@ -12115,14 +12123,31 @@ impl RetroForgeApp {
                         let (dx, dy) = (wx - pos.origin.0, wy - top);
                         let row = usize::try_from(dy).unwrap_or(0);
                         let palette = palettes.get(row).and_then(Option::as_ref);
+                        // Ticket W33-01: with the row's registers, compose
+                        // the margin as the picture is (sub-screen layers
+                        // behind the main ones, through colour math).
+                        if let (Some(regs), Some(pal)) =
+                            (line_regs.get(row).and_then(Option::as_ref), palette)
+                        {
+                            return Some(crate::layer_canvas::margin_color(
+                                layers,
+                                frames,
+                                row,
+                                dx,
+                                order.get(row),
+                                regs,
+                                pal,
+                            ));
+                        }
                         // Ticket W32-08: the layer order of THIS row, from
                         // the picture's own evidence.
-                        let Some(cell) = crate::layer_canvas::front_layer_pixel(
+                        let Some(cell) = crate::layer_canvas::front_layer_pixel_in(
                             layers,
-                            &frames.origins,
+                            |n| frames.origin_at(n, row),
                             dx,
                             dy,
                             order.get(row),
+                            0x0F,
                         ) else {
                             // Nothing known: the row's own backdrop colour.
                             return Some(
@@ -13106,6 +13131,7 @@ impl RetroForgeApp {
             layer_frames: None,
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
+            line_regs: Vec::new(),
         }
     }
 

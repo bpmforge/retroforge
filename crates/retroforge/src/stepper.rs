@@ -172,6 +172,16 @@ impl CoreSink for CountingSink<'_> {
         self.inner.sub_scanline(y, pixels, fixed_color);
     }
 
+    /// Ticket W33-01: forwarded like the sub-screen, or the widescreen
+    /// stitcher's per-line registers vanish at this seam.
+    fn wants_line_registers(&self) -> bool {
+        self.inner.wants_line_registers()
+    }
+
+    fn line_registers(&mut self, y: u16, regs: &rf_core_api::LineRegisters) {
+        self.inner.line_registers(y, regs);
+    }
+
     fn audio(&mut self, samples: &[i16]) {
         self.inner.audio(samples);
     }
@@ -353,6 +363,16 @@ pub struct MachineSnapshot {
     container: rf_state::Container,
     frames: u64,
     last_scanline: Option<u16>,
+    /// Ticket W33-01: the SNES `$212D` TS byte (which layers are on the sub
+    /// screen). **The `PPU_` region of a SNES state does not save it** (see
+    /// `rf_snes::ppu::Ppu::save`), so a machine restored from the container
+    /// alone keeps whatever TS it had: a fresh scout machine shows NO
+    /// sub-screen layer until the game rewrites the register, which Super
+    /// Mario World does not do every frame. Carried here, outside the
+    /// container (so [`Self::state_hash`] and the on-disk format are
+    /// unchanged), and written back by [`EmuStepper::restore`]; `None` on
+    /// the NES. Not a fix for the format: see the W33-01 report.
+    ppu_ts: Option<u8>,
 }
 
 impl MachineSnapshot {
@@ -1326,10 +1346,15 @@ impl EmuStepper {
                 crate::snes_save_state::save_state(core.system(), self.rom_sha256, 0)?
             }
         };
+        let ppu_ts = match &self.machine {
+            Machine::Nes(_) => None,
+            Machine::Snes(core) => Some(core.system().bus.ppu.ts),
+        };
         Ok(MachineSnapshot {
             container,
             frames: self.frames,
             last_scanline: self.last_scanline,
+            ppu_ts,
         })
     }
 
@@ -1356,6 +1381,9 @@ impl EmuStepper {
             }
             Machine::Snes(core) => {
                 crate::snes_save_state::load_state(core.system_mut(), rom, &snap.container)?;
+                if let Some(ts) = snap.ppu_ts {
+                    core.system_mut().bus.ppu.ts = ts;
+                }
             }
         }
         self.frames = snap.frames;
@@ -1464,6 +1492,16 @@ impl EmuStepper {
             vofs: g[i].vofs,
             enabled: g[i].enabled,
         }))
+    }
+
+    /// Ticket W33-01: the backgrounds on the SNES SUB screen (`$212D` bits
+    /// 0-3, BG1 = bit 0). `None` on NES. Read-only.
+    #[must_use]
+    pub fn sub_screen_bg_mask(&self) -> Option<u8> {
+        let Machine::Snes(core) = &self.machine else {
+            return None;
+        };
+        Some(core.system().bus.ppu.ts & 0x0F)
     }
 
     pub fn set_sprite_overlay_enabled(&mut self, enabled: bool) {
@@ -1956,6 +1994,41 @@ mod tests {
         let pads = &c.system_mut().bus.joypads;
         assert_eq!(pads.ports[0], y, "the word reached the port");
         assert_eq!(pads.latched[0], y, "auto-joypad latched it for $4218");
+    }
+
+    /// Ticket W33-01: a snapshot carries the sub-screen designation the SNES
+    /// state container leaves out, so a restored machine (a scout, the
+    /// run-ahead shadow) draws the same sub screen.
+    #[test]
+    fn a_snapshot_restores_the_sub_screen_designation() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc");
+        let raw = std::fs::read(&path).expect("SNES fixture");
+        let mut st = EmuStepper::from_snes_bytes(&raw).expect("opens");
+        let ts_of = |s: &mut EmuStepper| {
+            let Machine::Snes(c) = &mut s.machine else {
+                panic!("an SNES machine");
+            };
+            c.system_mut().bus.ppu.ts
+        };
+        let set_ts = |s: &mut EmuStepper, v: u8| {
+            let Machine::Snes(c) = &mut s.machine else {
+                panic!("an SNES machine");
+            };
+            c.system_mut().bus.ppu.ts = v;
+        };
+        set_ts(&mut st, 0x12);
+        let snap = st.snapshot().expect("snapshot");
+        let hash = snap.state_hash();
+        let mut other = EmuStepper::from_snes_bytes(&raw).expect("opens");
+        set_ts(&mut other, 0x00);
+        other.restore(&snap).expect("restore");
+        assert_eq!(ts_of(&mut other), 0x12, "TS came across");
+        assert_eq!(
+            other.snapshot().unwrap().state_hash(),
+            hash,
+            "and the container hash is unchanged by carrying it"
+        );
     }
 
     #[test]

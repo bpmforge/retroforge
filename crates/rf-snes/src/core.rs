@@ -430,6 +430,9 @@ impl SnesCore {
         let visible = self.system.bus.ppu.setini.visible_lines();
         let (width, mask) = self.widescreen;
         self.system.bus.ppu.wide_convention = self.wide_convention;
+        // Ticket W33-01: asked once per frame; a sink that did not ask (every
+        // sink in Accuracy Mode) costs nothing here.
+        let want_lines = sink.wants_line_registers();
         for y in 0..visible {
             let line = if width > crate::ppu::WIDTH {
                 self.system.bus.ppu.render_scanline_masked(y, width, mask)
@@ -443,6 +446,9 @@ impl SnesCore {
             // this line's indices against the CGRAM the beam saw.
             let (palette, brightness) = self.system.bus.ppu.line_palette(y);
             sink.palette_scanline(y, &palette, brightness);
+            if want_lines {
+                sink.line_registers(y, &self.system.bus.ppu.line_registers(y));
+            }
             // Ticket W7-21: the sub-screen, before the line it blends
             // into, on lines whose colour math can act. A true-hires line
             // already carries its sub-screen as half-dots of `line`, and

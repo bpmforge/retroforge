@@ -128,3 +128,54 @@ fn peek_reads_memory_without_touching_registers() {
         "a register address must report the quiescent 0, not be read for real"
     );
 }
+
+/// Ticket W33-01: the per-line register channel is pay-for-use. A sink that
+/// did not ask (every sink in Accuracy Mode) gets no call at all; one that
+/// asked gets exactly one per visible line, before that line's pixels.
+#[test]
+fn line_registers_reach_only_a_sink_that_asked() {
+    #[derive(Default)]
+    struct Lines {
+        want: bool,
+        regs: Vec<u16>,
+        order_ok: bool,
+        last_regs_line: Option<u16>,
+        rows: usize,
+    }
+    impl CoreSink for Lines {
+        fn wants_line_registers(&self) -> bool {
+            self.want
+        }
+        fn line_registers(&mut self, y: u16, _regs: &rf_core_api::LineRegisters) {
+            self.regs.push(y);
+            self.last_regs_line = Some(y);
+        }
+        fn video_scanline(&mut self, y: u16, _pixels: &[PpuPixel]) {
+            // The registers of line `y` came first.
+            self.order_ok = !self.want || self.last_regs_line == Some(y);
+            self.rows += 1;
+        }
+        fn audio(&mut self, _samples: &[i16]) {}
+        fn event(&mut self, _event: CoreEvent) {}
+    }
+    let Some(rom) = fixture() else {
+        panic!("SNES fixture missing");
+    };
+    for want in [false, true] {
+        let mut core = SnesCore::load(&rom).expect("valid image");
+        let mut sink = Lines {
+            want,
+            ..Lines::default()
+        };
+        for _ in 0..3 {
+            core.run_frame(&InputFrame::empty(), &mut sink);
+        }
+        if want {
+            assert_eq!(sink.regs.len(), sink.rows, "one per visible line");
+            assert!(sink.order_ok, "registers precede their line's pixels");
+        } else {
+            assert!(sink.regs.is_empty(), "nobody asked, nothing sent");
+            assert!(sink.rows > 0);
+        }
+    }
+}
