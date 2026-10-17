@@ -133,3 +133,56 @@ source = "observed: RetroForge re-find pass (W30, 2026-10-15)"
 
 [overclock]
 tick_counter = 0x7E0014
+
+# W32-07: the level scout. Every address below was found or confirmed by
+# observation in Yoshi's Island 1; the evidence is in
+# docs/research/W32-07-scout-smw.md. Writing the camera directly does not
+# work (the game snaps it back), so the scout moves the player's X word and
+# lets the game's own camera follow and stream the level.
+[scout]
+strategy = "player_move"
+step_px = 8
+frame_budget = 1500
+stall_frames = 60
+settle_frames = 0
+dirs = ["right", "left"]
+
+[[scout.addr]]
+role = "camera_x"
+addr = 0x7E001A
+notes = "BG1 X scroll, 16-bit. BG1HOFS read after frame f equals this word read after frame f-1 on 592 of 592 walking frames; mirrored at 0x7E1462."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "player_x"
+addr = 0x7E0094
+notes = "Player X in the level, 16-bit. Poking it moves Mario and the camera follows; 0x7E00D1 holds the same value but is recopied from this one each frame (poking it alone does nothing)."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "hold"
+addr = 0x7E0096
+value = 150
+notes = "Player Y, 16-bit low byte: 352 standing, 284..312 mid-jump, 821 falling. Held above the top of the screen (150) so no enemy or pit reaches the scout's Mario."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "hold"
+addr = 0x7E0097
+value = 0
+notes = "High byte of the player Y word."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x7E0100
+value = 0x14
+notes = "Game mode. Stepped 0x00..0x13 through boot, menus, the map and the level load, held 0x14 for the whole of each level played (Yoshi's Island 1: 211 frames until Mario was hit, then 0x0b/0x0c/0x0d back to the map), and 0x0e on the map. The scout starts only while it is 0x14."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x7E0071
+value = 0
+notes = "Player animation state: 0 while Mario walks, jumps and stands; 9 once he is hit by an enemy (the death animation, ending in the level restarting ~200 frames later). The scout starts only while it is 0, otherwise it gets as far as that restart and no further."
+source = "observed: W32-07 note"

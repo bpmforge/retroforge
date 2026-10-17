@@ -653,6 +653,32 @@ impl EmuStepper {
         self.machine.bus_write(addr, value);
     }
 
+    /// Ticket W32-07: out-of-band write into the console's work RAM at a full
+    /// bus address -- the write-side counterpart to [`Self::peek_bus`]. The
+    /// level scout uses it on its PRIVATE machine only (never the live one).
+    /// SNES: `$7E0000..$7FFFFF`, or the low-RAM mirror `$0000..$1FFF`. NES:
+    /// `$0000..$FFFF` through the CPU bus ([`Self::poke_bus`]). Anything else
+    /// is ignored (a write to ROM or a register is not what a scout means).
+    pub fn poke_ram(&mut self, addr: u32, value: u8) {
+        match &mut self.machine {
+            Machine::Snes(core) => {
+                let off = match addr {
+                    0x7E_0000..=0x7F_FFFF => (addr - 0x7E_0000) as usize,
+                    0..=0x1FFF => addr as usize,
+                    _ => return,
+                };
+                if let Some(b) = core.system_mut().bus.wram.get_mut(off) {
+                    *b = value;
+                }
+            }
+            Machine::Nes(_) => {
+                if let Ok(a) = u16::try_from(addr) {
+                    self.machine.bus_write(a, value);
+                }
+            }
+        }
+    }
+
     /// The full 256-byte OAM as last written — forwards `NesBus::oam`
     /// (ticket W3-05a: the mode-invariant test suite's fixture-sanity
     /// check reads this to prove its sprite table actually landed).

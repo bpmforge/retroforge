@@ -74,6 +74,9 @@ pub struct Profile {
     pub mods: Option<Mods>,
     /// `[widescreen]` — per-BG-layer widescreen policies (ticket W8-05).
     pub widescreen: Option<Widescreen>,
+    /// `[scout]` — how the level scout drives a second copy of the machine
+    /// to draw the level ahead of the camera (ticket W32-07).
+    pub scout: Option<Scout>,
     /// `[text]` — translation and accessibility overlay declarations
     /// (ticket W8-12).
     pub text: Option<Text>,
@@ -603,6 +606,49 @@ impl Heights {
     }
 }
 
+/// `[scout]` (ticket W32-07): the recipe for the level scout, a second copy
+/// of the machine (restored from a snapshot) that is driven ahead of the
+/// camera so the widescreen margins show real level. Every address row needs
+/// a `source`, like `[[memory_map]]`; addresses are found BY OBSERVATION.
+///
+/// - `strategy` — `"player_move"` (move the player's X words; the game's own
+///   follow logic moves the camera and streams the level) or
+///   `"camera_write"` (write the camera X words directly; most games snap it
+///   back).
+/// - `step_px` — pixels per scout frame, `1..=64`.
+/// - `frame_budget` — most frames one pass may run, `1..=20000`.
+/// - `stall_frames` — a pass ends after this many frames without new level,
+///   `1..=3000` (default 120).
+/// - `settle_frames` — live frames to wait after a scene is entered
+///   (default 90).
+/// - `dirs` — passes, `"right"` and/or `"left"` (default both).
+/// - `addr` — the rows: `role = "camera_x"` / `"player_x"` (16-bit
+///   little-endian words), `role = "hold"` (a byte with a `value`, written
+///   every scout frame) and `role = "start_when"` (a byte with a `value`
+///   the LIVE game must hold before a scout starts, e.g. "player alive").
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Scout {
+    pub strategy: String,
+    pub step_px: u16,
+    pub frame_budget: u32,
+    pub stall_frames: Option<u32>,
+    pub settle_frames: Option<u32>,
+    pub dirs: Option<Vec<String>>,
+    #[serde(default)]
+    pub addr: Vec<ScoutAddr>,
+}
+
+/// One `[[scout.addr]]` row.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ScoutAddr {
+    pub role: String,
+    pub addr: u32,
+    /// Required for `role = "hold"` and `"start_when"`.
+    pub value: Option<u8>,
+    pub notes: Option<String>,
+    pub source: Option<String>,
+}
+
 /// `[loading]` (§2).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Loading {
@@ -912,6 +958,7 @@ mod tests {
             plugins: None,
             mods: None,
             widescreen: None,
+            scout: None,
             text: None,
         }
     }

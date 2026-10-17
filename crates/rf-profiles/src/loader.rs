@@ -136,6 +136,10 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
         }
     }
 
+    if let Some(scout) = profile.scout.as_ref() {
+        validate_scout(scout, profile.meta.console)?;
+    }
+
     // `[overclock]` (ticket W30-01): the cap is a whole-hundred percent.
     if let Some(max) = profile.overclock.as_ref().and_then(|o| o.superfx_max) {
         if !(100..=800).contains(&max) || max % 100 != 0 {
@@ -279,6 +283,76 @@ fn parse_major_minor(s: &str) -> Result<(u64, u64), ProfileError> {
         .and_then(|m| m.parse::<u64>().ok())
         .unwrap_or(0);
     Ok((major, minor))
+}
+
+/// `[scout]` (ticket W32-07): strategy, ranges, and the address rows (each
+/// cited, each inside the console's RAM, the roles the strategy needs).
+fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), ProfileError> {
+    let bad = |why: String| ProfileError::ScoutInvalid(why);
+    if !matches!(scout.strategy.as_str(), "player_move" | "camera_write") {
+        return Err(bad(format!(
+            "strategy `{}` (valid: player_move, camera_write)",
+            scout.strategy
+        )));
+    }
+    for (key, v, lo, hi) in [
+        ("step_px", u32::from(scout.step_px), 1, 64),
+        ("frame_budget", scout.frame_budget, 1, 20_000),
+        ("stall_frames", scout.stall_frames.unwrap_or(120), 1, 3_000),
+        ("settle_frames", scout.settle_frames.unwrap_or(90), 0, 3_600),
+    ] {
+        if !(lo..=hi).contains(&v) {
+            return Err(bad(format!("{key} = {v} (valid: {lo}..={hi})")));
+        }
+    }
+    if let Some(dirs) = scout.dirs.as_ref() {
+        if dirs.is_empty() || dirs.iter().any(|d| !matches!(d.as_str(), "right" | "left")) {
+            return Err(bad(
+                "dirs must be a non-empty list of \"right\" / \"left\"".into()
+            ));
+        }
+    }
+    let (lo, hi): (u32, u32) = match console {
+        Console::Snes => (0x7E_0000, 0x7F_FFFF),
+        Console::Nes => (0, 0xFFFF),
+    };
+    for (i, row) in scout.addr.iter().enumerate() {
+        if !matches!(
+            row.role.as_str(),
+            "camera_x" | "player_x" | "hold" | "start_when"
+        ) {
+            return Err(bad(format!(
+                "addr row {i}: role `{}` (valid: camera_x, player_x, hold, start_when)",
+                row.role
+            )));
+        }
+        if !(lo..=hi).contains(&row.addr) {
+            return Err(bad(format!(
+                "addr row {i}: address 0x{:X} outside 0x{lo:X}..=0x{hi:X}",
+                row.addr
+            )));
+        }
+        if matches!(row.role.as_str(), "hold" | "start_when") && row.value.is_none() {
+            return Err(bad(format!(
+                "addr row {i}: a {} row needs a `value`",
+                row.role
+            )));
+        }
+        if row.source.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(bad(format!(
+                "addr row {i} (0x{:X}) has no `source` (FR-PROF-003)",
+                row.addr
+            )));
+        }
+    }
+    let has = |role: &str| scout.addr.iter().any(|r| r.role == role);
+    if !has("camera_x") {
+        return Err(bad("needs a camera_x row (the stop rules read it)".into()));
+    }
+    if scout.strategy == "player_move" && !has("player_x") {
+        return Err(bad("player_move needs a player_x row".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -529,6 +603,82 @@ mod tests {
         );
         let err = load_str(&text).expect_err("hashless identity entry must be rejected");
         assert!(matches!(err, ProfileError::IdentityMissingHash(0)));
+    }
+
+    // ---------------------------------------------------------------
+    // `[scout]` (ticket W32-07).
+    // ---------------------------------------------------------------
+
+    const SCOUT: &str = r#"
+        [scout]
+        strategy = "player_move"
+        step_px = 8
+        frame_budget = 1500
+        dirs = ["right", "left"]
+
+        [[scout.addr]]
+        role = "camera_x"
+        addr = 0x6B
+        source = "observed: test"
+
+        [[scout.addr]]
+        role = "player_x"
+        addr = 0x6D
+        source = "observed: test"
+
+        [[scout.addr]]
+        role = "hold"
+        addr = 0x70
+        value = 3
+        source = "observed: test"
+    "#;
+
+    #[test]
+    fn a_valid_scout_table_loads_clean() {
+        let outcome = load_str(&format!("{VALID}\n{SCOUT}")).expect("valid [scout] loads");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let scout = outcome.profile.scout.expect("scout section");
+        assert_eq!(scout.step_px, 8);
+        assert_eq!(scout.addr.len(), 3);
+        assert_eq!(scout.addr[2].value, Some(3));
+    }
+
+    #[test]
+    fn a_scout_table_with_a_bad_key_or_row_is_rejected_and_says_which() {
+        let bad = |from: &str, to: &str, needle: &str| {
+            let text = format!("{VALID}\n{}", SCOUT.replacen(from, to, 1));
+            let err = load_str(&text).expect_err("must be rejected");
+            assert!(matches!(err, ProfileError::ScoutInvalid(_)), "{err}");
+            assert!(err.to_string().contains(needle), "{err}");
+        };
+        bad("\"player_move\"", "\"teleport\"", "strategy");
+        bad("step_px = 8", "step_px = 0", "step_px");
+        bad(
+            "frame_budget = 1500",
+            "frame_budget = 99999",
+            "frame_budget",
+        );
+        bad("[\"right\", \"left\"]", "[\"up\"]", "dirs");
+        bad("role = \"camera_x\"", "role = \"camera_y\"", "role");
+        bad("addr = 0x6B", "addr = 0x1_0000", "outside");
+        bad(
+            "source = \"observed: test\"\n\n        [[scout.addr]]\n        role = \"player_x\"",
+            "\n\n        [[scout.addr]]\n        role = \"player_x\"",
+            "source",
+        );
+        bad("value = 3\n", "\n", "value");
+        bad(
+            "role = \"player_x\"",
+            "role = \"hold\"\n        value = 1",
+            "player_move needs a player_x",
+        );
+    }
+
+    #[test]
+    fn a_scout_table_needs_a_camera_row() {
+        let text = SCOUT.replacen("role = \"camera_x\"", "role = \"player_x\"", 1);
+        let err = load_str(&format!("{VALID}\n{text}")).expect_err("no camera_x");
+        assert!(err.to_string().contains("camera_x"), "{err}");
     }
 
     // ---------------------------------------------------------------

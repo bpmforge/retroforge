@@ -120,6 +120,18 @@ impl FramePacer {
         self.next_due = None;
     }
 
+    /// Ticket W32-07: how long until the next frame is due, without
+    /// advancing the schedule: the time the loop could lend to background
+    /// work (the level scout) and still be on time. `None` while pacing is
+    /// off or no schedule exists yet.
+    #[must_use]
+    pub fn spare(&self, now: Instant) -> Option<Duration> {
+        if !self.enabled {
+            return None;
+        }
+        self.next_due.map(|due| due.saturating_duration_since(now))
+    }
+
     /// How long the caller should sleep before running the next frame,
     /// and advance the schedule by one frame.
     ///
