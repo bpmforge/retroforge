@@ -645,6 +645,20 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
             continue;
         };
         use std::sync::atomic::Ordering::Relaxed;
+        // The NES canvas persists across sessions (`core_thread::canvas_cache_root`
+        // = `$TMPDIR/retroforge-canvas-cache`, keyed by ROM and scene). A warm
+        // cache already holds the level an earlier scout drew, so the live
+        // canvas knows every cell, the scout merges 0 and `-on` equals `-off`
+        // (the "0 cells merged" of 2026-10-17). Give each shot a cold cache.
+        let cold = std::env::temp_dir().join(format!("rf_scout_nes_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cold);
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: the harness is built after this and nothing else in this
+        // process reads the environment concurrently at this point.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
         let mut h = new_harness();
         open_and_run(&mut h, &path);
         enter(&mut h);
@@ -691,6 +705,10 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
             telemetry.finished.load(Relaxed),
             telemetry.aborted.load(Relaxed),
             telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        );
+        assert!(
+            !finished || telemetry.cells.load(Relaxed) > 0,
+            "{tag}: the scout finished but merged 0 cells into a cold canvas"
         );
         let d = out_dir();
         save(&d.join(format!("scout-{tag}-32x9-off.png")), &off.opaque());
