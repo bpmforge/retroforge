@@ -84,6 +84,9 @@ pub struct EnhanceCtx<'a> {
     /// Ticket W11-03: why each background did or did not widen. `Some` is
     /// a refusal with its reason.
     pub widescreen_decisions: [Option<&'static str>; 4],
+    /// Ticket W32-03: "352 wide (patch)" while a widescreen patch decides
+    /// the picture width.
+    pub patch_aspect_label: Option<String>,
     /// Ticket W11-05: what the loaded HD pack's import said, what it
     /// could not satisfy, and what the last frame actually replaced.
     pub hd_summary: Option<&'a str>,
@@ -636,6 +639,11 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
         // margins — so the policy declines those layers. A user who is
         // not told why simply sees a picture narrower than they asked for
         // and concludes the feature is broken.
+        if row.id == "widescreen_decoded" {
+            if let Some(label) = &ctx.patch_aspect_label {
+                ui.label(format!("    Picture: {label}"));
+            }
+        }
         if row.id == "widescreen_decoded" && row.enabled {
             for (i, reason) in ctx.widescreen_decisions.iter().enumerate() {
                 if let Some(why) = reason {

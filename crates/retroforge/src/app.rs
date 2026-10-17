@@ -123,6 +123,32 @@ const SLOT_THUMB_HEIGHT: f32 = 126.0;
 /// deliver.
 pub const WIDESCREEN_WIDTH: usize = 400;
 
+/// Ticket W32-03: the picture width of a bsnes-hd-convention widescreen
+/// patch: `256 + 2 * extra_per_side` (sneslab "Widescreen"), clamped to
+/// what the PPU can draw.
+#[must_use]
+pub fn convention_picture_width(extra_per_side: u16) -> usize {
+    (rf_snes::ppu::WIDTH + 2 * usize::from(extra_per_side))
+        .clamp(rf_snes::ppu::WIDTH, rf_snes::ppu::MAX_WIDTH)
+}
+
+/// Ticket W32-03: the width shown on screen. The patch's own width decides
+/// the picture, NOT the aspect setting; only a deliberately wider aspect
+/// (21:9, 32:9) adds margin fill beyond the patch's game-drawn width. The
+/// default 16:9 means "follow the patch".
+#[must_use]
+pub fn convention_out_width(
+    patch_dots: Option<usize>,
+    aspect: rf_enhance::widescreen::Aspect,
+    aspect_dots: usize,
+) -> usize {
+    match patch_dots {
+        None => aspect_dots,
+        Some(patch) if aspect == rf_enhance::widescreen::Aspect::Wide16x9 => patch,
+        Some(patch) => patch.max(aspect_dots),
+    }
+}
+
 /// Ticket W30-03: the visible SNES lines the widescreen width is computed
 /// from (NTSC, no overscan).
 const WIDESCREEN_LINES: usize = 224;
@@ -1254,6 +1280,9 @@ pub struct RetroForgeApp {
     /// Ticket W30-03: decoded widescreen is on (SNES only), so the
     /// presentation fills the margins.
     widescreen_on: bool,
+    /// Ticket W32-03: `sync_patch_widescreen` has acted on a widescreen
+    /// patch being in force.
+    patch_widescreen_applied: bool,
     /// Ticket W30-03: the scene of the last widescreen frame; a change asks
     /// for a fresh canvas snapshot straight away.
     widescreen_scene: Option<u64>,
@@ -1716,6 +1745,7 @@ impl RetroForgeApp {
             level_image_tried: false,
             level_camera: None,
             widescreen_on: false,
+            patch_widescreen_applied: false,
             widescreen_scene: None,
             widescreen_source: rf_enhance::widescreen::MarginSource::Vram,
             ultrawide_canvas_scene: None,
@@ -3813,6 +3843,7 @@ impl RetroForgeApp {
         self.level_image_tried = false;
         self.level_camera = None;
         self.widescreen_on = false;
+        self.patch_widescreen_applied = false;
         self.widescreen_scene = None;
         self.widescreen_source = rf_enhance::widescreen::MarginSource::Vram;
 
@@ -11983,13 +12014,20 @@ impl RetroForgeApp {
         palettes: &[Option<rf_renderer::LinePalette>],
     ) -> (Vec<u8>, (usize, usize)) {
         use rf_enhance::widescreen::{
-            choose_margin_source, fill_margins, MarginFacts, MarginSource,
+            choose_margin_source, fill_margins_keeping, MarginFacts, MarginSource,
         };
         let (w, h) = size;
         if self.keep_core_frame {
             self.core_frame_copy = Some(rgba.clone());
         }
         let out_w = self.widescreen_out_width(h);
+        // Ticket W32-03: a patch that drew its own margins keeps them whole;
+        // otherwise only the 256 hardware dots are protected.
+        let keep_w = if self.patch_widescreen_dots().is_some() {
+            w
+        } else {
+            usize::from(rf_enhance::widescreen::NARROW_WIDTH)
+        };
         // A scene change asks for the new scene's canvas at once instead of
         // waiting out the refresh interval; until it lands `scene_fresh`
         // is false and the margins fall back to VRAM.
@@ -12033,7 +12071,7 @@ impl RetroForgeApp {
                     let i = (y * iw + x) * 4;
                     Some([img[i], img[i + 1], img[i + 2]])
                 };
-                fill_margins(&rgba, w, h, out_w, (cx, cy), &world, &keep)
+                fill_margins_keeping(&rgba, w, h, out_w, (cx, cy), &world, &keep, keep_w)
             }
             (MarginSource::StitchedCanvas, Some(pos)) => {
                 let Some(canvas) = self.ultrawide_canvas.as_ref() else {
@@ -12068,7 +12106,8 @@ impl RetroForgeApp {
                         };
                         Some(rf_renderer::resolve_index(cell.palette_index, palette))
                     };
-                    let filled = fill_margins(&rgba, w, h, out_w, pos.origin, &world, &keep);
+                    let filled =
+                        fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w);
                     return (filled, (out_w, h));
                 }
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
@@ -12077,9 +12116,9 @@ impl RetroForgeApp {
                     let palette = palettes.get(row).and_then(Option::as_ref);
                     Some(rf_renderer::resolve_index(cell.palette_index, palette))
                 };
-                fill_margins(&rgba, w, h, out_w, pos.origin, &world, &keep)
+                fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w)
             }
-            _ => fill_margins(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep),
+            _ => fill_margins_keeping(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep, keep_w),
         };
         (filled, (out_w, h))
     }
@@ -12713,6 +12752,18 @@ impl RetroForgeApp {
     #[must_use]
     pub fn has_decoded_level_for_test(&self) -> bool {
         self.level_session.is_some()
+    }
+
+    /// Ticket W32-03: tick the Patches box for `key` and persist it (the
+    /// per-game opt-in), the way the game-settings window does. Takes
+    /// effect the next time the game is opened.
+    #[doc(hidden)]
+    pub fn enable_patch_and_save_for_test(&mut self, key: &str) {
+        let list = &mut self.current_game_settings.patches_enabled;
+        if !list.iter().any(|k| k == key) {
+            list.push(key.to_owned());
+        }
+        self.save_current_game_settings();
     }
 
     /// Ticket W16-06: switch the current game's mode exactly as the mode
@@ -13725,10 +13776,16 @@ impl RetroForgeApp {
                 // Ticket W30-03: the chosen aspect, capped at what the PPU
                 // path can draw; anything wider is finished by the margin
                 // fill. 16:9 is `WIDESCREEN_WIDTH`.
-                width: self
-                    .widescreen_out_width(WIDESCREEN_LINES)
-                    .min(rf_enhance::widescreen::CORE_MAX_WIDTH),
+                //
+                // Ticket W32-03: under a widescreen patch the core draws
+                // exactly the patch's own width; anything wider is margin
+                // fill.
+                width: self.patch_widescreen_dots().unwrap_or_else(|| {
+                    self.widescreen_out_width(WIDESCREEN_LINES)
+                        .min(rf_enhance::widescreen::CORE_MAX_WIDTH)
+                }),
                 policies,
+                convention: self.patch_widescreen_dots().is_some(),
             },
         )));
     }
@@ -13737,9 +13794,58 @@ impl RetroForgeApp {
     /// at the chosen aspect. Square dots: this counts console dots, and the
     /// display stage applies the TV pixel aspect on top, as it always has.
     fn widescreen_out_width(&self, lines: usize) -> usize {
-        self.current_game_settings
-            .widescreen_aspect
-            .output_width(lines, 1.0)
+        let aspect = self.current_game_settings.widescreen_aspect;
+        convention_out_width(
+            self.patch_widescreen_dots(),
+            aspect,
+            aspect.output_width(lines, 1.0),
+        )
+    }
+
+    /// Ticket W32-03: the picture width a widescreen patch (a `.bso` with a
+    /// `W` setting, bsnes-hd convention) draws, in dots, while it is in
+    /// force: an SNES session, Enhanced or Game-Aware, with such a patch
+    /// applied. `None` otherwise -- Accuracy keeps the 4:3 picture.
+    #[must_use]
+    pub fn patch_widescreen_dots(&self) -> Option<usize> {
+        use rf_enhance::patch::bso::WidescreenConvention;
+        if self.console_label != "SNES" || !self.current_game_settings.mode.enhancement_active() {
+            return None;
+        }
+        match self.soft_patch.widescreen_convention {
+            WidescreenConvention::BsnesHd { extra_per_side } => {
+                Some(convention_picture_width(extra_per_side))
+            }
+            _ => None,
+        }
+    }
+
+    /// Ticket W32-03: the picker's note for the widescreen aspect, e.g.
+    /// "352 wide (patch)", while a widescreen patch decides the width.
+    #[must_use]
+    pub fn patch_aspect_label(&self) -> Option<String> {
+        self.patch_widescreen_dots()
+            .map(|w| format!("{w} wide (patch)"))
+    }
+
+    /// Ticket W32-03: turn widescreen on by itself while a widescreen patch
+    /// is in force (and off again when it stops, unless the player's own
+    /// Widescreen: decoded row wants it). Idempotent; called every frame.
+    fn sync_patch_widescreen(&mut self) {
+        let want = self.patch_widescreen_dots().is_some();
+        if want == self.patch_widescreen_applied || self.core.is_none() {
+            return;
+        }
+        self.patch_widescreen_applied = want;
+        if want {
+            self.set_widescreen(true);
+        } else {
+            let user_wants = self.current_game_settings.widescreen_decoded
+                && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                    .iter()
+                    .any(|r| r.id == "widescreen_decoded" && r.effective());
+            self.set_widescreen(user_wants);
+        }
     }
 
     /// Ticket W30-03: which source filled the margins of the last frame.
@@ -14998,6 +15104,7 @@ impl RetroForgeApp {
                 let facts = self.game_facts();
                 let mut view = crate::enhance_dock::EnhanceCtx {
                     widescreen_decisions: self.widescreen_decisions,
+                    patch_aspect_label: self.patch_aspect_label(),
                     hd_summary: self.hd_summary.as_deref(),
                     hd_unsatisfied: &self.hd_unsatisfied,
                     hd_report: self.hd_report,
@@ -16256,6 +16363,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
+        self.sync_patch_widescreen();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.
         self.poll_library_scan(&ctx);
@@ -16881,6 +16989,49 @@ mod hud_tests {
         let out = super::elide_front(&name);
         assert_eq!(out.chars().count(), super::PROFILE_CHIP_BUDGET);
         assert!(out.chars().all(|c| c == '\u{2026}' || c == '\u{e9}'));
+    }
+}
+
+/// Ticket W32-03: which width a widescreen patch's convention selects.
+#[cfg(test)]
+mod patch_widescreen_tests {
+    use super::{convention_out_width, convention_picture_width};
+    use rf_enhance::widescreen::Aspect;
+
+    /// sneslab "Widescreen": 256 + 2W, W = 48 / 64 (wide-snes) and
+    /// 96 / 112 (experimental); clamped to the PPU's 512.
+    #[test]
+    fn the_patch_declares_the_picture_width() {
+        assert_eq!(convention_picture_width(48), 352);
+        assert_eq!(convention_picture_width(64), 384);
+        assert_eq!(convention_picture_width(96), 448);
+        assert_eq!(convention_picture_width(112), 480);
+        assert_eq!(convention_picture_width(0), 256);
+        assert_eq!(convention_picture_width(4000), 512);
+    }
+
+    /// The patch decides, not the aspect picker: the default 16:9 (400
+    /// dots) must not stretch a 352-wide patch.
+    #[test]
+    fn the_default_aspect_follows_the_patch_width() {
+        assert_eq!(convention_out_width(Some(352), Aspect::Wide16x9, 400), 352);
+        assert_eq!(convention_out_width(Some(480), Aspect::Wide16x9, 400), 480);
+    }
+
+    /// A deliberately wider aspect fills beyond the patch's own width; a
+    /// narrower one never cuts the game-drawn picture.
+    #[test]
+    fn a_wider_aspect_adds_fill_beyond_the_patch() {
+        assert_eq!(convention_out_width(Some(352), Aspect::Wide32x9, 800), 800);
+        assert_eq!(convention_out_width(Some(352), Aspect::Wide21x9, 528), 528);
+        assert_eq!(convention_out_width(Some(480), Aspect::Wide21x9, 400), 480);
+    }
+
+    /// No patch: the aspect decides, exactly as before.
+    #[test]
+    fn without_a_patch_the_aspect_decides() {
+        assert_eq!(convention_out_width(None, Aspect::Wide16x9, 400), 400);
+        assert_eq!(convention_out_width(None, Aspect::Wide32x9, 800), 800);
     }
 }
 

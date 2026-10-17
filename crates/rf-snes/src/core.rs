@@ -97,6 +97,11 @@ pub struct SnesCore {
     /// part of the request, not a separate setting the renderer could
     /// forget to consult.
     widescreen: (usize, crate::ppu::WidenMask),
+    /// Ticket W32-03: render the widened picture under the bsnes-hd
+    /// widescreen convention (patched games that draw their own margins).
+    /// Held here, like the overclocks, because a cartridge load or a state
+    /// restore rebuilds the PPU; `emit_frame` pushes it down every frame.
+    wide_convention: bool,
     /// Ticket W30-01: the Super FX overclock, in percent of the
     /// cartridge's own clock. Held here rather than only on
     /// [`SnesSystem`] because a cartridge load or a state restore rebuilds
@@ -208,6 +213,7 @@ impl SnesCore {
             ppu_regs: Vec::new(),
             budget: FRAME_INSTRUCTION_BUDGET,
             widescreen: (crate::ppu::WIDTH, crate::ppu::WidenMask::ALL),
+            wide_convention: false,
             gsu_overclock_percent: GSU_OVERCLOCK_DEFAULT,
             sa1_overclock_percent: SA1_OVERCLOCK_DEFAULT,
             cpu_overclock_percent: CPU_OVERCLOCK_DEFAULT,
@@ -236,6 +242,16 @@ impl SnesCore {
     /// path exactly. Clamped to the PPU's `MAX_WIDTH`.
     pub fn set_widescreen(&mut self, width: usize, mask: crate::ppu::WidenMask) {
         self.widescreen = (width.clamp(crate::ppu::WIDTH, crate::ppu::MAX_WIDTH), mask);
+    }
+
+    /// Ticket W32-03: render widened lines under the bsnes-hd widescreen
+    /// convention (sneslab "Widescreen"): sprite X read signed in
+    /// `-128..=383`, window positions mapped `2v - 128`, every background
+    /// widened (the patched game drew the margins on purpose, so the
+    /// per-layer policies are ignored). Has no effect unless a width above
+    /// 256 is also requested; off is the accuracy path exactly.
+    pub fn set_wide_convention(&mut self, on: bool) {
+        self.wide_convention = on;
     }
 
     /// Ticket W30-09: choose how the S-DSP interpolates voices for the main
@@ -413,6 +429,7 @@ impl SnesCore {
     fn emit_frame(&mut self, sink: &mut dyn CoreSink) {
         let visible = self.system.bus.ppu.setini.visible_lines();
         let (width, mask) = self.widescreen;
+        self.system.bus.ppu.wide_convention = self.wide_convention;
         for y in 0..visible {
             let line = if width > crate::ppu::WIDTH {
                 self.system.bus.ppu.render_scanline_masked(y, width, mask)

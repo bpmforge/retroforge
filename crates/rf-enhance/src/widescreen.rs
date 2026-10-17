@@ -437,10 +437,43 @@ pub fn fill_margins(
     world: &dyn Fn(i64, i64) -> Option<[u8; 3]>,
     keep_native_row: &dyn Fn(usize) -> bool,
 ) -> Vec<u8> {
+    fill_margins_keeping(
+        native,
+        native_w,
+        h,
+        out_w,
+        frame_world_origin,
+        world,
+        keep_native_row,
+        usize::from(NARROW_WIDTH),
+    )
+}
+
+/// [`fill_margins`] with the width of the central strip the world source
+/// must NOT replace made explicit (ticket W32-03).
+///
+/// A normal widened frame keeps only the 256 hardware dots: the PPU drew
+/// its margins from VRAM and the world source (decoded level, stitched
+/// canvas) knows better. A bsnes-hd-convention frame was drawn wide ON
+/// PURPOSE by the patched game, so its whole `native_w` is kept and the
+/// world source only fills what lies beyond it. `world_origin` still names
+/// the world position of the left edge of the 256-dot picture.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_margins_keeping(
+    native: &[u8],
+    native_w: usize,
+    h: usize,
+    out_w: usize,
+    frame_world_origin: (i64, i64),
+    world: &dyn Fn(i64, i64) -> Option<[u8; 3]>,
+    keep_native_row: &dyn Fn(usize) -> bool,
+    keep_w: usize,
+) -> Vec<u8> {
     let mut out = vec![0u8; out_w * h * 4];
     let pad = (out_w as i64 - native_w as i64).div_euclid(2);
     let pad_256 = (out_w as i64 - i64::from(NARROW_WIDTH)).div_euclid(2);
-    let central = pad_256..pad_256 + i64::from(NARROW_WIDTH);
+    let keep_start = (out_w as i64 - keep_w as i64).div_euclid(2);
+    let central = keep_start..keep_start + keep_w as i64;
     // Bounded `for` ranges only (law 8): every pixel is visited once.
     for y in 0..h {
         let keep = keep_native_row(y);

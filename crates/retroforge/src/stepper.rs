@@ -425,6 +425,8 @@ pub struct EmuStepper {
     /// run-ahead shadow machine can be configured the same way; the core
     /// keeps its own copy private.
     widescreen_args: Option<(usize, [bool; 4], bool)>,
+    /// Ticket W32-03: the widened picture follows the bsnes-hd convention.
+    wide_convention: bool,
     /// Ticket W30-07: the last sprite-overlay request, for the same reason
     /// (the NES-only getter above reads `false` on a SNES session).
     overlay_requested: bool,
@@ -483,6 +485,7 @@ impl EmuStepper {
             hd_mode7: None,
             mode7_latched: false,
             widescreen_args: None,
+            wide_convention: false,
             overlay_requested: false,
             rom_sha256,
         })
@@ -522,6 +525,7 @@ impl EmuStepper {
             hd_mode7: None,
             mode7_latched: false,
             widescreen_args: None,
+            wide_convention: false,
             overlay_requested: false,
         })
     }
@@ -1152,6 +1156,15 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W32-03: render widened lines under the bsnes-hd widescreen
+    /// convention (a no-op on NES and while widescreen is off).
+    pub fn set_wide_convention(&mut self, on: bool) {
+        self.wide_convention = on;
+        if let Machine::Snes(core) = &mut self.machine {
+            core.set_wide_convention(on);
+        }
+    }
+
     /// Ticket W30-01: set the Super FX overclock in percent (100 = stock).
     /// SNES-only and a no-op on a cartridge without a Super FX; the NES has
     /// nothing to clock.
@@ -1345,6 +1358,7 @@ impl EmuStepper {
             Some((width, bg, obj)) => self.set_widescreen(width, bg, obj),
             None => self.set_widescreen_off(),
         }
+        self.set_wide_convention(real.wide_convention);
     }
 
     /// Ticket W30-02: has this session's SNES game drawn a visible line in
@@ -1398,6 +1412,7 @@ impl EmuStepper {
     /// Turn widescreen off, restoring the accuracy path exactly.
     pub fn set_widescreen_off(&mut self) {
         self.widescreen_args = None;
+        self.set_wide_convention(false);
         if let Machine::Snes(core) = &mut self.machine {
             core.set_widescreen(rf_snes::ppu::WIDTH, rf_snes::ppu::WidenMask::ALL);
         }
