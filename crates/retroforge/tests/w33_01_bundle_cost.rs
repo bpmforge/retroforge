@@ -175,6 +175,7 @@ fn bundle_channels_cost_per_frame() {
         scene: 1,
         origins: [Some((0, 0)); LAYERS],
         row_dx: vec![[0; LAYERS]; 224],
+        confidence: Default::default(),
     };
     let mut words = [0u16; 256];
     for (i, w) in words.iter_mut().enumerate() {

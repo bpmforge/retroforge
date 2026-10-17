@@ -55,7 +55,7 @@ pub fn front_layer_pixel_in(
     const DEFAULT: [u8; LAYERS] = [0, 1, 2, 3];
     order.unwrap_or(&DEFAULT).iter().find_map(|&n| {
         let n = usize::from(n);
-        if screen & (1 << n) == 0 || *layers.hud.get(n)? {
+        if screen & (1 << n) == 0 || !layers.usable(n) {
             return None;
         }
         let canvas = layers.canvases.get(n)?.as_ref()?;

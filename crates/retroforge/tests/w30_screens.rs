@@ -717,6 +717,97 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
     }
 }
 
+/// Ticket W33-04: a normal run (scout off, 32:9 on) walking right through
+/// SMW Yoshi's Island 1 and SMB3 1-1 with the registration check on. The
+/// check must not fire on healthy placement: the layers stay at confidence 3
+/// and agree with the canvas. Prints the agreement and the per-frame cost.
+fn shot_confidence(readme: &mut Vec<String>) {
+    let name = "confidence";
+    if !wanted(name) {
+        return;
+    }
+    for (tag, console, file, enter, run_keys) in [
+        (
+            "smw",
+            "snes",
+            "Super Mario World (USA).zip",
+            smw_enter_yi1 as fn(&mut H),
+            vec![egui::Key::ArrowRight, egui::Key::A],
+        ),
+        (
+            "smb3",
+            "nes",
+            "Super Mario Bros. 3 (USA).zip",
+            smb3_enter_level as fn(&mut H),
+            vec![egui::Key::ArrowRight, egui::Key::Z],
+        ),
+    ] {
+        let Some(path) = rom(console, file) else {
+            skip(
+                readme,
+                &format!("confidence-{tag}"),
+                &format!("{file} not found"),
+            );
+            continue;
+        };
+        // A cold canvas cache (see `shot_scout_nes`): a warm one would hold
+        // the level already and the check would compare against a stranger.
+        let cold = std::env::temp_dir().join(format!("rf_confidence_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cold);
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: the harness is built after this; nothing else reads the
+        // environment concurrently at this point.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
+        let mut h = new_harness();
+        open_and_run(&mut h, &path);
+        enter(&mut h);
+        h.state_mut().set_scout_enabled_for_test(false);
+        h.state_mut()
+            .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+        h.state_mut().set_widescreen(true);
+        let t = h.state().frame_count_for_test() + 20;
+        run_frames(&mut h, t, Duration::from_secs(60));
+        for &k in &run_keys {
+            key_event(&mut h, k, true);
+        }
+        let mut min_level = [3u8; 4];
+        for _ in 0..60 {
+            let t = h.state().frame_count_for_test() + 10;
+            run_frames(&mut h, t, Duration::from_secs(60));
+            if let Some(conf) = h.state().stitch_confidence_for_test() {
+                for (n, c) in conf.iter().enumerate().filter(|(_, c)| c.frames > 0) {
+                    min_level[n] = min_level[n].min(c.level());
+                }
+            }
+        }
+        for &k in &run_keys {
+            key_event(&mut h, k, false);
+        }
+        run_n(&mut h, 6);
+        let readout = h.state().margin_readout_for_test().unwrap_or_default();
+        println!("CONFIDENCE {tag}: {readout}");
+        if let Some(conf) = h.state().stitch_confidence_for_test() {
+            for (n, c) in conf.iter().enumerate().filter(|(_, c)| c.frames > 0) {
+                println!(
+                    "CONFIDENCE {tag} layer {n}: level {} (lowest seen {}), agreed {}/{} = {:.3}% over {} frames this scene, {} stale drops, mean check {:.1} us",
+                    c.level(),
+                    min_level[n],
+                    c.total_agreed,
+                    c.total_compared,
+                    c.agreement_percent().unwrap_or(100.0),
+                    c.frames,
+                    c.resets,
+                    c.total_nanos as f64 / c.frames.max(1) as f64 / 1e3,
+                );
+            }
+        }
+        note(readme, format!("confidence-{tag}|{readout}"));
+    }
+}
+
 /// Ticket W33-02 acceptance, measured on the shot: for every picture row
 /// that shows backdrop, the margins either carry that exact colour (sky) or
 /// something else entirely (ground, hills, pipes), but never a NEAR miss
@@ -1520,6 +1611,7 @@ fn w30_w31_screens() {
     shot_widescreen(&mut readme);
     shot_scout(&mut readme);
     shot_scout_nes(&mut readme);
+    shot_confidence(&mut readme);
     shot_fps(&mut readme);
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);

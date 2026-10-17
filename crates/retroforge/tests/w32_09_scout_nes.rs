@@ -1017,3 +1017,50 @@ fn smb3_gate() {
     }
     println!("gate$0F/x90 after A: {line}");
 }
+
+/// Ticket W33-04: the registration check on a NORMAL walk (no scout): every
+/// frame's band is compared with the canvas it is about to be written to.
+/// Healthy placement stays at confidence 3 and agrees with its own canvas.
+/// `RF_NES_ROM` picks the game (default SMB3 1-1); `RF_WALK_FRAMES` the length.
+#[test]
+#[ignore = "needs a NES ROM"]
+fn walk_confidence() {
+    let file =
+        std::env::var("RF_NES_ROM").unwrap_or_else(|_| "Super Mario Bros. 3 (USA).zip".into());
+    let Some((mut st, mut sink)) = open(&file) else {
+        return;
+    };
+    script(&mut st, &mut sink, SMB3_TO_LEVEL);
+    let frames: u32 = std::env::var("RF_WALK_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    let mut m = CanvasModel::new();
+    let mut walker = Walker::default();
+    let (mut min_level, mut below, mut dis) = (3u8, 0u32, 0u32);
+    let mut worst = None;
+    for f in 0..frames {
+        let mask = walker.input(f, &st);
+        let b = frame(&mut st, &mut sink, mask);
+        m.observe_frame(&b, &FrameFeed::bands());
+        let c = m.frames().expect("band").confidence[0];
+        min_level = min_level.min(c.level());
+        below += u32::from(c.level() < 3);
+        if c.last.disagrees() {
+            dis += 1;
+            worst.get_or_insert((f, c.last, origin_of(&m)));
+        }
+    }
+    let c = m.frames().expect("band").confidence[0];
+    println!(
+        "WALK-CONF {file}: level {} (min {min_level}, {below} frames below 3, {dis} disagreeing, {} stale drops); \
+         agreed {}/{} = {:.3}% over {} checked frames; mean check {:.1} us; first disagreement {worst:?}",
+        c.level(),
+        c.resets,
+        c.total_agreed,
+        c.total_compared,
+        c.agreement_percent().unwrap_or(100.0),
+        c.frames,
+        c.total_nanos as f64 / c.frames.max(1) as f64 / 1e3,
+    );
+}
