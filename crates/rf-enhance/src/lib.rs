@@ -24,6 +24,7 @@ pub mod level_view;
 pub mod loading;
 pub mod mods;
 pub mod overlay;
+pub mod patch;
 pub mod persistence;
 pub mod scene_graph;
 pub mod scene_identity;

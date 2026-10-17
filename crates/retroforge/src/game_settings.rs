@@ -371,6 +371,10 @@ pub struct GameSettings {
     /// `label`s), in the order pinned, and the corner they show in.
     pub pinned_items: Vec<String>,
     pub info_corner: InfoCorner,
+    /// Ticket W32-01: the soft-patch files the player turned on for this
+    /// game (`soft_patch::Candidate::key`s). Empty by default: nothing
+    /// applies silently (law 6).
+    pub patches_enabled: Vec<String>,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
 }
@@ -481,6 +485,7 @@ impl Default for GameSettings {
             favourite: false,
             pinned_items: Vec::new(),
             info_corner: InfoCorner::default(),
+            patches_enabled: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -711,6 +716,11 @@ impl GameSettings {
                 self.info_corner.name().to_string(),
             );
         }
+        if !self.patches_enabled.is_empty() {
+            // Tab-separated: a file name may hold a comma but not a tab
+            // in any name worth supporting.
+            fields.insert("patches".to_string(), self.patches_enabled.join("\t"));
+        }
         if self.favourite {
             fields.insert("favourite".to_string(), "true".to_string());
         }
@@ -897,6 +907,13 @@ impl GameSettings {
                     settings.pinned_items = value
                         .split(',')
                         .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "patches" => {
+                    settings.patches_enabled = value
+                        .split('\t')
+                        .filter(|p| !p.is_empty())
                         .map(str::to_owned)
                         .collect();
                 }
@@ -1301,6 +1318,22 @@ mod mode_and_feature_persistence_tests {
     }
 
     /// FR-MODE-001: all five ARCHITECTURE §4 modes round-trip by name.
+    /// Ticket W32-01: the enabled patch list persists per game, is absent
+    /// from an untouched game's file, and survives names with commas.
+    #[test]
+    fn enabled_patches_round_trip_and_default_to_none() {
+        let untouched = GameSettings::default();
+        assert!(untouched.patches_enabled.is_empty());
+        assert!(!untouched.to_text().contains("patches"));
+        let s = GameSettings {
+            patches_enabled: vec!["Game, v2.ips".into(), "patches/fix.bps".into()],
+            ..GameSettings::default()
+        };
+        let back = GameSettings::from_text(&s.to_text()).unwrap();
+        assert_eq!(back.patches_enabled, s.patches_enabled);
+        assert!(back.unknown_keys().is_empty());
+    }
+
     #[test]
     fn every_mode_round_trips_through_the_per_game_file() {
         for mode in Mode::all() {

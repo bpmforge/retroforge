@@ -82,6 +82,7 @@ pub mod shader_select;
 pub mod slot_cards;
 pub mod snes_input;
 pub mod snes_save_state;
+pub mod soft_patch;
 pub mod state_slots;
 pub mod stepper;
 pub mod theme;

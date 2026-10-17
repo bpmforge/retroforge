@@ -4012,6 +4012,7 @@ dependencies = [
 name = "rf-enhance"
 version = "0.9.1"
 dependencies = [
+ "crc32fast",
  "rf-cache",
  "rf-core-api",
  "rf-profiles",
