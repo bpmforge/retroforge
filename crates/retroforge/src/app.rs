@@ -1286,8 +1286,6 @@ pub struct RetroForgeApp {
     scout_plan: Option<crate::scout::ScoutPlan>,
     /// Ticket W32-07: tests turn the scout off to take a control shot.
     scout_enabled: bool,
-    /// Ticket W32-07: tests run the whole scout in a few live frames.
-    scout_turbo: bool,
     /// Ticket W32-07: what the scouts have done (shared with the core thread).
     scout_telemetry: std::sync::Arc<crate::scout::ScoutTelemetry>,
     /// Ticket W32-03: `sync_patch_widescreen` has acted on a widescreen
@@ -1757,7 +1755,6 @@ impl RetroForgeApp {
             widescreen_on: false,
             scout_plan: None,
             scout_enabled: true,
-            scout_turbo: false,
             scout_telemetry: std::sync::Arc::default(),
             patch_widescreen_applied: false,
             widescreen_scene: None,
@@ -4314,7 +4311,7 @@ impl RetroForgeApp {
                                 native.1,
                                 msg.canvas_frame,
                                 msg.layer_frames,
-                                &msg.backdrop_rows,
+                                (&msg.backdrop_rows, &msg.layer_order),
                                 &msg.line_palettes,
                             )
                         } else {
@@ -12025,13 +12022,15 @@ impl RetroForgeApp {
     ///
     /// The frame is the post-crop, native-scale picture; `palettes` are its
     /// rows' palettes, used to resolve canvas cells (which are indexed).
+    /// `(backdrops, order)` are its per-row backdrop colours and per-row
+    /// layer order (W32-08).
     fn widen_margins(
         &mut self,
         rgba: Vec<u8>,
         size: (usize, usize),
         position: Option<crate::canvas_accum::FramePosition>,
         layer_frames: Option<crate::layer_canvas::LayerFrames>,
-        backdrops: &[Option<[u8; 3]>],
+        (backdrops, order): (&[Option<[u8; 3]>], &[[u8; crate::layer_canvas::LAYERS]]),
         palettes: &[Option<rf_renderer::LinePalette>],
     ) -> (Vec<u8>, (usize, usize)) {
         use rf_enhance::widescreen::{
@@ -12113,9 +12112,15 @@ impl RetroForgeApp {
                         let (dx, dy) = (wx - pos.origin.0, wy - top);
                         let row = usize::try_from(dy).unwrap_or(0);
                         let palette = palettes.get(row).and_then(Option::as_ref);
-                        let Some(cell) =
-                            crate::layer_canvas::front_layer_pixel(layers, &frames.origins, dx, dy)
-                        else {
+                        // Ticket W32-08: the layer order of THIS row, from
+                        // the picture's own evidence.
+                        let Some(cell) = crate::layer_canvas::front_layer_pixel(
+                            layers,
+                            &frames.origins,
+                            dx,
+                            dy,
+                            order.get(row),
+                        ) else {
                             // Nothing known: the row's own backdrop colour.
                             return Some(
                                 backdrops
@@ -13097,6 +13102,7 @@ impl RetroForgeApp {
             canvas_frame: None,
             layer_frames: None,
             backdrop_rows: Vec::new(),
+            layer_order: Vec::new(),
         }
     }
 
@@ -13820,7 +13826,6 @@ impl RetroForgeApp {
                 .map(|plan| crate::scout::ScoutSetup {
                     plan,
                     telemetry: self.scout_telemetry.clone(),
-                    turbo: self.scout_turbo,
                 }),
         ));
     }
@@ -13888,13 +13893,6 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_scout_enabled_for_test(&mut self, on: bool) {
         self.scout_enabled = on;
-    }
-
-    /// Ticket W32-07: run the whole scout in a few live frames (for the NEXT
-    /// `set_widescreen`).
-    #[doc(hidden)]
-    pub fn set_scout_turbo_for_test(&mut self, on: bool) {
-        self.scout_turbo = on;
     }
 
     /// Ticket W32-07: what the level scouts have done so far.

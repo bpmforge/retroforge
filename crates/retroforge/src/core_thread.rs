@@ -436,13 +436,17 @@ pub struct FrameMsg {
     /// on screen (`layer_canvas::row_backdrops`); empty unless
     /// `layer_frames` is set.
     pub backdrop_rows: Vec<Option<[u8; 3]>>,
+    /// Ticket W32-08: per picture row, the layers front to back by the
+    /// picture's own evidence (`LayerCanvasAccumulator::row_orders`); empty
+    /// unless `layer_frames` is set.
+    pub layer_order: Vec<[u8; crate::layer_canvas::LAYERS]>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
 /// widens (the scrolling level layer), wrapped to its tilemap, for the
-/// stitcher. `None` on the NES (its core emits scroll events itself) or when
-/// no layer scrolls, in which case nothing can be placed on a canvas and the
-/// margins stay VRAM.
+/// composite stitcher. `None` on the NES (its core emits scroll events
+/// itself) or when no layer scrolls, in which case nothing can be placed on
+/// a canvas and the margins stay VRAM.
 fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Option<(u16, u16)> {
     let views = stepper.bg_layer_views()?;
     let decisions = req.policies.decide_all(views);
@@ -454,26 +458,40 @@ fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Op
     ))
 }
 
-/// Ticket W31-07: each background layer the widescreen policy widens, with
-/// its registers wrapped to its tilemap, for the per-layer canvases. `None`
-/// on the NES; narrow (HUD) layers are `None` inside.
+/// Ticket W31-07, reworked in W32-08: each background layer on the main
+/// screen, with its registers wrapped to its tilemap, for the per-layer
+/// canvases. NOT filtered by the widescreen policy: the policy decides what
+/// the PPU draws in the margins, the canvas is what we remember (SMW's far
+/// hills are BG2 and the default policy keeps it narrow). Which layers are
+/// HUD is judged by what they do, in `LayerCanvasAccumulator::hud_layers`.
+/// `None` on the NES.
+#[must_use]
 pub fn snes_layer_scrolls(
     stepper: &EmuStepper,
-    req: &WidescreenRequest,
 ) -> Option<[Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS]> {
     let views = stepper.bg_layer_views()?;
-    let decisions = req.policies.decide_all(views);
     Some(std::array::from_fn(|i| {
         let v = views[i];
-        decisions[i]
-            .widens()
-            .then(|| crate::layer_canvas::LayerScroll {
-                hofs: v.hofs % v.tilemap_width.max(1),
-                vofs: v.vofs % v.tilemap_height.max(1),
-                tilemap_width: v.tilemap_width,
-                tilemap_height: v.tilemap_height,
-            })
+        v.enabled.then(|| crate::layer_canvas::LayerScroll {
+            hofs: v.hofs % v.tilemap_width.max(1),
+            vofs: v.vofs % v.tilemap_height.max(1),
+            tilemap_width: v.tilemap_width,
+            tilemap_height: v.tilemap_height,
+        })
     }))
+}
+
+/// Ticket W32-08: both stitchers' scroll reads in one place, so the
+/// composite canvas and the layer canvases cannot disagree on timing again
+/// (feed the result through one `layer_canvas::ScrollLag`).
+fn read_frame_scrolls(
+    stepper: &EmuStepper,
+    req: Option<&WidescreenRequest>,
+) -> crate::layer_canvas::FrameScrolls {
+    crate::layer_canvas::FrameScrolls {
+        composite: req.and_then(|r| snes_scroll_for_stitcher(stepper, r)),
+        layers: req.and_then(|_| snes_layer_scrolls(stepper)),
+    }
 }
 
 /// Ticket W30-03: a stitched canvas together with the scene it belongs to,
@@ -1339,11 +1357,8 @@ fn core_thread_main(
     let mut layer_canvases = crate::layer_canvas::LayerCanvasAccumulator::new();
     // Ticket W32-07: the level scout (a second machine; see `crate::scout`).
     let mut scout_driver = crate::scout::ScoutDriver::default();
-    // The scroll read after the previous frame, with that frame's number.
-    let mut prev_layer_scrolls: Option<(
-        u64,
-        [Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS],
-    )> = None;
+    // The scroll read after the previous frame (W32-08: for both stitchers).
+    let mut scroll_lag = crate::layer_canvas::ScrollLag::default();
     // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
     let mut last_canvas_flush: Option<std::time::Instant> = None;
 
@@ -1966,28 +1981,20 @@ fn core_thread_main(
             // level layer's, so the stitcher would see one static band
             // (classed HUD) and place nothing. While widescreen is on,
             // feed it the scrolling layer's registers, once per frame.
-            let scroll = widescreen
-                .as_ref()
-                .and_then(|req| snes_scroll_for_stitcher(&stepper, req));
-            let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], scroll);
+            // Ticket W32-08: BOTH stitchers place the frame at the scroll read
+            // after the PREVIOUS frame -- the registers read now draw the NEXT
+            // frame (the game's NMI writes them in vblank, after the visible
+            // lines; measured on Super Mario World, W32-07) -- through one
+            // `ScrollLag`, so the composite canvas and the per-layer canvases
+            // stay on the same world x. A frame whose predecessor was not the
+            // previous read is not placed at all.
+            let read_now = read_frame_scrolls(&stepper, widescreen.as_ref());
+            let drawn_with = scroll_lag.drawn_with(stepper.frame_count(), read_now);
+            let layer_scrolls = read_now.layers;
+            let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], drawn_with.composite);
             // Ticket W31-07: the same frame, stitched per layer by each
             // layer's own scroll (the margins prefer these).
-            let layer_scrolls = widescreen
-                .as_ref()
-                .and_then(|req| snes_layer_scrolls(&stepper, req));
-            // The registers read now draw the NEXT frame (the game's NMI
-            // writes them in vblank, after the visible lines), so this frame
-            // is stitched at the value read after the previous one (W32-07:
-            // measured on Super Mario World, a frame stitched at its own
-            // read lands one frame of scroll too far). Only when that read
-            // was the immediately preceding frame.
-            let this_frame = stepper.frame_count();
-            let drawn_with = match prev_layer_scrolls.take() {
-                Some((n, s)) if n + 1 == this_frame => Some(s),
-                _ => None,
-            };
-            prev_layer_scrolls = layer_scrolls.map(|s| (this_frame, s));
-            layer_canvases.observe_frame(&bundle, scene, drawn_with.as_ref());
+            layer_canvases.observe_frame(&bundle, scene, drawn_with.layers.as_ref());
             let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
@@ -2053,6 +2060,12 @@ fn core_thread_main(
             // (colour math included), for margins nothing is known about.
             let backdrop_rows = if layer_scrolls.is_some() {
                 crate::layer_canvas::row_backdrops(&bundle.video, bundle.width, &display)
+            } else {
+                Vec::new()
+            };
+            // Ticket W32-08: which layer is in front, row by row.
+            let layer_order = if layer_scrolls.is_some() {
+                layer_canvases.row_orders(&bundle)
             } else {
                 Vec::new()
             };
@@ -2158,6 +2171,7 @@ fn core_thread_main(
                 canvas_frame: canvas_accum.frame_position(),
                 layer_frames: layer_canvases.frames(),
                 backdrop_rows,
+                layer_order,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2208,25 +2222,24 @@ fn core_thread_main(
                 // UI thread hung up; nothing left to serve.
                 return LoopControl::Stop;
             }
-            // Ticket W32-07: the level scout runs AFTER the picture is out,
-            // in the time the pacer would otherwise sleep, so a slice cannot
-            // delay a frame (it is budgeted from the pacer's own schedule).
-            // The live machine is only read (a snapshot at scout start).
-            if let (false, Some(req)) = (stepped, widescreen.as_ref()) {
-                let scrolls = |s: &EmuStepper| snes_layer_scrolls(s, req);
-                scout_driver.tick(
-                    crate::scout::LiveView {
-                        stepper: &stepper,
-                        rom: &rom,
-                        canvases: &mut layer_canvases,
-                        scene,
-                        size: bundle_size,
-                        scrolls: &scrolls,
-                    },
-                    pacer.spare(Instant::now()),
-                );
+            // Ticket W32-07/08: the level scout. The core thread only decides
+            // (start conditions, one snapshot of the live machine -- read
+            // only) and merges the deltas its worker thread sends back.
+            if let (false, Some(_)) = (stepped, widescreen.as_ref()) {
+                scout_driver.tick(crate::scout::LiveView {
+                    stepper: &stepper,
+                    rom: &rom,
+                    canvases: &mut layer_canvases,
+                    scene,
+                    size: bundle_size,
+                    scrolls: snes_layer_scrolls,
+                });
             }
         } else {
+            // Paused: a scout worker goes on, so keep merging what it sends.
+            if widescreen.is_some() {
+                scout_driver.poll(&mut layer_canvases);
+            }
             // Paused with no pending commands: don't busy-spin a whole CPU
             // core waiting for the next one.
             thread::sleep(Duration::from_millis(5));
@@ -2482,6 +2495,7 @@ mod tests {
             canvas_frame: None,
             layer_frames: None,
             backdrop_rows: Vec::new(),
+            layer_order: Vec::new(),
         }
     }
 
