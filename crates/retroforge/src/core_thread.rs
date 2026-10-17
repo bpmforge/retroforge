@@ -39,7 +39,6 @@ use std::time::{Duration, Instant};
 
 use rf_core_api::InputFrame;
 
-use crate::canvas_accum::CanvasAccumulator;
 use crate::pacer::FramePacer;
 use crate::stepper::EmuStepper;
 
@@ -424,22 +423,20 @@ pub struct FrameMsg {
     /// (`ScrollWrite`, `MemWatch`, ...) to a consumer that reads none of
     /// them.
     pub mode7: Option<Box<rf_core_api::Mode7Frame>>,
-    /// Ticket W30-03: which scene's canvas this frame belongs to and where
-    /// it sits on it (`CanvasAccumulator::frame_position`), for filling the
-    /// widescreen margins. 24 bytes; `None` when no band could be placed.
-    pub canvas_frame: Option<crate::canvas_accum::FramePosition>,
-    /// Ticket W31-07: where this frame sits on each widened background
-    /// layer's own canvas (`LayerCanvasAccumulator::frames`); `None` on the
-    /// NES or while widescreen is off. 72 bytes.
-    pub layer_frames: Option<crate::layer_canvas::LayerFrames>,
+    /// Ticket W31-07, W33-03: which scene's canvases this frame belongs to
+    /// and where it sits on each layer's own canvas
+    /// (`rf_enhance::canvas::CanvasModel::frames`); the NES's is layer 0's.
+    /// `None` when nothing could be placed (a SNES frame with widescreen
+    /// off). 72 bytes.
+    pub layer_frames: Option<rf_enhance::canvas::LayerFrames>,
     /// Ticket W31-07: per picture row, the colour the backdrop shows there
-    /// on screen (`layer_canvas::backdrop_rows`, W33-02); empty unless
+    /// on screen (`rf_enhance::canvas::backdrop_rows`, W33-02); empty unless
     /// `layer_frames` is set.
     pub backdrop_rows: Vec<Option<[u8; 3]>>,
     /// Ticket W32-08: per picture row, the layers front to back by the
-    /// picture's own evidence (`LayerCanvasAccumulator::row_orders`); empty
+    /// picture's own evidence (`CanvasModel::row_orders`); empty
     /// unless `layer_frames` is set.
-    pub layer_order: Vec<[u8; crate::layer_canvas::LAYERS]>,
+    pub layer_order: Vec<[u8; rf_enhance::canvas::LAYERS]>,
     /// Ticket W33-01: per picture row, the registers it was drawn with
     /// (`FrameBundle::lines`), for composing the margins through the row's
     /// colour math; empty unless `layer_frames` is set.
@@ -447,11 +444,11 @@ pub struct FrameMsg {
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
-/// widens (the scrolling level layer), wrapped to its tilemap, for the
-/// composite stitcher. `None` on the NES (its core emits scroll events
-/// itself) or when no layer scrolls, in which case nothing can be placed on
-/// a canvas and the margins stay VRAM.
-fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Option<(u16, u16)> {
+/// widens (the scrolling level layer), wrapped to its tilemap, for the scene
+/// tracker (a SNES core's own scroll events are not the level layer's).
+/// `None` on the NES (its core emits scroll events itself) or when no layer
+/// scrolls.
+fn snes_scene_scroll(stepper: &EmuStepper, req: &WidescreenRequest) -> Option<(u16, u16)> {
     let views = stepper.bg_layer_views()?;
     let decisions = req.policies.decide_all(views);
     let layer = (0..4).find(|&i| decisions[i].widens())?;
@@ -467,19 +464,19 @@ fn snes_scroll_for_stitcher(stepper: &EmuStepper, req: &WidescreenRequest) -> Op
 /// canvases. NOT filtered by the widescreen policy: the policy decides what
 /// the PPU draws in the margins, the canvas is what we remember (SMW's far
 /// hills are BG2 and the default policy keeps it narrow). Which layers are
-/// HUD is judged by what they do, in `LayerCanvasAccumulator::hud_layers`.
+/// HUD is judged by what they do, in `rf_enhance::canvas`.
 /// `None` on the NES.
 #[must_use]
 pub fn snes_layer_scrolls(
     stepper: &EmuStepper,
-) -> Option<[Option<crate::layer_canvas::LayerScroll>; crate::layer_canvas::LAYERS]> {
+) -> Option<[Option<rf_enhance::canvas::LayerScroll>; rf_enhance::canvas::LAYERS]> {
     let views = stepper.bg_layer_views()?;
     // W33-01: a layer on the SUB screen is stitched too (Super Mario World's
     // far hills are BG2 on the sub screen and never on the main one).
     let sub = stepper.sub_screen_bg_mask().unwrap_or(0);
     Some(std::array::from_fn(|i| {
         let v = views[i];
-        (v.enabled || sub & (1 << i) != 0).then(|| crate::layer_canvas::LayerScroll {
+        (v.enabled || sub & (1 << i) != 0).then(|| rf_enhance::canvas::LayerScroll {
             hofs: v.hofs % v.tilemap_width.max(1),
             vofs: v.vofs % v.tilemap_height.max(1),
             tilemap_width: v.tilemap_width,
@@ -488,29 +485,27 @@ pub fn snes_layer_scrolls(
     }))
 }
 
-/// Ticket W32-08: both stitchers' scroll reads in one place, so the
-/// composite canvas and the layer canvases cannot disagree on timing again
-/// (feed the result through one `layer_canvas::ScrollLag`).
+/// Ticket W32-08: the scroll reads the canvas model needs, in one place (feed
+/// the result through one `rf_enhance::canvas::ScrollLag`).
 fn read_frame_scrolls(
     stepper: &EmuStepper,
     req: Option<&WidescreenRequest>,
-) -> crate::layer_canvas::FrameScrolls {
-    crate::layer_canvas::FrameScrolls {
-        composite: req.and_then(|r| snes_scroll_for_stitcher(stepper, r)),
+) -> rf_enhance::canvas::FrameScrolls {
+    rf_enhance::canvas::FrameScrolls {
+        scene: req.and_then(|r| snes_scene_scroll(stepper, r)),
         layers: req.and_then(|_| snes_layer_scrolls(stepper)),
     }
 }
 
-/// Ticket W30-03: a stitched canvas together with the scene it belongs to,
-/// so the UI thread can tell a canvas of the room being shown from one of
-/// the room it just left.
+/// Ticket W30-03, W33-03: the current scene's canvases together with the
+/// scene they belong to, so the UI thread can tell the canvases of the room
+/// being shown from those of the room it just left.
 pub struct SceneCanvas {
-    pub canvas: rf_enhance::stitcher::Canvas,
     /// `None` before any frame has been observed.
     pub scene: Option<u64>,
-    /// Ticket W31-07: the same scene's per-layer canvases (empty on the NES
-    /// or when nothing was stitched per layer).
-    pub layers: Box<crate::layer_canvas::LayerCanvases>,
+    /// The scene's per-layer canvases (NES: layer 0 holds the whole picture;
+    /// `LayerCanvases::map_canvas` is the one adapter the map view reads).
+    pub layers: Box<rf_enhance::canvas::LayerCanvases>,
 }
 
 /// Ticket W14-20 defect 1: the most `CoreEvent::Frame`s the core thread
@@ -580,11 +575,11 @@ pub enum CoreEvent {
     /// after this one.
     Crashed(CoreCrashReport),
     /// Ticket W4-03e: the reply to `CoreCommand::RequestCanvasSnapshot` —
-    /// a clone of the CURRENT scene's stitched canvas
-    /// (`crate::canvas_accum::CanvasAccumulator::current_canvas`), for the
+    /// a clone of the CURRENT scene's stitched canvases
+    /// (`rf_enhance::canvas::CanvasModel::current_canvases`), for the
     /// UI thread to resolve into an ultrawide render
     /// (`crate::enhanced_view::compose_ultrawide`). Pull, not push
-    /// (`crate::canvas_accum`'s own module doc): cloning a whole `Canvas`
+    /// (`rf_enhance::canvas`'s own module doc): cloning whole `Canvas`es
     /// every frame would be tens of MB/s at 60Hz for a level of any real
     /// size, so this only happens when the UI thread actually asks.
     CanvasSnapshot(SceneCanvas),
@@ -803,7 +798,7 @@ pub enum CoreCommand {
     SnapshotRam,
     /// Ticket W4-03e: ask for a `CoreEvent::CanvasSnapshot` of the current
     /// scene's stitched canvas (see that variant's doc). Also flushes the
-    /// canvas accumulator's cache (`CanvasAccumulator::flush`) — piggy-
+    /// canvas model's cache (`CanvasModel::flush`) — piggy-
     /// backing persistence on the same user-driven cadence (whenever the
     /// UI is actually showing/refreshing the Ultrawide view) rather than
     /// every frame.
@@ -1364,20 +1359,20 @@ fn core_thread_main(
         rf_renderer::frame::NES_HEIGHT as u16,
     );
     // Ticket W4-03e: fed one real `FrameBundle` per frame below, right
-    // where `bundle_builder` is drained — `crate::canvas_accum`'s own
-    // module doc explains why this must happen on THIS thread (every real
-    // frame, no gaps) rather than the UI thread polling the triple buffer.
-    // A cache-open failure (unwritable placeholder dir, etc.) degrades to
-    // `None` — persistence is strictly additive (`CanvasAccumulator`'s own
-    // doc), never a reason to fail loading the ROM.
+    // where `bundle_builder` is drained — `rf_enhance::canvas`'s own module
+    // doc explains why this must happen on THIS thread (every real frame, no
+    // gaps) rather than the UI thread polling the triple buffer. A
+    // cache-open failure (unwritable placeholder dir, etc.) degrades to
+    // `None` — persistence is strictly additive, never a reason to fail
+    // loading the ROM.
     let cache = rf_cache::Cache::open(canvas_cache_root(), CANVAS_CACHE_CAP_BYTES).ok();
-    let mut canvas_accum = CanvasAccumulator::new(rom_sha256, cache);
-    // Ticket W31-07: one canvas per widened background layer (SNES).
-    let mut layer_canvases = crate::layer_canvas::LayerCanvasAccumulator::new();
+    // Ticket W33-03: ONE canvas model for both consoles (NES = layer 0, SNES
+    // = a canvas per background layer).
+    let mut canvases = rf_enhance::canvas::CanvasModel::with_cache(rom_sha256, cache);
     // Ticket W32-07: the level scout (a second machine; see `crate::scout`).
     let mut scout_driver = crate::scout::ScoutDriver::default();
-    // The scroll read after the previous frame (W32-08: for both stitchers).
-    let mut scroll_lag = crate::layer_canvas::ScrollLag::default();
+    // The scroll read after the previous frame (W32-08).
+    let mut scroll_lag = rf_enhance::canvas::ScrollLag::default();
     // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
     let mut last_canvas_flush: Option<std::time::Instant> = None;
 
@@ -1630,13 +1625,12 @@ fn core_thread_main(
                     if last_canvas_flush
                         .is_none_or(|t: std::time::Instant| t.elapsed() >= CANVAS_FLUSH_INTERVAL)
                     {
-                        canvas_accum.flush();
+                        canvases.flush();
                         last_canvas_flush = Some(std::time::Instant::now());
                     }
                     let snapshot = SceneCanvas {
-                        canvas: canvas_accum.current_canvas().unwrap_or_default(),
-                        scene: canvas_accum.current_scene_id().map(|id| id.0),
-                        layers: Box::new(layer_canvases.current_canvases()),
+                        scene: canvases.current_scene().map(|id| id.0),
+                        layers: Box::new(canvases.current_canvases()),
                     };
                     if frame_tx.send(CoreEvent::CanvasSnapshot(snapshot)).is_err() {
                         return LoopControl::Stop; // UI thread hung up.
@@ -1899,7 +1893,7 @@ fn core_thread_main(
         if ran || stepped {
             // Ticket W4-03e: feed the enhanced-camera pipeline THIS exact
             // frame's bundle before it moves into `bundle_writer.publish`
-            // below — `canvas_accum`'s own module doc is explicit that
+            // below — `rf_enhance::canvas`'s own module doc is explicit that
             // every real frame must reach it, with no gaps, which is only
             // true on this thread (the UI thread's own `frame_bundle`
             // reader is latest-wins/lossy). Read-only: nothing here
@@ -2000,28 +1994,35 @@ fn core_thread_main(
                 push_event_traces(producer, &bundle);
             }
             // Ticket W30-03: the SNES core's scroll events are not the
-            // level layer's, so the stitcher would see one static band
-            // (classed HUD) and place nothing. While widescreen is on,
-            // feed it the scrolling layer's registers, once per frame.
-            // Ticket W32-08: BOTH stitchers place the frame at the scroll read
-            // after the PREVIOUS frame -- the registers read now draw the NEXT
-            // frame (the game's NMI writes them in vblank, after the visible
-            // lines; measured on Super Mario World, W32-07) -- through one
-            // `ScrollLag`, so the composite canvas and the per-layer canvases
-            // stay on the same world x. A frame whose predecessor was not the
-            // previous read is not placed at all.
+            // level layer's, so a SNES frame is placed by each layer's
+            // registers instead (while widescreen is on) and the scene
+            // tracker is fed the scrolling layer's scroll. The NES's own
+            // scroll events become bands. Ticket W32-08: the registers read
+            // now draw the NEXT frame (the game's NMI writes them in vblank,
+            // after the visible lines; measured on Super Mario World,
+            // W32-07), so a SNES frame is placed at the scroll read after the
+            // PREVIOUS frame, through one `ScrollLag`; a frame whose
+            // predecessor was not the previous read is not placed at all.
             let read_now = read_frame_scrolls(&stepper, widescreen.as_ref());
             let drawn_with = scroll_lag.drawn_with(stepper.frame_count(), read_now);
             let layer_scrolls = read_now.layers;
-            let scene = canvas_accum.observe_frame_with_scroll(&bundle, &[], drawn_with.composite);
-            // Ticket W31-07: the same frame, stitched per layer by each
-            // layer's own scroll (the margins prefer these).
-            layer_canvases.observe_frame_with_palettes(
-                &bundle,
-                scene,
-                crate::layer_canvas::scrolls_for(&bundle, &drawn_with, &read_now),
-                sink.line_palettes(),
-            );
+            let line_words: Vec<Option<&rf_enhance::canvas::Cgram>> = sink
+                .line_palettes()
+                .iter()
+                .map(|p| p.as_ref().map(|p| &p.words))
+                .collect();
+            let feed = if stepper.bg_layer_views().is_some() {
+                rf_enhance::canvas::FrameFeed::registers(rf_enhance::canvas::scrolls_for(
+                    &bundle,
+                    &drawn_with,
+                    &read_now,
+                ))
+                .with_scene_scroll(drawn_with.scene)
+            } else {
+                rf_enhance::canvas::FrameFeed::bands()
+            }
+            .with_palettes(&line_words);
+            let scene = canvases.observe_frame(&bundle, &feed);
             let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
@@ -2086,16 +2087,19 @@ fn core_thread_main(
             // Ticket W33-02: the colour each row's backdrop really shows
             // (colour math included), reconstructed from the row's
             // registers, for margins nothing is known about.
-            // The NES has no layer canvases but its composite canvas has
-            // unknown cells too, so it gets the rows whenever widescreen is on.
+            // The NES's layer 0 has unknown cells too, so it gets the rows
+            // whenever widescreen is on.
             let backdrop_rows = if layer_scrolls.is_some() || widescreen.is_some() {
-                crate::layer_canvas::backdrop_rows(&bundle, sink.line_palettes())
+                let rows = sink.line_palettes();
+                rf_enhance::canvas::backdrop_rows(&bundle, &|y, i| {
+                    rf_renderer::resolve_index(i, rows.get(y).and_then(Option::as_ref))
+                })
             } else {
                 Vec::new()
             };
             // Ticket W32-08: which layer is in front, row by row.
             let layer_order = if layer_scrolls.is_some() {
-                layer_canvases.row_orders(&bundle)
+                canvases.row_orders(&bundle)
             } else {
                 Vec::new()
             };
@@ -2203,8 +2207,7 @@ fn core_thread_main(
                 prg_ram: Box::new(*stepper.prg_ram()),
                 sprite_height_px: stepper.sprite_height_px(),
                 mode7: mode7_event.map(Box::new),
-                canvas_frame: canvas_accum.frame_position(),
-                layer_frames: layer_canvases.frames(),
+                layer_frames: canvases.frames(),
                 backdrop_rows,
                 layer_order,
                 line_regs,
@@ -2265,8 +2268,7 @@ fn core_thread_main(
                 scout_driver.tick(crate::scout::LiveView {
                     stepper: &stepper,
                     rom: &rom,
-                    canvases: &mut layer_canvases,
-                    composite: Some(&mut canvas_accum),
+                    canvases: &mut canvases,
                     scene,
                     size: bundle_size,
                     scrolls: snes_layer_scrolls,
@@ -2275,7 +2277,7 @@ fn core_thread_main(
         } else {
             // Paused: a scout worker goes on, so keep merging what it sends.
             if widescreen.is_some() {
-                scout_driver.poll(&mut layer_canvases, Some(&mut canvas_accum));
+                scout_driver.poll(&mut canvases);
             }
             // Paused with no pending commands: don't busy-spin a whole CPU
             // core waiting for the next one.
@@ -2529,7 +2531,6 @@ mod tests {
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7: None,
-            canvas_frame: None,
             layer_frames: None,
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),

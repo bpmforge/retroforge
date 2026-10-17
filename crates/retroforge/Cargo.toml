@@ -46,7 +46,7 @@ rf-input = { path = "../rf-input" }
 rf-enhance = { path = "../rf-enhance" }
 # rf-cache: already an rf-enhance dependency (arrives transitively for
 # version-resolution purposes), listed directly here too because
-# `crate::canvas_accum` calls `rf_cache::Cache::open` itself (Rust's
+# `crate::core_thread` calls `rf_cache::Cache::open` itself (Rust's
 # extern prelude only exposes crates a Cargo.toml names directly).
 rf-cache = { path = "../rf-cache" }
 # rf-debugger: viewer data providers + persisted-layout data model (ticket

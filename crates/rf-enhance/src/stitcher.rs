@@ -238,11 +238,6 @@ pub(crate) fn stitchable_pixel(pixel: &PpuPixel) -> Option<PpuPixel> {
     }
 }
 
-/// The width of an unwidened NES/SNES picture, and how many of its leftmost
-/// dots the NES can clip (W32-09).
-const CLIP_COLUMNS_WIDTH: u16 = 256;
-const CLIP_COLUMNS: usize = 8;
-
 /// Blits one frame's worth of classified bands into `canvas`. `video` is
 /// the frame's full row-major pixel buffer (`FrameBundle::video` shape:
 /// `width * height`, accuracy-exact); `width` is that frame's row stride.
@@ -251,40 +246,29 @@ const CLIP_COLUMNS: usize = 8;
 /// exactly the dishonesty ENHANCEMENT_RUNTIME §3 warns against (the HUD
 /// would appear to be part of the level at whatever position happened to
 /// be under it the first time it was captured).
+///
+/// Since W33-03 this is the NES half of `crate::canvas`'s one placement
+/// function ([`crate::canvas::place_rows`]), with the bands turned into
+/// per-row positions ([`crate::canvas::band_rows`]).
 pub fn stitch_frame(
     canvas: &mut Canvas,
     video: &[PpuPixel],
     width: u16,
     bands: &[(ScanlineBand, BandWorldPos)],
 ) {
-    let width = width as usize;
-    for (band, pos) in bands {
-        if band.is_hud {
-            continue;
-        }
-        for sy in band.start..band.end {
-            let row_start = sy as usize * width;
-            let Some(row) = video.get(row_start..row_start + width) else {
-                continue; // frame shorter than this band claims -- degrade, never panic/index-oob
-            };
-            let mut filtered: Vec<Option<PpuPixel>> = row.iter().map(stitchable_pixel).collect();
-            let world_y = pos.world_y_at_start + i64::from(sy - band.start);
-            // Ticket W32-09: the NES can hide its leftmost 8 dots (PPUMASK bit 1,
-            // nesdev "PPU registers"), and a clipped dot is drawn as the
-            // backdrop. A column that scrolls past the left edge would be
-            // painted over with sky by the frame that has it clipped, so a
-            // backdrop dot there only fills a cell nothing is known about.
-            if width == usize::from(CLIP_COLUMNS_WIDTH) {
-                for (c, cell) in filtered.iter_mut().take(CLIP_COLUMNS).enumerate() {
-                    let is_backdrop = cell.is_some_and(|p| p.layer == PixelLayer::Backdrop);
-                    if is_backdrop && canvas.get(pos.world_x + c as i64, world_y).is_some() {
-                        *cell = None;
-                    }
-                }
-            }
-            canvas.blit_row(pos.world_x, world_y, &filtered);
-        }
+    let width = usize::from(width);
+    if width == 0 {
+        return;
     }
+    let rows = crate::canvas::band_rows(bands, video.len() / width);
+    crate::canvas::place_rows(
+        canvas,
+        video,
+        width,
+        &rows,
+        &crate::canvas::Pick::Level,
+        &mut None,
+    );
 }
 
 #[cfg(test)]

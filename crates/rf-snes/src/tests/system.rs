@@ -129,7 +129,7 @@ fn eight_nops_are_enough_to_finish_a_divide_the_way_hardware_would() {
         0xA9, 0x0B, // LDA #$0B        (divisor 11)
         0x8D, 0x06, 0x42, // STA $4206 (WRDIVB -- starts the divide)
     ];
-    code.extend(std::iter::repeat(0xEA).take(8)); // eight NOPs
+    code.extend(std::iter::repeat_n(0xEA, 8)); // eight NOPs
     rom[..code.len()].copy_from_slice(&code);
     rom[0x7FFC] = 0x00;
     rom[0x7FFD] = 0x80;
@@ -1757,9 +1757,7 @@ fn a_4210_wait_loop_sees_the_vblank_flag_before_the_nmi_handler_eats_it() {
 #[test]
 fn disable_then_reenable_does_not_redispatch_while_the_flag_is_still_set() {
     let mut rom = lorom_image(0x20, 0x00);
-    for i in 0..4 {
-        rom[i] = 0xEA; // four NOPs: one per step below
-    }
+    rom[..4].fill(0xEA); // four NOPs: one per step below
     rom[0x7FFA] = 0x50;
     rom[0x7FFB] = 0x80;
     rom[0x7FFC] = 0x00;

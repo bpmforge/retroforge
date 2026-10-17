@@ -3506,10 +3506,8 @@ mod exec_tests {
     /// project's [`CACHE_MISS_EXTRA_GSU_CYCLES`] surcharge would otherwise
     /// mix in on every byte's first fetch.
     fn prime_cache(g: &mut GsuState, rom: &[u8], len: usize) {
-        for i in 0..len {
-            g.regs.cache[i] = rom[i];
-            g.regs.cache_valid[i] = true;
-        }
+        g.regs.cache[..len].copy_from_slice(&rom[..len]);
+        g.regs.cache_valid[..len].fill(true);
     }
 
     #[test]

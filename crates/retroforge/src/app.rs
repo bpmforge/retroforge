@@ -41,8 +41,8 @@ use rf_enhance::trust::TrustState;
 /// How many repaints [`RetroForgeApp::maybe_request_canvas_snapshot`] lets
 /// pass between `CoreCommand::RequestCanvasSnapshot` sends while the
 /// Ultrawide camera is active — a fresh snapshot on every repaint would
-/// clone the whole stitched `Canvas` at ~60Hz (`CanvasAccumulator::
-/// current_canvas`'s own doc: "tens of MB/s for a level of any real
+/// clone the whole stitched `Canvas` at ~60Hz (`CanvasModel::
+/// current_canvases`'s own doc: "tens of MB/s for a level of any real
 /// size"). 30 repaints is roughly twice a second at the app's normal
 /// repaint cadence — frequent enough that Ultrawide visibly keeps up with
 /// play, far below the cost of a per-frame clone.
@@ -1268,12 +1268,11 @@ pub struct RetroForgeApp {
     camera: CameraToggle,
     /// Latest stitched-canvas snapshot from the core thread
     /// (`CoreEvent::CanvasSnapshot`), if the Ultrawide camera has ever been
-    /// requested this session.
-    ultrawide_canvas: Option<rf_enhance::stitcher::Canvas>,
-    /// Ticket W31-07: the per-layer canvases of the same snapshot, which the
-    /// widescreen margins prefer over the composite canvas.
-    ultrawide_layers: crate::layer_canvas::LayerCanvases,
-    /// Ticket W30-03: the scene [`Self::ultrawide_canvas`] was snapshotted
+    /// requested this session. One model for both consoles (W33-03): the
+    /// widescreen margins read the layers, the map view reads
+    /// `LayerCanvases::map_canvas` (layer 0 on the NES).
+    ultrawide_layers: rf_enhance::canvas::LayerCanvases,
+    /// Ticket W30-03: the scene [`Self::ultrawide_layers`] was snapshotted
     /// from. The widescreen margins use the canvas only while this equals
     /// the scene of the frame being shown.
     ultrawide_canvas_scene: Option<u64>,
@@ -1305,7 +1304,7 @@ pub struct RetroForgeApp {
     keep_core_frame: bool,
     core_frame_copy: Option<Vec<u8>>,
     /// The most recent [`enhanced_view::compose_ultrawide`] result over
-    /// [`Self::ultrawide_canvas`] — `Err` (e.g. "canvas is empty") is kept
+    /// [`Self::ultrawide_layers`]'s map canvas — `Err` (e.g. "canvas is empty") is kept
     /// distinct from `None` ("never even tried yet") so
     /// [`enhanced_view::select_active_view`] can show a specific reason.
     /// Ticket W3-04 (FR-REND-005): how the original/enhanced compare view
@@ -1537,7 +1536,7 @@ fn picture_backdrop_rows(
 /// backdrop colours (W31-07), layer order (W32-08), registers (W33-01).
 type MarginRows<'a> = (
     &'a [Option<[u8; 3]>],
-    &'a [[u8; crate::layer_canvas::LAYERS]],
+    &'a [[u8; rf_enhance::canvas::LAYERS]],
     &'a [Option<rf_core_api::LineRegisters>],
 );
 
@@ -1806,7 +1805,7 @@ impl RetroForgeApp {
             widescreen_scene: None,
             widescreen_source: rf_enhance::widescreen::MarginSource::Vram,
             ultrawide_canvas_scene: None,
-            ultrawide_layers: crate::layer_canvas::LayerCanvases::default(),
+            ultrawide_layers: rf_enhance::canvas::LayerCanvases::default(),
             declared_hud: None,
             force_vram_margins: false,
             keep_core_frame: false,
@@ -1906,7 +1905,6 @@ impl RetroForgeApp {
             gpu,
             compositor,
             camera: CameraToggle::Original,
-            ultrawide_canvas: None,
             peeking_original: false,
             profile_matched: false,
             show_enhance: false,
@@ -4072,9 +4070,8 @@ impl RetroForgeApp {
                 // a completely different game. Camera resets to Original,
                 // matching "a fresh install boots in Accuracy Mode" (law 6).
                 self.camera = CameraToggle::Original;
-                self.ultrawide_canvas = None;
                 self.ultrawide_canvas_scene = None;
-                self.ultrawide_layers = crate::layer_canvas::LayerCanvases::default();
+                self.ultrawide_layers = rf_enhance::canvas::LayerCanvases::default();
                 self.ultrawide_render = None;
                 self.ultrawide_texture = None;
                 self.fm13_message = None;
@@ -4237,7 +4234,6 @@ impl RetroForgeApp {
         if let Some(snapshot) = latest_canvas {
             // Ticket W2-14's lesson, mirrored: the reply has now landed.
             self.awaiting_canvas_snapshot = false;
-            self.ultrawide_canvas = Some(snapshot.canvas);
             self.ultrawide_canvas_scene = snapshot.scene;
             self.ultrawide_layers = *snapshot.layers;
             // Ticket W30-03: a snapshot the widescreen margins asked for
@@ -4363,7 +4359,6 @@ impl RetroForgeApp {
                             self.widen_margins(
                                 native.0,
                                 native.1,
-                                msg.canvas_frame,
                                 msg.layer_frames.as_ref(),
                                 (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
                                 &msg.line_palettes,
@@ -4838,7 +4833,7 @@ impl RetroForgeApp {
     }
 
     /// Ticket W4-03e acceptance criterion 1: translate the current
-    /// [`Self::ultrawide_canvas`] into a `CompositeLayer`-composited RGBA
+    /// map canvas of [`Self::ultrawide_layers`] into a `CompositeLayer`-composited RGBA
     /// buffer (`crate::enhanced_view::compose_ultrawide` — this crate is
     /// the mediator, `ARCHITECTURE.md` §3), upload it as
     /// [`Self::ultrawide_texture`], and surface any FM-13 reduction
@@ -4854,9 +4849,10 @@ impl RetroForgeApp {
             self.fm13_message = None;
             return;
         };
-        let Some(canvas) = &self.ultrawide_canvas else {
-            return;
-        };
+        // A snapshot with nothing stitched yet composes to the specific
+        // "canvas is empty" reason, not to silence.
+        let empty = rf_enhance::stitcher::Canvas::new();
+        let canvas = self.ultrawide_layers.map_canvas().unwrap_or(&empty);
         // FM-13 POLICY half (`crate::enhanced_view` module doc): the real
         // adapter limit, never a hardcoded constant.
         let policy_max_dim = gpu.adapter_limits.max_texture_dimension_2d;
@@ -5011,7 +5007,7 @@ impl RetroForgeApp {
     /// Ticket W20-17: cut this frame's HUD band for the ultrawide view.
     ///
     /// The separator is given no scroll bands: those are computed on the
-    /// core thread (`crate::canvas_accum`), which reads every frame, and
+    /// core thread (`rf_enhance::canvas`), which reads every frame, and
     /// this thread sees only the latest. A profile declaration wins
     /// without them (`HudSeparator::observe`), so what is lost is the
     /// heuristic's cross-check against it, not the pin.
@@ -5702,7 +5698,7 @@ impl RetroForgeApp {
         // photographing the workspace at frame 308 of a live session
         // against a canvas the same tour rendered in full at frame 1200.
         //
-        // Same throttle either way: `CanvasAccumulator::current_canvas`
+        // Same throttle either way: `CanvasModel::current_canvases`
         // clones the whole stitched canvas ("tens of MB/s for a level of
         // any real size", W4-03e), so driving it from tab visibility must
         // keep the interval, not drop it — which is why this is one
@@ -10809,16 +10805,12 @@ impl RetroForgeApp {
             .as_ref()
             .and_then(|(p, _)| p.superfx_polygons.as_ref())
             .and_then(crate::gsu_poly::observer_config);
-        // Ticket W32-07/W32-09: the `[scout]` recipe. A NES plan stitches with
-        // the composite canvas (the core's own scroll events).
-        self.scout_plan = matched.as_ref().and_then(|(p, _)| {
-            let plan = crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?);
-            Some(if p.meta.console == rf_profiles::Console::Nes {
-                plan.composite()
-            } else {
-                plan
-            })
-        });
+        // Ticket W32-07/W32-09: the `[scout]` recipe (one plan type for both
+        // consoles; the scout places a NES machine by the core's own scroll
+        // events and a SNES one by layer registers).
+        self.scout_plan = matched
+            .as_ref()
+            .and_then(|(p, _)| Some(crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?)));
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -12085,8 +12077,7 @@ impl RetroForgeApp {
         &mut self,
         rgba: Vec<u8>,
         size: (usize, usize),
-        position: Option<crate::canvas_accum::FramePosition>,
-        layer_frames: Option<&crate::layer_canvas::LayerFrames>,
+        layer_frames: Option<&rf_enhance::canvas::LayerFrames>,
         (backdrops, order, line_regs): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
     ) -> (Vec<u8>, (usize, usize)) {
@@ -12108,16 +12099,16 @@ impl RetroForgeApp {
         // A scene change asks for the new scene's canvas at once instead of
         // waiting out the refresh interval; until it lands `scene_fresh`
         // is false and the margins fall back to VRAM.
-        let scene = position.map(|p| p.scene);
+        // Where the picture's left edge sits on the canvases (one reference
+        // point; each layer is looked up at its own origin).
+        let position = layer_frames.and_then(|f| Some((f.scene, f.reference_origin()?)));
+        let scene = position.map(|(scene, _)| scene);
         if scene != self.widescreen_scene {
             self.widescreen_scene = scene;
             self.ultrawide_refresh_countdown = 0;
         }
         let have_level = !self.force_vram_margins && self.level_image().is_some();
-        let canvas_ready = self
-            .ultrawide_canvas
-            .as_ref()
-            .is_some_and(|c| c.width() > 0 && c.height() > 0);
+        let canvas_ready = self.ultrawide_layers.any();
         let facts = MarginFacts {
             level_decoded: have_level,
             camera_known: self.level_camera.is_some(),
@@ -12150,86 +12141,32 @@ impl RetroForgeApp {
                 };
                 fill_margins_keeping(&rgba, w, h, out_w, (cx, cy), &world, &keep, keep_w)
             }
-            (MarginSource::StitchedCanvas, Some(pos)) => {
-                let Some(canvas) = self.ultrawide_canvas.as_ref() else {
+            (MarginSource::StitchedCanvas, Some((_, origin))) => {
+                // Ticket W33-03: one compose for both consoles (the NES's
+                // whole picture is layer 0). Each layer is read at its own
+                // origin and its own row's scroll; the row's registers and
+                // palette make it the picture's own colour math, and what no
+                // layer knows shows the row's backdrop colour.
+                let (Some(frames), layers) = (layer_frames, &self.ultrawide_layers) else {
                     return (rgba, size);
                 };
-                let top = pos.origin.1;
-                // Ticket W31-07: per-layer canvases of this very scene win
-                // (each layer placed by its own scroll, backdrop colour
-                // where nothing is known); the composite canvas is the
-                // fallback for a scene without them.
-                if let Some(frames) = layer_frames.filter(|f| {
-                    f.scene == pos.scene
-                        && self.ultrawide_layers.any()
-                        && f.origins.iter().any(Option::is_some)
-                }) {
-                    let layers = &self.ultrawide_layers;
-                    let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
-                        let (dx, dy) = (wx - pos.origin.0, wy - top);
-                        let row = usize::try_from(dy).unwrap_or(0);
-                        let palette = palettes.get(row).and_then(Option::as_ref);
-                        // Ticket W33-01: with the row's registers, compose
-                        // the margin as the picture is (sub-screen layers
-                        // behind the main ones, through colour math).
-                        if let (Some(regs), Some(pal)) =
-                            (line_regs.get(row).and_then(Option::as_ref), palette)
-                        {
-                            return Some(crate::layer_canvas::margin_color(
-                                layers,
-                                frames,
-                                row,
-                                dx,
-                                order.get(row),
-                                regs,
-                                pal,
-                            ));
-                        }
-                        // Ticket W32-08: the layer order of THIS row, from
-                        // the picture's own evidence.
-                        let Some(cell) = crate::layer_canvas::front_layer_pixel_in(
-                            layers,
-                            |n| frames.origin_at(n, row),
-                            dx,
-                            dy,
-                            order.get(row),
-                            0x0F,
-                        ) else {
-                            // Nothing known: the row's own backdrop colour.
-                            return Some(
-                                backdrops
-                                    .get(row)
-                                    .copied()
-                                    .flatten()
-                                    .unwrap_or_else(|| rf_renderer::resolve_index(0, palette)),
-                            );
-                        };
-                        // Ticket W33-02: with the palette the cell was seen
-                        // under, not the row's current one.
-                        Some(match palette {
-                            Some(pal) => rf_renderer::bgr555_to_rgb(
-                                layers.palettes.word(&cell, pal),
-                                pal.brightness,
-                            ),
-                            None => rf_renderer::resolve_index(cell.palette_index, None),
-                        })
-                    };
-                    let filled =
-                        fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w);
-                    return (filled, (out_w, h));
-                }
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
-                    let row = usize::try_from(wy - top).unwrap_or(0);
-                    let palette = palettes.get(row).and_then(Option::as_ref);
-                    // Ticket W33-02: nothing known here shows the row's own
-                    // backdrop colour, not black (a NES cell is already a
-                    // master-colour value, so it needs no palette snapshot).
-                    let Some(cell) = canvas.get(wx, wy) else {
-                        return backdrops.get(row).copied().flatten();
+                    let (dx, dy) = (wx - origin.0, wy - origin.1);
+                    let row = usize::try_from(dy).unwrap_or(0);
+                    let facts = rf_enhance::canvas::RowFacts {
+                        backdrop: backdrops.get(row).copied().flatten(),
+                        order: order.get(row),
+                        regs: line_regs.get(row).and_then(Option::as_ref),
+                        palette: palettes
+                            .get(row)
+                            .and_then(Option::as_ref)
+                            .map(|p| (&p.words, p.brightness)),
                     };
-                    Some(rf_renderer::resolve_index(cell.palette_index, palette))
+                    rf_enhance::canvas::margin_pixel(layers, frames, row, dx, &facts, &|i| {
+                        rf_renderer::resolve_index(i, None)
+                    })
                 };
-                fill_margins_keeping(&rgba, w, h, out_w, pos.origin, &world, &keep, keep_w)
+                fill_margins_keeping(&rgba, w, h, out_w, origin, &world, &keep, keep_w)
             }
             _ => fill_margins_keeping(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep, keep_w),
         };
@@ -13186,7 +13123,6 @@ impl RetroForgeApp {
             prg_ram: Box::new([0u8; 0x2000]),
             sprite_height_px: 8,
             mode7,
-            canvas_frame: None,
             layer_frames: None,
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
@@ -15098,7 +15034,7 @@ impl RetroForgeApp {
     /// set_event_mask` always re-asserts the camera baseline regardless of
     /// what's requested here (that function's own doc), so narrowing to
     /// `NONE` when every debug window is closed can never starve
-    /// `crate::canvas_accum`.
+    /// `rf_enhance::canvas`.
     /// Turn the SNES debug-memory capture on or off to match what is
     /// docked (ticket W13-02b) — the same shape as
     /// [`Self::sync_event_subscription`], and for the same reason: 128 KiB

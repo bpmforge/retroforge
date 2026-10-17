@@ -90,7 +90,7 @@ use rf_nes::{Cpu, NesBus, NesLoadError};
 const CYCLE_BUDGET: u64 = 4 * 29_781;
 
 /// `CoreEvent` subscriptions the enhanced-camera pipeline
-/// (`crate::canvas_accum`) needs on every frame, unconditionally — turned
+/// (`rf_enhance::canvas`) needs on every frame, unconditionally — turned
 /// on once by [`EmuStepper::from_ines_bytes`] below and re-asserted by
 /// every [`EmuStepper::set_event_mask`] call (ticket W4-06a) so a
 /// debugger-driven mask change can never silently starve scene tracking.
@@ -505,7 +505,7 @@ impl EmuStepper {
         let mut core = rf_nes::core::NesCore::from_ines_bytes(raw)?;
         let bus = core.bus_mut();
         // Ticket W4-03e: the enhanced camera's scroll/scene tracking
-        // (`crate::canvas_accum::CanvasAccumulator`, driven by
+        // (`rf_enhance::canvas::CanvasModel`, driven by
         // `crate::core_thread`) needs `CoreEvent::Scanline`/`ScrollWrite`
         // on every `FrameBundle` — before this, `EventMask` stayed at its
         // `CoreConfig` default (`EventMask::NONE`, `rf_core_api::core`'s own
@@ -1499,7 +1499,7 @@ impl EmuStepper {
     /// event_mask = mask`) — a bare passthrough here would let a debugger
     /// toggle silently drop [`CAMERA_BASELINE_EVENT_MASK`], the bits
     /// `Self::from_ines_bytes` turns on unconditionally for the enhanced-
-    /// camera pipeline (`crate::canvas_accum`), breaking scene tracking the
+    /// camera pipeline (`rf_enhance::canvas`), breaking scene tracking the
     /// moment the event panel is opened once. Always unioning the baseline
     /// back in makes that invariant hold by construction rather than by
     /// caller discipline.
@@ -2401,7 +2401,7 @@ mod tests {
     /// [`CAMERA_BASELINE_EVENT_MASK`] even when the caller asks for
     /// `EventMask::NONE` — otherwise a debugger session that ever narrows
     /// the mask (e.g. closing the event-viewer panel) would silently starve
-    /// `crate::canvas_accum`'s scene tracking for the rest of the session.
+    /// `rf_enhance::canvas`'s scene tracking for the rest of the session.
     /// `Scanline` is code-independent (driven by PPU tick logic, not game
     /// code — unlike `ScrollWrite`, which the all-zero synthetic NROM never
     /// triggers), so a full stepped frame is guaranteed to emit at least

@@ -298,7 +298,7 @@ fn snapshot(h: &mut H, _tag: &str) {
 }
 
 /// Step exactly one frame and let the UI consume it.
-fn step_from(h: &mut H, _state: &()) {
+fn step_from(h: &mut H) {
     h.state().send_core_command_for_test(CoreCommand::StepFrame);
     run_n(h, 120);
 }
@@ -367,12 +367,12 @@ fn shot_hdmode7(readme: &mut Vec<String>) {
     wait(&mut h, "fzero", 400);
     hold_for(&mut h, &[K::X], 240);
     release_all(&mut h);
-    let st = snapshot(&mut h, "hdm7");
+    snapshot(&mut h, "hdm7");
     // Off: native.
     h.state_mut().set_mode_for_test(Mode::Enhanced);
     h.state_mut().set_hd_mode7_for_test(false, 4);
     run_n(&mut h, 10);
-    step_from(&mut h, &st);
+    step_from(&mut h);
     let Some(off) = grab(&h) else {
         return skip(readme, name, "no frame");
     };
@@ -382,7 +382,7 @@ fn shot_hdmode7(readme: &mut Vec<String>) {
     });
     h.state_mut().set_hd_mode7_for_test(true, 4);
     run_n(&mut h, 20);
-    step_from(&mut h, &st);
+    step_from(&mut h);
     let Some(on) = grab(&h) else {
         return skip(readme, name, "no frame");
     };
@@ -712,8 +712,8 @@ fn backdrop_agreement(readme: &mut Vec<String>, tag: &str, on: &Pic, rows: &[Opt
     let (mut exact, mut near, mut none, mut skipped) = (0, 0, 0, 0);
     let mut black = 0usize;
     let mut sky_cols = 0usize;
-    for y in 0..on.h.min(rows.len()) {
-        let Some(c) = rows[y] else {
+    for (y, &row) in rows.iter().enumerate().take(on.h) {
+        let Some(c) = row else {
             skipped += 1;
             continue;
         };
@@ -1099,8 +1099,8 @@ fn shot_hd2d(readme: &mut Vec<String>) {
         "hd2d: decoded level {}",
         h.state().has_decoded_level_for_test()
     );
-    let st = snapshot(&mut h, "zelda");
-    step_from(&mut h, &st);
+    snapshot(&mut h, "zelda");
+    step_from(&mut h);
     let Some(off) = grab_play_area(&mut h) else {
         return skip(readme, name, "no play rect");
     };
@@ -1109,8 +1109,8 @@ fn shot_hd2d(readme: &mut Vec<String>) {
     }
     h.state_mut().toggle_hd2d_for_test();
     run_n(&mut h, 30);
-    step_from(&mut h, &st);
-    step_from(&mut h, &st);
+    step_from(&mut h);
+    step_from(&mut h);
     let on = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
     println!(
         "hd2d: opaque diorama px {:?}",
@@ -1144,10 +1144,10 @@ fn shot_lens(readme: &mut Vec<String>) {
     wait(&mut h, "smwlens", 300);
     hold_for(&mut h, &[K::ArrowRight, K::A], 120);
     release_all(&mut h);
-    let st = snapshot(&mut h, "lens");
+    snapshot(&mut h, "lens");
     h.state_mut().edit_lens_for_test(|s| s.lens_clear());
     run_n(&mut h, 10);
-    step_from(&mut h, &st);
+    step_from(&mut h);
     let Some(off) = grab_play_area(&mut h) else {
         return skip(readme, name, "no play rect");
     };
@@ -1160,8 +1160,8 @@ fn shot_lens(readme: &mut Vec<String>) {
         s.lens_time_of_day = 20;
     });
     run_n(&mut h, 30);
-    step_from(&mut h, &st);
-    step_from(&mut h, &st);
+    step_from(&mut h);
+    step_from(&mut h);
     let on = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
     let d = out_dir();
     save(&d.join("lens-off.png"), &off.opaque());
@@ -1202,15 +1202,15 @@ fn shot_superfx_hd(readme: &mut Vec<String>) {
     h.state_mut().resume_for_test();
     let t = h.state().frame_count_for_test() + 120;
     run_frames(&mut h, t, Duration::from_secs(120));
-    let st = snapshot(&mut h, "sfx");
-    step_from(&mut h, &st);
+    snapshot(&mut h, "sfx");
+    step_from(&mut h);
     let Some(on) = grab(&h) else {
         return skip(readme, name, "no frame");
     };
     h.state_mut()
         .set_superfx_hd_for_test(false, 3, Mode::Enhanced, true);
     run_n(&mut h, 20);
-    step_from(&mut h, &st);
+    step_from(&mut h);
     let Some(off) = grab(&h) else {
         return skip(readme, name, "no frame");
     };
@@ -1262,7 +1262,7 @@ fn shot_superfx_gpu(readme: &mut Vec<String>) {
     h.state_mut().resume_for_test();
     let t = h.state().frame_count_for_test() + 120;
     run_frames(&mut h, t, Duration::from_secs(120));
-    let st = snapshot(&mut h, "sfx-gpu");
+    snapshot(&mut h, "sfx-gpu");
     let mut shots: Vec<(&str, Pic, Pic)> = Vec::new();
     for (tag, scale, msaa) in [
         ("4x-smooth", 4u8, 4u8),
@@ -1272,7 +1272,7 @@ fn shot_superfx_gpu(readme: &mut Vec<String>) {
         h.state_mut()
             .set_superfx_hd_for_test(true, scale, Mode::Enhanced, true);
         h.state_mut().set_superfx_hd_msaa_for_test(msaa);
-        step_from(&mut h, &st);
+        step_from(&mut h);
         let readout = h.state().superfx_hd_readout_for_test().unwrap_or_default();
         println!("superfx-gpu {tag}: {readout}");
         if !readout.contains("HD (GPU") {

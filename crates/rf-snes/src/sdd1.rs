@@ -527,7 +527,7 @@ mod tests {
         r.write(0x4801, 0xFF);
         r.clear_transfer_bit(3);
         assert_eq!(r.read(0x4800), 0xFF);
-        assert_eq!(r.read(0x4801), 0xFF & !(1 << 3));
+        assert_eq!(r.read(0x4801), !(1 << 3));
         assert!(!r.channel_decompresses(3));
         assert!(r.channel_decompresses(4));
     }
@@ -583,17 +583,10 @@ mod tests {
     // module happens to produce").
     // ------------------------------------------------------------------
 
+    #[derive(Default)]
     struct MemStream {
         buf: Vec<u8>,
         at: usize,
-    }
-    impl Default for MemStream {
-        fn default() -> Self {
-            Self {
-                buf: Vec::new(),
-                at: 0,
-            }
-        }
     }
     impl rf_core_api::StateWriter for MemStream {
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), StateError> {

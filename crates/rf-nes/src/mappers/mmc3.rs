@@ -1094,9 +1094,9 @@ mod tests {
         m.cpu_write(0xA000, 0x01, 0); // would be horizontal on plain MMC3
                                       // A12 not inverted: R0 -> $2000/$2400, R1 -> $2800/$2C00.
         select(&mut m, 0, 0x80 | 2);
-        select(&mut m, 1, 0x00 | 4);
+        select(&mut m, 1, 4);
         assert_eq!(m.mirroring(), Mirroring::PerTable([1, 1, 0, 0]));
-        select(&mut m, 0, 0x00 | 2);
+        select(&mut m, 0, 2);
         select(&mut m, 1, 0x80 | 4);
         assert_eq!(m.mirroring(), Mirroring::PerTable([0, 0, 1, 1]));
         // A12 inverted: R2..R5 -> one table each.

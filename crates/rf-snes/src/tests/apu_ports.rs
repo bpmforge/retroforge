@@ -1146,7 +1146,7 @@ fn the_immediate_run_handoff_is_not_observable_before_its_listed_cycles_elapse()
     apu.cpu_write_port(1, 0x00);
     apu.cpu_write_port(0, 0xCC);
     apu.poll_boot();
-    for _ in 0..u16::from(crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES) - 1 {
+    for _ in 0..crate::apu::boot::RUN_HANDOFF_IMMEDIATE_CYCLES - 1 {
         apu.poll_boot();
         assert!(
             !apu.boot.is_running(),
@@ -1172,7 +1172,7 @@ fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
     apu.cpu_write_port(3, 0x02);
     apu.cpu_write_port(0, 0xCC);
     apu.poll_boot();
-    for _ in 0..u16::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) {
+    for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
         apu.poll_boot();
     }
     assert_eq!(apu.ports_out[0], 0xCC, "the $CC echo settled first");
@@ -1180,7 +1180,7 @@ fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
     apu.cpu_write_port(1, 0xAB);
     apu.cpu_write_port(0, 0x00);
     apu.poll_boot();
-    for _ in 0..u16::from(BYTE_HANDSHAKE_CYCLES) - 1 {
+    for _ in 0..BYTE_HANDSHAKE_CYCLES - 1 {
         apu.poll_boot();
         assert_eq!(
             apu.ports_out[0], 0xCC,
@@ -1218,7 +1218,7 @@ fn the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes() {
     apu.cpu_write_port(3, 0x02);
     apu.cpu_write_port(0, 0xCC);
     apu.poll_boot();
-    for _ in 0..u16::from(RUN_HANDOFF_AFTER_TRANSFER_CYCLES) {
+    for _ in 0..RUN_HANDOFF_AFTER_TRANSFER_CYCLES {
         apu.poll_boot();
     }
     assert_eq!(apu.ports_out[0], 0xCC);
@@ -1227,7 +1227,7 @@ fn the_data_byte_is_fetched_after_the_counter_not_when_the_counter_changes() {
     apu.cpu_write_port(0, 0x00);
     apu.poll_boot();
     apu.cpu_write_port(1, 0xAB);
-    for _ in 0..u16::from(BYTE_HANDSHAKE_CYCLES) {
+    for _ in 0..BYTE_HANDSHAKE_CYCLES {
         apu.poll_boot();
     }
     assert_eq!(apu.ports_out[0], 0x00, "the byte was accepted");

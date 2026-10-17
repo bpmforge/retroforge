@@ -14,6 +14,7 @@
 //! Do not add public API here without a ticket in plan.json.
 
 mod cart;
+pub mod color;
 mod core;
 mod cpu_regs;
 mod error;
