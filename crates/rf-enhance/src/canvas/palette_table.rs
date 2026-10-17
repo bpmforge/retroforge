@@ -25,7 +25,7 @@
 //! * **Where the id lives.** In `PpuPixel::sprite_id` of the LAYER canvas
 //!   cells only. That field is documented as "the OAM index of the sprite,
 //!   `None` for background/backdrop pixels", and sprites are never stitched
-//!   (`rf_enhance::stitcher` module doc), so on a canvas cell it is free; the
+//!   (`crate::stitcher` module doc), so on a canvas cell it is free; the
 //!   cell type, every blit/merge/crop and the core's pixels (hence the
 //!   accuracy hash) stay untouched. [`tag`] and [`PaletteTable::word`] are the
 //!   only readers and writers.
@@ -37,8 +37,13 @@
 use std::collections::HashMap;
 
 use rf_core_api::PpuPixel;
-use rf_renderer::palette::LINE_PALETTE_ENTRIES;
-use rf_renderer::LinePalette;
+
+/// Entries in a written palette: the SNES's CGRAM holds 256 words.
+pub const LINE_PALETTE_ENTRIES: usize = 256;
+
+/// One row's written palette (raw BGR555 words, fullsnes "SNES Color
+/// Palette").
+pub type Cgram = [u16; LINE_PALETTE_ENTRIES];
 
 /// Most palettes one scene remembers (ids are `u8`).
 pub const MAX_PALETTES: usize = 256;
@@ -86,7 +91,7 @@ impl PaletteTable {
 
     /// The snapshot with this id.
     #[must_use]
-    pub fn get(&self, id: u8) -> Option<&[u16; LINE_PALETTE_ENTRIES]> {
+    pub fn get(&self, id: u8) -> Option<&Cgram> {
         self.palettes.get(usize::from(id))
     }
 
@@ -112,11 +117,11 @@ impl PaletteTable {
     /// row's `current` palette (a cell with no id, or an id from a table that
     /// has no such entry).
     #[must_use]
-    pub fn word(&self, cell: &PpuPixel, current: &LinePalette) -> u16 {
+    pub fn word(&self, cell: &PpuPixel, current: &Cgram) -> u16 {
         let index = usize::from(cell.palette_index);
         cell.sprite_id
             .and_then(|id| self.get(id))
-            .map_or(current.words[index], |w| w[index])
+            .map_or(current[index], |w| w[index])
     }
 }
 
@@ -190,7 +195,7 @@ mod tests {
         let mut t = PaletteTable::new();
         let old = t.intern(&pal(0x1111)).unwrap();
         let new = t.intern(&pal(0x2222)).unwrap();
-        let current = LinePalette::from_words(&pal(0x2222), 15);
+        let current = pal(0x2222);
         assert_eq!(t.word(&cell(1, Some(old)), &current), 0x1111);
         assert_eq!(t.word(&cell(1, Some(new)), &current), 0x2222);
         // No id, or an id this table does not have: the current palette.

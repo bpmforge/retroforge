@@ -40,6 +40,12 @@ pub struct Sink {
     pub bundle: FrameBundleBuilder,
 }
 
+impl Default for Sink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sink {
     pub fn new() -> Self {
         Self {
@@ -226,10 +232,10 @@ fn observe_camera() {
         for k in -3i32..=3 {
             let mut hit = 0;
             let mut n = 0;
-            for f in 4..hofs.len() - 4 {
+            for (f, &hofs_f) in hofs.iter().enumerate().take(hofs.len() - 4).skip(4) {
                 let g = (f as i32 + k) as usize;
                 n += 1;
-                if w16(g, off) == hofs[f] {
+                if w16(g, off) == hofs_f {
                     hit += 1;
                 }
             }
@@ -260,8 +266,8 @@ fn observe_camera() {
 // ----------------------------------------------------------- scout runs
 
 use retroforge::core_thread::snes_layer_scrolls;
-use retroforge::layer_canvas::{LayerCanvasAccumulator, LayerScroll};
 use retroforge::scout::{Scout, ScoutDir, ScoutPlan, ScoutStatus, ScoutStrategy};
+use rf_enhance::canvas::{CanvasModel, FrameFeed, LayerScroll};
 use rf_enhance::scene_identity::SceneId;
 
 type Scrolls = Option<[Option<LayerScroll>; 4]>;
@@ -272,7 +278,6 @@ fn plan(strategy: ScoutStrategy, player: &[u32], camera: &[u32], step: u16) -> S
         camera: camera.to_vec(),
         player_x: player.to_vec(),
         player_x_hi: Vec::new(),
-        composite: false,
         step_px: step,
         frame_budget: 1500,
         stall_frames: 60,
@@ -296,7 +301,7 @@ fn profile_plan() -> ScoutPlan {
 fn live_frame(
     st: &mut EmuStepper,
     sink: &mut Sink,
-    acc: &mut LayerCanvasAccumulator,
+    acc: &mut CanvasModel,
     prev: &mut Scrolls,
     keys: &[SnesButton],
 ) {
@@ -304,15 +309,19 @@ fn live_frame(
     let bundle = sink.bundle.take(st.frame_count());
     let now = snes_layer_scrolls(st);
     let drawn_with = std::mem::replace(prev, now);
-    acc.observe_frame(&bundle, SceneId(1), drawn_with.as_ref());
+    acc.observe_frame_in(
+        &bundle,
+        SceneId(1),
+        &FrameFeed::registers(drawn_with.as_ref()),
+    );
 }
 
-fn bg1(acc: &LayerCanvasAccumulator) -> Option<&rf_enhance::stitcher::Canvas> {
+fn bg1(acc: &CanvasModel) -> Option<&rf_enhance::stitcher::Canvas> {
     acc.scene_canvases(1).map(|s| &s[0])
 }
 
 /// BG1 cells known to both: `(compared, equal by palette index)`.
-fn compare_bg1(a: &LayerCanvasAccumulator, b: &LayerCanvasAccumulator) -> (usize, usize) {
+fn compare_bg1(a: &CanvasModel, b: &CanvasModel) -> (usize, usize) {
     let (Some(ca), Some(cb)) = (bg1(a), bg1(b)) else {
         return (0, 0);
     };
@@ -334,7 +343,7 @@ struct Run {
     secs: f64,
 }
 
-fn run_scout(rom: &[u8], st: &EmuStepper, live: &LayerCanvasAccumulator, p: ScoutPlan) -> Run {
+fn run_scout(rom: &[u8], st: &EmuStepper, live: &CanvasModel, p: ScoutPlan) -> Run {
     let snap = st.snapshot().expect("snapshot");
     let t0 = std::time::Instant::now();
     let mut scout = Scout::start(rom, snap, p, live, SceneId(1), (W, H)).expect("scout");
@@ -352,7 +361,7 @@ fn run_scout(rom: &[u8], st: &EmuStepper, live: &LayerCanvasAccumulator, p: Scou
     }
 }
 
-fn width(acc: &LayerCanvasAccumulator) -> usize {
+fn width(acc: &CanvasModel) -> usize {
     bg1(acc).map_or(0, |c| c.width())
 }
 
@@ -368,7 +377,7 @@ fn scout_strategies() {
     let rom = retroforge::rom_open::load_rom_bytes(&path).expect("rom");
     let (mut st, mut sink) = open().unwrap();
     reach_yi1(&mut st, &mut sink);
-    let mut live = LayerCanvasAccumulator::new();
+    let mut live = CanvasModel::new();
     let mut prev: Scrolls = snes_layer_scrolls(&st);
     // Frame 0 of the reference walk: the walk below replays the observed
     // run exactly (an enemy stands next to Mario at the start).
@@ -408,7 +417,7 @@ fn scout_strategies() {
             r.scout.frames_run(),
             r.secs,
             r.scout.frames_run() as f64 / r.secs,
-            width(r.scout.accumulator())
+            width(r.scout.model())
         );
         runs.push((label, r));
     }
@@ -435,7 +444,7 @@ fn scout_strategies() {
         dump_canvas(c, "live-walk");
     }
     for (label, r) in &runs {
-        let (both, same) = compare_bg1(r.scout.accumulator(), &live);
+        let (both, same) = compare_bg1(r.scout.model(), &live);
         let pct = if both > 0 {
             100.0 * same as f64 / both as f64
         } else {
@@ -447,12 +456,12 @@ fn scout_strategies() {
         );
     }
     let (_, profile_run) = runs.last().unwrap();
-    if let Some(c) = bg1(profile_run.scout.accumulator()) {
+    if let Some(c) = bg1(profile_run.scout.model()) {
         dump_canvas(c, "scout-profile");
     }
 
     // What the recipes did, as assertions (the evidence in the note).
-    let w = |i: usize| width(runs[i].1.scout.accumulator());
+    let w = |i: usize| width(runs[i].1.scout.model());
     assert!(
         w(0) < 300,
         "writing the camera is snapped back: {} px",
@@ -464,7 +473,7 @@ fn scout_strategies() {
         "the profile's recipe covers the level: {} px",
         w(3)
     );
-    let (both, same) = compare_bg1(profile_run.scout.accumulator(), &live);
+    let (both, same) = compare_bg1(profile_run.scout.model(), &live);
     assert!(
         both > 30_000,
         "the walk and the scout overlap a lot: {both}"
@@ -618,7 +627,7 @@ fn parallax_layers_get_canvases() {
     let views = st.bg_layer_views().expect("snes");
     let enabled: Vec<bool> = views.iter().map(|v| v.enabled).collect();
     println!("layers on the main screen: {enabled:?}");
-    let mut live = LayerCanvasAccumulator::new();
+    let mut live = CanvasModel::new();
     let mut prev: Scrolls = snes_layer_scrolls(&st);
     live_frame(
         &mut st,
@@ -628,7 +637,7 @@ fn parallax_layers_get_canvases() {
         &[SnesButton::Right, SnesButton::B],
     );
     let r = run_scout(&rom, &st, &live, profile_plan());
-    let acc = r.scout.accumulator();
+    let acc = r.scout.model();
     {
         // What the picture itself labels: which layer each pixel's winner is.
         let b = sink.bundle.take(st.frame_count());

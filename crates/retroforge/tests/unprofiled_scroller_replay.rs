@@ -28,9 +28,9 @@
 
 use std::path::{Path, PathBuf};
 
-use retroforge::canvas_accum::CanvasAccumulator;
 use retroforge::stepper::EmuStepper;
 use rf_core_api::InputFrame;
+use rf_enhance::canvas::{CanvasModel, FrameFeed};
 use rf_input::replay::{ReplayHeader, ReplayLog, ReplayRecorder, StartType};
 
 /// Long enough for the camera to cross several screens' worth of level,
@@ -137,7 +137,7 @@ fn the_checked_in_replay_grows_a_canvas_under_one_stable_scene() {
     // `None` cache: this test is about the canvas GROWING during one
     // session, which is a different claim from W4-03b's cross-restart
     // persistence and is gated there.
-    let mut accum = CanvasAccumulator::new(actual, None);
+    let mut accum = CanvasModel::with_cache(actual, None);
     let mut builder = rf_core_api::FrameBundleBuilder::new(
         rf_renderer::frame::NES_WIDTH as u16,
         rf_renderer::frame::NES_HEIGHT as u16,
@@ -149,12 +149,17 @@ fn the_checked_in_replay_grows_a_canvas_under_one_stable_scene() {
     for (i, input) in log.frames.iter().enumerate() {
         stepper.latch_and_advance_frame(*input, &mut builder);
         let bundle = builder.take(stepper.frame_count());
-        let id = accum.observe_frame(&bundle, &[]);
+        let id = accum.observe_frame(&bundle, &FrameFeed::bands());
         if !scene_ids.contains(&id) {
             scene_ids.push(id);
         }
         if i % 100 == 0 {
-            sizes.push(accum.current_canvas().map_or(0, |c| c.width()));
+            sizes.push(
+                accum
+                    .current_canvases()
+                    .map_canvas()
+                    .map_or(0, |c| c.width()),
+            );
         }
     }
 

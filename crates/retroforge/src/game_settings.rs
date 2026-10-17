@@ -1693,9 +1693,11 @@ mod mode_and_feature_persistence_tests {
     /// Ticket W27-05: pins and their corner survive a save.
     #[test]
     fn pinned_items_round_trip() {
-        let mut s = GameSettings::default();
-        s.pinned_items = vec!["lives".into(), "coins".into()];
-        s.info_corner = InfoCorner::BottomRight;
+        let s = GameSettings {
+            pinned_items: vec!["lives".into(), "coins".into()],
+            info_corner: InfoCorner::BottomRight,
+            ..GameSettings::default()
+        };
         let back = GameSettings::from_text(&s.to_text()).expect("parses");
         assert_eq!(back.pinned_items, ["lives", "coins"]);
         assert_eq!(back.info_corner, InfoCorner::BottomRight);

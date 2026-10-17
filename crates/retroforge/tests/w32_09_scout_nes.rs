@@ -16,13 +16,24 @@
 
 use std::path::{Path, PathBuf};
 
-use retroforge::canvas_accum::CanvasAccumulator;
 use retroforge::scout::{Scout, ScoutDir, ScoutPlan, ScoutStatus, ScoutStrategy};
 use retroforge::stepper::EmuStepper;
 use rf_core_api::{CoreSink, FrameBundle, FrameBundleBuilder, InputFrame, PpuPixel};
+use rf_enhance::canvas::{CanvasModel, FrameFeed};
+use rf_enhance::scene_identity::SceneId;
 
 pub const W: u16 = 256;
 pub const H: u16 = 240;
+
+/// Layer 0 of a scene: the NES's whole picture.
+fn layer0(m: &CanvasModel, scene: SceneId) -> Option<&rf_enhance::stitcher::Canvas> {
+    m.scene_canvases(scene.0).map(|s| &s[0])
+}
+
+/// Where the last frame's picture sits on layer 0.
+fn origin_of(m: &CanvasModel) -> Option<(i64, i64)> {
+    m.frames().and_then(|f| f.origins[0])
+}
 
 fn rom_path(file: &str) -> Option<PathBuf> {
     let root = std::env::var("RF_SCREENS_ROMS_DIR")
@@ -537,7 +548,6 @@ fn smb3_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         camera: Vec::new(),
         player_x: vec![0x0090],
         player_x_hi: vec![0x0075],
-        composite: true,
         step_px: step,
         frame_budget: 1500,
         stall_frames: 60,
@@ -555,15 +565,15 @@ fn scout_run(file: &str, to_level: &str, idle: u32, plan: ScoutPlan, probes: &[u
         return;
     };
     script(&mut st, &mut sink, to_level);
-    let mut live = CanvasAccumulator::new("probe".into(), None);
+    let mut live = CanvasModel::new();
     let mut scene = None;
     for _ in 0..idle {
         let b = frame(&mut st, &mut sink, 0);
-        scene = Some(live.observe_frame(&b, &[]));
+        scene = Some(live.observe_frame(&b, &FrameFeed::bands()));
     }
     let scene = scene.expect("idle frames");
     let snap = st.snapshot().expect("snapshot");
-    let mut scout = Scout::start_composite(
+    let mut scout = Scout::start(
         &retroforge::rom_open::load_rom_bytes(&rom_path(file).unwrap()).unwrap(),
         snap,
         plan,
@@ -572,7 +582,7 @@ fn scout_run(file: &str, to_level: &str, idle: u32, plan: ScoutPlan, probes: &[u
         (W, H),
     )
     .expect("scout");
-    let before = live.scene_canvas(scene).map(|c| (c.width(), c.height()));
+    let before = layer0(&live, scene).map(|c| (c.width(), c.height()));
     println!(
         "live canvas {before:?}, scene {scene:?}, gate $0F={}",
         st.peek_bus(0x0F)
@@ -581,7 +591,7 @@ fn scout_run(file: &str, to_level: &str, idle: u32, plan: ScoutPlan, probes: &[u
     for i in 0..4000u32 {
         let status = scout.step(&none);
         if probes.is_empty() || i % 20 == 0 {
-            let c = scout.accumulator();
+            let c = scout.model();
             let _ = c;
         }
         if i % 10 == 0 && i < 60 {
@@ -604,7 +614,7 @@ fn scout_run(file: &str, to_level: &str, idle: u32, plan: ScoutPlan, probes: &[u
             );
             println!(
                 "   pos {:?} fc={:#04x} 87={:#04x}",
-                scout.frame_position().map(|p| p.origin),
+                scout.frames().and_then(|f| f.origins[0]),
                 scout.peek_word(0xFC) & 0xFF,
                 scout.peek_word(0x87) & 0xFF
             );
@@ -614,10 +624,10 @@ fn scout_run(file: &str, to_level: &str, idle: u32, plan: ScoutPlan, probes: &[u
         }
     }
     println!("ends {:?} frames {}", scout.ends, scout.frames_run());
-    let merged = scout.merge_into_composite(&mut live);
-    let after = live.scene_canvas(scene).map(|c| (c.width(), c.height()));
+    let merged = scout.merge_into(&mut live);
+    let after = layer0(&live, scene).map(|c| (c.width(), c.height()));
     println!("merged {merged} cells; live canvas {before:?} -> {after:?}");
-    if let Some(c) = live.scene_canvas(scene) {
+    if let Some(c) = layer0(&live, scene) {
         for x0 in [300i64, 600, 900, 1500] {
             let mut hist = std::collections::BTreeMap::new();
             for x in x0..x0 + 100 {
@@ -696,7 +706,7 @@ fn smb3_cam() {
     for (name, step, input) in [("poke4", 4u32, 0)] {
         st.restore(&snap).unwrap();
         println!("== {name}");
-        let mut x = 0x20u32 + 0;
+        let mut x = 0x20u32;
         for f in 0..400u32 {
             x += step;
             if step > 0 {
@@ -729,17 +739,17 @@ fn smb3_wrap() {
         return;
     };
     script(&mut st, &mut sink, SMB3_TO_LEVEL);
-    let mut live = CanvasAccumulator::new("probe".into(), None);
+    let mut live = CanvasModel::new();
     let mut last = None;
     for f in 0..600u32 {
         st.poke_bus(0xA2, 0x10);
         let b = frame(&mut st, &mut sink, BTN_RIGHT | BTN_B);
-        let scene = live.observe_frame(&b, &[]);
+        let scene = live.observe_frame(&b, &FrameFeed::bands());
         let cam = i64::from(st.peek_bus(0xFD)) | i64::from(st.peek_bus(0x12)) << 8;
         if f % 25 == 0 || last != Some(scene) {
             println!(
                 "f{f} cam={cam:#06x} pos {:?} scene {scene:?}",
-                live.frame_position().map(|p| p.origin)
+                origin_of(&live)
             );
             last = Some(scene);
         }
@@ -765,7 +775,7 @@ fn smb3_restored() {
         bundle: FrameBundleBuilder::new(W, H),
     };
     let mut x = 0x20u32;
-    let mut acc = CanvasAccumulator::new("p".into(), None);
+    let mut acc = CanvasModel::new();
     let mut prev_frame: Option<FrameBundle> = None;
     for f in 0..300u32 {
         x += 4;
@@ -773,7 +783,7 @@ fn smb3_restored() {
         st2.poke_ram(0x75, (x >> 8) as u8);
         st2.poke_ram(0xA2, 0x28);
         let b = frame(&mut st2, &mut sink2, 0);
-        let sc = acc.observe_frame(&b, &[]);
+        let sc = acc.observe_frame(&b, &FrameFeed::bands());
         if let Some(pv) = prev_frame.take() {
             if (100..110).contains(&f) {
                 let mut best = (0usize, 0i32);
@@ -796,31 +806,31 @@ fn smb3_restored() {
                     "shift f{f}: best {:?} of {}, pos {:?} x90={:#x} fd={:#x}",
                     best,
                     190 * 210,
-                    acc.frame_position().map(|p| p.origin.0),
+                    origin_of(&acc).map(|p| p.0),
                     x,
                     st2.peek_bus(0xFD)
                 );
             }
         }
         prev_frame = Some(b.clone());
-        if f >= 98 && f < 140 {
-            let cv = acc.scene_canvas(sc).unwrap();
+        if (98..140).contains(&f) {
+            let cv = layer0(&acc, sc).unwrap();
             println!(
                 "g{f} canvas(370,400) = {:?} pos {:?}",
                 cv.get(370, 400).map(|p| (p.palette_index, p.layer)),
-                acc.frame_position().map(|p| p.origin)
+                origin_of(&acc)
             );
         }
-        if f >= 100 && f < 104 {
-            let pos = acc.frame_position().unwrap();
-            let cv = acc.scene_canvas(sc).unwrap();
+        if (100..104).contains(&f) {
+            let origin = origin_of(&acc).unwrap();
+            let cv = layer0(&acc, sc).unwrap();
             let px = b.video[170 * 256 + 100];
             println!(
                 "f{f} frame px (100,170)={:?}/{:?} canvas at {:?} = {:?}",
                 px.palette_index,
                 px.layer,
-                (pos.origin.0 + 100, pos.origin.1 + 170),
-                cv.get(pos.origin.0 + 100, pos.origin.1 + 170)
+                (origin.0 + 100, origin.1 + 170),
+                cv.get(origin.0 + 100, origin.1 + 170)
                     .map(|p| (p.palette_index, p.layer))
             );
         }
@@ -837,7 +847,7 @@ fn smb3_restored() {
                 .count();
             println!(
                 "f{f} scene {sc:?} pos {:?} bg px {nb} backdrop px {nd} events {}",
-                acc.frame_position(),
+                origin_of(&acc),
                 events_line(&b)
             );
         }
@@ -845,7 +855,7 @@ fn smb3_restored() {
             save_bundle(&b, &format!("restored-{f}"));
         }
     }
-    let c = acc.scene_canvas(acc.current_scene_id().unwrap()).unwrap();
+    let c = layer0(&acc, acc.current_scene().unwrap()).unwrap();
     for x0 in [0i64, 100, 200, 250, 256, 280, 300] {
         let mut hist = std::collections::BTreeMap::new();
         for x in x0..x0 + 100 {
@@ -951,7 +961,6 @@ fn mm2_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         camera: if cam { vec![0x1F] } else { Vec::new() },
         player_x: vec![0x0460],
         player_x_hi: vec![0x0440],
-        composite: true,
         step_px: step,
         frame_budget: 3000,
         stall_frames: 60,

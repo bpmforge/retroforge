@@ -6,7 +6,7 @@
 //! decoder and the scene construction but may not read a bus or a
 //! filesystem; `rf-nes` may not know profiles exist. This module is the
 //! mediator, exactly as `crate::debug_dock` is for `rf-debugger`'s
-//! viewers and `crate::canvas_accum` is for the stitcher.
+//! viewers and `rf_enhance::canvas` is for the stitcher.
 //!
 //! ## Decoded once, not per frame
 //!

@@ -51,8 +51,8 @@ use rf_renderer::palette::palette_index_to_rgb;
 use rf_renderer::{CompositeLayer, EnhancedCompositor, GpuContext, TargetReduction};
 
 /// Fixed handle: this ticket's shell only ever resolves one live canvas at
-/// a time (the current scene's `Canvas`, `crate::canvas_accum::
-/// CanvasAccumulator::current_canvas`) — `CanvasId` exists for a future
+/// a time (the current scene's `Canvas`, `rf_enhance::canvas::
+/// CanvasModel::current_canvases`) — `CanvasId` exists for a future
 /// multi-canvas registry (`rf_enhance::scene_graph`'s own module doc), not
 /// needed here.
 const LIVE_CANVAS_ID: CanvasId = CanvasId(0);

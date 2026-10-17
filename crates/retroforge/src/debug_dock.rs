@@ -329,7 +329,7 @@ impl DebugPanels {
     /// `CoreCommand::SetEventMask(EventMask::ALL)` (widen) or
     /// `EventMask::NONE` (narrow — `EmuStepper::set_event_mask` always
     /// re-asserts the camera baseline regardless, so this can never starve
-    /// `crate::canvas_accum`).
+    /// `rf_enhance::canvas`).
     #[must_use]
     pub fn wants_event_subscription(&self) -> bool {
         self.dock_state

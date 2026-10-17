@@ -246,7 +246,7 @@ pub fn cache_root(
 /// (acceptance 1: "respecting the existing size-capped LRU"). `None` when
 /// there is nowhere to root it (no config directory on this platform) or
 /// `Cache::open` itself fails — persistence here is strictly additive,
-/// same stance as `CanvasAccumulator`'s own cache: a missing cache means
+/// same stance as `CanvasModel`'s own cache: a missing cache means
 /// first-frame capture degrades to "never captured this session", never a
 /// reason to fail loading a ROM.
 #[must_use]

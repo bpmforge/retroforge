@@ -147,9 +147,7 @@ fn bundle_channels_cost_per_frame() {
     // frame (2 x 272 columns x 224 rows), through `margin_color` against the
     // old `front_layer_pixel` + palette lookup, on canvases with cells in
     // three layers.
-    use retroforge::layer_canvas::{
-        front_layer_pixel, margin_color, LayerCanvases, LayerFrames, LAYERS,
-    };
+    use rf_enhance::canvas::{front_layer_pixel, margin_color, LayerCanvases, LayerFrames, LAYERS};
     let mut canvases: [Option<rf_enhance::stitcher::Canvas>; LAYERS] = [None, None, None, None];
     for (n, slot) in canvases.iter_mut().enumerate().take(3) {
         let mut c = rf_enhance::stitcher::Canvas::new();
@@ -212,7 +210,7 @@ fn bundle_channels_cost_per_frame() {
         let mut acc = 0u64;
         for row in 0..224usize {
             for dx in (-272i64..0).chain(256..528) {
-                let rgb = margin_color(&layers, &frames, row, dx, None, &regs, &palette);
+                let rgb = margin_color(&layers, &frames, row, dx, None, &regs, &palette.words);
                 acc += u64::from(rgb[0]);
             }
         }

@@ -17,9 +17,9 @@
 //! `fn main` is the only place `eframe::run_native` is ever called — never
 //! from a test.
 //!
-//! Ticket W4-03e adds [`canvas_accum`] (per-scene `Canvas` accumulation,
-//! driven on the core thread — see [`core_thread`] for why every frame
-//! must reach it) and [`enhanced_view`] (the `SceneGraph` ->
+//! Ticket W4-03e adds the per-scene canvas model (since W33-03
+//! `rf_enhance::canvas`, driven on the core thread — see [`core_thread`]
+//! for why every frame must reach it) and [`enhanced_view`] (the `SceneGraph` ->
 //! `CompositeLayer` mediator, `ARCHITECTURE.md` §3). Neither touches
 //! `egui`/`eframe`.
 //!
@@ -39,7 +39,6 @@ pub mod art;
 pub mod audio_out;
 pub mod authoring;
 pub mod bindings_store;
-pub mod canvas_accum;
 pub mod clock_governor;
 pub mod controls_panel;
 pub mod core_thread;
@@ -56,7 +55,6 @@ pub mod hash;
 pub mod hd2d_preset;
 pub mod icons;
 pub mod input_map;
-pub mod layer_canvas;
 pub mod lens_view;
 pub mod level_view;
 pub mod library;
@@ -67,7 +65,6 @@ pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod overclock_ui;
 pub mod pacer;
-pub mod palette_table;
 pub mod play_view;
 pub mod profile_builder;
 pub mod profile_editor;
