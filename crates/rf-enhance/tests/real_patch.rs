@@ -24,4 +24,7 @@ fn a_real_published_patch_applies_with_matching_crcs() {
         out.len()
     );
     assert!(!out.is_empty());
+    if let Ok(dest) = std::env::var("RF_PATCH_OUT") {
+        std::fs::write(dest, &out).expect("write patched image");
+    }
 }

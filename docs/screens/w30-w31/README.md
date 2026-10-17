@@ -38,3 +38,9 @@ divider. Use these for the tour.
 
 Not in the tour yet: **HD-2D** (no game has painted heights yet; the
 fixture shot is a flat strip).
+
+## Widescreen patches (2026-10-16)
+
+| File | Game | What it shows |
+|---|---|---|
+| `widesnes-352.png` | Super Mario World (USA) + wide-snes 1.11 patch (user-supplied; soft-patched in memory) | The game itself drawing 352x224 (bsnes-hd convention, W32-03): level, HUD re-centred, and the Banzai Bill sprite live in the right margin. Needed the SA-1 second-reset fix. |
