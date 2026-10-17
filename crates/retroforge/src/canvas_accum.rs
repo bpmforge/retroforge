@@ -198,6 +198,50 @@ impl CanvasAccumulator {
         scene_id
     }
 
+    /// Ticket W32-09: a copy that CONTINUES this accumulator's scroll and
+    /// scene tracking (so a second machine restored from a snapshot of the
+    /// live one is placed on the same world coordinates, and attributed to
+    /// the same scene) but holds no canvases and no cache: what the NES level
+    /// scout stitches into before [`Self::merge_unknown_from`].
+    #[must_use]
+    pub fn fork_for_scout(&self) -> Self {
+        CanvasAccumulator {
+            scroll: self.scroll.clone(),
+            scene_tracker: self.scene_tracker.clone(),
+            canvases: HashMap::new(),
+            cache: None,
+            rom_sha256: String::new(),
+            last_scene_id: self.last_scene_id,
+            last_position: None,
+        }
+    }
+
+    /// Ticket W32-09: put the trackers back to `seed`'s (a
+    /// [`Self::fork_for_scout`] of the live accumulator) and keep the canvases
+    /// stitched so far: a scout's next pass restarts from the snapshot.
+    pub fn rewind_trackers(&mut self, seed: &Self) {
+        self.scroll = seed.scroll.clone();
+        self.scene_tracker = seed.scene_tracker.clone();
+        self.last_scene_id = seed.last_scene_id;
+        self.last_position = None;
+    }
+
+    /// Ticket W32-09: `scene`'s canvas, borrowed (no clone).
+    #[must_use]
+    pub fn scene_canvas(&self, scene: SceneId) -> Option<&Canvas> {
+        self.canvases.get(&scene)
+    }
+
+    /// Ticket W32-09: fill the cells of `scene`'s canvas that are still
+    /// UNKNOWN from `from` (a scout's cells); a cell the live game has seen is
+    /// never touched. A scene with no live canvas takes nothing. Returns the
+    /// number of cells filled.
+    pub fn merge_unknown_from(&mut self, scene: SceneId, from: &Canvas) -> usize {
+        self.canvases
+            .get_mut(&scene)
+            .map_or(0, |live| crate::layer_canvas::merge_unknown(live, from))
+    }
+
     /// Ticket W30-03: where the latest observed frame sits on its canvas.
     #[must_use]
     pub fn frame_position(&self) -> Option<FramePosition> {

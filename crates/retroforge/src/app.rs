@@ -10755,13 +10755,16 @@ impl RetroForgeApp {
             .as_ref()
             .and_then(|(p, _)| p.superfx_polygons.as_ref())
             .and_then(crate::gsu_poly::observer_config);
-        // Ticket W32-07: the `[scout]` recipe (SNES; the NES scout is the
-        // next ticket).
-        self.scout_plan = matched
-            .as_ref()
-            .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
-            .and_then(|(p, _)| p.scout.as_ref())
-            .map(crate::scout::ScoutPlan::from_profile);
+        // Ticket W32-07/W32-09: the `[scout]` recipe. A NES plan stitches with
+        // the composite canvas (the core's own scroll events).
+        self.scout_plan = matched.as_ref().and_then(|(p, _)| {
+            let plan = crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?);
+            Some(if p.meta.console == rf_profiles::Console::Nes {
+                plan.composite()
+            } else {
+                plan
+            })
+        });
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -13808,10 +13811,19 @@ impl RetroForgeApp {
                 // Ticket W32-03: under a widescreen patch the core draws
                 // exactly the patch's own width; anything wider is margin
                 // fill.
-                width: self.patch_widescreen_dots().unwrap_or_else(|| {
-                    self.widescreen_out_width(WIDESCREEN_LINES)
-                        .min(rf_enhance::widescreen::CORE_MAX_WIDTH)
-                }),
+                //
+                // Ticket W32-09: a NES core draws its 256 dots and no more, so
+                // its frame stays 256 wide (a wider buffer would hold the
+                // picture at its left and the margin fill would centre it
+                // 128 dots off); the margins are all canvas.
+                width: if self.console_label == "NES" {
+                    usize::from(rf_enhance::widescreen::NARROW_WIDTH)
+                } else {
+                    self.patch_widescreen_dots().unwrap_or_else(|| {
+                        self.widescreen_out_width(WIDESCREEN_LINES)
+                            .min(rf_enhance::widescreen::CORE_MAX_WIDTH)
+                    })
+                },
                 policies,
                 convention: self.patch_widescreen_dots().is_some(),
             },

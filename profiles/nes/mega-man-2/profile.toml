@@ -149,3 +149,32 @@ type = "u8"
 label = "ammo_crash_bomb"
 notes = "Crash Bomb energy. Watched in play on this dump: 0-28, changed 1 times over 1876 frames."
 source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
+
+# W32-09: the level scout, Air Man's stage, first horizontal section. Every
+# address below was found or confirmed by observation
+# (docs/research/W32-09-scout-nes.md). Writing the camera repeats the first
+# 512 px (the game streams the level only for a player who moves) and poking
+# Mega Man's X does not move the camera, so the scout holds Right on its own
+# pad and Mega Man's Y near the top of the screen (out of reach of the pits
+# and of the Air Tikki).
+[scout]
+strategy = "walk"
+step_px = 1
+frame_budget = 3000
+stall_frames = 60
+settle_frames = 60
+dirs = ["right"]
+
+[[scout.addr]]
+role = "hold"
+addr = 0x04A0
+value = 0x20
+notes = "Mega Man's Y: 0x74 standing on the first platform, 0xf0 once he has fallen into a pit. Held at 0x20 he floats above the obstacles that stop a held Right at 0x60 and lower."
+source = "observed: W32-09 note"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x06C0
+value = 0x1C
+notes = "Mega Man's health, 0x1c (28) at the start of a stage. The scout starts only at full health: health is not an alive flag (it still read 0x1a after the fall that ended a run), so a hurt Mega Man is not scouted."
+source = "observed: W32-09 note"

@@ -611,7 +611,9 @@ impl Heights {
 /// camera so the widescreen margins show real level. Every address row needs
 /// a `source`, like `[[memory_map]]`; addresses are found BY OBSERVATION.
 ///
-/// - `strategy` — `"player_move"` (move the player's X words; the game's own
+/// - `strategy` — `"walk"` (NES, W32-09: no X pokes, the scout's pad holds
+///   the pass's direction so a player who must walk to move the camera does),
+///   `"player_move"` (move the player's X words; the game's own
 ///   follow logic moves the camera and streams the level) or
 ///   `"camera_write"` (write the camera X words directly; most games snap it
 ///   back).
@@ -623,7 +625,9 @@ impl Heights {
 ///   (default 90).
 /// - `dirs` — passes, `"right"` and/or `"left"` (default both).
 /// - `addr` — the rows: `role = "camera_x"` / `"player_x"` (16-bit
-///   little-endian words), `role = "hold"` (a byte with a `value`, written
+///   little-endian words; `"player_x_hi"` names the high byte when it is not
+///   the byte after the `player_x` one, as on the NES games; the NES scout
+///   needs no `camera_x`), `role = "hold"` (a byte with a `value`, written
 ///   every scout frame) and `role = "start_when"` (a byte with a `value`
 ///   the LIVE game must hold before a scout starts, e.g. "player alive").
 #[derive(Debug, Clone, PartialEq, Deserialize)]

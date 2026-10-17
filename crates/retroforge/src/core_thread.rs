@@ -2230,6 +2230,7 @@ fn core_thread_main(
                     stepper: &stepper,
                     rom: &rom,
                     canvases: &mut layer_canvases,
+                    composite: Some(&mut canvas_accum),
                     scene,
                     size: bundle_size,
                     scrolls: snes_layer_scrolls,
@@ -2238,7 +2239,7 @@ fn core_thread_main(
         } else {
             // Paused: a scout worker goes on, so keep merging what it sends.
             if widescreen.is_some() {
-                scout_driver.poll(&mut layer_canvases);
+                scout_driver.poll(&mut layer_canvases, Some(&mut canvas_accum));
             }
             // Paused with no pending commands: don't busy-spin a whole CPU
             // core waiting for the next one.

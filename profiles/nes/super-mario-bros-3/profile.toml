@@ -120,3 +120,42 @@ type = "u8"
 label = "boss_health"
 notes = "watched in play on this dump: 0, changed 0 times over 264 frames"
 source = "https://tasvideos.org/UserFiles/Info/637936906462581196"
+
+# W32-09: the level scout, World 1-1. Every address below was found or
+# confirmed by observation (docs/research/W32-09-scout-nes.md). The game
+# draws the level as the camera moves, so the scout moves Mario's X (the
+# camera follows) and holds his Y near the top of the screen, out of reach of
+# the goombas, the piranha plant and the pits.
+[scout]
+strategy = "player_move"
+step_px = 4
+frame_budget = 1500
+stall_frames = 60
+settle_frames = 60
+dirs = ["right", "left"]
+
+[[scout.addr]]
+role = "player_x"
+addr = 0x0090
+notes = "Low byte of Mario's X in the level; poking it moves Mario and the camera follows."
+source = "observed: W32-09 note"
+
+[[scout.addr]]
+role = "player_x_hi"
+addr = 0x0075
+notes = "High byte of Mario's X (steps +1 when 0090 wraps; 0x00 to 0x01 at world x 256)."
+source = "observed: W32-09 note"
+
+[[scout.addr]]
+role = "hold"
+addr = 0x00A2
+value = 0x28
+notes = "Mario's Y (level Y low byte; 0x80 standing on the ground, 0x42-0x80 in a jump). Held at 0x28, above the goombas, the piranha plants (a hold of 0x30 or lower ends the pass in the first pipe) and every pit."
+source = "observed: W32-09 note"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x000F
+value = 0x01
+notes = "1 while Mario is in a level and alive (0 on the map and during the death animation; observed 1-1 alive for 135 frames, 0 after the first goomba hit)."
+source = "observed: W32-09 note"
