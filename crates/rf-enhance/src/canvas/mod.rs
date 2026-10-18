@@ -549,6 +549,13 @@ impl CanvasModel {
         self.last_scene
     }
 
+    /// Ticket W33-08: whether the current section scrolls vertically
+    /// ([`SceneTracker::scrolls_vertically`]); `None` when it is not known.
+    #[must_use]
+    pub fn scene_scrolls_vertically(&self) -> Option<bool> {
+        self.scene_tracker.scrolls_vertically()
+    }
+
     /// Ticket W33-09: every scene change seen this session, with the scroll
     /// position it happened at (`SceneTracker::edges`).
     #[must_use]

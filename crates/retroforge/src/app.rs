@@ -1305,6 +1305,9 @@ pub struct RetroForgeApp {
     /// the core thread while widescreen is on at an aspect wider than the
     /// game's own picture.
     scout_plan: Option<crate::scout::ScoutPlan>,
+    /// Ticket W33-08: the matched profile's `[scene]` key, kept so it can be
+    /// sent again once the core exists (see `open_rom_path`).
+    scene_key_spec: Option<crate::scene_key::SceneKeySpec>,
     /// Ticket W32-07: tests turn the scout off to take a control shot.
     scout_enabled: bool,
     /// Ticket W33-06: tests force the scout's starting step (the profile's
@@ -1863,6 +1866,7 @@ impl RetroForgeApp {
             level_camera: None,
             widescreen_on: false,
             scout_plan: None,
+            scene_key_spec: None,
             scout_enabled: true,
             scout_step_override: None,
             scout_telemetry: std::sync::Arc::default(),
@@ -4037,6 +4041,12 @@ impl RetroForgeApp {
                 if self.camera_search.is_some() {
                     self.send_command(CoreCommand::FindCamera(true));
                 }
+                // Ticket W33-08: the same for the `[scene]` key. Sent only to
+                // a core that did not exist yet, the live canvas model read no
+                // level bytes while the scout's tracker (whose plan carries
+                // the key) did: its first frame was a "key change" and every
+                // NES scout ended at frame 1.
+                self.send_command(CoreCommand::SetSceneKey(self.scene_key_spec.clone()));
                 self.send_command(CoreCommand::WatchItems(self.item_rows()));
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
@@ -10904,12 +10914,11 @@ impl RetroForgeApp {
             Some(plan)
         });
         // Ticket W33-09: the `[scene]` table (which RAM bytes name the level).
-        self.send_command(CoreCommand::SetSceneKey(
-            matched
-                .as_ref()
-                .and_then(|(p, _)| p.scene.as_ref())
-                .map(crate::scene_key::SceneKeySpec::from_profile),
-        ));
+        self.scene_key_spec = matched
+            .as_ref()
+            .and_then(|(p, _)| p.scene.as_ref())
+            .map(crate::scene_key::SceneKeySpec::from_profile);
+        self.send_command(CoreCommand::SetSceneKey(self.scene_key_spec.clone()));
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
@@ -14228,10 +14237,10 @@ impl RetroForgeApp {
                     if let Some(step) = self.scout_step_override {
                         plan.step_px = step;
                     }
-                    crate::scout::ScoutSetup {
+                    Box::new(crate::scout::ScoutSetup {
                         plan,
                         telemetry: self.scout_telemetry.clone(),
-                    }
+                    })
                 }),
         ));
     }

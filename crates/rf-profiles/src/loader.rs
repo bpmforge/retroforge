@@ -315,9 +315,13 @@ fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), 
         }
     }
     if let Some(dirs) = scout.dirs.as_ref() {
-        if dirs.is_empty() || dirs.iter().any(|d| !matches!(d.as_str(), "right" | "left")) {
+        if dirs.is_empty()
+            || dirs
+                .iter()
+                .any(|d| !matches!(d.as_str(), "right" | "left" | "up" | "down"))
+        {
             return Err(bad(
-                "dirs must be a non-empty list of \"right\" / \"left\"".into()
+                "dirs must be a non-empty list of \"right\" / \"left\" / \"up\" / \"down\"".into(),
             ));
         }
     }
@@ -328,10 +332,17 @@ fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), 
     for (i, row) in scout.addr.iter().enumerate() {
         if !matches!(
             row.role.as_str(),
-            "camera_x" | "player_x" | "player_x_hi" | "hold" | "start_when"
+            "camera_x"
+                | "camera_y"
+                | "player_x"
+                | "player_x_hi"
+                | "player_y"
+                | "player_y_hi"
+                | "hold"
+                | "start_when"
         ) {
             return Err(bad(format!(
-                "addr row {i}: role `{}` (valid: camera_x, player_x, player_x_hi, hold, start_when)",
+                "addr row {i}: role `{}` (valid: camera_x, camera_y, player_x, player_x_hi, player_y, player_y_hi, hold, start_when)",
                 row.role
             )));
         }
@@ -740,8 +751,8 @@ mod tests {
             "frame_budget = 99999",
             "frame_budget",
         );
-        bad("[\"right\", \"left\"]", "[\"up\"]", "dirs");
-        bad("role = \"camera_x\"", "role = \"camera_y\"", "role");
+        bad("[\"right\", \"left\"]", "[\"sideways\"]", "dirs");
+        bad("role = \"camera_x\"", "role = \"camera_z\"", "role");
         bad("addr = 0x6B", "addr = 0x1_0000", "outside");
         bad(
             "source = \"observed: test\"\n\n        [[scout.addr]]\n        role = \"player_x\"",

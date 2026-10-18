@@ -24,7 +24,7 @@ use rf_enhance::canvas::{scout_agreement_aligned, scout_verdict, ScoutVerdict, L
 use rf_enhance::persistence::ScoutMemo;
 use rf_enhance::stitcher::Canvas;
 
-use crate::scout::{ScoutDir, ScoutEnd, ScoutPlan, ScoutStrategy};
+use crate::scout::{ScoutAxis, ScoutDir, ScoutEnd, ScoutPlan, ScoutStrategy};
 
 /// Step a rung starts at when the profile has none.
 pub const DEFAULT_STEP_PX: u16 = 8;
@@ -66,15 +66,23 @@ pub fn rung_name(s: ScoutStrategy) -> &'static str {
     }
 }
 
-/// The rungs a scout may try, in order. `bands`: the machine is placed by
-/// the core's own scroll events (the NES), the only place `walk` can act.
-/// `hint`: the rung that worked last time on this scene (tried first).
+/// The rungs a scout may try on `axis`, in order. `bands`: the machine is
+/// placed by the core's own scroll events (the NES), the only place `walk` can
+/// act. `hint`: the rung that worked last time on this scene (tried first).
+/// The profile's strategy is the recipe of the X axis; a Y pass starts at
+/// `player_move` (a game that scrolls sideways on a held pad does not scroll
+/// down on one).
 #[must_use]
-pub fn rungs_for(plan: &ScoutPlan, bands: bool, hint: Option<ScoutStrategy>) -> Vec<ScoutStrategy> {
+pub fn rungs_for(
+    plan: &ScoutPlan,
+    axis: ScoutAxis,
+    bands: bool,
+    hint: Option<ScoutStrategy>,
+) -> Vec<ScoutStrategy> {
     let usable = |s: ScoutStrategy| match s {
-        ScoutStrategy::PlayerMove => !plan.player_x.is_empty(),
+        ScoutStrategy::PlayerMove => !plan.player_words(axis).is_empty(),
         ScoutStrategy::Walk => bands,
-        ScoutStrategy::CameraWrite => !plan.camera.is_empty(),
+        ScoutStrategy::CameraWrite => !plan.camera_words(axis).is_empty(),
     };
     if plan.pin {
         // The profile's word is final.
@@ -85,7 +93,11 @@ pub fn rungs_for(plan: &ScoutPlan, bands: bool, hint: Option<ScoutStrategy>) -> 
         ScoutStrategy::Walk,
         ScoutStrategy::CameraWrite,
     ];
-    let first = hint.filter(|h| usable(*h)).unwrap_or(plan.strategy);
+    let own = match axis {
+        ScoutAxis::X => plan.strategy,
+        ScoutAxis::Y => ScoutStrategy::PlayerMove,
+    };
+    let first = hint.filter(|h| usable(*h)).unwrap_or(own);
     let mut out = Vec::with_capacity(canonical.len());
     for s in std::iter::once(first).chain(canonical) {
         if usable(s) && !out.contains(&s) {
@@ -344,6 +356,9 @@ mod tests {
             camera: if camera { vec![0x1A] } else { Vec::new() },
             player_x: if player { vec![0x94] } else { Vec::new() },
             player_x_hi: Vec::new(),
+            camera_y: Vec::new(),
+            player_y: Vec::new(),
+            player_y_hi: Vec::new(),
             step_px: 8,
             frame_budget: 100,
             stall_frames: 10,
@@ -363,36 +378,64 @@ mod tests {
         // A SNES game with both address sets: no walk (the console is not
         // placed by bands).
         let p = plan(PlayerMove, true, true, false);
-        assert_eq!(rungs_for(&p, false, None), vec![PlayerMove, CameraWrite]);
+        assert_eq!(
+            rungs_for(&p, ScoutAxis::X, false, None),
+            vec![PlayerMove, CameraWrite]
+        );
         // The NES with player addresses only (SMB3): walk is a real fallback.
         let p = plan(PlayerMove, true, false, false);
-        assert_eq!(rungs_for(&p, true, None), vec![PlayerMove, Walk]);
+        assert_eq!(
+            rungs_for(&p, ScoutAxis::X, true, None),
+            vec![PlayerMove, Walk]
+        );
         // MM2: walk first (the profile's), the rest follow.
         let p = plan(Walk, false, false, false);
-        assert_eq!(rungs_for(&p, true, None), vec![Walk]);
+        assert_eq!(rungs_for(&p, ScoutAxis::X, true, None), vec![Walk]);
         let p = plan(Walk, true, true, false);
         assert_eq!(
-            rungs_for(&p, true, None),
+            rungs_for(&p, ScoutAxis::X, true, None),
             vec![Walk, PlayerMove, CameraWrite]
         );
     }
 
     #[test]
+    fn a_vertical_scene_starts_at_player_move_whatever_the_profiles_x_strategy() {
+        // MM2: the profile says walk (right on the pad); a held Down does
+        // nothing for a game that scrolls down only when the player falls.
+        let mut p = plan(Walk, false, false, false);
+        p.player_y = vec![0x04A0];
+        assert_eq!(rungs_for(&p, ScoutAxis::X, true, None), vec![Walk]);
+        assert_eq!(
+            rungs_for(&p, ScoutAxis::Y, true, None),
+            vec![PlayerMove, Walk]
+        );
+        // No Y words and no pad: nothing to try.
+        let p = plan(PlayerMove, true, true, false);
+        assert!(rungs_for(&p, ScoutAxis::Y, false, None).is_empty());
+    }
+
+    #[test]
     fn a_pinned_profile_tries_its_own_strategy_and_nothing_else() {
         let p = plan(Walk, true, true, true);
-        assert_eq!(rungs_for(&p, true, Some(PlayerMove)), vec![Walk]);
+        assert_eq!(
+            rungs_for(&p, ScoutAxis::X, true, Some(PlayerMove)),
+            vec![Walk]
+        );
     }
 
     #[test]
     fn the_rung_that_worked_last_time_goes_first() {
         let p = plan(PlayerMove, true, true, false);
         assert_eq!(
-            rungs_for(&p, true, Some(CameraWrite)),
+            rungs_for(&p, ScoutAxis::X, true, Some(CameraWrite)),
             vec![CameraWrite, PlayerMove, Walk]
         );
         // A remembered rung this profile cannot act on is ignored.
         let p = plan(PlayerMove, true, false, false);
-        assert_eq!(rungs_for(&p, false, Some(CameraWrite)), vec![PlayerMove]);
+        assert_eq!(
+            rungs_for(&p, ScoutAxis::X, false, Some(CameraWrite)),
+            vec![PlayerMove]
+        );
     }
 
     #[test]

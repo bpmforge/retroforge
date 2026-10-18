@@ -287,9 +287,9 @@ rejects a bad key or row naming it.
 | `frame_budget` | Most frames one pass may run, 1..=20000. |
 | `stall_frames` | A pass ends after this many frames with no new level, 1..=3000 (default 120). |
 | `settle_frames` | Live frames to wait after a scene is entered (default 90). |
-| `dirs` | Passes, `"right"` and/or `"left"` (default both); each restarts from the snapshot. |
+| `dirs` | Passes, each restarting from the snapshot: `"right"` / `"left"` on a horizontal scene, `"down"` / `"up"` on a vertical one (the scout follows the axis the scene tracker names for the scene, W33-08). Default: right + left, or down + up when the profile names none on that axis. |
 | `pin` | `true` = try only `strategy`. Without it the scout starts there and falls back down the ladder (player_move, walk, camera_write) when its own self-check refuses a rung; a rung with no addresses to act on is skipped (W33-06). |
-| `[[scout.addr]]` | Rows with `role` = `camera_x` / `player_x` (16-bit little-endian words), `hold` (a byte `value` written every scout frame: invincibility, Mario kept out of reach) or `start_when` (a byte `value` the LIVE game must hold, for 30 frames running, before a scout starts: "in a level, player alive"). |
+| `[[scout.addr]]` | Rows with `role` = `camera_x` / `player_x` (16-bit little-endian words), `camera_y` / `player_y` (the same for a vertical scene, W33-08; `player_y_hi` names the high byte, a `player_y` with none is one byte as in Mega Man 2), `hold` (a byte `value` written every scout frame: invincibility, Mario kept out of reach; a hold on a `player_y` byte is released on a vertical pass) or `start_when` (a byte `value` the LIVE game must hold, for 30 frames running, before a scout starts: "in a level, player alive"). |
 
 A scout stops at its frame budget, after `stall_frames` without new level, or
 when the camera jumps (a scene change). Sprites are never taken from it. See

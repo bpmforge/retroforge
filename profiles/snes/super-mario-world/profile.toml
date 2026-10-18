@@ -173,6 +173,27 @@ value = 0
 notes = "High byte of the player Y word."
 source = "observed: W32-07 note"
 
+# W33-08: the Y words, for a vertical level (none was reachable to try them
+# on; see docs/research/W33-08-vertical.md). The two player Y bytes are the
+# `hold` rows above: a Y pass releases them and moves the word itself.
+[[scout.addr]]
+role = "camera_y"
+addr = 0x7E001C
+notes = "BG1 Y scroll, 16-bit: the same word the profile's [camera] row names."
+source = "observed: W33-08 note (the [camera] y row)"
+
+[[scout.addr]]
+role = "player_y"
+addr = 0x7E0096
+notes = "Player Y, 16-bit low byte (the same word the hold row above pins at 150)."
+source = "observed: W32-07 note"
+
+[[scout.addr]]
+role = "player_y_hi"
+addr = 0x7E0097
+notes = "High byte of the player Y word."
+source = "observed: W32-07 note"
+
 [[scout.addr]]
 role = "start_when"
 addr = 0x7E0100
