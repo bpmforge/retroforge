@@ -556,6 +556,7 @@ fn smb3_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         hold,
         start_when: vec![(0x000F, 1)],
         pin: false,
+        scene_key: None,
     }
 }
 
@@ -970,6 +971,7 @@ fn mm2_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         hold,
         start_when: vec![(0x06C0, 0x1C)],
         pin: false,
+        scene_key: None,
     }
 }
 

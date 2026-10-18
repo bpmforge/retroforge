@@ -527,6 +527,18 @@ const CARD_SPACING: f32 = 10.0;
 /// visibly wrong box.
 const CARD_THUMB_HEIGHT: f32 = (CARD_WIDTH - 12.0) * 15.0 / 16.0;
 
+/// Ticket W33-07: where "Find scout settings for this game" stands.
+#[derive(Debug, Clone, Default)]
+enum ScoutFindUi {
+    #[default]
+    Idle,
+    /// Watching play; what has been found so far.
+    Looking(core_thread::ScoutFindProgress),
+    /// Found and tried on a second machine; waiting for Save / Not now.
+    Found(Box<rf_enhance::scout_finder::Skeleton>),
+    Failed(String),
+}
+
 /// The whole application's UI-thread-owned state.
 pub struct RetroForgeApp {
     /// Ticket W29-01: the backend and adapter actually running, e.g.
@@ -1097,6 +1109,8 @@ pub struct RetroForgeApp {
     /// camera (`None` when not looking), and the camera once found.
     camera_search: Option<u32>,
     camera_found: Option<core_thread::FoundCamera>,
+    /// Ticket W33-07: "Find scout settings for this game".
+    scout_find: ScoutFindUi,
     /// Ticket W27-05: the matched profile's showable items, and the bytes
     /// the core read for them this frame (same order).
     profile_items: Vec<rf_profiles::schema::MemoryMapEntry>,
@@ -1910,6 +1924,7 @@ impl RetroForgeApp {
             builder_note: None,
             camera_search: None,
             camera_found: None,
+            scout_find: ScoutFindUi::Idle,
             profile_items: Vec::new(),
             item_values: Vec::new(),
             quick_rail_ids: Vec::new(),
@@ -4216,6 +4231,20 @@ impl RetroForgeApp {
                 CoreEvent::CameraFound(found) => {
                     self.camera_search = None;
                     self.camera_found = Some(found);
+                }
+                // Ticket W33-07: the scout-settings finder.
+                CoreEvent::ScoutFindProgress(p) => {
+                    if matches!(self.scout_find, ScoutFindUi::Looking(_)) {
+                        self.scout_find = ScoutFindUi::Looking(p);
+                    }
+                }
+                CoreEvent::ScoutFound(result) => {
+                    if matches!(self.scout_find, ScoutFindUi::Looking(_)) {
+                        self.scout_find = match result {
+                            Ok(sk) => ScoutFindUi::Found(sk),
+                            Err(why) => ScoutFindUi::Failed(why),
+                        };
+                    }
                 }
                 CoreEvent::WorkRam(ram) => {
                     if let Some(pending) = self.finder_pending.take() {
@@ -8926,6 +8955,7 @@ impl RetroForgeApp {
                         {
                             self.make_profile_for_this_game();
                         }
+                        self.scout_find_section(ui, &tokens);
                         egui::CollapsingHeader::new("What's a profile?")
                             .id_salt("whats-a-profile")
                             .show(ui, |ui| {
@@ -10817,6 +10847,8 @@ impl RetroForgeApp {
         let looking = self.current_game_hashes.is_some() && !has_camera;
         self.camera_search = looking.then_some(0);
         self.camera_found = None;
+        self.scout_find = ScoutFindUi::Idle;
+        self.send_command(CoreCommand::FindScout(false));
         self.send_command(CoreCommand::FindCamera(looking));
         // Ticket W27-05: Game info reads the profile's items every frame.
         self.profile_items = matched
@@ -10861,9 +10893,16 @@ impl RetroForgeApp {
         // Ticket W32-07/W32-09: the `[scout]` recipe (one plan type for both
         // consoles; the scout places a NES machine by the core's own scroll
         // events and a SNES one by layer registers).
-        self.scout_plan = matched
-            .as_ref()
-            .and_then(|(p, _)| Some(crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?)));
+        self.scout_plan = matched.as_ref().and_then(|(p, _)| {
+            let mut plan = crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?);
+            // Ticket W33-07: the scout's scene tracker reads the same level
+            // bytes the live one does.
+            plan.scene_key = p
+                .scene
+                .as_ref()
+                .map(crate::scene_key::SceneKeySpec::from_profile);
+            Some(plan)
+        });
         // Ticket W33-09: the `[scene]` table (which RAM bytes name the level).
         self.send_command(CoreCommand::SetSceneKey(
             matched
@@ -11232,6 +11271,213 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn camera_search_for_test(&self) -> (Option<u32>, bool) {
         (self.camera_search, self.camera_found.is_some())
+    }
+
+    /// Ticket W33-07: the Enhancements panel's "Find scout settings for this
+    /// game" action and what it is doing.
+    fn scout_find_section(&mut self, ui: &mut egui::Ui, tokens: &crate::theme::Tokens) {
+        if self.core.is_none() || self.current_game_hashes.is_none() {
+            return;
+        }
+        let caption = |text: String| {
+            egui::RichText::new(text)
+                .font(egui::FontId::proportional(
+                    crate::theme::type_scale::CAPTION,
+                ))
+                .color(tokens.muted)
+        };
+        match self.scout_find.clone() {
+            ScoutFindUi::Idle | ScoutFindUi::Failed(_) => {
+                if let ScoutFindUi::Failed(why) = &self.scout_find {
+                    ui.label(caption(format!(
+                        "Could not work out scout settings: {why}."
+                    )));
+                }
+                ui.add_space(4.0);
+                if ui.button("Find scout settings for this game").clicked() {
+                    self.start_scout_find();
+                }
+                ui.label(caption(
+                    "Widescreen margins use a scout that looks ahead of you. Play a level for a \
+                     minute: walk right and left, jump a few times, stand still. RetroForge \
+                     finds the camera, the player and what keeps the scout safe."
+                        .to_owned(),
+                ));
+            }
+            ScoutFindUi::Looking(p) => {
+                ui.add_space(4.0);
+                let mark = |ok: bool| if ok { "\u{2713}" } else { "\u{2026}" };
+                ui.label(caption(if p.testing {
+                    "Found what it needs. Trying it on a second copy of the game...".to_owned()
+                } else {
+                    format!(
+                        "Looking while you play: camera {}  player {}  jump {}  (the screen has scrolled {} frames)",
+                        mark(p.camera),
+                        mark(p.player),
+                        mark(p.y),
+                        p.moving
+                    )
+                }));
+                if ui.button("Stop").clicked() {
+                    self.stop_scout_find();
+                }
+            }
+            ScoutFindUi::Found(_) => {
+                ui.label(caption(
+                    "Scout settings found. Save them from the card beside the game.".to_owned(),
+                ));
+            }
+        }
+    }
+
+    fn start_scout_find(&mut self) {
+        self.scout_find = ScoutFindUi::Looking(core_thread::ScoutFindProgress::default());
+        self.send_command(CoreCommand::FindScout(true));
+    }
+
+    fn stop_scout_find(&mut self) {
+        self.scout_find = ScoutFindUi::Idle;
+        self.send_command(CoreCommand::FindScout(false));
+    }
+
+    /// Ticket W33-07: save the table the finder found into the PLAYER's own
+    /// profile. A profile that ships with the app (or sits in the repo) is
+    /// never written to: it is copied into the player's profile folder first,
+    /// which is searched before the shipped ones.
+    fn use_found_scout(&mut self) {
+        let ScoutFindUi::Found(sk) = std::mem::take(&mut self.scout_find) else {
+            return;
+        };
+        let (Some(root), Some(hashes)) =
+            (self.config_root.clone(), self.current_game_hashes.clone())
+        else {
+            self.status = "Can't save scout settings: no config folder or no game.".to_owned();
+            return;
+        };
+        let snes = self.console_label == "SNES";
+        let user = crate::profile_builder::user_profiles_root(&root);
+        let title = self
+            .current_rom_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "Game".to_owned(), |s| s.to_string_lossy().into_owned());
+        let path = match self.matched_profile.clone() {
+            Some(p) if p.starts_with(&user) => p,
+            Some(shipped) => {
+                let dir = user.join(if snes { "snes" } else { "nes" }).join(
+                    shipped.parent().and_then(|d| d.file_name()).map_or_else(
+                        || crate::profile_builder::slug(&title).into(),
+                        std::ffi::OsString::from,
+                    ),
+                );
+                let dest = dir.join("profile.toml");
+                if !dest.exists() {
+                    let copied = std::fs::create_dir_all(&dir)
+                        .and_then(|()| std::fs::copy(&shipped, &dest).map(|_| ()));
+                    if let Err(e) = copied {
+                        self.status = format!("Could not copy this game's profile: {e}");
+                        return;
+                    }
+                }
+                dest
+            }
+            None => match crate::profile_builder::create(&user, &title, snes, &hashes) {
+                Ok(path) => path,
+                Err(e) => {
+                    self.status = format!("Could not make a profile: {e}");
+                    return;
+                }
+            },
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        match crate::profile_builder::apply_scout(&text, &sk) {
+            Ok(new_text) => {
+                if let Err(e) = std::fs::write(&path, new_text) {
+                    self.status = format!("Could not save the scout settings: {e}");
+                    return;
+                }
+                self.apply_profile_match();
+                // The scout is armed with the saved table at once.
+                if self.widescreen_on {
+                    self.set_widescreen(true);
+                }
+                self.status = "Scout settings saved to your profile for this game".to_owned();
+                let ctx = self.ctx.clone();
+                self.toasts.push(
+                    crate::toast::ToastKind::Success,
+                    "Scout settings saved. Widescreen margins can show the level ahead of you."
+                        .to_owned(),
+                    &ctx,
+                );
+            }
+            Err(e) => self.status = format!("Could not save the scout settings: {e}"),
+        }
+    }
+
+    /// Ticket W33-07: the offer, once the finder has a table its trials
+    /// confirmed: a small card beside the game that does not pause it.
+    fn scout_found_card(&mut self, ctx: &egui::Context) {
+        let ScoutFindUi::Found(sk) = &self.scout_find else {
+            return;
+        };
+        let (strategy, confidence) = (sk.strategy, sk.confidence);
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        let mut save = false;
+        let mut not_now = false;
+        egui::Area::new(egui::Id::new("scout_found_card"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -48.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(tokens.surface)
+                    .stroke(egui::Stroke::new(1.0, tokens.ok))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_max_width(320.0);
+                        ui.label(
+                            egui::RichText::new("Found this game's scout settings")
+                                .strong()
+                                .color(tokens.ink),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "RetroForge watched you play, then tried what it found on a second copy of the game ({}, {:.0}% sure). Save it to your own profile so widescreen margins can show the level ahead of you.",
+                                strategy.replace('_', " "),
+                                confidence * 100.0
+                            ))
+                            .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
+                            .color(tokens.ink),
+                        );
+                        ui.horizontal(|ui| {
+                            save = ui
+                                .add(egui::Button::new(egui::RichText::new("Save scout settings").strong()))
+                                .clicked();
+                            not_now = ui.button("Not now").clicked();
+                        });
+                    });
+            });
+        if save {
+            self.use_found_scout();
+        } else if not_now {
+            self.scout_find = ScoutFindUi::Idle;
+        }
+    }
+
+    /// Ticket W33-07 (tests): what the scout-settings finder is doing, as
+    /// `(looking, found)`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scout_find_for_test(&self) -> (bool, bool) {
+        (
+            matches!(self.scout_find, ScoutFindUi::Looking(_)),
+            matches!(self.scout_find, ScoutFindUi::Found(_)),
+        )
+    }
+
+    /// Ticket W33-07 (tests): as if the finder had just answered.
+    #[doc(hidden)]
+    pub fn offer_scout_for_test(&mut self, sk: rf_enhance::scout_finder::Skeleton) {
+        self.scout_find = ScoutFindUi::Found(Box::new(sk));
     }
 
     /// Ticket W24-03: ask the core for a look at the work RAM.
@@ -14055,6 +14301,13 @@ impl RetroForgeApp {
         self.scout_enabled = on;
     }
 
+    /// Ticket W33-07: scout with `plan` (a table the finder discovered, not
+    /// yet saved to any profile) the next time widescreen is turned on.
+    #[doc(hidden)]
+    pub fn set_scout_plan_for_test(&mut self, plan: Option<crate::scout::ScoutPlan>) {
+        self.scout_plan = plan;
+    }
+
     /// Ticket W33-06: start the NEXT scout at `step` pixels per frame whatever
     /// the profile says (a probe that the self-check must refuse).
     #[doc(hidden)]
@@ -16645,6 +16898,7 @@ impl eframe::App for RetroForgeApp {
         self.profile_builder_panel(&ctx);
         self.height_painter_window(&ctx);
         self.camera_found_card(&ctx);
+        self.scout_found_card(&ctx);
         self.enhance_tip(&ctx);
         self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the

@@ -1186,6 +1186,85 @@ mod nes_layer0 {
         assert_eq!(m.frames().unwrap().scene, cut.0);
     }
 
+    /// W33-07: a player standing still leaves every band unchanged, and the
+    /// scroll tracker's zero-delta rule flags the level band as HUD too. The
+    /// primary band is never HUD for not having moved: later frames of a
+    /// standing scene still reach the canvas (live wins over what was there).
+    #[test]
+    fn a_standing_player_still_stitches_the_primary_band() {
+        let mut m = CanvasModel::new();
+        observe(&mut m, &frame_bundle(0, 0, 3));
+        observe(&mut m, &frame_bundle(1, 4, 3));
+        // Nothing moves from here on, but a tile animates (a 16 px square
+        // with another seed; the rest of the picture is unchanged, so the
+        // registration guard has no quarrel with it).
+        for frame in 2..6 {
+            let mut b = frame_bundle(frame, 4, 3);
+            let still = frame_bundle(frame, 4, 9);
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    b.video[y * usize::from(WIDTH) + x] = still.video[y * usize::from(WIDTH) + x];
+                }
+            }
+            observe(&mut m, &b);
+        }
+        let c = layer0(&m).expect("a canvas");
+        let at = |x: i64, y: i64| c.get(x, y).map(|p| p.palette_index);
+        let want = |x: i64, y: i64, seed: u8| (x.rem_euclid(97) as u8) ^ ((y % 61) as u8) ^ seed;
+        // Screen column 6 at shift 4 is world 10.
+        assert_eq!(at(10, 7), Some(want(10, 7, 9)), "the standing frames");
+        assert_eq!(at(104, 7), Some(want(104, 7, 3)), "the rest is untouched");
+    }
+
+    /// ...and the HUD rule survives: a band that stays fixed while the level
+    /// stands still too is still not stitched into the world.
+    #[test]
+    fn a_fixed_status_band_is_not_stitched_while_the_level_stands_still() {
+        let (width, height) = (usize::from(WIDTH), usize::from(HEIGHT));
+        let status_rows = 32usize;
+        let frame = |n: u64| {
+            let mut video = Vec::with_capacity(width * height);
+            for y in 0..height {
+                for x in 0..width {
+                    let v = if y < status_rows {
+                        250
+                    } else {
+                        ((x as i64 + 4).rem_euclid(97) as u8) ^ ((y as i64).rem_euclid(61) as u8)
+                    };
+                    video.push(bg(v));
+                }
+            }
+            let sw = |x: u16| CoreEvent::ScrollWrite {
+                x,
+                y: 0,
+                layer: PixelLayer::Background(0),
+            };
+            let mut events = vec![sw(0)];
+            events.extend((0..status_rows as u16).map(CoreEvent::Scanline));
+            events.push(sw(4));
+            events.extend((status_rows as u16..HEIGHT).map(CoreEvent::Scanline));
+            FrameBundle::new(n, WIDTH, HEIGHT, video, events)
+        };
+        let mut m = CanvasModel::new();
+        for n in 0..8 {
+            observe(&mut m, &frame(n));
+        }
+        let c = layer0(&m).expect("a canvas");
+        let (ox, oy) = c.origin();
+        let status_cells = (0..c.height() as i64)
+            .flat_map(|y| (0..c.width() as i64).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                c.get(ox + x, oy + y)
+                    .is_some_and(|p| p.palette_index == 250)
+            })
+            .count();
+        assert_eq!(status_cells, 0, "the status bar stays out of the world");
+        assert!(
+            c.get(ox + 100, oy + 200).is_some() || c.width() > 0,
+            "while the level is stitched"
+        );
+    }
+
     /// A camera that stops (the scroll register unchanged, which the scroll
     /// tracker calls a HUD band) keeps its frame position.
     #[test]

@@ -76,6 +76,8 @@ pub mod run_ahead;
 pub mod save_state;
 pub mod scene_key;
 pub mod scout;
+pub mod scout_discovery;
+pub mod scout_find;
 pub mod scout_ladder;
 pub mod script_panel;
 pub mod settings;

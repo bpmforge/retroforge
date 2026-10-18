@@ -33,6 +33,11 @@ use rf_enhance::widescreen::{Aspect, MarginSource};
 
 type H = Harness<'static, RetroForgeApp>;
 
+/// Ticket W33-07: the scripted sessions and the discovery driver.
+#[allow(dead_code, unused_imports)]
+#[path = "w33_07_common/mod.rs"]
+mod discovery;
+
 /// An RGBA picture.
 #[derive(Clone)]
 struct Pic {
@@ -766,6 +771,125 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
         save(&d.join(format!("scout-{tag}-32x9-on.png")), &on.opaque());
         note(readme, format!("scout-{tag}-32x9|{file}|{}x{}", on.w, on.h));
     }
+}
+
+/// Ticket W33-07: Mega Man X (USA) has no `[scout]` table. A scripted session
+/// finds one (camera, player, gate, hold) and the app scouts with it: 32:9,
+/// scout off and then on, on a cold canvas cache.
+fn shot_scout_mmx(readme: &mut Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "scout-mmx";
+    if !wanted(name) {
+        return;
+    }
+    let file = "Mega Man X (USA).zip";
+    let Some(path) = rom("snes", file) else {
+        skip(readme, name, &format!("{file} not found"));
+        return;
+    };
+    let Some((skeleton, width, _)) = discovery::discover_game(
+        discovery::MMX,
+        discovery::MMX_TO_LEVEL,
+        discovery::MMX_PLAY,
+        false,
+    ) else {
+        skip(readme, name, "the finder found no table");
+        return;
+    };
+    let mut plan = retroforge::scout_discovery::plan_of(&skeleton);
+    plan.settle_frames = 30;
+    let cold = std::env::temp_dir().join(format!("rf_scout_mmx_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this
+    // process reads the environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    // The title, then Game Start (the same presses the session used).
+    {
+        use egui::Key as K;
+        wait(&mut h, "mmx", 300);
+        for _ in 0..5 {
+            tap(&mut h, K::Enter, 6);
+            wait(&mut h, "mmx", 106);
+        }
+        wait(&mut h, "mmx", 300);
+        // The level fades in at a time that depends on real-time input; wait
+        // for a picture that is not black (a dark frame is the fade or the
+        // loading, not the level).
+        for _ in 0..10 {
+            let lit = grab(&h).is_some_and(|p| {
+                p.rgba
+                    .chunks_exact(4)
+                    .map(|c| usize::from(c[0]) + usize::from(c[1]) + usize::from(c[2]))
+                    .sum::<usize>()
+                    > p.w * p.h * 3 * 30
+            });
+            if lit {
+                break;
+            }
+            wait(&mut h, "mmx", 120);
+        }
+        wait(&mut h, "mmx", 60);
+    }
+    probe(&h, "mmx-level-start");
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_plan_for_test(Some(plan));
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    let t = h.state().frame_count_for_test() + 20;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let off = grab(&h);
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state_mut().set_widescreen(true);
+    let t1 = Instant::now();
+    while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+        let t = h.state().frame_count_for_test() + 2;
+        run_frames(&mut h, t, Duration::from_secs(10));
+    }
+    h.state().send_core_command_for_test(CoreCommand::Pause);
+    let mut finished = false;
+    while t1.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_millis(100));
+        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+            finished = telemetry.finished.load(Relaxed) >= 1;
+            break;
+        }
+    }
+    h.state().send_core_command_for_test(CoreCommand::Resume);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let t = h.state().frame_count_for_test() + 90;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let (Some(off), Some(on)) = (off, grab(&h)) else {
+        skip(readme, name, "no frame");
+        return;
+    };
+    println!(
+        "SCOUT-MMX: finished {finished}; scout width {width}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells; gave up {}; {}",
+        telemetry.frames.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+        telemetry.gave_up.load(Relaxed),
+        telemetry.last_summary().unwrap_or_default(),
+    );
+    let d = out_dir();
+    save(&d.join("scout-mmx-32x9-off.png"), &off.opaque());
+    save(&d.join("scout-mmx-32x9-on.png"), &on.opaque());
+    note(readme, format!("scout-mmx-32x9|{file}|{}x{}", on.w, on.h));
 }
 
 /// One session of [`shot_persist`].
@@ -1870,6 +1994,7 @@ fn w30_w31_screens() {
     shot_widescreen(&mut readme);
     shot_scout(&mut readme);
     shot_scout_nes(&mut readme);
+    shot_scout_mmx(&mut readme);
     shot_persist(&mut readme);
     shot_confidence(&mut readme);
     shot_fps(&mut readme);

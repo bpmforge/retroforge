@@ -374,6 +374,41 @@ and a scout from one play session, all written as observation rows.
   stops while the player keeps moving (boss doors, MM2 `$1B` per Data Crystal
   is a lead to verify, never a value to trust).
 
+**Built (W33-07).** `rf_enhance::scout_finder` (the observer, pure and
+unit-tested), `retroforge::scout_discovery` (the trials on a second machine)
+and `retroforge::scout_find` (the core-thread half of the in-app action).
+
+* **What the observer names.** Camera: `CameraFinder`, unchanged. Player X: a
+  byte that steps by the camera's step on >= 85 % of the frames the camera
+  moves, goes UP on Right and DOWN on Left, and keeps changing in the held
+  direction on >= 6 frames the camera stands still (a session that starts
+  with the camera not yet following gives those frames for free; a game that
+  starts mid-screen needs a Left walk). Its high half is the byte that stepped
+  +1/-1 in the frames the low half wrapped, anywhere in RAM (SMB3 `$75`,
+  MM2 `$0440`, MMX `$0BAE`). Y: a byte that held still for 8 frames, moved
+  within 6 frames of a face-button press, by 6..=127, in >= 50 % of the
+  presses that found it quiet and never in the control windows opened with no
+  press. Gate: a byte that holds one value on >= 98 % of the frames of the
+  level (the scene with the most scrolling frames; the scene ids are the
+  canvas model's, so W33-09's level ids decide where a profile has them) and a
+  different value on >= 60 % of the frames of every other scene.
+* **What the trials decide.** Which player word the game obeys (the others are
+  copies it recopies), which Y byte holds the player out of harm's way, how
+  high, and whether to `walk` instead: each recipe scouts 300 frames from one
+  snapshot (`Scout::restart_with`), then the winning hold is tuned over six
+  heights on 1100-frame trials (a hold too low catches on pipes that 300
+  frames never reach; the highest height within 2 % of the best extent wins).
+  SMB3 does not scroll for a player standing on the ground, so the mover and
+  the hold are chosen TOGETHER (no hold: extent stays at one screen).
+* **A bug this found.** A NES scout whose profile has `[scene]` rows ended
+  every pass at its first frame: the live model is fed the level bytes, the
+  scout's scene tracker was not, so its first frame was a "key change". The
+  plan now carries the profile's scene key (`ScoutPlan::scene_key`).
+* **Session recipe** (what a player is asked to do): play the level for a
+  minute, walk right and left, jump a few times (>= 6 jumps), then stand
+  still for a second. The app starts the trials when the player has stood
+  still for 20 frames after that.
+
 ### 3.2 Generic strategy ladder with fallbacks
 
 Try in order per scene, each with the self-check of §3.3; stop at the first

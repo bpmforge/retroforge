@@ -141,6 +141,11 @@ pub struct ScoutPlan {
     /// Ticket W33-06: the profile's strategy is final: the ladder tries no
     /// other rung.
     pub pin: bool,
+    /// Ticket W33-07: the profile's `[scene]` key, so the scout's own scene
+    /// tracker is fed the same level bytes the live one is (without them a
+    /// level the profile names is a "key change" on the scout's first frame,
+    /// which ends the pass at once). The app sets it from the matched profile.
+    pub scene_key: Option<crate::scene_key::SceneKeySpec>,
 }
 
 /// No addresses (the walk strategy pokes none).
@@ -195,6 +200,7 @@ impl ScoutPlan {
             hold: valued("hold"),
             start_when: valued("start_when"),
             pin: t.pin.unwrap_or(false),
+            scene_key: None,
         }
     }
 
@@ -577,6 +583,19 @@ impl Scout {
         Ok(())
     }
 
+    /// Ticket W33-07: [`Self::restart`] with a whole other plan (another
+    /// player word, another hold), for the discovery trials that try one
+    /// recipe after another from the same snapshot.
+    ///
+    /// # Errors
+    /// The snapshot cannot be restored.
+    pub fn restart_with(&mut self, plan: ScoutPlan) -> Result<(), ScoutError> {
+        let dir = plan.dirs.first().copied().unwrap_or(ScoutDir::Right);
+        let (strategy, step, budget) = (plan.strategy, plan.step_px, plan.frame_budget);
+        self.plan = plan;
+        self.restart(strategy, step, budget, dir)
+    }
+
     /// Fill the unknown cells of `live` for this scout's scene; returns the
     /// number of cells filled. Live cells are never touched.
     pub fn merge_into(&mut self, live: &mut CanvasModel) -> usize {
@@ -596,7 +615,10 @@ impl Scout {
         self.acc.take_delta(self.scene.0)
     }
 
-    fn extent(&self) -> usize {
+    /// Cells inside the bounding boxes of the scout's canvases (how much it
+    /// has seen).
+    #[must_use]
+    pub fn extent(&self) -> usize {
         self.acc
             .scene_canvases(self.scene.0)
             .map_or(0, |set| set.iter().map(|c| c.width() * c.height()).sum())
@@ -677,7 +699,18 @@ impl Scout {
             // another scene (a respawn, a transition) ends the pass.
             let bundle = self.sink.bundle.take(self.stepper.frame_count());
             let pad = i64::from(bundle.width.saturating_sub(256) / 2);
-            let scene = self.acc.observe_frame(&bundle, &FrameFeed::bands());
+            let level = self
+                .plan
+                .scene_key
+                .as_ref()
+                .and_then(|k| k.read(|a| self.stepper.peek_bus(a)));
+            let hints = rf_enhance::scene_tracker::SceneHints {
+                level: level.as_deref(),
+                axis_sections: self.plan.scene_key.as_ref().and_then(|k| k.axis_sections),
+            };
+            let scene = self
+                .acc
+                .observe_frame(&bundle, &FrameFeed::bands().with_scene_hints(hints));
             if scene != self.scene {
                 self.end_pass(ScoutEnd::SceneChanged);
                 return self.status;
@@ -1657,6 +1690,7 @@ mod tests {
             hold: vec![(0x7E_0100, 7)],
             start_when: Vec::new(),
             pin: false,
+            scene_key: None,
         }
     }
 
@@ -1788,6 +1822,7 @@ mod tests {
             hold: Vec::new(),
             start_when: Vec::new(),
             pin: false,
+            scene_key: None,
         }
     }
 
