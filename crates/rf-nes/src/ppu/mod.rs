@@ -449,6 +449,18 @@ pub struct DrawnTile {
     pub base: u16,
     /// Background palette 0-3, from the attribute byte's quadrant.
     pub palette: u8,
+    /// Ticket W34-01: the row of the tile this scanline shows (`v`'s fine Y,
+    /// 0-7), so `y - fine_y` is where the tile's top edge is (it can be
+    /// above the picture on the first row). Metadata only: nothing in the
+    /// simulation reads it.
+    pub fine_y: u8,
+    /// Ticket W34-01: the nametable address the tile was fetched from
+    /// (`$2000-$2FFF`: nametable select, coarse Y, coarse X), derived from
+    /// `v` at the reload, one coarse-X step after the fetch. Gives the tile's
+    /// place in the 512 x 480 nametable space, and with it which 2x2 group
+    /// shares an attribute byte (a metatile). Not valid inside an MMC5
+    /// vertical split, which has its own row.
+    pub nt_addr: u16,
 }
 
 /// One sprite tile the PPU drew, and where it landed.

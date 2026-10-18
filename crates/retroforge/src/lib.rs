@@ -90,6 +90,7 @@ pub mod state_slots;
 pub mod stepper;
 pub mod theme;
 pub mod thumbnail;
+pub mod tile_capture;
 pub mod toast;
 pub mod trace_capture;
 pub mod ui_nav;

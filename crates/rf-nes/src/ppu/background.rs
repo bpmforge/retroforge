@@ -385,6 +385,22 @@ impl Ppu {
         Some((x, self.scanline))
     }
 
+    /// Ticket W34-01: the nametable address of the tile now being reloaded.
+    ///
+    /// The tile was fetched while `v` still pointed at it; the coarse-X
+    /// increment on the dot just before the reload (`is_coarse_x_increment_dot`)
+    /// has moved `v` one tile on, so undo that step, including the
+    /// nametable flip when it wrapped.
+    fn fetched_nt_addr(&self) -> u16 {
+        let v = self.v & 0x0FFF;
+        let back = if v & 0x1F == 0 {
+            (v | 0x1F) ^ 0x0400
+        } else {
+            v - 1
+        };
+        0x2000 | back
+    }
+
     fn reload_shift_registers(&mut self) {
         if self.tile_capture {
             if let Some((x, y)) = self.drawn_tile_position(self.dot) {
@@ -394,6 +410,8 @@ impl Ppu {
                     tile: self.nt_latch,
                     base: self.bg_pattern_table_base(),
                     palette: self.at_latch,
+                    fine_y: ((self.v >> 12) & 0x07) as u8,
+                    nt_addr: self.fetched_nt_addr(),
                 };
                 self.drawn_tiles.push(tile);
             }
