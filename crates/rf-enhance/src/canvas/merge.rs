@@ -71,20 +71,35 @@ pub fn merge_unknown_in(live: &mut Canvas, scout: &Canvas, within: Option<Rect>)
         }));
         let n = row.iter().flatten().count();
         if n > 0 {
-            live.blit_row(x0, wy, &row);
+            // Tagged Scout (W33-06): a live frame landing here later
+            // overwrites it and makes it Live again.
+            live.blit_row_scout(x0, wy, &row);
             filled += n;
         }
     }
     filled
 }
 
-/// Ticket W33-04: how many cells the scout and the live canvas BOTH know, and
-/// how many of those hold the same pixel (palette index and palette id),
-/// inside `within` (`None` = everywhere). The W32-07 note measured 39 110 of
-/// 39 110; this is that measurement as a function (STITCHING_PLAN §3.3).
-/// Returns `(agreed, shared)`. Reads only.
+/// Ticket W33-04 / W33-06: how many cells the scout and the live canvas BOTH
+/// know, and how many of those hold the same pixel, inside `within` (`None` =
+/// everywhere). The W32-07 note measured 39 110 of 39 110; this is that
+/// measurement as a function (STITCHING_PLAN §3.3). Returns `(agreed,
+/// shared)`. Reads only.
+///
+/// Only cells a LIVE frame wrote count on the `live` side (an earlier scout
+/// merge is not evidence about a later one). The palette index must be equal;
+/// the palette id is compared only when BOTH cells carry one, because the
+/// scout stitches with no per-row palettes on the SNES yet, so its cells carry
+/// none (a cell with no id says nothing about the palette snapshot).
 #[must_use]
 pub fn scout_agreement(live: &Canvas, scout: &Canvas, within: Option<Rect>) -> (usize, usize) {
+    agreement_at(live, scout, within, 0)
+}
+
+/// [`scout_agreement`] with the scout read `dy` rows lower than the live
+/// canvas (a cell of the scout at `(x, y)` against the live one at
+/// `(x, y + dy)`).
+fn agreement_at(live: &Canvas, scout: &Canvas, within: Option<Rect>, dy: i64) -> (usize, usize) {
     let (w, h) = (scout.width(), scout.height());
     if w == 0 || h == 0 {
         return (0, 0);
@@ -102,14 +117,57 @@ pub fn scout_agreement(live: &Canvas, scout: &Canvas, within: Option<Rect>) -> (
     // Bounded `for` over the clipped box (law 8).
     for wy in y0..y1 {
         for wx in x0..x1 {
-            let (Some(a), Some(b)) = (live.get(wx, wy), scout.get(wx, wy)) else {
+            let (Some(a), Some(b)) = (live.get_live(wx, wy + dy), scout.get(wx, wy)) else {
                 continue;
             };
             shared += 1;
-            agreed += usize::from(a.palette_index == b.palette_index && a.sprite_id == b.sprite_id);
+            let ids = match (a.sprite_id, b.sprite_id) {
+                (Some(x), Some(y)) => x == y,
+                _ => true,
+            };
+            agreed += usize::from(a.palette_index == b.palette_index && ids);
         }
     }
     (agreed, shared)
+}
+
+/// The most rows the scout may sit off the live canvas and still be read as
+/// the same picture ([`scout_agreement_aligned`]).
+pub const MAX_ALIGN_ROWS: i64 = 1;
+
+/// What [`scout_agreement_aligned`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Alignment {
+    pub agreed: usize,
+    pub shared: usize,
+    /// The row offset it was measured at (0 = none).
+    pub dy: i64,
+}
+
+/// [`scout_agreement`] at the best vertical offset within [`MAX_ALIGN_ROWS`].
+/// The NES scout stitches a game whose vertical scroll the tracker does not
+/// follow (Super Mario Bros. 3 with the player held near the top of the
+/// screen) one row off the live canvas: measured on 1-1, 90 % agreement at
+/// offset 0 and 99.3 % at +1, on a texture where one row of error flips every
+/// edge. The offset is reported, never applied.
+#[must_use]
+pub fn scout_agreement_aligned(live: &Canvas, scout: &Canvas, within: Option<Rect>) -> Alignment {
+    let mut best = Alignment {
+        agreed: 0,
+        shared: 0,
+        dy: 0,
+    };
+    // Offset 0 first: a tie keeps it.
+    for dy in std::iter::once(0).chain((1..=MAX_ALIGN_ROWS).flat_map(|d| [d, -d])) {
+        let (agreed, shared) = agreement_at(live, scout, within, dy);
+        // Compare ratios without division: agreed/shared > best.agreed/best.shared.
+        let better =
+            shared > 0 && (best.shared == 0 || agreed * best.shared > best.agreed * shared);
+        if better {
+            best = Alignment { agreed, shared, dy };
+        }
+    }
+    best
 }
 
 /// What to do with a scout delta, by [`scout_agreement`].
@@ -127,8 +185,7 @@ pub enum ScoutVerdict {
 pub const MIN_SHARED_CELLS: usize = 2000;
 
 /// The §3.3 thresholds over `(agreed, shared)`; `None` = too few shared
-/// cells to judge. Wiring it into the scout worker (reject/slow the pass)
-/// belongs to W33-06.
+/// cells to judge. The scout worker applies it before every delta (W33-06).
 #[must_use]
 pub fn scout_verdict((agreed, shared): (usize, usize)) -> Option<ScoutVerdict> {
     if shared < MIN_SHARED_CELLS {

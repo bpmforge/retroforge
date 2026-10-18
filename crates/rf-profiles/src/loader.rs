@@ -714,6 +714,18 @@ mod tests {
     }
 
     #[test]
+    fn a_scout_table_may_pin_its_strategy_and_by_default_does_not() {
+        let plain = load_str(&format!("{VALID}\n{SCOUT}")).expect("loads");
+        assert_eq!(plain.profile.scout.expect("scout").pin, None);
+        let pinned = SCOUT.replace(
+            "frame_budget = 1500",
+            "frame_budget = 1500\n        pin = true",
+        );
+        let outcome = load_str(&format!("{VALID}\n{pinned}")).expect("a pinned table loads");
+        assert_eq!(outcome.profile.scout.expect("scout").pin, Some(true));
+    }
+
+    #[test]
     fn a_scout_table_with_a_bad_key_or_row_is_rejected_and_says_which() {
         let bad = |from: &str, to: &str, needle: &str| {
             let text = format!("{VALID}\n{}", SCOUT.replacen(from, to, 1));

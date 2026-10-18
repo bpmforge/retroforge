@@ -408,6 +408,68 @@ equal (palette_index, palette_id). Rules:
   overwrites); a mismatch rate above 1 % over 600 frames flips the scene's
   margins back to live-only and reports it.
 
+**Built (W33-06).** `crates/retroforge/src/scout_ladder.rs` (the ladder and
+`check_delta`, pure and unit-tested) and the worker in `scout.rs`.
+
+* **Source bit.** `Canvas` carries a per-cell Live/Scout flag (a parallel
+  vector, empty while every cell is Live). A merge tags the cells it fills
+  `Scout` and never writes over a live cell or an earlier scout cell; a live
+  write over a Scout cell replaces it and makes it `Live`. The registration
+  check and the agreement count only `Live` cells as evidence (`get_live`), so
+  wrong scout cells under a live frame are not a placement fault. Persistence
+  v2 writes and reads the flag cell for cell.
+* **Check.** Each delta is compared with a copy of the live canvas taken when
+  the scout starts, per trusted layer, at the best vertical offset within one
+  row (`scout_agreement_aligned`: SMB3 1-1 reads 90 % at offset 0 and 99.3 % at
+  +1 against a standing live canvas, the tracker not following that game's
+  vertical scroll; the offset is reported, never applied). The worst layer's
+  verdict decides; the pass's FIRST judged delta decides the pass (merge:
+  carry on; slow: merge and lower the step for the next pass; reject: discard
+  and halve the step, then the next rung); a later reject only drops that
+  delta, because where a late delta meets the live canvas again that is the
+  live canvas's newest edge, half drawn (RF-Scroller: 99.9 % over the screen,
+  86 % over the last 40 columns). Palette ids are compared only when both
+  cells carry one (the SNES scout stitches with no per-row palettes yet, so
+  its cells carry none).
+* **A live canvas cannot judge what lies ahead.** The corruption of a too-fast
+  scout (SMB3 at 8 px) sits in the columns AHEAD of the player, and a canvas
+  of the standing screen agrees 99 % at 4 px AND at 8 px (measured). So a
+  step is first probed: the same stretch scouted at half the step and
+  compared cell by cell (8 vs 4 on SMB3: 85.7 %, rejected; 4 vs 2: 99.7 %).
+  Probes are verified once per rung and step. A scene the live game has not
+  drawn has nothing to compare with at all, and in the app that is the normal
+  state of a NES level start: the scroll tracker calls a band whose scroll
+  has not changed since the previous frame HUD (`ScrollTracker::observe`), so a
+  player who stands still after the scene settled stitches nothing, and the
+  scout reference held 0 cells in both NES shots (SMB3, MM2; SMW's per-layer
+  path held 58 572, so its deltas are judged live: 100 % over 336 075 cells).
+  There the probe is the check, and a scout is not refused for the live
+  canvas's silence (rule 3 of §3.3 refused it; measured in the app harness,
+  that kills every NES scout at a level start). A rung with no probe (walk, or
+  a step already at the floor) on an empty live canvas is accepted blind; the
+  live frames that later overwrite its cells are what would catch it (not done,
+  see below). The ROM-gated driver tests build their live canvas from a fresh
+  model, which does stitch a standing screen (the first frame of a scene), so
+  they do exercise the live check on SMB3 (99.1 % over one screen).
+* **Ladder.** player_move, walk, camera_write, give up; a rung with nothing
+  to act on is skipped (player_move needs player addresses, walk a machine
+  placed by bands, camera_write camera addresses); the profile's strategy goes
+  first, `pin = true` limits it to that one, and the rung that finished a
+  scene is kept with it and tried first by that scene's next scout. Step: the
+  profile's value (8 without one), halved to a floor of 2 (a profile step
+  below that is its own floor); a smaller step gets up to 4x the frame budget.
+  A pass that stitches nothing (Left on a forward-only engine) ends, it is not
+  a failed rung. Give-up is remembered with the scene.
+* **Telemetry** (`ScoutTelemetry`): deltas merged / slow / rejected /
+  unjudged, probes and probes rejected, agreed and shared cells (so the
+  agreement percentage), gave_up, and `last_report` (every check with its
+  agreement, the rung each pass finished on, the live cells it had to
+  compare with); the harness prints them.
+* **Not done.** The continuous re-check of §3.3 (count mismatches where a live
+  frame overwrites a Scout cell, flip the margins to live-only above 1 % over
+  600 frames) and `Confidence.scout`. The scout's cells carry no palette id on
+  the SNES (they never did): its margins resolve with the current row palette.
+
 ### 3.4 Confidence score per game (shown in the UI, stored in the profile)
 
 `Confidence { placement: 0-3, palette: 0-3, scout: 0-3, scenes_ok: n/m }`

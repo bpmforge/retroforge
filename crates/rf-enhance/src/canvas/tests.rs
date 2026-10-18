@@ -1766,6 +1766,45 @@ mod registration_checks {
         c.observe(good);
         assert_eq!(c.level(), 3, "capped");
     }
+
+    /// A scout cell is not evidence about a live frame: wrong scout cells
+    /// under the live game's own frames must not make the placement check
+    /// withhold them (the garbage would stay on the canvas).
+    #[test]
+    fn wrong_scout_cells_under_live_frames_are_not_a_placement_fault() {
+        let mut m = CanvasModel::new();
+        for f in 0..60u16 {
+            feed_frame(&mut m, f, f * SPEED);
+        }
+        // The live game knows world x 0..278. The scout filled everything
+        // from 280 to 1000, every row, with garbage.
+        let mut delta = Canvas::new();
+        for y in 0..i64::from(RH) {
+            let row: Vec<_> = (280..1000)
+                .map(|_| Some(px(PixelLayer::Background(0), 250)))
+                .collect();
+            delta.blit_row(280, y, &row);
+        }
+        let delta = [delta, Canvas::new(), Canvas::new(), Canvas::new()];
+        assert!(m.merge_unknown_from(ID.0, &delta) > 0);
+        // The live game gets there in big steps: most of every frame lies on
+        // scout cells, a strip of it on live ones.
+        for hofs in [180u16, 260, 340, 420, 500] {
+            m.feed(&ramp(hofs), ID, Some(&one_layer(hofs)));
+            let last = m.frames().unwrap().confidence[0].last;
+            assert_eq!(
+                last.withheld_rows, 0,
+                "hofs {hofs}: withheld over scout cells"
+            );
+        }
+        let c = &m.scene_canvases(ID.0).unwrap()[0];
+        for y in [0i64, 7, 31] {
+            let want = (350 * 7 + y * 13) as u8;
+            assert_eq!(c.get(350, y).map(|p| p.palette_index), Some(want));
+            assert!(!c.is_scout(350, y), "the live frame made the cell live");
+        }
+        assert_eq!(m.frames().unwrap().confidence[0].level(), MAX_LEVEL);
+    }
 }
 
 mod scout_agreement_checks {
@@ -2002,4 +2041,232 @@ mod scenes {
             assert!(cells(&m, id) > 0, "{id:?} has no canvas of its own");
         }
     }
+}
+
+// ---- W33-06: the per-cell source (Live | Scout)
+
+fn scout_canvas_with(cells: &[(i64, i64, u8)]) -> Canvas {
+    let mut c = Canvas::new();
+    for &(x, y, v) in cells {
+        c.blit_row_scout(x, y, &[Some(px(PixelLayer::Background(0), v))]);
+    }
+    c
+}
+
+#[test]
+fn a_merge_tags_the_cells_it_fills_scout_and_leaves_live_cells_live() {
+    let mut live = canvas_with(&[(0, 0, 1), (1, 0, 1)]);
+    let scout = canvas_with(&[(1, 0, 9), (2, 0, 9)]);
+    assert_eq!(merge_unknown(&mut live, &scout), 1);
+    assert!(
+        !live.is_scout(0, 0) && !live.is_scout(1, 0),
+        "live stays live"
+    );
+    assert!(live.is_scout(2, 0), "the filled cell is a scout cell");
+    assert_eq!(live.scout_cell_count(), 1);
+    assert_eq!(live.get_live(2, 0), None, "a scout cell is not a live read");
+    assert_eq!(live.get(2, 0).map(|p| p.palette_index), Some(9));
+    assert!(!live.is_scout(50, 50), "outside the canvas is not scout");
+}
+
+#[test]
+fn a_scout_never_overwrites_a_live_cell_or_an_earlier_scout_cell() {
+    let mut live = canvas_with(&[(0, 0, 1)]);
+    assert_eq!(merge_unknown(&mut live, &canvas_with(&[(1, 0, 5)])), 1);
+    // A second scout (the left pass) offers different cells at 0 and 1.
+    let second = canvas_with(&[(0, 0, 7), (1, 0, 7), (2, 0, 7)]);
+    assert_eq!(
+        merge_unknown(&mut live, &second),
+        1,
+        "only x = 2 is unknown"
+    );
+    assert_eq!(row_of(&live, 0, 0..3), vec![Some(1), Some(5), Some(7)]);
+    assert_eq!(live.scout_cell_count(), 2);
+}
+
+#[test]
+fn a_live_write_over_a_scout_cell_replaces_it_and_makes_it_live() {
+    let mut c = scout_canvas_with(&[(0, 0, 9), (1, 0, 9)]);
+    c.blit_row(1, 0, &[Some(px(PixelLayer::Background(0), 4))]);
+    assert_eq!(row_of(&c, 0, 0..2), vec![Some(9), Some(4)]);
+    assert!(c.is_scout(0, 0) && !c.is_scout(1, 0));
+    // A live write that skips a cell (None: a sprite was in front) leaves
+    // the scout cell and its tag alone.
+    c.blit_row(0, 0, &[None, Some(px(PixelLayer::Background(0), 6))]);
+    assert!(c.is_scout(0, 0));
+}
+
+#[test]
+fn growing_a_canvas_keeps_every_cells_source() {
+    let mut c = scout_canvas_with(&[(5, 5, 9)]);
+    c.blit_row(6, 5, &[Some(px(PixelLayer::Background(0), 1))]);
+    // Grow in every direction.
+    c.blit_row(-20, -20, &[Some(px(PixelLayer::Background(0), 2))]);
+    c.blit_row(200, 40, &[Some(px(PixelLayer::Background(0), 3))]);
+    assert!(c.is_scout(5, 5) && !c.is_scout(6, 5));
+    assert!(!c.is_scout(-20, -20) && !c.is_scout(200, 40));
+    assert_eq!(c.scout_cell_count(), 1);
+}
+
+#[test]
+fn canvases_equal_when_cells_and_sources_equal_whatever_the_flag_vector_looks_like() {
+    let live_only = canvas_with(&[(0, 0, 1), (1, 0, 2)]);
+    // The same cells after a scout tag was written over and cleared again.
+    let mut churned = scout_canvas_with(&[(0, 0, 9), (1, 0, 9)]);
+    churned.blit_row(
+        0,
+        0,
+        &[
+            Some(px(PixelLayer::Background(0), 1)),
+            Some(px(PixelLayer::Background(0), 2)),
+        ],
+    );
+    assert_eq!(live_only, churned);
+    let tagged = scout_canvas_with(&[(0, 0, 1), (1, 0, 2)]);
+    assert_ne!(live_only, tagged, "same pixels, different source");
+}
+
+#[test]
+fn agreement_counts_only_live_cells_and_compares_palette_ids_only_when_both_carry_one() {
+    let with_id = |v: u8, id: Option<u8>| PpuPixel {
+        sprite_id: id,
+        ..px(PixelLayer::Background(0), v)
+    };
+    let mut live = Canvas::new();
+    live.blit_row(
+        0,
+        0,
+        &[
+            Some(with_id(1, Some(0))),
+            Some(with_id(2, Some(0))),
+            Some(with_id(3, Some(0))),
+            Some(with_id(4, None)),
+        ],
+    );
+    live.blit_row_scout(4, 0, &[Some(with_id(5, Some(0)))]);
+    let mut scout = Canvas::new();
+    scout.blit_row(
+        0,
+        0,
+        &[
+            Some(with_id(1, Some(0))), // same
+            Some(with_id(2, Some(1))), // same index, other palette id
+            Some(with_id(9, Some(0))), // other index
+            Some(with_id(4, Some(2))), // live has no id: index decides
+            Some(with_id(5, Some(0))), // over a scout cell: not counted
+        ],
+    );
+    assert_eq!(scout_agreement(&live, &scout, None), (2, 4));
+}
+
+#[test]
+fn a_scout_a_row_off_is_read_at_that_offset_and_the_offset_never_exceeds_one_row() {
+    let pic = |x: i64, y: i64| ((x * 5 + y * y) % 60) as u8;
+    let mut live = Canvas::new();
+    let mut scout = Canvas::new();
+    for y in 0..30i64 {
+        let l: Vec<_> = (0..40)
+            .map(|x| Some(px(PixelLayer::Background(0), pic(x, y))))
+            .collect();
+        live.blit_row(0, y, &l);
+        // The scout's row y is the live picture's row y + 1.
+        let s: Vec<_> = (0..40)
+            .map(|x| Some(px(PixelLayer::Background(0), pic(x, y + 1))))
+            .collect();
+        scout.blit_row(0, y, &s);
+    }
+    let a = scout_agreement_aligned(&live, &scout, None);
+    assert_eq!(a.dy, 1);
+    assert_eq!(a.agreed, a.shared);
+    let (plain, shared) = scout_agreement(&live, &scout, None);
+    assert!(plain < shared, "unaligned they disagree");
+    // Two rows off is beyond the tolerance: not read as agreement.
+    let mut far = Canvas::new();
+    for y in 0..30i64 {
+        let s: Vec<_> = (0..40)
+            .map(|x| Some(px(PixelLayer::Background(0), pic(x, y + 2))))
+            .collect();
+        far.blit_row(0, y, &s);
+    }
+    let b = scout_agreement_aligned(&live, &far, None);
+    assert!(b.agreed < b.shared, "a two row error stays an error");
+}
+
+/// A live frame landing on cells the scout filled overwrites them, with its
+/// own pixels and its own source; the scout's merge never undoes that.
+#[test]
+fn a_live_frame_overwrites_scout_cells_and_a_later_merge_does_not_take_them_back() {
+    let id = SceneId(1);
+    let mut live = CanvasModel::new();
+    live.feed(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(0, 0)));
+    // The scout filled x = 300.. with garbage the live game has not seen.
+    let garbage: Vec<(i64, i64, u8)> = (0..i64::from(H))
+        .flat_map(|y| (296..320).map(move |x| (x, y, 200)))
+        .collect();
+    let scout = [
+        scout_canvas_with(&garbage),
+        Canvas::new(),
+        Canvas::new(),
+        Canvas::new(),
+    ];
+    // (scout_canvas_with tags its cells; a delta is plain cells.)
+    let mut delta = Canvas::new();
+    for &(x, y, v) in &garbage {
+        delta.blit_row(x, y, &[Some(px(PixelLayer::Background(0), v))]);
+    }
+    let delta = [delta, Canvas::new(), Canvas::new(), Canvas::new()];
+    drop(scout);
+    assert!(live.merge_unknown_from(1, &delta) > 0);
+    let bg = |m: &CanvasModel| m.scene_canvases(1).unwrap()[0].clone();
+    assert!(bg(&live).is_scout(300, 0));
+    assert_eq!(bg(&live).get(300, 0).map(|p| p.palette_index), Some(200));
+    // The live game walks there (the world axis follows steps under half
+    // the tilemap): its pixels land on x = 296..328.
+    for hofs in [100u16, 200, 296] {
+        live.feed(
+            &bundle([hofs, 0], |_, _, _| {}),
+            id,
+            Some(&scrolls(hofs, 0)),
+        );
+    }
+    let after = bg(&live);
+    assert!(!after.is_scout(300, 0), "a live frame makes the cell live");
+    assert_eq!(
+        after.get(300, 0).map(|p| p.palette_index),
+        Some(300u16 as u8),
+        "with its own pixel, not the scout's"
+    );
+    // A scout delta offered again changes nothing.
+    assert_eq!(live.merge_unknown_from(1, &delta), 0);
+    assert_eq!(bg(&live).get(300, 0), after.get(300, 0));
+}
+
+#[test]
+fn the_scout_reference_is_a_copy_of_the_live_canvases_with_the_trusted_layers() {
+    let id = SceneId(1);
+    let mut live = CanvasModel::new();
+    assert!(live.scout_reference(1).is_none(), "no such scene yet");
+    live.feed(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(0, 0)));
+    let r = live.scout_reference(1).expect("scene");
+    assert_eq!(r.layers[0], live.scene_canvases(1).unwrap()[0]);
+    assert!(r.trusted[0]);
+    // A copy: later frames do not reach it.
+    live.feed(&bundle([100, 0], |_, _, _| {}), id, Some(&scrolls(100, 0)));
+    assert!(r.layers[0].get(120, 0).is_none());
+}
+
+#[test]
+fn peeking_a_delta_leaves_it_to_be_taken_and_taking_empties_it() {
+    let mut acc = CanvasModel::new();
+    let id = SceneId(1);
+    acc.feed(&bundle([0, 0], |_, _, _| {}), id, Some(&scrolls(0, 0)));
+    let peeked = acc.peek_delta(1).expect("scene");
+    assert!(peeked[0].get(0, 0).is_some());
+    // Looking again gives the same cells, and the next frame adds to them.
+    acc.feed(&bundle([100, 0], |_, _, _| {}), id, Some(&scrolls(100, 0)));
+    let again = acc.peek_delta(1).unwrap();
+    assert!(again[0].get(0, 0).is_some() && again[0].get(100, 0).is_some());
+    let taken = acc.take_delta(1).unwrap();
+    assert_eq!(taken[0], again[0]);
+    assert!(acc.peek_delta(1).unwrap()[0].get(0, 0).is_none(), "taken");
 }

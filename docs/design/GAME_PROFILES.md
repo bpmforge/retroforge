@@ -288,6 +288,7 @@ rejects a bad key or row naming it.
 | `stall_frames` | A pass ends after this many frames with no new level, 1..=3000 (default 120). |
 | `settle_frames` | Live frames to wait after a scene is entered (default 90). |
 | `dirs` | Passes, `"right"` and/or `"left"` (default both); each restarts from the snapshot. |
+| `pin` | `true` = try only `strategy`. Without it the scout starts there and falls back down the ladder (player_move, walk, camera_write) when its own self-check refuses a rung; a rung with no addresses to act on is skipped (W33-06). |
 | `[[scout.addr]]` | Rows with `role` = `camera_x` / `player_x` (16-bit little-endian words), `hold` (a byte `value` written every scout frame: invincibility, Mario kept out of reach) or `start_when` (a byte `value` the LIVE game must hold, for 30 frames running, before a scout starts: "in a level, player alive"). |
 
 A scout stops at its frame budget, after `stall_frames` without new level, or

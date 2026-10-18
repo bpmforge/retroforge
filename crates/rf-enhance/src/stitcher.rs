@@ -45,14 +45,34 @@ use crate::scroll_tracker::{BandWorldPos, ScanlineBand};
 /// content-derived bounding box has no such hazard: growth is a pure
 /// function of which world coordinates have been touched, and equality is
 /// plain `Vec` equality.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Canvas {
     origin_x: i64,
     origin_y: i64,
     width: usize,
     height: usize,
     cells: Vec<Option<PpuPixel>>,
+    /// Ticket W33-06: per cell, whether it came from the level scout rather
+    /// than a live frame (`true` = Scout). Empty = every cell is Live (the
+    /// common case costs nothing); otherwise `cells.len()` long. A cell a
+    /// live frame writes is Live again, so live overwrites scout.
+    scout: Vec<bool>,
 }
+
+impl PartialEq for Canvas {
+    /// Same bounds, same cells, same sources (an absent source vector and an
+    /// all-Live one are equal).
+    fn eq(&self, other: &Self) -> bool {
+        self.origin_x == other.origin_x
+            && self.origin_y == other.origin_y
+            && self.width == other.width
+            && self.height == other.height
+            && self.cells == other.cells
+            && (0..self.cells.len()).all(|i| self.scout_at(i) == other.scout_at(i))
+    }
+}
+
+impl Eq for Canvas {}
 
 impl Canvas {
     #[must_use]
@@ -63,7 +83,55 @@ impl Canvas {
             width: 0,
             height: 0,
             cells: Vec::new(),
+            scout: Vec::new(),
         }
+    }
+
+    /// Whether the cell at row-major index `i` came from the scout.
+    fn scout_at(&self, i: usize) -> bool {
+        self.scout.get(i).copied().unwrap_or(false)
+    }
+
+    /// Whether the cell at world coordinates is a Scout cell (`false` for a
+    /// Live cell and for an unknown one).
+    #[must_use]
+    pub fn is_scout(&self, world_x: i64, world_y: i64) -> bool {
+        let (ix, iy) = (world_x - self.origin_x, world_y - self.origin_y);
+        if ix < 0 || iy < 0 || ix as usize >= self.width || iy as usize >= self.height {
+            return false;
+        }
+        let i = iy as usize * self.width + ix as usize;
+        self.cells[i].is_some() && self.scout_at(i)
+    }
+
+    /// The observed pixel at world coordinates, only when a LIVE frame wrote
+    /// it: a Scout cell reads as unknown. What the registration check and the
+    /// scout's agreement compare against (a scout cell is not evidence about
+    /// a live frame).
+    #[must_use]
+    pub fn get_live(&self, world_x: i64, world_y: i64) -> Option<PpuPixel> {
+        if self.is_scout(world_x, world_y) {
+            None
+        } else {
+            self.get(world_x, world_y)
+        }
+    }
+
+    /// How many known cells came from the scout.
+    #[must_use]
+    pub fn scout_cell_count(&self) -> usize {
+        self.scout
+            .iter()
+            .zip(&self.cells)
+            .filter(|(s, c)| **s && c.is_some())
+            .count()
+    }
+
+    /// The per-cell source flags (`true` = Scout), row-major like
+    /// [`Self::cells`]; empty when every cell is Live.
+    #[must_use]
+    pub fn scout_flags(&self) -> &[bool] {
+        &self.scout
     }
 
     #[must_use]
@@ -123,7 +191,36 @@ impl Canvas {
             width,
             height,
             cells,
+            scout: Vec::new(),
         }
+    }
+
+    /// [`Self::from_raw_parts`] with the per-cell sources (`true` = Scout;
+    /// empty = all Live), as a restored cache entry carries them.
+    ///
+    /// # Panics
+    /// As [`Self::from_raw_parts`]; also if `scout` is neither empty nor
+    /// `cells.len()` long.
+    #[must_use]
+    pub fn from_raw_parts_with_sources(
+        origin_x: i64,
+        origin_y: i64,
+        width: usize,
+        height: usize,
+        cells: Vec<Option<PpuPixel>>,
+        scout: Vec<bool>,
+    ) -> Self {
+        assert!(
+            scout.is_empty() || scout.len() == cells.len(),
+            "Canvas::from_raw_parts_with_sources: {} sources for {} cells",
+            scout.len(),
+            cells.len()
+        );
+        let mut c = Self::from_raw_parts(origin_x, origin_y, width, height, cells);
+        if scout.iter().any(|&b| b) {
+            c.scout = scout;
+        }
+        c
     }
 
     /// The observed pixel at world coordinates, `None` for both "outside
@@ -159,6 +256,7 @@ impl Canvas {
             self.width = extra_width;
             self.height = extra_height;
             self.cells = vec![None; self.width * self.height];
+            self.scout = Vec::new();
             return;
         }
         let min_x = self.origin_x.min(world_x);
@@ -176,6 +274,11 @@ impl Canvas {
         }
 
         let mut new_cells = vec![None; new_width * new_height];
+        let mut new_scout = if self.scout.is_empty() {
+            Vec::new()
+        } else {
+            vec![false; new_width * new_height]
+        };
         let dst_x_offset = (self.origin_x - min_x) as usize;
         let dst_y_offset = (self.origin_y - min_y) as usize;
         for y in 0..self.height {
@@ -183,12 +286,17 @@ impl Canvas {
             let dst_start = (y + dst_y_offset) * new_width + dst_x_offset;
             new_cells[dst_start..dst_start + self.width]
                 .copy_from_slice(&self.cells[src_start..src_start + self.width]);
+            if !new_scout.is_empty() {
+                new_scout[dst_start..dst_start + self.width]
+                    .copy_from_slice(&self.scout[src_start..src_start + self.width]);
+            }
         }
         self.origin_x = min_x;
         self.origin_y = min_y;
         self.width = new_width;
         self.height = new_height;
         self.cells = new_cells;
+        self.scout = new_scout;
     }
 
     /// Blit one row of already-layer-filtered pixels
@@ -210,6 +318,30 @@ impl Canvas {
         for (i, px) in row.iter().enumerate() {
             if let Some(px) = px {
                 self.cells[dst_start + i] = Some(*px);
+                // A live frame always wins: the cell is Live again.
+                if let Some(flag) = self.scout.get_mut(dst_start + i) {
+                    *flag = false;
+                }
+            }
+        }
+    }
+
+    /// As [`Self::blit_row`], tagging every cell written as a Scout cell (the
+    /// merge of a scout's delta; W33-06). Callers fill unknown cells only.
+    pub fn blit_row_scout(&mut self, world_x: i64, world_y: i64, row: &[Option<PpuPixel>]) {
+        if row.is_empty() {
+            return;
+        }
+        self.ensure_bounds(world_x, world_y, row.len(), 1);
+        if self.scout.is_empty() {
+            self.scout = vec![false; self.cells.len()];
+        }
+        let dst_start =
+            (world_y - self.origin_y) as usize * self.width + (world_x - self.origin_x) as usize;
+        for (i, px) in row.iter().enumerate() {
+            if let Some(px) = px {
+                self.cells[dst_start + i] = Some(*px);
+                self.scout[dst_start + i] = true;
             }
         }
     }
