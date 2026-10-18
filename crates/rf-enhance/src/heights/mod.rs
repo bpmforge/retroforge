@@ -7,6 +7,11 @@
 //! console's tilemap into these types is the mediator's job
 //! (`retroforge::tile_capture`); what arrives here is already console-free.
 
+pub mod player;
 pub mod tile_grid;
 
+pub use player::{
+    cluster, Dirs, Entity, FrameInput, Orientation, OrientationGuess, OrientationSource, Player,
+    PlayerSource, PlayerTracker, SpriteBox, TrackEvidence,
+};
 pub use tile_grid::{Fnv64, TileCell, TileGrid, TileKey, TileObs};

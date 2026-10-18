@@ -879,6 +879,25 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W34-02: the sprites on screen as console-free boxes
+    /// (`crate::sprite_capture`), for the player detector. Reads OAM only.
+    pub fn sprite_boxes(&self, screen: (i32, i32), out: &mut Vec<rf_enhance::heights::SpriteBox>) {
+        match &self.machine {
+            Machine::Snes(core) => {
+                let ppu = &core.system().bus.ppu;
+                crate::sprite_capture::snes_sprites(&ppu.oam, ppu.obj_size, screen, out);
+            }
+            Machine::Nes(_) => {
+                crate::sprite_capture::nes_sprites(
+                    self.oam(),
+                    self.sprite_height_px(),
+                    screen,
+                    out,
+                );
+            }
+        }
+    }
+
     /// Ticket W11-05: record the tiles the NES PPU draws. No-op on SNES —
     /// Mesen HD packs are an NES format.
     pub fn set_tile_capture(&mut self, on: bool) {

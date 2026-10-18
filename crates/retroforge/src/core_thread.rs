@@ -447,6 +447,12 @@ pub struct FrameMsg {
     /// yet; the height learner (W34-03) is its consumer. Worst case about
     /// 61 KB (33 x 29 cells x 4 layers x 16 B).
     pub tile_grids: Vec<rf_enhance::heights::TileGrid>,
+    /// Ticket W34-02: the sprites on screen as console-free boxes
+    /// (`crate::sprite_capture`), under the same switch as `tile_grids`;
+    /// EMPTY otherwise. The player detector's input
+    /// (`rf_enhance::heights::PlayerTracker`); the pad it correlates with is
+    /// the UI-readable input frame, and the camera the scene tracker's.
+    pub sprites: Vec<rf_enhance::heights::SpriteBox>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
@@ -2235,6 +2241,10 @@ fn core_thread_main(
             } else {
                 Vec::new()
             };
+            let mut sprites = Vec::new();
+            if tile_grid_capture {
+                stepper.sprite_boxes((sink.width() as i32, sink.height() as i32), &mut sprites);
+            }
             bundle_writer.publish(bundle);
             let mut msg = FrameMsg {
                 governors: clocks.report(),
@@ -2339,6 +2349,7 @@ fn core_thread_main(
                 layer_order,
                 line_regs,
                 tile_grids,
+                sprites,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2665,6 +2676,7 @@ mod tests {
             layer_order: Vec::new(),
             line_regs: Vec::new(),
             tile_grids: Vec::new(),
+            sprites: Vec::new(),
         }
     }
 
