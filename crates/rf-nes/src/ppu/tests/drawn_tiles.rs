@@ -132,6 +132,50 @@ fn fine_x_shifts_the_reported_tiles_left() {
     );
 }
 
+/// Ticket W34-01: every tile reports where in the nametable space it was
+/// fetched from and which of its eight rows the scanline shows, so a
+/// consumer can group tiles into the 2x2 metatiles one attribute byte
+/// colours and find each tile row's top edge.
+#[test]
+fn each_tile_reports_its_nametable_address_and_fine_y() {
+    let mut p = ppu_with_grid();
+    run_captured_frame(&mut p);
+    let tiles = p.completed_tiles();
+    for t in tiles.iter().filter(|t| t.x >= 0 && t.x < 256) {
+        let (col, row) = (usize::from(t.x as u16 / 8), usize::from(t.y / 8));
+        assert_eq!(
+            usize::from(t.nt_addr),
+            0x2000 + row * 32 + col,
+            "tile at x={} y={}",
+            t.x,
+            t.y
+        );
+        assert_eq!(u16::from(t.fine_y), t.y % 8, "fine Y at y={}", t.y);
+    }
+}
+
+/// The address undoes the coarse-X step that precedes the reload, including
+/// across the nametable seam, and the prefetched tiles of the next line.
+#[test]
+fn the_reported_address_follows_scroll_across_the_nametable_seam() {
+    let mut p = ppu_with_grid();
+    // X = 250: coarse X 31, fine X 2. Column 0 is tile 31 of nametable 0,
+    // column 1 is tile 0 of nametable 1 ($2400).
+    p.write_register(5, 250);
+    p.write_register(5, 0);
+    run_captured_frame(&mut p);
+    let row0: Vec<_> = {
+        let mut v: Vec<_> = p.completed_tiles().iter().filter(|t| t.y == 0).collect();
+        v.sort_by_key(|t| t.x);
+        v
+    };
+    assert_eq!(row0[0].x, -2);
+    assert_eq!(row0[0].nt_addr, 0x2000 + 31);
+    assert_eq!(row0[1].x, 6);
+    assert_eq!(row0[1].nt_addr, 0x2400);
+    assert_eq!(row0[2].nt_addr, 0x2401);
+}
+
 /// Capture off costs nothing and reports nothing.
 #[test]
 fn capture_off_reports_nothing() {

@@ -828,6 +828,57 @@ impl EmuStepper {
             .map_or(8, rf_nes::NesBus::sprite_height)
     }
 
+    /// Ticket W34-01: the frame's background tile grids
+    /// (`crate::tile_capture`), read from the PPU without touching it.
+    ///
+    /// `lines` is the bundle's per-line registers (empty when it did not
+    /// capture them), `hud` the canvas model's verdict per layer, `height`
+    /// the picture's visible lines. On the NES the grids come from the
+    /// tiles the PPU recorded, so `set_tile_capture` must be on or this is
+    /// empty.
+    #[must_use]
+    pub fn tile_grids(
+        &self,
+        lines: &[Option<rf_core_api::LineRegisters>],
+        hud: [bool; 4],
+        height: usize,
+    ) -> Vec<rf_enhance::heights::TileGrid> {
+        let height = u32::try_from(height).unwrap_or(0);
+        match &self.machine {
+            Machine::Snes(core) => {
+                let ppu = &core.system().bus.ppu;
+                crate::tile_capture::snes_grids(&crate::tile_capture::SnesSource {
+                    vram: &ppu.vram,
+                    cgram: &ppu.cgram,
+                    mode: ppu.bg_mode,
+                    layers: std::array::from_fn(|i| {
+                        let b = &ppu.bgs[i];
+                        crate::tile_capture::SnesLayer {
+                            tilemap_base: b.tilemap_base,
+                            tilemap_size: b.tilemap_size,
+                            char_base: b.char_base,
+                            tile16: b.tile_size_16,
+                            hofs: b.hofs,
+                            vofs: b.vofs,
+                            on_main: b.enabled,
+                            on_sub: ppu.ts & (1 << i) != 0,
+                        }
+                    }),
+                    lines,
+                    screen: (u32::from(rf_snes::ppu::WIDTH as u16), height),
+                    hud,
+                })
+            }
+            Machine::Nes(_) => crate::tile_capture::nes_grids(
+                self.completed_tiles(),
+                self.palette(),
+                self.chr(),
+                hud[0],
+                height,
+            ),
+        }
+    }
+
     /// Ticket W11-05: record the tiles the NES PPU draws. No-op on SNES —
     /// Mesen HD packs are an NES format.
     pub fn set_tile_capture(&mut self, on: bool) {

@@ -1485,6 +1485,8 @@ pub struct RetroForgeApp {
     event_subscription_active: bool,
     /// Ticket W13-02b: whether `SetSnesDebugCapture(true)` was last sent.
     snes_capture_active: bool,
+    /// Ticket W34-01: whether `SetTileGridCapture(true)` was last sent.
+    tile_grid_capture_active: bool,
     /// Ticket W4-10a: the UI-thread half of the trace transport, present
     /// only while a capture is armed.
     trace_drain: Option<crate::trace_capture::TraceDrain>,
@@ -2004,6 +2006,7 @@ impl RetroForgeApp {
             debug_panels: crate::debug_dock::DebugPanels::new(),
             event_subscription_active: false,
             snes_capture_active: false,
+            tile_grid_capture_active: false,
             trace_drain: None,
             trace_writer: None,
             show_states: false,
@@ -4062,6 +4065,7 @@ impl RetroForgeApp {
                 self.debug_panels.data.snes = None;
                 self.debug_panels.data.cpu_regs = rf_core_api::CpuRegs::None;
                 self.snes_capture_active = false;
+                self.tile_grid_capture_active = false;
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
                 // A fresh `EmuStepper` (inside `core_thread::spawn` below)
@@ -5235,6 +5239,16 @@ impl RetroForgeApp {
     /// too, so the disarm direction is symmetric whichever toggle moves
     /// last).
     fn sync_diorama_subscription(&mut self) {
+        // Ticket W34-01: the tile grids the automatic heights will learn
+        // from are recorded while Diorama is ticked outside Accuracy Mode
+        // (law 6: Accuracy Mode never turns any of it on), whether or not
+        // a profile makes the walls available yet.
+        let grids_wanted = self.current_game_settings.diorama
+            && self.current_game_settings.mode != crate::game_settings::Mode::Accuracy;
+        if grids_wanted != self.tile_grid_capture_active {
+            self.tile_grid_capture_active = grids_wanted;
+            self.send_command(CoreCommand::SetTileGridCapture(grids_wanted));
+        }
         let wants = self.diorama_effective();
         if wants != self.diorama_wanted {
             self.diorama_wanted = wants;
@@ -13504,6 +13518,7 @@ impl RetroForgeApp {
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
             line_regs: Vec::new(),
+            tile_grids: Vec::new(),
         }
     }
 
@@ -13539,6 +13554,15 @@ impl RetroForgeApp {
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
         Some(hash)
+    }
+
+    /// Ticket W34-00: the rolling p95, in milliseconds, of the time the app
+    /// spent building and rendering the Diorama (mesh, upload, draw,
+    /// readback) -- the number the budget gate watches.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_p95_ms_for_test(&self) -> f64 {
+        self.diorama_budget.p95()
     }
 
     /// Ticket W30-06: how many pixels of the current Diorama render are not

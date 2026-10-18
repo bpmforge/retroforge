@@ -441,6 +441,12 @@ pub struct FrameMsg {
     /// (`FrameBundle::lines`), for composing the margins through the row's
     /// colour math; empty unless `layer_frames` is set.
     pub line_regs: Vec<Option<rf_core_api::LineRegisters>>,
+    /// Ticket W34-01: this frame's background tile grids
+    /// (`crate::tile_capture`), one per band of each layer; EMPTY unless
+    /// `CoreCommand::SetTileGridCapture(true)` is in effect. Nothing reads it
+    /// yet; the height learner (W34-03) is its consumer. Worst case about
+    /// 61 KB (33 x 29 cells x 4 layers x 16 B).
+    pub tile_grids: Vec<rf_enhance::heights::TileGrid>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
@@ -760,6 +766,14 @@ pub enum CoreCommand {
     /// the handler below — so a session with neither active pays nothing,
     /// exactly as `SetTileCapture`'s own doc promises.
     SetStudioCapture(bool),
+    /// Ticket W34-01: build this frame's background tile grids
+    /// (`FrameMsg::tile_grids`) for the automatic heights. Off by default
+    /// and sent only while Diorama / HD-2D is on outside Accuracy Mode
+    /// (law 6): it asks the PPU to record its tiles (NES), keeps the
+    /// per-line registers in the bundle (SNES) and reads VRAM, never
+    /// writing the machine. Independent of `SetTileCapture` (an HD pack) and
+    /// `SetStudioCapture`, which it shares the PPU's recording with.
+    SetTileGridCapture(bool),
     /// Ticket W11-02: which bytes the full-level view needs each frame.
     ///
     /// A BOUNDED probe, not "send the UI some RAM". The profile declares
@@ -1363,6 +1377,8 @@ fn core_thread_main(
     // Ticket W16-02: independent from `hd_capture` — see
     // `CoreCommand::SetStudioCapture`'s doc.
     let mut studio_capture = false;
+    // Ticket W34-01: independent of both, see `CoreCommand::SetTileGridCapture`.
+    let mut tile_grid_capture = false;
     // Ticket W13-02b: whether to snapshot the SNES debug memories each
     // frame. Off until a panel asks — 128 KiB per frame is not a cost to
     // pay while nobody is looking.
@@ -1590,11 +1606,18 @@ fn core_thread_main(
                 }
                 CoreCommand::SetTileCapture(on) => {
                     hd_capture = on;
-                    stepper.set_tile_capture(hd_capture || studio_capture);
+                    stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
                 }
                 CoreCommand::SetStudioCapture(on) => {
                     studio_capture = on;
-                    stepper.set_tile_capture(hd_capture || studio_capture);
+                    stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
+                }
+                CoreCommand::SetTileGridCapture(on) => {
+                    tile_grid_capture = on;
+                    stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
+                    // The SNES grids follow per-line scroll, which the bundle
+                    // keeps only while it captures the wide channels.
+                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
                 }
                 CoreCommand::SetWidescreen(request) => {
                     // **The frame buffer has to grow with the picture.**
@@ -1624,7 +1647,7 @@ fn core_thread_main(
                     widescreen = request;
                     // Ticket W33-01: the bundle keeps the sub-screen and the
                     // per-line registers only while widescreen is on.
-                    bundle_builder.set_capture_wide(widescreen.is_some());
+                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
                     if widescreen.is_none() {
                         scout_driver.set(None);
                         stepper.set_widescreen_off();
@@ -1940,7 +1963,16 @@ fn core_thread_main(
             // mutates `stepper`/`sink`/`layers`, only the already-
             // materialized bundle, so this cannot perturb core state
             // (Law 6).
-            let bundle = bundle_builder.take(stepper.frame_count());
+            let mut bundle = bundle_builder.take(stepper.frame_count());
+            // Ticket W34-01: the per-line registers are kept for the tile
+            // grids even with widescreen off. Everything else (the canvas
+            // model above all) must see exactly what it saw before, so set
+            // them aside here; with widescreen on they stay in the bundle.
+            let grid_lines = if widescreen.is_none() {
+                std::mem::take(&mut bundle.lines)
+            } else {
+                Vec::new()
+            };
             // Ticket W30-08: feed the speed governors this REAL frame (a
             // single-stepped or rewound frame is not a running one).
             if ran && !stepped {
@@ -2186,6 +2218,23 @@ fn core_thread_main(
             } else {
                 Vec::new()
             };
+            // Ticket W34-01: the tile grids, read before `bundle` moves (its
+            // per-line registers position the bands). The HUD verdict is
+            // the canvas model's, when it is tracking the scene.
+            let tile_grids = if tile_grid_capture {
+                let hud = canvases.frames().map_or([false; 4], |f| {
+                    let h = canvases.hud_layers(f.scene);
+                    std::array::from_fn(|i| h.get(i).copied().unwrap_or(false))
+                });
+                let lines = if widescreen.is_none() {
+                    &grid_lines
+                } else {
+                    &bundle.lines
+                };
+                stepper.tile_grids(lines, hud, sink.height())
+            } else {
+                Vec::new()
+            };
             bundle_writer.publish(bundle);
             let mut msg = FrameMsg {
                 governors: clocks.report(),
@@ -2289,6 +2338,7 @@ fn core_thread_main(
                 backdrop_rows,
                 layer_order,
                 line_regs,
+                tile_grids,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2311,6 +2361,7 @@ fn core_thread_main(
                 && !audio_capture
                 && !hd_capture
                 && !studio_capture
+                && !tile_grid_capture
                 && !historian.enabled()
             {
                 if let Some(spec) = speculator.run(
@@ -2613,6 +2664,7 @@ mod tests {
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
             line_regs: Vec::new(),
+            tile_grids: Vec::new(),
         }
     }
 

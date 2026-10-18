@@ -2206,6 +2206,154 @@ fn contact_sheet(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W34-00: what the live Diorama costs in the whole app, on Super
+/// Mario World's first level. `RF_SCREENS_ONLY=w34-baseline`.
+///
+/// SMW has no painted `[heights]`, so a table is made from what is on screen
+/// (the tiles of the lowest rows, minus the tile the top rows are made of),
+/// which gives the mesh a realistic count of walls. Three states alternate
+/// chunk by chunk, 20 chunks of 30 frames each (600 frames per state), the
+/// pace limiter off, so drift in the scene and load on the machine hit all
+/// three alike: Diorama off (the control), Diorama on, and the HD-2D preset
+/// (Diorama plus the lens). Today the app renders the Diorama at the
+/// frame's own size (256x224) and the UI scales the texture, so this is
+/// the "1x" figure; the 4x figure is the pass alone, `rf-renderer`'s
+/// `w34_00_diorama_cost`.
+fn shot_w34_baseline(readme: &mut Vec<String>) {
+    use std::collections::HashMap;
+    let name = "w34-baseline";
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smw_enter_yi1(&mut h);
+    // A stand-in table first: it makes the live Diorama active, which is
+    // what arms the SNES snapshot the real table is made from.
+    h.state_mut()
+        .set_live_heights_for_test(retroforge::live_heights::HeightTable::new(
+            1,
+            8,
+            HashMap::from([(0x0001, 8)]),
+        ));
+    h.state_mut().set_mode_for_test(Mode::GameAware);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let table = {
+        let Some(f) = h.state().snes_debug_frame_for_test() else {
+            return skip(readme, name, "no SNES snapshot (capture not armed)");
+        };
+        let Some(g) = retroforge::live_heights::character_grid(
+            1,
+            8,
+            &f.vram,
+            &f.ppu_regs,
+            f.bg_scroll,
+            (256, 224),
+        ) else {
+            return skip(readme, name, "BG1 has no plain tilemap here");
+        };
+        let mut sky: HashMap<u16, u32> = HashMap::new();
+        for row in 0..6 {
+            for col in 0..g.cols {
+                *sky.entry(g.char_at(col, row).unwrap()).or_default() += 1;
+            }
+        }
+        let sky_tile = sky.iter().max_by_key(|(_, n)| **n).map(|(c, _)| *c);
+        let mut heights: HashMap<u16, u8> = HashMap::new();
+        for row in g.rows.saturating_sub(9)..g.rows {
+            for col in 0..g.cols {
+                let c = g.char_at(col, row).unwrap();
+                if Some(c) != sky_tile {
+                    heights.insert(c, 8);
+                }
+            }
+        }
+        println!(
+            "w34-baseline: sky tile {sky_tile:?}, {} wall tiles in the table",
+            heights.len()
+        );
+        retroforge::live_heights::HeightTable::new(1, 8, heights)
+    };
+    h.state_mut().set_live_heights_for_test(table);
+    h.state_mut().set_mode_for_test(Mode::GameAware);
+    h.state_mut()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    let load = || {
+        std::process::Command::new("uptime")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let mut fps: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut p95 = [0.0f64; 3];
+    let mut opaque = [0usize; 3];
+    let mut preset_on = false;
+    for chunk in 0..60 {
+        let state = chunk % 3;
+        // Enter the state, then let three frames settle before timing.
+        if preset_on && state != 2 {
+            h.state_mut().toggle_hd2d_for_test();
+            preset_on = false;
+        }
+        match state {
+            0 => h.state_mut().set_diorama_for_test(false),
+            1 => h.state_mut().set_diorama_for_test(true),
+            _ => {
+                h.state_mut().set_diorama_for_test(true);
+                if !preset_on {
+                    if let Some(why) = h.state().hd2d_unavailable_for_test() {
+                        return skip(readme, name, &format!("HD-2D unavailable: {why}"));
+                    }
+                    h.state_mut().toggle_hd2d_for_test();
+                    preset_on = true;
+                }
+            }
+        }
+        let f0 = h.state().frame_count_for_test();
+        run_frames(&mut h, f0 + 3, Duration::from_secs(60));
+        let f0 = h.state().frame_count_for_test();
+        let t0 = Instant::now();
+        run_frames(&mut h, f0 + 30, Duration::from_secs(120));
+        let n = h.state().frame_count_for_test() - f0;
+        fps[state].push(n as f64 / t0.elapsed().as_secs_f64());
+        if state > 0 {
+            p95[state] = h.state().diorama_p95_ms_for_test();
+            opaque[state] = h.state().diorama_opaque_pixels_for_test().unwrap_or(0);
+        }
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let med = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
+    };
+    let [mut a, mut b, mut c] = fps;
+    note(
+        readme,
+        format!(
+            "W34-BASELINE smw yi1 (20 chunks x 30 frames per state, interleaved): \
+             median fps off {:.1} | diorama {:.1} | hd2d preset {:.1}; \
+             diorama pass p95 (app gate, build+render+readback) {:.2} ms / {:.2} ms; \
+             opaque diorama px {} / {}; {}",
+            med(&mut a),
+            med(&mut b),
+            med(&mut c),
+            p95[1],
+            p95[2],
+            opaque[1],
+            opaque[2],
+            load()
+        ),
+    );
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -2233,6 +2381,7 @@ fn w30_w31_screens() {
     shot_fps(&mut readme);
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
+    shot_w34_baseline(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);
