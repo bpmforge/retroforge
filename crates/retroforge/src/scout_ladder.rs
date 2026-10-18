@@ -352,6 +352,7 @@ mod tests {
             hold: Vec::new(),
             start_when: Vec::new(),
             pin,
+            scene_key: None,
         }
     }
 

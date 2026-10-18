@@ -168,7 +168,22 @@ pub struct RowPos {
 #[must_use]
 pub fn band_rows(bands: &[(ScanlineBand, BandWorldPos)], height: usize) -> Vec<Option<RowPos>> {
     let mut rows = vec![None; height];
-    for (band, pos) in bands.iter().filter(|(b, _)| !b.is_hud) {
+    // The primary band (the tracker's own: the most rows) carries the level
+    // and is never HUD just because it did not move: a player standing
+    // still leaves every band unchanged against the last frame, and the
+    // tracker's zero-delta rule then flags the level band too. HUD is a band
+    // that stays fixed while ANOTHER one moves (STITCHING_PLAN 2.3); the
+    // bands that are not the primary keep the tracker's call (W33-07).
+    let primary = bands
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (b, _))| b.end.saturating_sub(b.start))
+        .map(|(i, _)| i);
+    for (_, (band, pos)) in bands
+        .iter()
+        .enumerate()
+        .filter(|(i, (b, _))| !b.is_hud || Some(*i) == primary)
+    {
         // Bounded `for` over the band's rows (law 8).
         for sy in band.start..band.end {
             if let Some(slot) = rows.get_mut(usize::from(sy)) {

@@ -498,35 +498,56 @@ mod tests {
         assert!(stitchable_pixel(&sprite_pixel(1)).is_none());
     }
 
+    /// A HUD band (flagged, and not the largest) never reaches the canvas. (A
+    /// LONE flagged band is the level standing still, not a HUD: W33-07,
+    /// `band_rows`.)
     #[test]
     fn stitch_frame_skips_hud_bands_entirely() {
         let mut canvas = Canvas::new();
         let width = 4u16;
-        let video: Vec<PpuPixel> = (0..(width as usize * 2))
+        let video: Vec<PpuPixel> = (0..(width as usize * 6))
             .map(|i| bg_pixel(i as u8))
             .collect();
-        let bands = vec![(
-            ScanlineBand {
-                start: 0,
-                end: 2,
-                base_scroll: (0, 0),
-                is_hud: true,
-            },
-            BandWorldPos {
-                world_x: 100,
-                world_y_at_start: 100,
-            },
-        )];
+        let bands = vec![
+            (
+                ScanlineBand {
+                    start: 0,
+                    end: 2,
+                    base_scroll: (0, 0),
+                    is_hud: true,
+                },
+                BandWorldPos {
+                    world_x: 100,
+                    world_y_at_start: 100,
+                },
+            ),
+            (
+                ScanlineBand {
+                    start: 2,
+                    end: 6,
+                    base_scroll: (0, 0),
+                    is_hud: false,
+                },
+                BandWorldPos {
+                    world_x: 300,
+                    world_y_at_start: 300,
+                },
+            ),
+        ];
         stitch_frame(&mut canvas, &video, width, &bands);
         assert_eq!(
             canvas.get(100, 100),
             None,
             "HUD band content must never reach the canvas"
         );
+        assert!(
+            canvas.get(300, 300).is_some(),
+            "while the level band is stitched"
+        );
         assert_eq!(
-            canvas.width(),
-            0,
-            "canvas must not even grow for an all-HUD frame"
+            canvas.get(101, 101),
+            None,
+            "and the canvas does not grow to the HUD's world position"
         );
     }
 

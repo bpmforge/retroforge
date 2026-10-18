@@ -30,6 +30,7 @@ pub mod persistence;
 pub mod scene_graph;
 pub mod scene_identity;
 pub mod scene_tracker;
+pub mod scout_finder;
 pub mod scroll_tracker;
 pub mod speed_governor;
 pub mod sprite_historian;

@@ -559,6 +559,19 @@ pub struct FoundCamera {
     pub moving: u32,
 }
 
+/// Ticket W33-07: what the scout-settings finder has so far, for the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScoutFindProgress {
+    pub camera: bool,
+    pub player: bool,
+    pub y: bool,
+    pub gate: bool,
+    /// The candidates are being tried on a second machine.
+    pub testing: bool,
+    /// Frames the camera has moved.
+    pub moving: u32,
+}
+
 /// What the core thread reports back to the UI thread.
 pub enum CoreEvent {
     /// A new frame is ready to paint. Boxed (ticket W16-14): `FrameMsg`
@@ -588,6 +601,11 @@ pub enum CoreEvent {
     WorkRam(Vec<u8>),
     /// Ticket W27-02: the camera `CoreCommand::FindCamera` found.
     CameraFound(FoundCamera),
+    /// Ticket W33-07: how far the scout-settings finder is.
+    ScoutFindProgress(ScoutFindProgress),
+    /// Ticket W33-07: the finder's answer: a table whose recipe was tried
+    /// on a second machine, or why there is none.
+    ScoutFound(Result<Box<rf_enhance::scout_finder::Skeleton>, String>),
     /// Ticket W11-03 (FR-ENH-004): what the widescreen policy decided,
     /// per background, and WHY when the answer was no.
     ///
@@ -786,6 +804,12 @@ pub enum CoreCommand {
     /// with no profile camera). Observer only; replies once with
     /// `CoreEvent::CameraFound`. `false` stops looking.
     FindCamera(bool),
+    /// Ticket W33-07: find this game's scout settings while it is played
+    /// (camera, player X, Y, game-mode byte), then try them on a second
+    /// machine. Observer only until the trials; replies with
+    /// `CoreEvent::ScoutFindProgress` while it looks and once with
+    /// `CoreEvent::ScoutFound`. `false` stops.
+    FindScout(bool),
     /// Ticket W27-05: read these `(address, length)` rows every frame
     /// for Game info (`FrameMsg::items`); empty stops.
     WatchItems(Vec<(u32, u32)>),
@@ -1345,6 +1369,8 @@ fn core_thread_main(
     let mut snes_debug_capture = false;
     // Ticket W27-02: looking for this game's camera, when asked.
     let mut camera_finder: Option<rf_enhance::camera_finder::CameraFinder> = None;
+    // Ticket W33-07: looking for this game's scout settings, when asked.
+    let mut scout_find: Option<crate::scout_find::ScoutFind> = None;
     // Ticket W27-05: the profile items Game info shows.
     let mut item_watches: Vec<(u32, u32)> = Vec::new();
     let mut last_decisions: Option<[Option<&'static str>; 4]> = None;
@@ -1552,6 +1578,11 @@ fn core_thread_main(
                             },
                             if snes { 2 } else { 1 },
                         )
+                    });
+                }
+                CoreCommand::FindScout(on) => {
+                    scout_find = on.then(|| {
+                        crate::scout_find::ScoutFind::new(stepper.bg_layer_views().is_some())
                     });
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
@@ -2041,6 +2072,36 @@ fn core_thread_main(
             });
             let scene = canvases.observe_frame(&bundle, &feed);
             let bundle_size = (bundle.width, bundle.height);
+            // Ticket W33-07: the scout-settings finder, an observer of this
+            // frame; its trials run on a thread of their own.
+            if let Some(find) = scout_find.as_mut() {
+                let outs = find.frame(&crate::scout_find::Fed {
+                    stepper: &stepper,
+                    bundle: &bundle,
+                    pad: input.load().ports[0],
+                    scene,
+                    rom: &rom,
+                    canvases: &canvases,
+                    size: bundle_size,
+                    scene_key: scene_key.as_ref(),
+                });
+                let mut done = false;
+                for out in outs {
+                    let ev = match out {
+                        crate::scout_find::Out::Progress(p) => CoreEvent::ScoutFindProgress(p),
+                        crate::scout_find::Out::Done(r) => {
+                            done = true;
+                            CoreEvent::ScoutFound(r)
+                        }
+                    };
+                    if frame_tx.send(ev).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                }
+                if done {
+                    scout_find = None;
+                }
+            }
             // Ticket W4-01: publish before sending `FrameMsg` so a reader
             // that wakes on the `FrameMsg` channel never sees a
             // `frame_bundle` older than the frame it was just notified
@@ -2746,6 +2807,9 @@ mod tests {
             }
             CoreEvent::WorkRam(_) => panic!("expected a crash report, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a crash report, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a crash report, got widescreen decisions")
             }
@@ -3038,6 +3102,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -3081,6 +3148,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -3153,6 +3223,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -3199,6 +3272,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
@@ -3239,6 +3315,9 @@ mod tests {
             CoreEvent::CanvasSnapshot(_) => panic!("expected a frame, got a canvas snapshot"),
             CoreEvent::WorkRam(_) => panic!("expected a frame, got a RAM snapshot"),
             CoreEvent::CameraFound(_) => panic!("expected a frame, got a camera"),
+            CoreEvent::ScoutFindProgress(_) | CoreEvent::ScoutFound(_) => {
+                panic!("unexpected scout-settings event")
+            }
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }

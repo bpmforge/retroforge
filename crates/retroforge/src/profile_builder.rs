@@ -237,6 +237,58 @@ fn apply_step_typed(
     Ok(out)
 }
 
+/// Ticket W33-07: write the `[scout]` table the finder discovered into `text`
+/// (a profile), replacing one that is there, and prove the result still loads.
+/// Every row keeps its `source = "observed: auto (W33-07)"`.
+///
+/// # Errors
+/// Returns why the text could not be parsed or the result would not load.
+pub fn apply_scout(text: &str, sk: &rf_enhance::scout_finder::Skeleton) -> Result<String, String> {
+    let mut doc: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+    let int = |v: u32| toml::Value::Integer(i64::from(v));
+    let mut scout = toml::Table::new();
+    scout.insert("strategy".into(), toml::Value::String(sk.strategy.into()));
+    scout.insert("step_px".into(), int(u32::from(sk.step_px)));
+    scout.insert("frame_budget".into(), int(sk.frame_budget));
+    scout.insert("stall_frames".into(), int(sk.stall_frames));
+    scout.insert("settle_frames".into(), int(sk.settle_frames));
+    scout.insert(
+        "dirs".into(),
+        toml::Value::Array(
+            sk.dirs
+                .iter()
+                .map(|d| toml::Value::String((*d).into()))
+                .collect(),
+        ),
+    );
+    let rows: Vec<toml::Value> = sk
+        .rows
+        .iter()
+        .map(|r| {
+            let mut t = toml::Table::new();
+            t.insert("role".into(), toml::Value::String(r.role.into()));
+            t.insert("addr".into(), int(r.addr));
+            if let Some(v) = r.value {
+                t.insert("value".into(), int(u32::from(v)));
+            }
+            t.insert("notes".into(), toml::Value::String(r.notes.clone()));
+            t.insert(
+                "source".into(),
+                toml::Value::String(rf_enhance::scout_finder::SOURCE.into()),
+            );
+            toml::Value::Table(t)
+        })
+        .collect();
+    scout.insert("addr".into(), toml::Value::Array(rows));
+    doc.insert("scout".into(), toml::Value::Table(scout));
+    let out = format!(
+        "# Edited in RetroForge: the [scout] table was found by observation (W33-07).\n{}",
+        toml::to_string(&doc).map_err(|e| e.to_string())?
+    );
+    rf_profiles::load_str(&out).map_err(|e| format!("the profile would not load: {e}"))?;
+    Ok(out)
+}
+
 /// Ticket W30-06 part B: the tallest wall the table may hold, in eighths of
 /// a tile (the loader's `HEIGHTS_MAX_EIGHTHS`).
 pub const HEIGHT_MAX: u8 = 64;
@@ -568,6 +620,63 @@ mod tests {
             sha1: "1".repeat(40),
             sha256: "2".repeat(64),
         }
+    }
+
+    /// Ticket W33-07: a discovered table replaces the old one, loads with the
+    /// real loader, and every row names its source.
+    #[test]
+    fn a_discovered_scout_table_is_written_and_loads() {
+        use rf_enhance::scout_finder::{Row, Skeleton, SOURCE};
+        let sk = Skeleton {
+            strategy: "player_move",
+            step_px: 4,
+            frame_budget: 3000,
+            stall_frames: 60,
+            settle_frames: 60,
+            dirs: vec!["right", "left"],
+            rows: vec![
+                Row {
+                    role: "camera_x",
+                    addr: 0x7E_001A,
+                    value: None,
+                    notes: "found".into(),
+                    confidence: 1.0,
+                },
+                Row {
+                    role: "player_x",
+                    addr: 0x7E_0094,
+                    value: None,
+                    notes: "found".into(),
+                    confidence: 0.9,
+                },
+                Row {
+                    role: "hold",
+                    addr: 0x7E_0096,
+                    value: Some(150),
+                    notes: "found".into(),
+                    confidence: 0.8,
+                },
+            ],
+            confidence: 0.8,
+        };
+        let base = new_profile_text("Some Game", true, &hashes());
+        let once = apply_scout(&base, &sk).expect("applies");
+        // Again with another table: the first is replaced, not doubled.
+        let mut other = sk.clone();
+        other.step_px = 8;
+        let twice = apply_scout(&once, &other).expect("applies again");
+        let scout = rf_profiles::load_str(&twice)
+            .expect("loads")
+            .profile
+            .scout
+            .expect("a scout table");
+        assert_eq!(scout.step_px, 8);
+        assert_eq!(scout.addr.len(), 3);
+        assert!(scout
+            .addr
+            .iter()
+            .all(|r| r.source.as_deref() == Some(SOURCE)));
+        assert_eq!(scout.addr[2].value, Some(150));
     }
 
     #[test]
