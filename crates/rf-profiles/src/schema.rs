@@ -642,6 +642,10 @@ pub struct Scout {
     pub stall_frames: Option<u32>,
     pub settle_frames: Option<u32>,
     pub dirs: Option<Vec<String>>,
+    /// Ticket W33-06: `true` = try only `strategy`. Without it the scout
+    /// starts there and falls back down the ladder (player_move, walk,
+    /// camera_write) when the agreement check refuses a rung.
+    pub pin: Option<bool>,
     #[serde(default)]
     pub addr: Vec<ScoutAddr>,
 }

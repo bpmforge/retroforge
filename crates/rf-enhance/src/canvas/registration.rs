@@ -419,7 +419,8 @@ fn sample(pick: &Pick<'_>, sy: usize, c: usize, p: &PpuPixel) -> Option<PpuPixel
 fn score(canvas: &Canvas, samples: &[(i64, i64, u8)], dx: i64) -> (u32, u32) {
     let (mut agreed, mut compared) = (0, 0);
     for &(x, y, idx) in samples {
-        if let Some(cell) = canvas.get(x + dx, y) {
+        // A scout cell is not evidence about a live frame (W33-06).
+        if let Some(cell) = canvas.get_live(x + dx, y) {
             compared += 1;
             agreed += u32::from(cell.palette_index == idx);
         }

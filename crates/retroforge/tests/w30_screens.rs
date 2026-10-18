@@ -499,7 +499,7 @@ fn shot_scout(readme: &mut Vec<String>) {
         while t1.elapsed() < Duration::from_secs(300) {
             let t = h.state().frame_count_for_test() + 10;
             run_frames(&mut h, t, Duration::from_secs(10));
-            if telemetry.finished.load(Relaxed) >= 1 {
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
                 finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
                 break;
             }
@@ -512,7 +512,7 @@ fn shot_scout(readme: &mut Vec<String>) {
         h.state().send_core_command_for_test(CoreCommand::Pause);
         while t1.elapsed() < Duration::from_secs(300) {
             std::thread::sleep(Duration::from_millis(100));
-            if telemetry.finished.load(Relaxed) >= 1 {
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
                 finished_at = Some((h.state().frame_count_for_test() - f1, t1.elapsed()));
                 break;
             }
@@ -553,7 +553,9 @@ fn shot_scout(readme: &mut Vec<String>) {
         "SCOUT {sf} scout frames over {live_frames} live frames ({:.1} s wall; worker ran {:.1} s), \
          {sl} deltas merged on the core thread ({:.2} ms in total, longest {:.2} ms), {cells} cells \
          merged; scouts started {} finished {} aborted {}, passes ended {:?}; live fps with the \
-         scout ON {:.1} ({}), OFF before {} / after {}; {load}",
+         scout ON {:.1} ({}), OFF before {} / after {}; {load}; self-check: agreement {} over {} \
+         shared cells, deltas merged {} slow {} rejected {} unjudged {}, probes {} (rejected {}), \
+         gave up {}; {}",
         took.as_secs_f64(),
         sw as f64 / 1e6,
         telemetry.core_us.load(Relaxed) as f64 / 1000.0,
@@ -566,6 +568,16 @@ fn shot_scout(readme: &mut Vec<String>) {
         if paced { "paced" } else { "UNPACED, not comparable" },
         fps_off.map_or("n/a".to_string(), |f| format!("{f:.1}")),
         fps_after.map_or("n/a".to_string(), |f| format!("{f:.1}")),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+        telemetry.deltas_merged.load(Relaxed),
+        telemetry.deltas_slow.load(Relaxed),
+        telemetry.deltas_rejected.load(Relaxed),
+        telemetry.deltas_unjudged.load(Relaxed),
+        telemetry.probes.load(Relaxed),
+        telemetry.probes_rejected.load(Relaxed),
+        telemetry.gave_up.load(Relaxed),
+        telemetry.last_summary().unwrap_or_default(),
     );
     if paced {
         return; // the game is long over for Mario: no picture worth keeping
@@ -619,6 +631,13 @@ fn mm2_enter_level(h: &mut H) {
     probe(h, "mm2-level-start");
 }
 
+/// Ticket W33-06: the scout's overall agreement with what it was checked
+/// against, as a percentage.
+fn agreement_text(t: &retroforge::scout::ScoutTelemetry) -> String {
+    t.agreement_permille()
+        .map_or("n/a".to_string(), |p| format!("{:.1}%", p as f64 / 10.0))
+}
+
 /// Ticket W32-09: the level scout on the NES. 32:9 right after entering the
 /// level (the player has not moved), scout off and then on; the live game is
 /// paused once the worker runs so the player is still at the start when the
@@ -663,6 +682,12 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
         open_and_run(&mut h, &path);
         enter(&mut h);
         let telemetry = h.state().scout_telemetry_for_test();
+        // W33-06: `RF_SCOUT_FORCE_STEP=8` starts every scout at 8 px per
+        // frame whatever the profile says: the self-check has to refuse it.
+        let forced: Option<u16> = std::env::var("RF_SCOUT_FORCE_STEP")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        h.state_mut().set_scout_step_for_test(forced);
         h.state_mut().set_scout_enabled_for_test(false);
         h.state_mut()
             .set_widescreen_aspect_for_test(Aspect::Wide32x9);
@@ -683,8 +708,9 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
         let mut finished = false;
         while t1.elapsed() < Duration::from_secs(300) {
             std::thread::sleep(Duration::from_millis(100));
-            if telemetry.finished.load(Relaxed) >= 1 {
-                finished = true;
+            // W33-06: a scout the self-check gave up on is over as well.
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+                finished = telemetry.finished.load(Relaxed) >= 1;
                 break;
             }
         }
@@ -698,18 +724,43 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
             continue;
         };
         println!(
-            "SCOUT-NES {tag}: finished {finished}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}",
+            "SCOUT-NES {tag}: finished {finished}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells, deltas merged {} slow {} rejected {} unjudged {}, probes {} (rejected {}), gave up {}, forced step {forced:?}; {}",
             telemetry.frames.load(Relaxed),
             telemetry.cells.load(Relaxed),
             telemetry.started.load(Relaxed),
             telemetry.finished.load(Relaxed),
             telemetry.aborted.load(Relaxed),
             telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+            agreement_text(&telemetry),
+            telemetry.shared_cells.load(Relaxed),
+            telemetry.deltas_merged.load(Relaxed),
+            telemetry.deltas_slow.load(Relaxed),
+            telemetry.deltas_rejected.load(Relaxed),
+            telemetry.deltas_unjudged.load(Relaxed),
+            telemetry.probes.load(Relaxed),
+            telemetry.probes_rejected.load(Relaxed),
+            telemetry.gave_up.load(Relaxed),
+            telemetry.last_summary().unwrap_or_default(),
         );
         assert!(
             !finished || telemetry.cells.load(Relaxed) > 0,
             "{tag}: the scout finished but merged 0 cells into a cold canvas"
         );
+        // W33-06: the check refuses a forced 8 px on Super Mario Bros. 3 and
+        // the scout is retried at a smaller step and accepted.
+        if tag == "smb3" && forced == Some(8) {
+            let report = telemetry.last_report.lock().ok().and_then(|r| r.clone());
+            let winner = report.as_ref().and_then(|r| r.winner());
+            assert!(
+                telemetry.probes_rejected.load(Relaxed) + telemetry.deltas_rejected.load(Relaxed)
+                    >= 1,
+                "smb3: nothing refused the forced 8 px"
+            );
+            assert!(
+                winner.is_some_and(|(_, step)| step < 8),
+                "smb3: the scout must finish below 8 px, not {winner:?}"
+            );
+        }
         let d = out_dir();
         save(&d.join(format!("scout-{tag}-32x9-off.png")), &off.opaque());
         save(&d.join(format!("scout-{tag}-32x9-on.png")), &on.opaque());

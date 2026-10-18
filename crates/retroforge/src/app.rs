@@ -1293,6 +1293,9 @@ pub struct RetroForgeApp {
     scout_plan: Option<crate::scout::ScoutPlan>,
     /// Ticket W32-07: tests turn the scout off to take a control shot.
     scout_enabled: bool,
+    /// Ticket W33-06: tests force the scout's starting step (the profile's
+    /// own value is used when `None`).
+    scout_step_override: Option<u16>,
     /// Ticket W32-07: what the scouts have done (shared with the core thread).
     scout_telemetry: std::sync::Arc<crate::scout::ScoutTelemetry>,
     /// Ticket W32-03: `sync_patch_widescreen` has acted on a widescreen
@@ -1847,6 +1850,7 @@ impl RetroForgeApp {
             widescreen_on: false,
             scout_plan: None,
             scout_enabled: true,
+            scout_step_override: None,
             scout_telemetry: std::sync::Arc::default(),
             patch_widescreen_applied: false,
             widescreen_scene: None,
@@ -13974,9 +13978,14 @@ impl RetroForgeApp {
             self.scout_plan
                 .clone()
                 .filter(|_| wider && self.scout_enabled)
-                .map(|plan| crate::scout::ScoutSetup {
-                    plan,
-                    telemetry: self.scout_telemetry.clone(),
+                .map(|mut plan| {
+                    if let Some(step) = self.scout_step_override {
+                        plan.step_px = step;
+                    }
+                    crate::scout::ScoutSetup {
+                        plan,
+                        telemetry: self.scout_telemetry.clone(),
+                    }
                 }),
         ));
     }
@@ -14044,6 +14053,13 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn set_scout_enabled_for_test(&mut self, on: bool) {
         self.scout_enabled = on;
+    }
+
+    /// Ticket W33-06: start the NEXT scout at `step` pixels per frame whatever
+    /// the profile says (a probe that the self-check must refuse).
+    #[doc(hidden)]
+    pub fn set_scout_step_for_test(&mut self, step: Option<u16>) {
+        self.scout_step_override = step;
     }
 
     /// Ticket W32-07: what the level scouts have done so far.

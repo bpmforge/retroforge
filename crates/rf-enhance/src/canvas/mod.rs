@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use rf_cache::Cache;
 use rf_core_api::{CoreEvent, FrameBundle, PixelLayer};
 
-use crate::persistence::{load_scene, save_scene, Saved, SceneView};
+use crate::persistence::{load_scene, save_scene, Saved, SceneView, ScoutMemo};
 use crate::scene_identity::SceneId;
 use crate::scene_tracker::{SceneEdge, SceneHints, SceneTracker, SETTLING};
 use crate::scroll_tracker::{BandWorldPos, ScanlineBand, ScrollTracker, WorldAxis};
@@ -70,8 +70,9 @@ pub use compose::{
     margin_known, margin_palette_index, margin_pixel, RowFacts,
 };
 pub use merge::{
-    crop_into, merge_unknown, merge_unknown_in, rect_union, scout_agreement, scout_verdict, Rect,
-    ScoutVerdict, MIN_SHARED_CELLS,
+    crop_into, merge_unknown, merge_unknown_in, rect_union, scout_agreement,
+    scout_agreement_aligned, scout_verdict, Alignment, Rect, ScoutVerdict, MAX_ALIGN_ROWS,
+    MIN_SHARED_CELLS,
 };
 pub use palette_table::{tag, Cgram, PaletteTable, LINE_PALETTE_ENTRIES, MAX_PALETTES};
 pub use placement::{
@@ -206,6 +207,8 @@ pub struct SceneCanvases {
     /// Ticket W33-05: a scout has run every pass on this scene (restored from
     /// the cache too): the next visit skips it.
     scouted: bool,
+    /// Ticket W33-06: the ladder rung that scout finished on.
+    scout_memo: Option<ScoutMemo>,
     /// Stitched or merged since the last write.
     unsaved: bool,
     /// Restored from the cache when first stitched.
@@ -214,6 +217,17 @@ pub struct SceneCanvases {
     on_disk_crc: Option<u32>,
     /// What the last write stored (the size report).
     saved: Option<Saved>,
+}
+
+/// Ticket W33-06: what the scout's agreement check compares a delta with: the
+/// live canvases of the scene as they stand when the scout starts (a copy, so
+/// the worker never touches the live model), and which layers are worth
+/// comparing with (those whose placement is fully trusted, the only ones a
+/// scout merge may fill).
+#[derive(Debug, Clone, Default)]
+pub struct ScoutReference {
+    pub layers: [Canvas; LAYERS],
+    pub trusted: [bool; LAYERS],
 }
 
 /// A scene's per-layer canvases, shipped to the UI thread. `None` = the
@@ -580,6 +594,17 @@ impl CanvasModel {
         row_orders(bundle, frames, &set.layers, self.hud_layers(frames.scene))
     }
 
+    /// Ticket W33-06: a copy of `scene`'s canvases for the scout's agreement
+    /// check (`None` for a scene with none yet).
+    #[must_use]
+    pub fn scout_reference(&self, scene: u64) -> Option<ScoutReference> {
+        let set = self.scenes.get(&scene)?;
+        Some(ScoutReference {
+            layers: set.layers.clone(),
+            trusted: set.confidence.map(|c| c.level() >= MAX_LEVEL),
+        })
+    }
+
     /// The per-layer canvases stitched for `scene`, borrowed.
     #[must_use]
     pub fn scene_canvases(&self, scene: u64) -> Option<&[Canvas; LAYERS]> {
@@ -622,6 +647,7 @@ impl CanvasModel {
             set.palettes = data.palettes;
             set.confidence = data.confidence;
             set.scouted = data.scouted;
+            set.scout_memo = data.scout_memo;
             set.restored = true;
             set.on_disk_crc = Some(data.body_crc);
             self.scene_tracker.restore_edges(&data.edges);
@@ -669,6 +695,7 @@ impl CanvasModel {
                 confidence: &set.confidence,
                 edges: &edges,
                 scouted: set.scouted,
+                scout_memo: set.scout_memo,
             };
             match save_scene(cache, &self.rom_sha256, SceneId(id), &view, set.on_disk_crc) {
                 Ok(saved) => {
@@ -704,11 +731,26 @@ impl CanvasModel {
     /// Record that a scout ran every pass on `scene` and write it now, so a
     /// quit before the next flush does not lose the fact.
     pub fn mark_scouted(&mut self, scene: u64) {
+        self.mark_scouted_with(scene, None);
+    }
+
+    /// [`Self::mark_scouted`], remembering the ladder rung the scout finished
+    /// on (W33-06); a later scout of the scene starts there.
+    pub fn mark_scouted_with(&mut self, scene: u64, memo: Option<ScoutMemo>) {
         if let Some(s) = self.scenes.get_mut(&scene) {
             s.scouted = true;
+            if memo.is_some() {
+                s.scout_memo = memo;
+            }
             s.unsaved = true;
         }
         self.flush();
+    }
+
+    /// The rung `scene`'s last scout finished on, if one did (W33-06).
+    #[must_use]
+    pub fn scene_scout_memo(&self, scene: u64) -> Option<ScoutMemo> {
+        self.scenes.get(&scene).and_then(|s| s.scout_memo)
     }
 
     /// What the last write of `scene` stored (the size report), if it wrote.
@@ -765,10 +807,24 @@ impl CanvasModel {
     /// ([`Self::merge_unknown_from`]).
     pub fn take_delta(&mut self, scene: u64) -> Option<[Canvas; LAYERS]> {
         let dirty = self.take_dirty();
+        self.delta_of(scene, &dirty)
+    }
+
+    /// As [`Self::take_delta`] without forgetting what was stitched: the same
+    /// cells (and more, next time) come again until [`Self::take_dirty`] or
+    /// `take_delta` consumes them. The scout worker holds a delta this way
+    /// while the agreement check has too few shared cells to judge it
+    /// (W33-06).
+    #[must_use]
+    pub fn peek_delta(&self, scene: u64) -> Option<[Canvas; LAYERS]> {
+        self.delta_of(scene, &self.dirty)
+    }
+
+    fn delta_of(&self, scene: u64, dirty: &[Option<Rect>; LAYERS]) -> Option<[Canvas; LAYERS]> {
         let set = self.scenes.get(&scene)?;
         let mut out: [Canvas; LAYERS] = std::array::from_fn(|_| Canvas::new());
         for ((from, rect), to) in set.layers.iter().zip(dirty).zip(out.iter_mut()) {
-            if let Some(rect) = rect {
+            if let Some(rect) = *rect {
                 crop_into(to, from, rect);
             }
         }

@@ -555,6 +555,7 @@ fn smb3_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         dirs: vec![ScoutDir::Right],
         hold,
         start_when: vec![(0x000F, 1)],
+        pin: false,
     }
 }
 
@@ -968,6 +969,7 @@ fn mm2_plan(step: u16, hold: Vec<(u32, u8)>) -> ScoutPlan {
         dirs: vec![ScoutDir::Right],
         hold,
         start_when: vec![(0x06C0, 0x1C)],
+        pin: false,
     }
 }
 

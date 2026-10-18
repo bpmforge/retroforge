@@ -19,6 +19,8 @@
 //!        confidence x4 { Confidence::ENCODED_LEN }
 //!        u16 edges, edges x SceneEdge::ENCODED_LEN
 //!        u8 flags (bit 0: a scout ran every pass on this scene)
+//!        [u8 rung, u8 step_px]   (W33-06; absent in an entry written by the
+//!                                 first v2 build: read as "no memo")
 //! cell = kind(2 bits: 0 unknown, 1 live, 2 scout) | layer(2 bits) | has_id<<4
 //!        [palette_index, priority, (layer arg if background), (id if has_id)]
 //! ```
@@ -88,12 +90,36 @@ const KIND_UNKNOWN: u8 = 0;
 const KIND_LIVE: u8 = 1;
 const KIND_SCOUT: u8 = 2;
 
-/// Where a cell came from. Every cell is written `Live` until the scout
-/// tags its own cells (W33-06); the decoder accepts both.
+/// Where a cell came from: a live frame, or the level scout (W33-06).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Live,
     Scout,
+}
+
+/// Ticket W33-06: which rung of the strategy ladder finished a scene's scout
+/// and at what step, kept with the scene so the next scout of it starts
+/// there. `rung` codes: [`Self::PLAYER_MOVE`], [`Self::WALK`],
+/// [`Self::CAMERA_WRITE`], [`Self::GAVE_UP`] (every rung failed the
+/// agreement check: the margins stay on live cells only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScoutMemo {
+    pub rung: u8,
+    pub step_px: u8,
+}
+
+impl ScoutMemo {
+    pub const PLAYER_MOVE: u8 = 1;
+    pub const WALK: u8 = 2;
+    pub const CAMERA_WRITE: u8 = 3;
+    pub const GAVE_UP: u8 = 255;
+
+    fn valid(self) -> bool {
+        matches!(
+            self.rung,
+            Self::PLAYER_MOVE | Self::WALK | Self::CAMERA_WRITE | Self::GAVE_UP
+        )
+    }
 }
 
 /// A bounds-checked little-endian cursor: every read is `None` on short
@@ -170,6 +196,8 @@ pub struct SceneView<'a> {
     pub edges: &'a [SceneEdge],
     /// A scout ran every pass on this scene: the next visit skips it.
     pub scouted: bool,
+    /// The rung that scout finished on (W33-06).
+    pub scout_memo: Option<ScoutMemo>,
 }
 
 /// What a decoded entry holds.
@@ -180,6 +208,7 @@ pub struct SceneData {
     pub confidence: [Confidence; LAYERS],
     pub edges: Vec<SceneEdge>,
     pub scouted: bool,
+    pub scout_memo: Option<ScoutMemo>,
     /// CRC32 of the decoded body without its confidence statistics: what the
     /// scene looked like on disk, so a
     /// flush of an unchanged scene writes nothing ([`save_scene`]).
@@ -203,7 +232,7 @@ pub struct Saved {
     pub unchanged: bool,
 }
 
-fn push_cell(out: &mut Vec<u8>, cell: Option<PpuPixel>) {
+fn push_cell(out: &mut Vec<u8>, cell: Option<PpuPixel>, source: Source) {
     let Some(p) = cell else {
         out.push(KIND_UNKNOWN);
         return;
@@ -213,7 +242,11 @@ fn push_cell(out: &mut Vec<u8>, cell: Option<PpuPixel>) {
         PixelLayer::Background(n) => (1, Some(n)),
         PixelLayer::Sprite => (2, None),
     };
-    out.push(KIND_LIVE | (layer << 2) | (u8::from(p.sprite_id.is_some()) << 4));
+    let kind = match source {
+        Source::Live => KIND_LIVE,
+        Source::Scout => KIND_SCOUT,
+    };
+    out.push(kind | (layer << 2) | (u8::from(p.sprite_id.is_some()) << 4));
     out.push(p.palette_index);
     out.push(p.priority);
     out.extend(arg);
@@ -277,8 +310,14 @@ fn encode_body(view: &SceneView<'_>, keep_layers: usize) -> (Vec<u8>, std::ops::
         out.extend_from_slice(&oy.to_le_bytes());
         out.extend_from_slice(&(canvas.width() as u32).to_le_bytes());
         out.extend_from_slice(&(canvas.height() as u32).to_le_bytes());
-        for cell in canvas.cells() {
-            push_cell(&mut out, *cell);
+        let flags = canvas.scout_flags();
+        for (i, cell) in canvas.cells().iter().enumerate() {
+            let scout = flags.get(i).copied().unwrap_or(false);
+            push_cell(
+                &mut out,
+                *cell,
+                if scout { Source::Scout } else { Source::Live },
+            );
         }
     }
     let palettes = view.palettes.palettes();
@@ -300,6 +339,9 @@ fn encode_body(view: &SceneView<'_>, keep_layers: usize) -> (Vec<u8>, std::ops::
         out.extend_from_slice(&e.to_bytes());
     }
     out.push(u8::from(view.scouted));
+    let memo = view.scout_memo.filter(|m| m.valid());
+    out.push(memo.map_or(0, |m| m.rung));
+    out.push(memo.map_or(0, |m| m.step_px));
     (out, conf_start..conf_end)
 }
 
@@ -314,10 +356,18 @@ fn decode_body(body: &[u8]) -> Option<SceneData> {
         // refused before anything is allocated.
         let n = usize::try_from(n).ok().filter(|&n| n <= r.remaining())?;
         let mut cells = Vec::with_capacity(n);
-        for _ in 0..n {
-            cells.push(read_cell(&mut r)?.0);
+        let mut scout = Vec::new();
+        for i in 0..n {
+            let (cell, source) = read_cell(&mut r)?;
+            if source == Source::Scout {
+                if scout.is_empty() {
+                    scout = vec![false; n];
+                }
+                scout[i] = true;
+            }
+            cells.push(cell);
         }
-        *slot = Canvas::from_raw_parts(ox, oy, w as usize, h as usize, cells);
+        *slot = Canvas::from_raw_parts_with_sources(ox, oy, w as usize, h as usize, cells, scout);
     }
     let count = usize::from(r.u16()?);
     let overflowed = r.u64()?;
@@ -352,12 +402,28 @@ fn decode_body(body: &[u8]) -> Option<SceneData> {
         1 => true,
         _ => return None,
     };
-    (r.remaining() == 0).then_some(SceneData {
+    // The rung memo (W33-06); an entry from the first v2 build ends here.
+    let scout_memo = if r.remaining() == 0 {
+        None
+    } else {
+        let (rung, step_px) = (r.u8()?, r.u8()?);
+        let memo = (rung != 0 || step_px != 0).then_some(ScoutMemo { rung, step_px });
+        // A rung byte that is not a rung is a corrupt entry, not "no memo".
+        if memo.is_some_and(|m| !m.valid()) {
+            return None;
+        }
+        memo
+    };
+    if r.remaining() != 0 {
+        return None;
+    }
+    Some(SceneData {
         layers,
         palettes,
         confidence,
         edges,
         scouted,
+        scout_memo,
         body_crc: content_crc(body, conf_start..conf_end),
     })
 }
@@ -576,6 +642,16 @@ mod tests {
             ],
         );
         c.blit_row(-35, 14, &[Some(px(9, PixelLayer::Background(0), None, 2))]);
+        // W33-06: cells the scout filled, beside live ones, and a grown canvas.
+        c.blit_row_scout(
+            -33,
+            14,
+            &[
+                Some(px(seed, PixelLayer::Background(1), Some(2), 1)),
+                None,
+                Some(px(6, PixelLayer::Backdrop, None, 0)),
+            ],
+        );
         c
     }
 
@@ -611,6 +687,10 @@ mod tests {
             confidence,
             edges: vec![edge(1, 2, true), edge(2, 1, false)],
             scouted: true,
+            scout_memo: Some(ScoutMemo {
+                rung: ScoutMemo::PLAYER_MOVE,
+                step_px: 4,
+            }),
             body_crc: 0,
         }
     }
@@ -622,6 +702,7 @@ mod tests {
             confidence: &d.confidence,
             edges: &d.edges,
             scouted: d.scouted,
+            scout_memo: d.scout_memo,
         }
     }
 
@@ -647,9 +728,59 @@ mod tests {
         assert_eq!(back.confidence[1].last.residual, Some(-5));
         assert_eq!(back.edges, d.edges);
         assert!(back.scouted);
+        assert_eq!(back.scout_memo, d.scout_memo, "the rung it finished on");
+        // W33-06: which cells are Scout survives, cell for cell.
+        for (a, b) in back.layers.iter().zip(&d.layers) {
+            assert_eq!(a.scout_flags().len(), b.scout_flags().len());
+            assert_eq!(a.scout_cell_count(), b.scout_cell_count());
+        }
+        assert!(
+            back.layers[0].scout_cell_count() == 2,
+            "two scout cells in the fixture"
+        );
+        assert!(back.layers[0].is_scout(-33, 14) && !back.layers[0].is_scout(-35, 14));
         // Deterministic: the decoded scene encodes to the very same bytes.
         assert_eq!(encode_entry(scene, &view(&back), LAYERS).0, bytes);
         assert_eq!(encode_entry(scene, &view(&d), LAYERS).0, bytes);
+    }
+
+    #[test]
+    fn a_live_frame_over_a_scout_cell_makes_it_live_and_the_flag_survives_a_round_trip() {
+        let mut d = fixture();
+        // A live frame lands on one of the scout cells of layer 0.
+        d.layers[0].blit_row(-33, 14, &[Some(px(77, PixelLayer::Background(1), None, 0))]);
+        assert!(!d.layers[0].is_scout(-33, 14));
+        assert_eq!(d.layers[0].scout_cell_count(), 1);
+        let scene = SceneId(5);
+        let (bytes, _) = encode_entry(scene, &view(&d), LAYERS);
+        let back = decode_entry(&bytes, scene).expect("decodes");
+        assert_eq!(back.layers, d.layers);
+        assert!(!back.layers[0].is_scout(-33, 14) && back.layers[0].is_scout(-31, 14));
+    }
+
+    #[test]
+    fn an_entry_without_the_rung_memo_still_decodes_and_a_bad_rung_does_not() {
+        let d = fixture();
+        let scene = SceneId(9);
+        let (body, _) = encode_body(&view(&d), LAYERS);
+        // The first v2 build ended the body at the `scouted` byte.
+        let old = &body[..body.len() - 2];
+        let (bytes, _) = frame_body(scene, old);
+        let back = decode_entry(&bytes, scene).expect("an entry without a memo decodes");
+        assert!(back.scouted && back.scout_memo.is_none());
+        // A rung byte that is no rung is a corrupt entry.
+        let mut bad = body.clone();
+        let n = bad.len();
+        bad[n - 2] = 77;
+        let (bytes, _) = frame_body(scene, &bad);
+        assert!(decode_entry(&bytes, scene).is_err());
+        // A memo of "none" (0, 0) decodes as none.
+        let mut none = body;
+        let n = none.len();
+        none[n - 2] = 0;
+        none[n - 1] = 0;
+        let (bytes, _) = frame_body(scene, &none);
+        assert_eq!(decode_entry(&bytes, scene).unwrap().scout_memo, None);
     }
 
     #[test]

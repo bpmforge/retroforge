@@ -36,12 +36,37 @@
 //! (a flag it checks every frame). `Scout::step` still runs one frame and
 //! returns, so tests drive a `Scout` directly without a thread.
 //!
+//! **Self-check and ladder (W33-06).** The worker does not trust its own
+//! cells. Before a delta leaves the worker it is compared with a copy of the
+//! live canvas taken when the scout started ([`ScoutReference`]): >= 99 %
+//! agreement over >= 2 000 shared cells merges, 95-99 % merges and lowers the
+//! step for the next pass, less is discarded and the pass is retried at half
+//! the step (down to a floor), then on the next rung of the strategy ladder
+//! (`crate::scout_ladder`), and a scene no rung can scout is given up. A
+//! delta the live canvas cannot judge yet (too few shared cells) is held until
+//! one can; a pass that never gets a verdict fails its rung. The first judged
+//! delta decides the pass (it is the one that overlaps the screen the player
+//! stands on); a later delta judged "reject" is only dropped, because where
+//! it meets the live canvas again that is its newest edge, which may be
+//! half drawn. Because the live
+//! canvas only holds the screen the player stands on and a too-fast scout is
+//! wrong in the columns AHEAD of it (SMB3 at 8 px per frame), a step is first
+//! checked by a probe: the same stretch scouted at half the step, compared
+//! cell by cell. The merge tags its cells `Scout` ([`rf_enhance::stitcher`]),
+//! a live frame turns them `Live` again, and a scout never writes over a live
+//! cell.
+//!
 //! The recipe (which RAM words, how far per frame) is per game and comes from
 //! the profile's `[scout]` table; the pure rules (what to poke, when to stop)
 //! are plain functions so they are tested without a ROM.
 
 use rf_core_api::{CoreSink, EventMask, FrameBundleBuilder, InputFrame, PpuPixel};
+use rf_enhance::canvas::{ScoutReference, ScoutVerdict, MIN_SHARED_CELLS};
 use rf_enhance::scene_identity::SceneId;
+
+use crate::scout_ladder::{
+    check_delta, rung_of_code, rungs_for, Attempt, DeltaCheck, Ladder, PassReport, ScoutReport,
+};
 
 use rf_enhance::stitcher::Canvas;
 
@@ -113,6 +138,9 @@ pub struct ScoutPlan {
     /// scout started from a dying player only gets as far as the game's
     /// own restart timer).
     pub start_when: Vec<(u32, u8)>,
+    /// Ticket W33-06: the profile's strategy is final: the ladder tries no
+    /// other rung.
+    pub pin: bool,
 }
 
 /// No addresses (the walk strategy pokes none).
@@ -166,6 +194,7 @@ impl ScoutPlan {
             dirs,
             hold: valued("hold"),
             start_when: valued("start_when"),
+            pin: t.pin.unwrap_or(false),
         }
     }
 
@@ -479,6 +508,75 @@ impl Scout {
         self.since_merge
     }
 
+    /// Whether this machine is placed by the core's own scroll events (the
+    /// NES), the only kind `walk` can drive.
+    #[must_use]
+    pub fn places_by_bands(&self) -> bool {
+        self.bands
+    }
+
+    /// The scout's own canvases of its scene (nothing stitched yet: `None`).
+    #[must_use]
+    pub fn canvases(&self) -> Option<&[Canvas; LAYERS]> {
+        self.acc.scene_canvases(self.scene.0)
+    }
+
+    /// What has been stitched since the last delta, left in place: the same
+    /// cells come again, and more, until [`Self::discard_delta`] or
+    /// [`Self::take_delta`]. Counts as a look (the next one is
+    /// [`DELTA_EVERY`] frames away).
+    #[must_use]
+    pub fn peek_delta(&mut self) -> Option<[Canvas; LAYERS]> {
+        self.since_merge = 0;
+        self.acc.peek_delta(self.scene.0)
+    }
+
+    /// Forget what was stitched since the last delta (it was sent, or it was
+    /// refused).
+    pub fn discard_delta(&mut self) {
+        self.since_merge = 0;
+        let _ = self.acc.take_dirty();
+    }
+
+    /// Start over from the snapshot with another recipe: one pass in `dir`,
+    /// stepping `step_px` per frame for at most `frame_budget` frames, on a
+    /// clean canvas (a refused attempt leaves nothing in it). The frame
+    /// counter keeps counting across restarts.
+    ///
+    /// # Errors
+    /// The snapshot cannot be restored.
+    pub fn restart(
+        &mut self,
+        strategy: ScoutStrategy,
+        step_px: u16,
+        frame_budget: u32,
+        dir: ScoutDir,
+    ) -> Result<(), ScoutError> {
+        self.plan.strategy = strategy;
+        self.plan.step_px = step_px;
+        self.plan.frame_budget = frame_budget;
+        self.plan.dirs = vec![dir];
+        self.stepper
+            .restore(&self.snapshot)
+            .map_err(|e| ScoutError::Restore(format!("{e:?}")))?;
+        if self.bands {
+            self.stepper.set_event_mask(EventMask::NONE);
+        }
+        self.acc = self.seed.fork_for_scout();
+        self.pass = 0;
+        self.rule = StopRule::default();
+        self.status = ScoutStatus::Running;
+        self.since_merge = 0;
+        self.lag.forget();
+        self.primed = false;
+        self.camera = None;
+        self.ends.clear();
+        // Anything the last attempt's frames left in the sink is not this
+        // attempt's picture.
+        drop(self.sink.bundle.take(self.stepper.frame_count()));
+        Ok(())
+    }
+
     /// Fill the unknown cells of `live` for this scout's scene; returns the
     /// number of cells filled. Live cells are never touched.
     pub fn merge_into(&mut self, live: &mut CanvasModel) -> usize {
@@ -659,6 +757,28 @@ pub struct ScoutTelemetry {
     pub max_slice_us: std::sync::atomic::AtomicU64,
     /// How the passes of the most recent finished scout ended.
     pub last_ends: std::sync::Mutex<Vec<ScoutEnd>>,
+    /// Ticket W33-06: deltas the self-check judged "merge" (>= 99 %).
+    pub deltas_merged: std::sync::atomic::AtomicU64,
+    /// Deltas judged "slow" (95-99 %): merged, and the step lowered.
+    pub deltas_slow: std::sync::atomic::AtomicU64,
+    /// Deltas judged "reject" (< 95 %): discarded, never merged.
+    pub deltas_rejected: std::sync::atomic::AtomicU64,
+    /// Deltas sent with no verdict because the pass had already been accepted
+    /// and the delta shared too few cells with the live canvas to be judged.
+    pub deltas_unjudged: std::sync::atomic::AtomicU64,
+    /// Step probes run (a scout against the same stretch at half the step) and
+    /// how many of them rejected the step.
+    pub probes: std::sync::atomic::AtomicU64,
+    pub probes_rejected: std::sync::atomic::AtomicU64,
+    /// Cells that agreed / cells compared, over every judged delta and
+    /// probe: the agreement percentage is `agreed / shared`.
+    pub agreed_cells: std::sync::atomic::AtomicU64,
+    pub shared_cells: std::sync::atomic::AtomicU64,
+    /// Scouts that found no rung the check accepted.
+    pub gave_up: std::sync::atomic::AtomicU64,
+    /// What the most recent scout did: every check with its agreement, and
+    /// the rung each pass finished on ([`ScoutReport::summary`]).
+    pub last_report: std::sync::Mutex<Option<ScoutReport>>,
 }
 
 impl ScoutTelemetry {
@@ -670,6 +790,23 @@ impl ScoutTelemetry {
     #[must_use]
     pub fn get(counter: &std::sync::atomic::AtomicU64) -> u64 {
         counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Agreement over everything the self-check judged so far, in
+    /// thousandths (`None` before anything was judged).
+    #[must_use]
+    pub fn agreement_permille(&self) -> Option<u64> {
+        let shared = Self::get(&self.shared_cells);
+        (shared > 0).then(|| Self::get(&self.agreed_cells) * 1000 / shared)
+    }
+
+    /// The last scout's report line (checks, agreement, rung), if one ran.
+    #[must_use]
+    pub fn last_summary(&self) -> Option<String> {
+        self.last_report
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(ScoutReport::summary))
     }
 }
 
@@ -700,6 +837,14 @@ const DELTA_EVERY: u32 = 60;
 const CHANNEL_DEPTH: usize = 4;
 /// Most messages the core thread takes from the worker per live frame.
 const MSGS_PER_TICK: usize = 2;
+/// The stretch (pixels of player travel past the lead-in) a step probe
+/// scouts at the step and at half of it.
+const PROBE_PX: u32 = 640;
+/// Lead-in of a probe: the player walks to where the camera starts to follow.
+const PROBE_LEAD_PX: u32 = 256;
+/// Most rung/step changes one pass may go through (3 rungs x 4 steps, with
+/// room): a backstop for law 8, the ladder itself is finite.
+const MAX_ATTEMPTS_PER_PASS: u32 = 24;
 
 /// Reads the per-layer scroll the stitcher needs off a scout's machine (the
 /// same function the live path uses, so the two agree on layers). A plain
@@ -708,14 +853,20 @@ pub type ScrollReader = fn(&EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]>
 
 /// What the worker sends the core thread.
 enum ScoutMsg {
-    /// Cells stitched since the last delta (see `CanvasModel::take_delta`).
+    /// Cells stitched since the last delta (see `CanvasModel::take_delta`),
+    /// already judged by the worker's self-check.
     Delta {
         scene: u64,
         canvases: Box<[Canvas; LAYERS]>,
     },
     /// Every pass is over.
-    Done { ends: Vec<ScoutEnd>, frames: u64 },
-    /// The machine could not be opened or restored.
+    Done {
+        ends: Vec<ScoutEnd>,
+        frames: u64,
+        report: Box<ScoutReport>,
+    },
+    /// The machine could not be opened or restored, or the scout began in the
+    /// middle of a transition.
     Failed,
 }
 
@@ -727,6 +878,10 @@ struct ScoutJob {
     plan: ScoutPlan,
     /// The live model's axes and trackers at the snapshot, no canvases.
     seed: CanvasModel,
+    /// The live canvases at the snapshot, for the self-check.
+    reference: Option<ScoutReference>,
+    /// The rung that finished this scene's last scout (W33-05/06 memo).
+    hint: Option<(ScoutStrategy, u16)>,
     scene: SceneId,
     size: (u16, u16),
     reader: ScrollReader,
@@ -772,7 +927,396 @@ fn send_or_cancel(
     }
 }
 
-/// The worker body: open, restore, run the passes, ship deltas.
+/// The worker stopped: cancelled, the core thread went away, or the machine
+/// could not be restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Cancelled,
+    Broken,
+}
+
+/// How one pass of the worker ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassEnd {
+    /// The pass ran to its end on this rung at this step.
+    Accepted(ScoutEnd, (ScoutStrategy, u16)),
+    /// No rung was accepted.
+    Failed,
+    /// The scout began in the middle of a transition.
+    Aborted,
+}
+
+/// What one attempt at a pass came to.
+enum PassRun {
+    Done(ScoutEnd, (ScoutStrategy, u16)),
+    /// The check refused it: the ladder has moved.
+    Refused,
+    Aborted,
+}
+
+/// The worker: one scout machine reused for every probe and attempt (each a
+/// [`Scout::restart`]), the live reference its checks compare with, and the
+/// report it ships when it is done.
+struct Worker<'a> {
+    scout: Scout,
+    base: ScoutPlan,
+    reference: Option<ScoutReference>,
+    reader: ScrollReader,
+    tx: &'a std::sync::mpsc::SyncSender<ScoutMsg>,
+    cancel: &'a std::sync::atomic::AtomicBool,
+    telemetry: &'a ScoutTelemetry,
+    report: ScoutReport,
+    /// Frames already counted into the telemetry.
+    counted: u64,
+    /// The `(rung, step)` a probe already vouched for.
+    validated: Option<(ScoutStrategy, u16)>,
+    scene: u64,
+}
+
+/// What the worker does with a delta (the rules of the self-check, apart from
+/// the machine, so they are tested alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// The pass's first verdict is "reject": the rung is refused at this
+    /// step and the ladder moves.
+    Refuse,
+    /// A delta of an accepted pass judged "reject": dropped, never merged.
+    Drop,
+    /// Merge it. `lower`: it was the pass's first verdict and "slow".
+    Send { lower: bool },
+    /// No verdict from the live canvas, and none to wait for: merge it (the
+    /// step was vouched for by a probe, or there was nothing slower to check
+    /// it against).
+    SendUnjudged,
+    /// Nothing was stitched: nothing to send, no fault.
+    Nothing,
+    /// No verdict yet, the live canvas may still give one: keep the delta for
+    /// the next look.
+    Hold,
+}
+
+/// The §3.3 rules for one delta: `verdict` from [`check_delta`], whether the
+/// pass has been accepted already, whether it just ended, whether the delta
+/// holds no cell, whether the live canvas holds enough cells to ever judge
+/// one. A scene the live game has not drawn (the player stands still at the
+/// start of a level: an unchanged scroll stitches nothing) can judge nothing,
+/// and a scout is not refused for that; the probe is its check.
+fn disposition(
+    verdict: Option<ScoutVerdict>,
+    accepted: bool,
+    ended: bool,
+    empty: bool,
+    judgeable: bool,
+) -> Disposition {
+    match verdict {
+        Some(ScoutVerdict::Reject) if !accepted => Disposition::Refuse,
+        Some(ScoutVerdict::Reject) => Disposition::Drop,
+        Some(v) => Disposition::Send {
+            lower: v == ScoutVerdict::SlowDown && !accepted,
+        },
+        None if empty => Disposition::Nothing,
+        None if accepted || ended || !judgeable => Disposition::SendUnjudged,
+        None => Disposition::Hold,
+    }
+}
+
+impl Worker<'_> {
+    fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Report the frames run since the last call.
+    fn count_frames(&mut self) {
+        let run = self.scout.frames_run();
+        ScoutTelemetry::add(&self.telemetry.frames, run - self.counted);
+        self.counted = run;
+    }
+
+    /// Keep a check in the report and the counters.
+    fn note(
+        &mut self,
+        what: &'static str,
+        strategy: ScoutStrategy,
+        step_px: u16,
+        check: DeltaCheck,
+    ) {
+        let t = self.telemetry;
+        ScoutTelemetry::add(&t.agreed_cells, check.agreed as u64);
+        ScoutTelemetry::add(&t.shared_cells, check.shared as u64);
+        if what == "probe" {
+            ScoutTelemetry::add(&t.probes, 1);
+            if check.verdict == Some(ScoutVerdict::Reject) {
+                ScoutTelemetry::add(&t.probes_rejected, 1);
+            }
+        } else {
+            let counter = match check.verdict {
+                Some(ScoutVerdict::Merge) => Some(&t.deltas_merged),
+                Some(ScoutVerdict::SlowDown) => Some(&t.deltas_slow),
+                Some(ScoutVerdict::Reject) => Some(&t.deltas_rejected),
+                None => None,
+            };
+            if let Some(c) = counter {
+                ScoutTelemetry::add(c, 1);
+            }
+        }
+        self.report.attempts.push(Attempt {
+            what,
+            strategy,
+            step_px,
+            check,
+        });
+    }
+
+    fn send(&self, msg: ScoutMsg) -> Result<(), Stop> {
+        if send_or_cancel(self.tx, self.cancel, msg) {
+            Ok(())
+        } else {
+            Err(Stop::Cancelled)
+        }
+    }
+
+    /// Restart the machine on a recipe.
+    fn restart(
+        &mut self,
+        strategy: ScoutStrategy,
+        step_px: u16,
+        budget: u32,
+        dir: ScoutDir,
+    ) -> Result<(), Stop> {
+        self.scout
+            .restart(strategy, step_px, budget, dir)
+            .map_err(|_| Stop::Broken)
+    }
+
+    /// The canvases after the first `frames` frames of a pass at `step_px`.
+    fn canvases_after(
+        &mut self,
+        strategy: ScoutStrategy,
+        step_px: u16,
+        dir: ScoutDir,
+    ) -> Result<Option<[Canvas; LAYERS]>, Stop> {
+        let frames = ((PROBE_PX + PROBE_LEAD_PX) / u32::from(step_px.max(1))).max(1);
+        self.restart(strategy, step_px, frames, dir)?;
+        // Bounded: the pass's frame budget is `frames`.
+        for _ in 0..=frames {
+            if self.cancelled() {
+                return Err(Stop::Cancelled);
+            }
+            if self.scout.step(&self.reader) != ScoutStatus::Running {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        self.count_frames();
+        Ok(self.scout.canvases().cloned())
+    }
+
+    /// Check `step_px` against the same stretch at `reference_step`.
+    fn probe(
+        &mut self,
+        strategy: ScoutStrategy,
+        step_px: u16,
+        reference_step: u16,
+        dir: ScoutDir,
+    ) -> Result<DeltaCheck, Stop> {
+        let fast = self.canvases_after(strategy, step_px, dir)?;
+        let slow = self.canvases_after(strategy, reference_step, dir)?;
+        let check = match (fast, slow) {
+            (Some(fast), Some(slow)) => check_delta(&slow, &fast, [true; LAYERS]),
+            _ => DeltaCheck::default(),
+        };
+        self.note("probe", strategy, step_px, check);
+        Ok(check)
+    }
+
+    /// Judge the delta the scout holds and send, hold or discard it.
+    /// `true` = the attempt is refused (the ladder has moved); `false` =
+    /// carry on.
+    fn deliver(
+        &mut self,
+        ladder: &mut Ladder,
+        (strategy, step): (ScoutStrategy, u16),
+        accepted: &mut bool,
+        ended: bool,
+    ) -> Result<bool, Stop> {
+        let Some(delta) = self.scout.peek_delta() else {
+            return Ok(false);
+        };
+        let check = self
+            .reference
+            .as_ref()
+            .map_or_else(DeltaCheck::default, |r| {
+                check_delta(&r.layers, &delta, r.trusted)
+            });
+        let empty = delta.iter().all(|c| c.width() == 0);
+        let judgeable = self.report.reference_cells >= MIN_SHARED_CELLS;
+        match disposition(check.verdict, *accepted, ended, empty, judgeable) {
+            Disposition::Refuse => {
+                // The pass's first verdict: the rung is refused at this step.
+                self.note("delta", strategy, step, check);
+                self.scout.discard_delta();
+                ladder.reject();
+                return Ok(true);
+            }
+            Disposition::Drop => {
+                // The pass was accepted on its first judged delta. A later
+                // one that overlaps the live canvas again (its edge, where
+                // the newest live columns may still be half drawn) is
+                // dropped, never merged; the pass is not thrown away for it.
+                self.note("delta", strategy, step, check);
+                self.scout.discard_delta();
+                return Ok(false);
+            }
+            Disposition::Send { lower } => {
+                self.note("delta", strategy, step, check);
+                if lower {
+                    ladder.lower();
+                }
+                *accepted = true;
+            }
+            Disposition::SendUnjudged => {
+                ScoutTelemetry::add(&self.telemetry.deltas_unjudged, 1);
+            }
+            Disposition::Nothing => return Ok(false),
+            Disposition::Hold => return Ok(false), // it may be judged next time
+        }
+        self.scout.discard_delta();
+        if empty {
+            return Ok(false);
+        }
+        self.send(ScoutMsg::Delta {
+            scene: self.scene,
+            canvases: Box::new(delta),
+        })?;
+        Ok(false)
+    }
+
+    /// One attempt at a pass on the ladder's current rung and step.
+    fn run_pass(
+        &mut self,
+        ladder: &mut Ladder,
+        recipe: (ScoutStrategy, u16),
+        dir: ScoutDir,
+    ) -> Result<PassRun, Stop> {
+        let budget = ladder.scaled_budget(self.base.frame_budget);
+        self.restart(recipe.0, recipe.1, budget, dir)?;
+        let first_frame = self.scout.frames_run();
+        let mut accepted = false;
+        // A pass ends by its frame budget at the latest, so this cap is only
+        // a backstop for law 8.
+        for _ in 0..=u64::from(budget) {
+            if self.cancelled() {
+                return Err(Stop::Cancelled);
+            }
+            let status = self.scout.step(&self.reader);
+            let ScoutStatus::Finished(end) = status else {
+                if self.scout.frames_since_merge() >= DELTA_EVERY {
+                    self.count_frames();
+                    if self.deliver(ladder, recipe, &mut accepted, false)? {
+                        return Ok(PassRun::Refused);
+                    }
+                }
+                // Lower priority: a scout has no real-time need, so give
+                // the core thread's core back after every frame.
+                std::thread::yield_now();
+                continue;
+            };
+            self.count_frames();
+            if end == ScoutEnd::SceneChanged
+                && self.scout.frames_run() - first_frame < MIN_USEFUL_FRAMES
+            {
+                return Ok(PassRun::Aborted);
+            }
+            return if self.deliver(ladder, recipe, &mut accepted, true)? {
+                Ok(PassRun::Refused)
+            } else {
+                Ok(PassRun::Done(end, recipe))
+            };
+        }
+        // Unreachable in practice (the budget ends the pass); a pass that
+        // somehow did not is a failed rung.
+        ladder.reject();
+        Ok(PassRun::Refused)
+    }
+
+    /// One pass in `dir`, climbing the ladder until a rung is accepted.
+    fn pass(&mut self, ladder: &mut Ladder, dir: ScoutDir) -> Result<PassEnd, Stop> {
+        // Bounded: every iteration either returns or moves the ladder, which
+        // only ever moves forward.
+        for _ in 0..MAX_ATTEMPTS_PER_PASS {
+            let Some(recipe) = ladder.current() else {
+                return Ok(PassEnd::Failed);
+            };
+            if let Some(reference_step) = ladder.reference_step() {
+                if self.validated != Some(recipe) {
+                    let check = self.probe(recipe.0, recipe.1, reference_step, dir)?;
+                    if check.verdict == Some(ScoutVerdict::Reject) {
+                        ladder.reject();
+                        continue;
+                    }
+                    self.validated = Some(recipe);
+                }
+            }
+            match self.run_pass(ladder, recipe, dir)? {
+                PassRun::Done(end, recipe) => return Ok(PassEnd::Accepted(end, recipe)),
+                PassRun::Refused => {}
+                PassRun::Aborted => return Ok(PassEnd::Aborted),
+            }
+        }
+        Ok(PassEnd::Failed)
+    }
+
+    /// Every pass; `None` = the scout began in the middle of a transition.
+    fn run(&mut self, mut ladder: Ladder) -> Result<Option<Vec<ScoutEnd>>, Stop> {
+        let mut ends = Vec::new();
+        let dirs = self.base.dirs.clone();
+        // A pass that fails leaves the ladder spent; the next pass starts
+        // from the rung the last accepted one finished on.
+        let mut good = ladder.clone();
+        for (i, &dir) in dirs.iter().enumerate() {
+            ladder = good.clone();
+            match self.pass(&mut ladder, dir)? {
+                PassEnd::Accepted(end, recipe) => {
+                    self.report.passes.push(PassReport {
+                        dir,
+                        finished_on: Some(recipe),
+                        end: Some(end),
+                    });
+                    ends.push(end);
+                    good = ladder.clone();
+                }
+                PassEnd::Failed => {
+                    self.report.passes.push(PassReport {
+                        dir,
+                        finished_on: None,
+                        end: None,
+                    });
+                    if i == 0 {
+                        self.report.gave_up = true;
+                        break;
+                    }
+                }
+                PassEnd::Aborted => return Ok(None),
+            }
+        }
+        Ok(Some(ends))
+    }
+}
+
+/// Known cells of the layers a check may compare with.
+fn reference_cells(r: Option<&ScoutReference>) -> usize {
+    r.map_or(0, |r| {
+        r.layers
+            .iter()
+            .zip(r.trusted)
+            .filter(|(_, ok)| *ok)
+            .map(|(c, _)| c.cells().iter().flatten().count())
+            .sum()
+    })
+}
+
+/// The worker body: open, restore, run the passes through the ladder, ship
+/// the deltas the self-check accepted.
 fn run_worker(
     job: ScoutJob,
     tx: &std::sync::mpsc::SyncSender<ScoutMsg>,
@@ -784,53 +1328,52 @@ fn run_worker(
         snapshot,
         plan,
         seed,
+        reference,
+        hint,
         scene,
         size,
         reader,
         telemetry,
     } = job;
-    // A pass ends by its frame budget at the latest, so this cap is only a
-    // backstop for law 8.
-    let cap = (plan.frame_budget as usize + 1) * plan.dirs.len().max(1) + 1;
-    let started = Scout::start(&rom, snapshot, plan, &seed, scene, size);
-    let Ok(mut scout) = started else {
+    let started = Scout::start(&rom, snapshot, plan.clone(), &seed, scene, size);
+    let Ok(scout) = started else {
         let _ = send_or_cancel(tx, cancel, ScoutMsg::Failed);
         return;
     };
-    let mut counted = 0u64;
-    for _ in 0..cap {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        let status = scout.step(&reader);
-        let finished = matches!(status, ScoutStatus::Finished(_));
-        if finished || scout.frames_since_merge() >= DELTA_EVERY {
-            let run = scout.frames_run();
-            ScoutTelemetry::add(&telemetry.frames, run - counted);
-            counted = run;
-            if let Some(canvases) = scout.take_delta() {
-                let msg = ScoutMsg::Delta {
-                    scene: scene.0,
-                    canvases: Box::new(canvases),
-                };
-                if !send_or_cancel(tx, cancel, msg) {
-                    return;
-                }
-            }
-        }
-        if finished {
-            ScoutTelemetry::add(&telemetry.wall_us, t0.elapsed().as_micros() as u64);
-            let done = ScoutMsg::Done {
-                ends: scout.ends.clone(),
-                frames: scout.frames_run(),
-            };
-            let _ = send_or_cancel(tx, cancel, done);
-            return;
-        }
-        // Lower priority: a scout has no real-time need, so give the core
-        // thread's core back after every frame.
-        std::thread::yield_now();
-    }
+    let rungs = rungs_for(&plan, scout.places_by_bands(), hint.map(|h| h.0));
+    let start_step = match hint {
+        Some((s, step)) if rungs.first() == Some(&s) => step,
+        _ => plan.step_px,
+    };
+    let known = reference_cells(reference.as_ref());
+    let mut worker = Worker {
+        scout,
+        base: plan,
+        reference,
+        reader,
+        tx,
+        cancel,
+        telemetry: &telemetry,
+        report: ScoutReport {
+            reference_cells: known,
+            ..ScoutReport::default()
+        },
+        counted: 0,
+        validated: None,
+        scene: scene.0,
+    };
+    let outcome = worker.run(Ladder::new(rungs, start_step));
+    ScoutTelemetry::add(&telemetry.wall_us, t0.elapsed().as_micros() as u64);
+    let msg = match outcome {
+        Ok(Some(ends)) => ScoutMsg::Done {
+            ends,
+            frames: worker.scout.frames_run(),
+            report: Box::new(std::mem::take(&mut worker.report)),
+        },
+        Ok(None) | Err(Stop::Broken) => ScoutMsg::Failed,
+        Err(Stop::Cancelled) => return,
+    };
+    let _ = send_or_cancel(tx, cancel, msg);
 }
 
 /// Decides WHEN to scout, hands the work to a worker thread and merges what
@@ -961,6 +1504,11 @@ impl ScoutDriver {
             snapshot,
             plan: setup.plan.clone(),
             seed: live.canvases.fork_for_scout(),
+            reference: live.canvases.scout_reference(live.scene.0),
+            hint: live
+                .canvases
+                .scene_scout_memo(live.scene.0)
+                .and_then(|m| Some((rung_of_code(m.rung)?, u16::from(m.step_px)))),
             scene: live.scene,
             size: live.size,
             reader: live.scrolls,
@@ -1018,17 +1566,44 @@ impl ScoutDriver {
                     t.max_slice_us
                         .fetch_max(us, std::sync::atomic::Ordering::Relaxed);
                 }
-                Ok(ScoutMsg::Done { ends, frames }) => {
+                Ok(ScoutMsg::Done {
+                    ends,
+                    frames,
+                    report,
+                }) => {
                     self.run = None;
-                    if frames >= MIN_USEFUL_FRAMES {
+                    let memo = if report.gave_up {
+                        // No rung passed the check: margins stay on live
+                        // cells, and the scene is not scouted again.
+                        ScoutTelemetry::add(&t.gave_up, 1);
+                        Some(rf_enhance::persistence::ScoutMemo {
+                            rung: rf_enhance::persistence::ScoutMemo::GAVE_UP,
+                            step_px: 0,
+                        })
+                    } else if frames >= MIN_USEFUL_FRAMES {
+                        ScoutTelemetry::add(&t.finished, 1);
                         if let Ok(mut last) = t.last_ends.lock() {
                             *last = ends;
                         }
-                        ScoutTelemetry::add(&t.finished, 1);
+                        report
+                            .winner()
+                            .map(|(s, step)| rf_enhance::persistence::ScoutMemo {
+                                rung: crate::scout_ladder::rung_code(s),
+                                step_px: u8::try_from(step).unwrap_or(u8::MAX),
+                            })
+                    } else {
+                        None
+                    };
+                    let finished = report.gave_up || frames >= MIN_USEFUL_FRAMES;
+                    if let Ok(mut last) = t.last_report.lock() {
+                        *last = Some(*report);
+                    }
+                    if finished {
                         self.done = true;
                         // Remembered with the scene (and written now): the
-                        // next visit skips the scout.
-                        live.mark_scouted(scene.0);
+                        // next visit skips the scout, and a later one starts
+                        // on the rung that worked.
+                        live.mark_scouted_with(scene.0, memo);
                     } else {
                         // It began in the middle of a transition: try again later.
                         ScoutTelemetry::add(&t.aborted, 1);
@@ -1081,6 +1656,7 @@ mod tests {
             dirs: vec![ScoutDir::Right],
             hold: vec![(0x7E_0100, 7)],
             start_when: Vec::new(),
+            pin: false,
         }
     }
 
@@ -1211,6 +1787,7 @@ mod tests {
             dirs: vec![ScoutDir::Right],
             hold: Vec::new(),
             start_when: Vec::new(),
+            pin: false,
         }
     }
 
@@ -1239,13 +1816,13 @@ mod tests {
         let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
         let mut driver = ScoutDriver::default();
         driver.set(Some(ScoutSetup {
-            plan: plan_of(4, 300, 40, 90),
+            plan: plan_of(2, 600, 40, 90),
             telemetry: telemetry.clone(),
         }));
         let mut first_run_tick = None;
         let mut scene = SceneId(0);
-        // Bounded: 600 live frames.
-        for f in 0..600u32 {
+        // Bounded: 300 live frames.
+        for f in 0..300u32 {
             scene = live_frame(
                 &mut st,
                 &mut sink,
@@ -1294,12 +1871,12 @@ mod tests {
             let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
             let mut driver = ScoutDriver::default();
             driver.set(Some(ScoutSetup {
-                plan: plan_of(4, 300, 40, 90),
+                plan: plan_of(2, 600, 40, 90),
                 telemetry: telemetry.clone(),
             }));
             let mut scene = SceneId(0);
-            // Bounded: 600 live frames.
-            for f in 0..600u32 {
+            // Bounded: 300 live frames.
+            for f in 0..300u32 {
                 scene = live_frame(
                     &mut st,
                     &mut sink,
@@ -1316,19 +1893,32 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 driver.tick(live_view(&st, &rom, &mut live, scene));
             }
+            let tagged = live
+                .scene_canvases(scene.0)
+                .map_or(0, |c| c.iter().map(|c| c.scout_cell_count()).sum::<usize>());
             (
                 telemetry,
                 scene,
                 live.scene_scouted(scene.0),
                 live.scene_restored(scene.0),
+                (live.scene_scout_memo(scene.0), tagged),
             )
         };
-        let (first, scene, scouted, restored) = session(3_000);
+        let (first, scene, scouted, restored, (memo, tagged)) = session(3_000);
         assert_eq!(ScoutTelemetry::get(&first.started), 1);
         assert_eq!(ScoutTelemetry::get(&first.finished), 1);
         assert!(scouted && !restored, "the first visit is cold");
         // The model was dropped at the end of `session`: written.
-        let (second, scene2, scouted2, restored2) = session(0);
+        assert!(
+            tagged > 0 && memo.is_some(),
+            "the scout tagged its cells and kept its rung"
+        );
+        let (second, scene2, scouted2, restored2, (memo2, tagged2)) = session(0);
+        assert_eq!(
+            (memo2, tagged2),
+            (memo, tagged),
+            "both round-trip through the cache"
+        );
         assert_eq!(scene2, scene, "same frames, same scene");
         assert!(restored2 && scouted2, "restored with its scout");
         assert_eq!(ScoutTelemetry::get(&second.started), 0, "no scout started");
@@ -1568,5 +2158,358 @@ mod tests {
         assert_eq!(plan.start_when, vec![(0x06C0, 0x1C)]);
         assert_eq!(plan.dirs, vec![ScoutDir::Right]);
         assert_eq!(plan.frame_budget, 3000);
+    }
+
+    // ---- W33-06: the worker's self-check and the strategy ladder, on the
+    // RF-Scroller fixture (a scroller that cannot keep up with a 4 px step).
+
+    struct Ran {
+        deltas: usize,
+        delta_cells: usize,
+        done: Option<(Vec<ScoutEnd>, u64, ScoutReport)>,
+        failed: bool,
+        telemetry: std::sync::Arc<ScoutTelemetry>,
+    }
+
+    /// Run a worker to its end on a thread and collect what it sends.
+    fn run_job(
+        rom: &[u8],
+        live: &CanvasModel,
+        st: &EmuStepper,
+        scene: SceneId,
+        plan: ScoutPlan,
+        hint: Option<(ScoutStrategy, u16)>,
+        poison: impl FnOnce(&mut ScoutReference),
+    ) -> Ran {
+        let mut reference = live.scout_reference(scene.0).expect("a live canvas");
+        poison(&mut reference);
+        let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
+        let job = ScoutJob {
+            rom: rom.to_vec(),
+            snapshot: st.snapshot().expect("snapshot"),
+            plan,
+            seed: live.fork_for_scout(),
+            reference: Some(reference),
+            hint,
+            scene,
+            size: (256, 240),
+            reader: no_scrolls,
+            telemetry: telemetry.clone(),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_DEPTH);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c2 = cancel.clone();
+        let worker = std::thread::spawn(move || run_worker(job, &tx, &c2));
+        let mut ran = Ran {
+            deltas: 0,
+            delta_cells: 0,
+            done: None,
+            failed: false,
+            telemetry,
+        };
+        // Bounded: the worker ends (its budgets) and drops the sender.
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                ScoutMsg::Delta { canvases, .. } => {
+                    ran.deltas += 1;
+                    ran.delta_cells += canvases
+                        .iter()
+                        .map(|c| c.cells().iter().flatten().count())
+                        .sum::<usize>();
+                }
+                ScoutMsg::Done {
+                    ends,
+                    frames,
+                    report,
+                } => ran.done = Some((ends, frames, *report)),
+                ScoutMsg::Failed => ran.failed = true,
+            }
+        }
+        worker.join().expect("the worker ends");
+        ran
+    }
+
+    /// Every known cell of layer 0 recoloured: the live canvas the scout is
+    /// checked against no longer looks like the picture the scout draws.
+    fn recolour(r: &mut ScoutReference) {
+        let c = &r.layers[0];
+        let (ox, oy) = c.origin();
+        let mut out = Canvas::new();
+        for y in 0..c.height() {
+            let row: Vec<_> = (0..c.width())
+                .map(|x| {
+                    c.get(ox + x as i64, oy + y as i64).map(|mut p| {
+                        p.palette_index = p.palette_index.wrapping_add(1);
+                        p
+                    })
+                })
+                .collect();
+            out.blit_row(ox, oy + y as i64, &row);
+        }
+        r.layers[0] = out;
+    }
+
+    fn attempts_of(
+        r: &ScoutReport,
+    ) -> Vec<(&'static str, ScoutStrategy, u16, Option<ScoutVerdict>)> {
+        r.attempts
+            .iter()
+            .map(|a| (a.what, a.strategy, a.step_px, a.check.verdict))
+            .collect()
+    }
+
+    #[test]
+    fn a_step_the_game_cannot_keep_up_with_is_rejected_and_the_scout_is_retried_at_half_of_it() {
+        let Some(rom) = fixture() else { return };
+        let (st, live, scene) = nes_live(&rom, 300);
+        let ran = run_job(
+            &rom,
+            &live,
+            &st,
+            scene,
+            plan_of(4, 600, 40, 0),
+            None,
+            |_| {},
+        );
+        let (_, _, report) = ran.done.expect("the scout finished");
+        let a = attempts_of(&report);
+        // The 4 px step disagrees with the same stretch at 2 px: refused
+        // before a single cell leaves the worker, then 2 px is accepted.
+        assert_eq!(
+            a[0],
+            (
+                "probe",
+                ScoutStrategy::PlayerMove,
+                4,
+                Some(ScoutVerdict::Reject)
+            ),
+            "{a:?}"
+        );
+        assert_eq!(a[1].1, ScoutStrategy::PlayerMove);
+        assert_eq!((a[1].0, a[1].2), ("delta", 2), "{a:?}");
+        assert!(
+            matches!(a[1].3, Some(ScoutVerdict::Merge | ScoutVerdict::SlowDown)),
+            "accepted, whichever of the two: {a:?}"
+        );
+        assert_eq!(report.winner(), Some((ScoutStrategy::PlayerMove, 2)));
+        assert!(!report.gave_up);
+        assert!(
+            ran.deltas > 0 && ran.delta_cells > 0,
+            "the accepted pass shipped cells"
+        );
+        let t = &ran.telemetry;
+        assert!(ScoutTelemetry::get(&t.probes_rejected) >= 1);
+        assert!(ScoutTelemetry::get(&t.deltas_merged) + ScoutTelemetry::get(&t.deltas_slow) >= 1);
+        assert!(
+            t.agreement_permille().is_some_and(|p| p >= 700),
+            "agreement is reported"
+        );
+        assert!(t.shared_cells.load(std::sync::atomic::Ordering::Relaxed) > 2000);
+    }
+
+    #[test]
+    fn a_pass_the_live_canvas_contradicts_is_never_merged_and_every_rung_is_tried_in_order() {
+        let Some(rom) = fixture() else { return };
+        let (st, live, scene) = nes_live(&rom, 300);
+        let ran = run_job(
+            &rom,
+            &live,
+            &st,
+            scene,
+            plan_of(4, 600, 40, 0),
+            None,
+            recolour,
+        );
+        assert_eq!(
+            ran.deltas, 0,
+            "a rejected delta is never sent, so never merged"
+        );
+        let (_, _, report) = ran.done.expect("it ends, having given up");
+        assert!(report.gave_up && report.winner().is_none());
+        let deltas: Vec<_> = report
+            .attempts
+            .iter()
+            .filter(|a| a.what == "delta")
+            .map(|a| (a.strategy, a.step_px, a.check.verdict))
+            .collect();
+        assert!(
+            deltas.iter().all(|d| d.2 == Some(ScoutVerdict::Reject)),
+            "{deltas:?}"
+        );
+        // player_move (down to its floor), then walk, then camera_write.
+        let mut order: Vec<ScoutStrategy> = Vec::new();
+        for d in &deltas {
+            if order.last() != Some(&d.0) {
+                order.push(d.0);
+            }
+        }
+        assert_eq!(
+            order,
+            vec![
+                ScoutStrategy::PlayerMove,
+                ScoutStrategy::Walk,
+                ScoutStrategy::CameraWrite
+            ],
+            "{deltas:?}"
+        );
+        assert_eq!(ScoutTelemetry::get(&ran.telemetry.deltas_merged), 0);
+        assert!(ScoutTelemetry::get(&ran.telemetry.deltas_rejected) >= 3);
+        assert!(
+            report.summary().contains("-> gave up"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn a_scene_the_live_game_has_not_drawn_cannot_judge_a_scout_and_is_not_refused_for_it() {
+        let Some(rom) = fixture() else { return };
+        let (st, live, scene) = nes_live(&rom, 300);
+        // The player stood still at the start of the level: the live canvas
+        // holds nothing to compare with.
+        let ran = run_job(&rom, &live, &st, scene, plan_of(4, 600, 40, 0), None, |r| {
+            r.layers = Default::default();
+        });
+        let (_, _, report) = ran.done.expect("done");
+        assert_eq!(report.reference_cells, 0);
+        assert!(!report.gave_up, "{}", report.summary());
+        // The probe still refuses the step the game cannot keep up with; the
+        // pass at the half step goes through with no live verdict.
+        let a = attempts_of(&report);
+        assert_eq!(
+            a[0],
+            (
+                "probe",
+                ScoutStrategy::PlayerMove,
+                4,
+                Some(ScoutVerdict::Reject)
+            ),
+            "{a:?}"
+        );
+        assert_eq!(report.winner(), Some((ScoutStrategy::PlayerMove, 2)));
+        assert!(ran.deltas > 0 && ran.delta_cells > 0, "the cells were sent");
+        assert!(ScoutTelemetry::get(&ran.telemetry.deltas_unjudged) > 0);
+        assert_eq!(ScoutTelemetry::get(&ran.telemetry.deltas_rejected), 0);
+    }
+
+    #[test]
+    fn a_pinned_profile_gives_up_without_trying_another_rung() {
+        let Some(rom) = fixture() else { return };
+        let (st, live, scene) = nes_live(&rom, 300);
+        let mut plan = plan_of(2, 600, 40, 0);
+        plan.pin = true;
+        let ran = run_job(&rom, &live, &st, scene, plan, None, recolour);
+        let (_, _, report) = ran.done.expect("done");
+        assert!(report.gave_up);
+        assert!(
+            report
+                .attempts
+                .iter()
+                .all(|a| a.strategy == ScoutStrategy::PlayerMove),
+            "{:?}",
+            attempts_of(&report)
+        );
+    }
+
+    #[test]
+    fn the_rung_remembered_for_the_scene_is_tried_first() {
+        let Some(rom) = fixture() else { return };
+        let (st, live, scene) = nes_live(&rom, 300);
+        let ran = run_job(
+            &rom,
+            &live,
+            &st,
+            scene,
+            plan_of(2, 600, 40, 0),
+            Some((ScoutStrategy::CameraWrite, 2)),
+            recolour,
+        );
+        let (_, _, report) = ran.done.expect("done");
+        assert_eq!(report.attempts[0].strategy, ScoutStrategy::CameraWrite);
+    }
+
+    #[test]
+    fn an_accepted_scout_remembers_its_rung_with_the_scene_and_a_give_up_is_remembered_too() {
+        let Some(rom) = fixture() else { return };
+        let (st, mut live, scene) = nes_live(&rom, 300);
+        let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
+        let mut driver = ScoutDriver::default();
+        driver.set(Some(ScoutSetup {
+            plan: plan_of(2, 600, 40, 0),
+            telemetry: telemetry.clone(),
+        }));
+        // Bounded: 3000 x 10 ms.
+        for _ in 0..3_000u32 {
+            driver.tick(live_view(&st, &rom, &mut live, scene));
+            if ScoutTelemetry::get(&telemetry.finished) >= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ScoutTelemetry::get(&telemetry.finished), 1);
+        let memo = live.scene_scout_memo(scene.0).expect("the rung was kept");
+        assert_eq!(
+            (memo.rung, memo.step_px),
+            (rf_enhance::persistence::ScoutMemo::PLAYER_MOVE, 2)
+        );
+        assert!(live.scene_scouted(scene.0));
+        assert!(telemetry
+            .last_summary()
+            .is_some_and(|s| s.contains("player_move@2px")));
+        assert!(ScoutTelemetry::get(&telemetry.cells) > 0);
+        // The cells it filled are Scout cells; none is a live one.
+        let c = &live.scene_canvases(scene.0).unwrap()[0];
+        assert!(c.scout_cell_count() > 0);
+        assert_eq!(
+            c.scout_cell_count() as u64,
+            ScoutTelemetry::get(&telemetry.cells),
+            "every merged cell is tagged"
+        );
+    }
+
+    #[test]
+    fn the_rules_for_a_delta_follow_the_plan() {
+        use Disposition::*;
+        use ScoutVerdict::{Merge, Reject, SlowDown};
+        // (verdict, accepted, ended, empty, judgeable)
+        let d = disposition;
+        // The first verdict decides the pass.
+        assert_eq!(
+            d(Some(Merge), false, false, false, true),
+            Send { lower: false }
+        );
+        assert_eq!(
+            d(Some(SlowDown), false, false, false, true),
+            Send { lower: true }
+        );
+        assert_eq!(d(Some(Reject), false, false, false, true), Refuse);
+        // Afterwards a reject only drops that delta; a slow one is merged and
+        // does not lower the step again.
+        assert_eq!(d(Some(Reject), true, false, false, true), Drop);
+        assert_eq!(
+            d(Some(SlowDown), true, false, false, true),
+            Send { lower: false }
+        );
+        // No verdict: held while the live canvas might still give one and the
+        // pass runs; merged once the pass is accepted or has ended, or when
+        // the live canvas could never judge it.
+        assert_eq!(d(None, false, false, false, true), Hold);
+        assert_eq!(d(None, true, false, false, true), SendUnjudged);
+        assert_eq!(d(None, false, true, false, true), SendUnjudged);
+        assert_eq!(d(None, false, false, false, false), SendUnjudged);
+        // Nothing stitched: nothing to do, whatever else is true.
+        assert_eq!(d(None, false, true, true, true), Nothing);
+        assert_eq!(d(None, false, false, true, false), Nothing);
+        // A rejected delta is never sent, whatever else is true.
+        for accepted in [false, true] {
+            for ended in [false, true] {
+                for empty in [false, true] {
+                    for judgeable in [false, true] {
+                        let r = d(Some(Reject), accepted, ended, empty, judgeable);
+                        assert!(matches!(r, Refuse | Drop), "{r:?}");
+                    }
+                }
+            }
+        }
     }
 }
