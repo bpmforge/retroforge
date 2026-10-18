@@ -468,6 +468,15 @@ pub fn scout_width(rig: &mut Rig, rom: &[u8], plan: ScoutPlan, secs: u64) -> (us
         telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
         telemetry.last_summary().unwrap_or_default(),
     );
+    // Ticket W33-08: which way each pass went.
+    let dirs: Vec<String> = telemetry
+        .last_report
+        .lock()
+        .ok()
+        .and_then(|r| r.clone())
+        .map(|r| r.passes.iter().map(|p| format!("{:?}", p.dir)).collect())
+        .unwrap_or_default();
+    let line = format!("passes {dirs:?}; {line}");
     (width, line)
 }
 

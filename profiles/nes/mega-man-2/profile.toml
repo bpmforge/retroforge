@@ -172,6 +172,19 @@ value = 0x20
 notes = "Mega Man's Y: 0x74 standing on the first platform, 0xf0 once he has fallen into a pit. Held at 0x20 he floats above the obstacles that stop a held Right at 0x60 and lower."
 source = "observed: W32-09 note"
 
+# W33-08: the vertical sections. Air Man's first one is a shaft the game
+# scrolls only when Mega Man's Y reaches the bottom of the screen: from the
+# cloud platform at its top (Y 0x54) a Y of 0xF0 or more starts a downward
+# screen transition (about 4 px a frame, $20 0x0A -> 0x0B). Standing on the
+# platform the game puts a poked Y back on it, so the Y pass pokes from its
+# own running target (and the hold above, which pins him at the TOP, is
+# released on a vertical pass because this row names the same byte).
+[[scout.addr]]
+role = "player_y"
+addr = 0x04A0
+notes = "Mega Man's Y, one byte (no high byte): 0x54 standing on the first cloud platform of the climb, 0xF0 or more starts the downward screen transition, 0x07..0x0B on landing at the top of the next screen."
+source = "observed: W33-08 probe (tests/w33_08_vertical.rs)"
+
 [[scout.addr]]
 role = "start_when"
 addr = 0x06C0

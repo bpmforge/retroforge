@@ -627,12 +627,17 @@ impl Heights {
 ///   `1..=3000` (default 120).
 /// - `settle_frames` — live frames to wait after a scene is entered
 ///   (default 90).
-/// - `dirs` — passes, `"right"` and/or `"left"` (default both).
+/// - `dirs` — passes: `"right"` / `"left"` on a horizontal scene,
+///   `"down"` / `"up"` on a vertical one (ticket W33-08; the scout follows
+///   the scene's own axis and defaults to right + left, or down + up).
 /// - `addr` — the rows: `role = "camera_x"` / `"player_x"` (16-bit
 ///   little-endian words; `"player_x_hi"` names the high byte when it is not
 ///   the byte after the `player_x` one, as on the NES games; the NES scout
-///   needs no `camera_x`), `role = "hold"` (a byte with a `value`, written
-///   every scout frame) and `role = "start_when"` (a byte with a `value`
+///   needs no `camera_x`), `role = "camera_y"` / `"player_y"` (the same for a
+///   vertical scene; `"player_y_hi"` names the high byte, and a `player_y`
+///   with none is a single byte, as Mega Man 2's), `role = "hold"` (a byte
+///   with a `value`, written every scout frame; a hold on a `player_y` byte is
+///   released on a vertical pass) and `role = "start_when"` (a byte with a `value`
 ///   the LIVE game must hold before a scout starts, e.g. "player alive").
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Scout {

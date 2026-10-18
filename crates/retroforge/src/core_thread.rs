@@ -737,7 +737,7 @@ pub enum CoreCommand {
     /// Ticket W32-07: arm (or disarm) the level scout, whose recipe comes
     /// from the profile's `[scout]` table. It only ever runs while
     /// widescreen is on, and only on the scene it was started for.
-    SetScout(Option<crate::scout::ScoutSetup>),
+    SetScout(Option<Box<crate::scout::ScoutSetup>>),
     /// Ticket W33-09: the profile's `[scene]` table, so the scene tracker is
     /// told which level the game is in (`None`: no table, the picture and
     /// the scroll decide).
@@ -1634,7 +1634,7 @@ fn core_thread_main(
                     }
                 }
                 CoreCommand::SetScout(setup) => {
-                    scout_driver.set(setup);
+                    scout_driver.set(setup.map(|b| *b));
                 }
                 CoreCommand::SetSceneKey(spec) => {
                     scene_key = spec;

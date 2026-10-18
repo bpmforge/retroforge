@@ -660,6 +660,10 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
         ),
         ("mm2", "Mega Man 2 (USA).zip", mm2_enter_level as fn(&mut H)),
     ] {
+        // `RF_NES_TAG=mm2`: only that game.
+        if std::env::var("RF_NES_TAG").is_ok_and(|only| only != tag) {
+            continue;
+        }
         let Some(path) = rom("nes", file) else {
             skip(
                 readme,
@@ -747,9 +751,17 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
             telemetry.gave_up.load(Relaxed),
             telemetry.last_summary().unwrap_or_default(),
         );
+        // W33-08: a scout that aborted at its first frame (the live model and
+        // the scout's tracker disagreeing about the level key: the core had
+        // not been sent the profile's `[scene]` key) is no scout. What it
+        // merges is another matter: a live canvas whose registration is below
+        // the top confidence (a player who has not moved since the level
+        // began) takes nothing from a scout (W33-04), so the cells merged are
+        // reported, not asserted.
         assert!(
-            !finished || telemetry.cells.load(Relaxed) > 0,
-            "{tag}: the scout finished but merged 0 cells into a cold canvas"
+            finished && telemetry.aborted.load(Relaxed) == 0,
+            "{tag}: the scout did not finish cleanly (aborted {})",
+            telemetry.aborted.load(Relaxed)
         );
         // W33-06: the check refuses a forced 8 px on Super Mario Bros. 3 and
         // the scout is retried at a smaller step and accepted.
@@ -890,6 +902,148 @@ fn shot_scout_mmx(readme: &mut Vec<String>) {
     save(&d.join("scout-mmx-32x9-off.png"), &off.opaque());
     save(&d.join("scout-mmx-32x9-on.png"), &on.opaque());
     note(readme, format!("scout-mmx-32x9|{file}|{}x{}", on.w, on.h));
+}
+
+/// Ticket W33-08: Mega Man 2, Air Man's stage, the shaft the first horizontal
+/// section ends in (the scene tracker names its axis vertical). The headless
+/// rig walks the section the way the scout does (Right held, Mega Man's Y
+/// held high) up to 650 frames before the end and saves the machine; the app
+/// loads it and plays on the same way (the app pokes through core commands),
+/// lets Mega Man fall into the shaft, and takes 32:9 shots with the scout off
+/// and on, on a cold canvas cache.
+fn shot_scout_mm2_climb(readme: &mut Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "scout-mm2-climb";
+    if !wanted(name) {
+        return;
+    }
+    let file = "Mega Man 2 (USA).zip";
+    let Some(path) = rom("nes", file) else {
+        skip(readme, name, &format!("{file} not found"));
+        return;
+    };
+    let Some(mut rig) =
+        discovery::Rig::open(discovery::MM2.0, discovery::MM2.1, Some(discovery::MM2.2))
+    else {
+        skip(readme, name, "no rig");
+        return;
+    };
+    rig.script(discovery::MM2_TO_LEVEL);
+    for _ in 0..1500u32 {
+        rig.st.poke_bus(0x4A0, 0x20);
+        rig.st.poke_bus(0x6C0, 0x1C);
+        rig.frame(1 << 7);
+    }
+    let container = rig.st.save_state(1).expect("container");
+    let cold = std::env::temp_dir().join(format!("rf_scout_mm2_climb_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this
+    // process reads the environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplyState(Box::new(container)));
+    run_n(&mut h, 30);
+    // Play: Right held; Mega Man's Y held high for the first 650 frames (the
+    // rest of the section: the tracker needs 256 px of walking before the
+    // climb to know the axis) and let go for the fall; health kept full.
+    key_event(&mut h, egui::Key::ArrowRight, true);
+    let poke = |h: &H, addr: u16, value: u8| {
+        h.state()
+            .send_core_command_for_test(CoreCommand::PokeBus { addr, value });
+    };
+    let t0 = h.state().frame_count_for_test();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while h.state().frame_count_for_test() < t0 + 1100 && Instant::now() < deadline {
+        let played = h.state().frame_count_for_test().saturating_sub(t0);
+        if played < 650 {
+            poke(&h, 0x04A0, 0x20);
+        }
+        poke(&h, 0x06C0, 0x1C);
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    probe(&h, "mm2-climb-landed");
+    // Off: a few frames, still keeping Mega Man alive.
+    let t = h.state().frame_count_for_test() + 20;
+    while h.state().frame_count_for_test() < t {
+        poke(&h, 0x06C0, 0x1C);
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let off = grab(&h);
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut().set_widescreen(true);
+    let t1 = Instant::now();
+    while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(90) {
+        poke(&h, 0x06C0, 0x1C);
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    h.state().send_core_command_for_test(CoreCommand::Pause);
+    let mut finished = false;
+    while t1.elapsed() < Duration::from_secs(400) {
+        std::thread::sleep(Duration::from_millis(100));
+        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+            finished = telemetry.finished.load(Relaxed) >= 1;
+            break;
+        }
+    }
+    h.state().send_core_command_for_test(CoreCommand::Resume);
+    let t = h.state().frame_count_for_test() + 90;
+    while h.state().frame_count_for_test() < t {
+        poke(&h, 0x06C0, 0x1C);
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let (Some(off), Some(on)) = (off, grab(&h)) else {
+        skip(readme, name, "no frame");
+        return;
+    };
+    let dirs: Vec<String> = telemetry
+        .last_report
+        .lock()
+        .ok()
+        .and_then(|r| r.clone())
+        .map(|r| r.passes.iter().map(|p| format!("{:?}", p.dir)).collect())
+        .unwrap_or_default();
+    println!(
+        "SCOUT-MM2-CLIMB: finished {finished}; passes {dirs:?}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells; gave up {}; {}",
+        telemetry.frames.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+        telemetry.gave_up.load(Relaxed),
+        telemetry.last_summary().unwrap_or_default(),
+    );
+    assert!(
+        finished
+            && telemetry.aborted.load(Relaxed) == 0
+            && dirs.first().is_some_and(|d| d == "Down"),
+        "the shaft was not scouted down: finished {finished}, aborted {}, passes {dirs:?}",
+        telemetry.aborted.load(Relaxed)
+    );
+    let d = out_dir();
+    save(&d.join("scout-mm2-climb-32x9-off.png"), &off.opaque());
+    save(&d.join("scout-mm2-climb-32x9-on.png"), &on.opaque());
+    note(
+        readme,
+        format!("scout-mm2-climb-32x9|{file}|{}x{}", on.w, on.h),
+    );
 }
 
 /// One session of [`shot_persist`].
@@ -1995,6 +2149,7 @@ fn w30_w31_screens() {
     shot_scout(&mut readme);
     shot_scout_nes(&mut readme);
     shot_scout_mmx(&mut readme);
+    shot_scout_mm2_climb(&mut readme);
     shot_persist(&mut readme);
     shot_confidence(&mut readme);
     shot_fps(&mut readme);

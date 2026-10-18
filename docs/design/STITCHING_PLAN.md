@@ -636,6 +636,23 @@ X margins at the level's side walls show backdrop not garbage; fps unchanged.
 Risk: camera-Y follow rules differ (SMW's camera Y stayed at 192 with Mario
 above the screen, W32-07 note): the hold must be released on the Y axis.
 
+**Built (W33-08).** `ScoutAxis {X, Y}` and `ScoutDir {Right, Left, Up, Down}`;
+the plan gains `camera_y`, `player_y`, `player_y_hi` (profile roles of the same
+names); `pokes` runs on the axis of the pass and RELEASES every `hold` on the
+player's Y word on a Y pass; a Y `player_move` pokes from the scout's own
+running target (a player standing on a floor is put back on it every frame);
+a Y pass has a 300-frame lead-in before the stall rule counts (Mega Man 2
+scrolls down only after the poked Y has crossed `$F0` and the game's own
+30-frame latency). The ladder is per axis (a Y pass starts at `player_move`
+whatever the profile's X strategy, at the default step). The driver scouts the
+scene along `SceneTracker::scrolls_vertically()` (new: a CONFIRMED axis only,
+see `docs/research/W33-08-vertical.md` section 2) when the recipe has Y words
+or a pad to walk, else along X as before. Mega Man 2's Air Man shaft:
+416 -> 656 cells tall by the real driver, 4 px accepted after the 8 px probe
+and delta were refused; horizontal widths unchanged (SMW 5120, SMB3 2816, MM2
+2560, MMX 1024, same agreement). Found on the way and fixed: the app never
+sent the profile's `[scene]` key to a core spawned after the profile match.
+
 ### W33-09 Scene graph: level ids, doors, rooms (5 pt)
 `SceneKey` with the profile's `level_id`; transition edges; neighbour rooms
 in the margin only across continuous-scroll edges. Acceptance: SMW pipe to

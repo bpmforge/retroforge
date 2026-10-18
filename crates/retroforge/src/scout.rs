@@ -89,18 +89,74 @@ pub enum ScoutStrategy {
     Walk,
 }
 
+/// Ticket W33-08: the axis a pass scouts along. A scene scrolls along one
+/// (the scene tracker's axis rule), and the scout follows it: `X` passes walk
+/// right and left, `Y` passes down and up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoutAxis {
+    X,
+    Y,
+}
+
+impl ScoutAxis {
+    /// The passes a scene of this axis gets when the profile names none on it:
+    /// forward first (right, down), then back.
+    #[must_use]
+    pub fn default_dirs(self) -> Vec<ScoutDir> {
+        match self {
+            ScoutAxis::X => vec![ScoutDir::Right, ScoutDir::Left],
+            ScoutAxis::Y => vec![ScoutDir::Down, ScoutDir::Up],
+        }
+    }
+}
+
 /// Which way a pass walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoutDir {
     Right,
     Left,
+    Up,
+    Down,
 }
 
 impl ScoutDir {
+    /// The axis this direction moves along.
+    #[must_use]
+    pub const fn axis(self) -> ScoutAxis {
+        match self {
+            ScoutDir::Right | ScoutDir::Left => ScoutAxis::X,
+            ScoutDir::Up | ScoutDir::Down => ScoutAxis::Y,
+        }
+    }
+
+    /// Screen coordinates grow right and DOWN.
     const fn sign(self) -> i32 {
         match self {
-            ScoutDir::Right => 1,
-            ScoutDir::Left => -1,
+            ScoutDir::Right | ScoutDir::Down => 1,
+            ScoutDir::Left | ScoutDir::Up => -1,
+        }
+    }
+
+    /// The NES pad bit that walks this way (nesdev "Controller reading":
+    /// A B Select Start Up Down Left Right = bits 0..7).
+    const fn nes_pad_bit(self) -> u8 {
+        match self {
+            ScoutDir::Up => 1 << 4,
+            ScoutDir::Down => 1 << 5,
+            ScoutDir::Left => 1 << 6,
+            ScoutDir::Right => 1 << 7,
+        }
+    }
+
+    /// The profile's word for it.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "right" => Some(ScoutDir::Right),
+            "left" => Some(ScoutDir::Left),
+            "up" => Some(ScoutDir::Up),
+            "down" => Some(ScoutDir::Down),
+            _ => None,
         }
     }
 }
@@ -119,6 +175,12 @@ pub struct ScoutPlan {
     /// `player_x` address, for a game that keeps the two bytes apart (the NES
     /// games of W32-09). Empty: the high byte is the next address.
     pub player_x_hi: Vec<u32>,
+    /// Ticket W33-08: the same for a VERTICAL scene. `camera_y` words are 16-bit
+    /// little-endian; a `player_y` word with a `player_y_hi` is 16-bit, one
+    /// with none is a single byte (Mega Man 2 keeps Y in one).
+    pub camera_y: Vec<u32>,
+    pub player_y: Vec<u32>,
+    pub player_y_hi: Vec<u32>,
     /// Pixels per scout frame.
     pub step_px: u16,
     /// Most frames one pass may run.
@@ -170,16 +232,10 @@ impl ScoutPlan {
                 .collect()
         };
         let dirs = t.dirs.as_ref().map_or_else(
-            || vec![ScoutDir::Right, ScoutDir::Left],
+            || ScoutAxis::X.default_dirs(),
             |d| {
                 d.iter()
-                    .map(|s| {
-                        if s == "left" {
-                            ScoutDir::Left
-                        } else {
-                            ScoutDir::Right
-                        }
-                    })
+                    .map(|s| ScoutDir::parse(s).unwrap_or(ScoutDir::Right))
                     .collect()
             },
         );
@@ -192,6 +248,9 @@ impl ScoutPlan {
             camera: words("camera_x"),
             player_x: words("player_x"),
             player_x_hi: words("player_x_hi"),
+            camera_y: words("camera_y"),
+            player_y: words("player_y"),
+            player_y_hi: words("player_y_hi"),
             step_px: t.step_px,
             frame_budget: t.frame_budget,
             stall_frames: t.stall_frames.unwrap_or(120),
@@ -204,40 +263,132 @@ impl ScoutPlan {
         }
     }
 
-    /// The player's X word as the scout's machine holds it: the first
+    /// The camera words of `axis`.
+    #[must_use]
+    pub fn camera_words(&self, axis: ScoutAxis) -> &[u32] {
+        match axis {
+            ScoutAxis::X => &self.camera,
+            ScoutAxis::Y => &self.camera_y,
+        }
+    }
+
+    /// The player words of `axis`.
+    #[must_use]
+    pub fn player_words(&self, axis: ScoutAxis) -> &[u32] {
+        match axis {
+            ScoutAxis::X => &self.player_x,
+            ScoutAxis::Y => &self.player_y,
+        }
+    }
+
+    /// The passes a scene scrolling along `axis` gets: the profile's
+    /// directions on that axis, else the axis's defaults.
+    #[must_use]
+    pub fn dirs_for(&self, axis: ScoutAxis) -> Vec<ScoutDir> {
+        let own: Vec<ScoutDir> = self
+            .dirs
+            .iter()
+            .copied()
+            .filter(|d| d.axis() == axis)
+            .collect();
+        if own.is_empty() {
+            axis.default_dirs()
+        } else {
+            own
+        }
+    }
+
+    /// Whether this recipe can move the scout along `axis` on a machine
+    /// placed by `bands` (the NES: `walk` holds the pad): some word to poke,
+    /// or a pad to hold. A scene whose axis it cannot move is scouted along
+    /// the other one, as before W33-08, rather than given up.
+    #[must_use]
+    pub fn can_scout(&self, axis: ScoutAxis, bands: bool) -> bool {
+        bands || !self.camera_words(axis).is_empty() || !self.player_words(axis).is_empty()
+    }
+
+    /// The player's word on `axis` as the scout's machine holds it: the first
     /// `player_x` address, with its high byte at the matching `player_x_hi`
-    /// address (else the next one).
-    fn player_word(&self, st: &EmuStepper) -> u16 {
-        self.player_x.first().map_or(0, |&a| {
-            let hi = self.player_x_hi.first().copied().unwrap_or(a + 1);
-            u16::from(st.peek_bus(a)) | (u16::from(st.peek_bus(hi)) << 8)
+    /// address (else the next one); a `player_y` with no `player_y_hi` is one
+    /// byte.
+    fn player_word(&self, st: &EmuStepper, axis: ScoutAxis) -> u16 {
+        let (words, his) = match axis {
+            ScoutAxis::X => (&self.player_x, &self.player_x_hi),
+            ScoutAxis::Y => (&self.player_y, &self.player_y_hi),
+        };
+        words.first().map_or(0, |&a| {
+            let lo = u16::from(st.peek_bus(a));
+            match (axis, his.first()) {
+                (ScoutAxis::Y, None) => lo,
+                (_, hi) => {
+                    let hi = hi.copied().unwrap_or(a + 1);
+                    lo | (u16::from(st.peek_bus(hi)) << 8)
+                }
+            }
         })
+    }
+
+    /// Whether `addr` is a byte of the player's Y word: a hold on it keeps
+    /// the player where the X recipe wants him and fights a Y one.
+    fn is_y_hold(&self, addr: u32) -> bool {
+        self.player_y.contains(&addr) || self.player_y_hi.contains(&addr)
     }
 
     /// The camera moved by more than this in one frame is a scene change
     /// (a transition or a respawn), not scrolling.
     pub const JUMP_PX: i32 = 64;
 
-    /// The pokes for one scout frame, given what the scout machine holds now.
+    /// Where a poke of `dir` puts a word that is at `from`: a step along the
+    /// direction, held inside the word's range (a Y byte is 8-bit).
+    #[must_use]
+    pub fn moved(&self, dir: ScoutDir, from: u16) -> u16 {
+        let top = if dir.axis() == ScoutAxis::Y
+            && self.strategy == ScoutStrategy::PlayerMove
+            && self.player_y_hi.is_empty()
+        {
+            i32::from(u8::MAX)
+        } else {
+            i32::from(u16::MAX)
+        };
+        (i32::from(from) + i32::from(self.step_px) * dir.sign()).clamp(0, top) as u16
+    }
+
+    /// The pokes for one scout frame, given what the scout machine holds now
+    /// (`camera` and `player` on the axis of `dir`).
+    ///
+    /// On a Y pass the holds on the player's Y word are RELEASED: they pin him
+    /// above the obstacles of a horizontal level, and a Y recipe moves that
+    /// very word (Super Mario World's camera Y stays at its floor with Mario
+    /// held above the screen, W32-07).
     #[must_use]
     pub fn pokes(&self, dir: ScoutDir, camera: u16, player: u16) -> Vec<(u32, u8)> {
-        let step = i32::from(self.step_px) * dir.sign();
+        let axis = dir.axis();
         let (addrs, from) = match self.strategy {
-            ScoutStrategy::CameraWrite => (&self.camera, camera),
-            ScoutStrategy::PlayerMove => (&self.player_x, player),
-            ScoutStrategy::Walk => (&NO_ADDRS, 0),
+            ScoutStrategy::CameraWrite => (self.camera_words(axis), camera),
+            ScoutStrategy::PlayerMove => (self.player_words(axis), player),
+            ScoutStrategy::Walk => (&NO_ADDRS[..], 0),
         };
-        let to = (i32::from(from) + step).clamp(0, i32::from(u16::MAX)) as u16;
+        let to = self.moved(dir, from);
         let mut out: Vec<(u32, u8)> = Vec::with_capacity(addrs.len() * 2 + self.hold.len());
         for (i, &a) in addrs.iter().enumerate() {
             out.push((a, to as u8));
-            let hi = match self.strategy {
-                ScoutStrategy::PlayerMove => self.player_x_hi.get(i).copied().unwrap_or(a + 1),
-                ScoutStrategy::CameraWrite | ScoutStrategy::Walk => a + 1,
+            let hi = match (self.strategy, axis) {
+                (ScoutStrategy::PlayerMove, ScoutAxis::X) => {
+                    Some(self.player_x_hi.get(i).copied().unwrap_or(a + 1))
+                }
+                (ScoutStrategy::PlayerMove, ScoutAxis::Y) => self.player_y_hi.get(i).copied(),
+                (ScoutStrategy::CameraWrite | ScoutStrategy::Walk, _) => Some(a + 1),
             };
-            out.push((hi, (to >> 8) as u8));
+            if let Some(hi) = hi {
+                out.push((hi, (to >> 8) as u8));
+            }
         }
-        out.extend(self.hold.iter().copied());
+        out.extend(
+            self.hold
+                .iter()
+                .filter(|(a, _)| axis == ScoutAxis::X || !self.is_y_hold(*a))
+                .copied(),
+        );
         out
     }
 }
@@ -261,9 +412,34 @@ pub struct StopRule {
     still: u32,
     extent: usize,
     last_camera: Option<i64>,
+    /// Ticket W33-08: frames a pass may run without growing the canvases
+    /// before the stall rule counts (see [`Y_LEAD_IN_FRAMES`]).
+    lead_in: u32,
+    /// The extent after the pass's first frame (which stitches a screen of
+    /// its own), and whether anything has grown past it since.
+    first: Option<usize>,
+    grew: bool,
 }
 
+/// A vertical pass's lead-in. A game that scrolls down only for a player who
+/// reaches the bottom of the screen (Mega Man 2: the poked Y crosses 0xF0
+/// after 40 frames at 4 px, and the screen starts to scroll about 30 frames
+/// later) has stitched nothing new for far longer than the stall rule's 60.
+pub const Y_LEAD_IN_FRAMES: u32 = 300;
+
 impl StopRule {
+    /// The rules for a pass in `dir`.
+    #[must_use]
+    pub fn for_dir(dir: ScoutDir) -> Self {
+        Self {
+            lead_in: match dir.axis() {
+                ScoutAxis::X => 0,
+                ScoutAxis::Y => Y_LEAD_IN_FRAMES,
+            },
+            ..Self::default()
+        }
+    }
+
     /// Whether `camera` is a jump from the last frame's (a scene change).
     #[must_use]
     pub fn jumped(&self, camera: i64) -> bool {
@@ -285,7 +461,9 @@ impl StopRule {
         } else {
             self.still += 1;
         }
-        if self.still >= plan.stall_frames {
+        let first = *self.first.get_or_insert(extent);
+        self.grew |= extent > first;
+        if self.still >= plan.stall_frames && (self.grew || self.frames >= self.lead_in) {
             Some(ScoutEnd::Stalled)
         } else if self.frames >= plan.frame_budget {
             Some(ScoutEnd::Budget)
@@ -381,9 +559,15 @@ pub struct Scout {
     /// A NES machine: frames are placed by the core's own scroll events
     /// (bands), not by layer registers (W32-09).
     bands: bool,
-    /// World x of the last frame's picture: the camera the stop rules watch
-    /// on the NES, where the stitcher's own placement is the only camera.
+    /// World x (y, on a vertical pass) of the last frame's picture: the camera
+    /// the stop rules watch on the NES, where the stitcher's own placement is
+    /// the only camera.
     camera: Option<i64>,
+    /// Ticket W33-08: where the last Y poke put the player's Y word. A Y pass
+    /// pokes from THIS, not from what the game holds: a player standing on a
+    /// floor is put back on it every frame, and a poke from his own value
+    /// would never get past it.
+    y_target: Option<u16>,
     /// How the passes ended, in order.
     pub ends: Vec<ScoutEnd>,
 }
@@ -449,7 +633,7 @@ impl Scout {
                 keep_events: bands,
             },
             pass: 0,
-            rule: StopRule::default(),
+            rule: StopRule::for_dir(plan.dirs.first().copied().unwrap_or(ScoutDir::Right)),
             status: ScoutStatus::Running,
             frames_total: 0,
             since_merge: 0,
@@ -457,6 +641,7 @@ impl Scout {
             primed: false,
             bands,
             camera: None,
+            y_target: None,
             ends: Vec::new(),
             plan,
         }
@@ -486,7 +671,7 @@ impl Scout {
                 .camera
                 .first()
                 .map_or(0, |&a| word(&self.stepper, a)),
-            self.plan.player_word(&self.stepper),
+            self.plan.player_word(&self.stepper, ScoutAxis::X),
         )
     }
 
@@ -570,12 +755,13 @@ impl Scout {
         }
         self.acc = self.seed.fork_for_scout();
         self.pass = 0;
-        self.rule = StopRule::default();
+        self.rule = StopRule::for_dir(dir);
         self.status = ScoutStatus::Running;
         self.since_merge = 0;
         self.lag.forget();
         self.primed = false;
         self.camera = None;
+        self.y_target = None;
         self.ends.clear();
         // Anything the last attempt's frames left in the sink is not this
         // attempt's picture.
@@ -642,7 +828,8 @@ impl Scout {
         }
         self.acc.rewind_to(&self.seed);
         self.camera = None;
-        self.rule = StopRule::default();
+        self.y_target = None;
+        self.rule = StopRule::for_dir(self.plan.dirs[self.pass]);
         self.lag.forget();
         self.primed = false;
     }
@@ -672,12 +859,18 @@ impl Scout {
             );
             self.primed = true;
         }
+        let axis = dir.axis();
         let cam = self
             .plan
-            .camera
+            .camera_words(axis)
             .first()
             .map_or(0, |&a| word(&self.stepper, a));
-        let player = self.plan.player_word(&self.stepper);
+        let mut player = self.plan.player_word(&self.stepper, axis);
+        if axis == ScoutAxis::Y && self.plan.strategy == ScoutStrategy::PlayerMove {
+            // Poke from the last poke (see `y_target`).
+            player = *self.y_target.get_or_insert(player);
+            self.y_target = Some(self.plan.moved(dir, player));
+        }
         for (addr, value) in self.plan.pokes(dir, cam, player) {
             self.stepper.poke_ram(addr, value);
         }
@@ -686,11 +879,7 @@ impl Scout {
         // player who walks.
         let mut input = InputFrame::empty();
         if self.bands && self.plan.strategy == ScoutStrategy::Walk {
-            // NES port 0 bits (nesdev "Controller reading"): Left 6, Right 7.
-            input.ports[0] = match dir {
-                ScoutDir::Right => 1 << 7,
-                ScoutDir::Left => 1 << 6,
-            };
+            input.ports[0] = u16::from(dir.nes_pad_bit());
         }
         self.stepper.latch_and_advance_frame(input, &mut self.sink);
         self.frames_total += 1;
@@ -721,13 +910,18 @@ impl Scout {
                 .filter(|f| f.scene == scene.0)
                 .and_then(|f| f.origins[0])
             {
-                self.camera = Some(origin.0 - pad);
+                self.camera = Some(match axis {
+                    ScoutAxis::X => origin.0 - pad,
+                    ScoutAxis::Y => origin.1,
+                });
             }
             self.camera.unwrap_or(0)
         } else {
+            // Without a camera word on this axis the stop rules cannot see a
+            // jump (a respawn), only a stall.
             let after = i64::from(
                 self.plan
-                    .camera
+                    .camera_words(axis)
                     .first()
                     .map_or(0, |&a| word(&self.stepper, a)),
             );
@@ -1373,9 +1567,13 @@ fn run_worker(
         let _ = send_or_cancel(tx, cancel, ScoutMsg::Failed);
         return;
     };
-    let rungs = rungs_for(&plan, scout.places_by_bands(), hint.map(|h| h.0));
+    let axis = plan.dirs.first().map_or(ScoutAxis::X, |d| d.axis());
+    let rungs = rungs_for(&plan, axis, scout.places_by_bands(), hint.map(|h| h.0));
+    // The profile's step is the X recipe's (Mega Man 2's is 1 px, a walk). A
+    // vertical pass starts at the default and lets the ladder halve it.
     let start_step = match hint {
         Some((s, step)) if rungs.first() == Some(&s) => step,
+        _ if axis == ScoutAxis::Y => crate::scout_ladder::DEFAULT_STEP_PX,
         _ => plan.step_px,
     };
     let known = reference_cells(reference.as_ref());
@@ -1520,10 +1718,11 @@ impl ScoutDriver {
         if self.ready < READY_FRAMES {
             return false;
         }
+        let axis = scene_axis(&setup.plan, live);
         // A SNES scout needs the game's camera word to agree with a live
         // layer (the NES's camera is the stitcher's own placement).
         if live.stepper.bg_layer_views().is_some()
-            && !camera_matches(&setup.plan, live.stepper, live.scrolls)
+            && !camera_matches(&setup.plan, axis, live.stepper, live.scrolls)
         {
             self.retry();
             return false;
@@ -1532,10 +1731,12 @@ impl ScoutDriver {
             self.retry();
             return false;
         };
+        let mut plan = setup.plan.clone();
+        plan.dirs = plan.dirs_for(axis);
         let job = ScoutJob {
             rom: live.rom.to_vec(),
             snapshot,
-            plan: setup.plan.clone(),
+            plan,
             seed: live.canvases.fork_for_scout(),
             reference: live.canvases.scout_reference(live.scene.0),
             hint: live
@@ -1657,18 +1858,42 @@ impl ScoutDriver {
     }
 }
 
-/// Whether the game's camera word agrees with the first stitched layer's
-/// live scroll (the game is in a level and the recipe's address is right).
-fn camera_matches(plan: &ScoutPlan, stepper: &EmuStepper, scrolls: ScrollReader) -> bool {
-    let Some(&addr) = plan.camera.first() else {
+/// Ticket W33-08: the axis to scout the live scene along. The scene tracker
+/// names the axis the screen has been scrolling along (the rule behind
+/// `[scene] sections = "axis"`); a scene it cannot name yet, or one the recipe
+/// has no Y words for, is scouted along X as before.
+fn scene_axis(plan: &ScoutPlan, live: &LiveView<'_>) -> ScoutAxis {
+    let bands = live.stepper.bg_layer_views().is_none();
+    if live.canvases.scene_scrolls_vertically() == Some(true) && plan.can_scout(ScoutAxis::Y, bands)
+    {
+        ScoutAxis::Y
+    } else {
+        ScoutAxis::X
+    }
+}
+
+/// Whether the game's camera word on `axis` agrees with the first stitched
+/// layer's live scroll (the game is in a level and the recipe's address is
+/// right).
+fn camera_matches(
+    plan: &ScoutPlan,
+    axis: ScoutAxis,
+    stepper: &EmuStepper,
+    scrolls: ScrollReader,
+) -> bool {
+    let Some(&addr) = plan.camera_words(axis).first() else {
         return true;
     };
     let Some(layer) = scrolls(stepper).and_then(|s| s.into_iter().flatten().next()) else {
         return false;
     };
-    let wrap = i64::from(layer.tilemap_width.max(1));
+    let (wrap, live) = match axis {
+        ScoutAxis::X => (layer.tilemap_width, layer.hofs),
+        ScoutAxis::Y => (layer.tilemap_height, layer.vofs),
+    };
+    let wrap = i64::from(wrap.max(1));
     let cam = i64::from(word(stepper, addr)).rem_euclid(wrap);
-    let d = (cam - i64::from(layer.hofs)).rem_euclid(wrap);
+    let d = (cam - i64::from(live)).rem_euclid(wrap);
     d.min(wrap - d) <= CAMERA_TOLERANCE_PX
 }
 
@@ -1682,6 +1907,9 @@ mod tests {
             camera: vec![0x7E_001A, 0x7E_1462],
             player_x: vec![0x7E_0094],
             player_x_hi: Vec::new(),
+            camera_y: Vec::new(),
+            player_y: Vec::new(),
+            player_y_hi: Vec::new(),
             step_px: 4,
             frame_budget: 10,
             stall_frames: 3,
@@ -1708,6 +1936,123 @@ mod tests {
                 (0x7E_0100, 7)
             ]
         );
+    }
+
+    /// A plan with Y rows: SMW's 16-bit player Y (the hold rows are its two
+    /// bytes) and Mega Man 2's one-byte one.
+    fn y_plan(strategy: ScoutStrategy, wide: bool) -> ScoutPlan {
+        let mut p = plan(strategy);
+        p.camera_y = vec![0x7E_001C];
+        p.player_y = vec![0x7E_0096];
+        if wide {
+            p.player_y_hi = vec![0x7E_0097];
+        }
+        p.hold = vec![(0x7E_0096, 150), (0x7E_0097, 0), (0x7E_0100, 7)];
+        p
+    }
+
+    #[test]
+    fn a_y_pass_releases_the_holds_on_the_players_y_word_and_keeps_the_rest() {
+        let p = y_plan(ScoutStrategy::PlayerMove, true);
+        // Going right the hold pins him high, as before.
+        let right = p.pokes(ScoutDir::Right, 0, 0x0100);
+        assert!(right.contains(&(0x7E_0096, 150)) && right.contains(&(0x7E_0097, 0)));
+        // Going down the word is moved by the recipe: 0x0150 + 4, both bytes,
+        // and no hold on either byte, only the unrelated one.
+        let down = p.pokes(ScoutDir::Down, 0, 0x0150);
+        assert_eq!(
+            down,
+            vec![(0x7E_0096, 0x54), (0x7E_0097, 0x01), (0x7E_0100, 7)]
+        );
+        // Going up it is 4 less.
+        let up = p.pokes(ScoutDir::Up, 0, 0x0150);
+        assert_eq!(up[..2], [(0x7E_0096, 0x4C), (0x7E_0097, 0x01)]);
+    }
+
+    #[test]
+    fn a_player_y_with_no_high_row_is_one_byte_held_inside_it() {
+        let p = y_plan(ScoutStrategy::PlayerMove, false);
+        assert_eq!(p.pokes(ScoutDir::Down, 0, 0x54)[0], (0x7E_0096, 0x58));
+        // No second poke for a high byte, and the value stops at 0xFF.
+        let p2 = p.pokes(ScoutDir::Down, 0, 0xFE);
+        assert_eq!(p2[0], (0x7E_0096, 0xFF));
+        // The recipe writes no high byte; the hold row on `$7E0097` is not a
+        // `player_y` byte here, so it stays (a profile that means it as the
+        // high half names it `player_y_hi`).
+        assert_eq!(p2, vec![(0x7E_0096, 0xFF), (0x7E_0097, 0), (0x7E_0100, 7)]);
+        assert_eq!(p.moved(ScoutDir::Up, 2), 0);
+        // The X recipe of the same plan still has the whole 16 bits.
+        assert_eq!(p.moved(ScoutDir::Right, 0xFFFE), 0xFFFF);
+    }
+
+    #[test]
+    fn camera_write_on_the_y_axis_writes_the_y_camera_words() {
+        let p = y_plan(ScoutStrategy::CameraWrite, true).pokes(ScoutDir::Down, 0x00F0, 0);
+        assert_eq!(p[..2], [(0x7E_001C, 0xF4), (0x7E_001D, 0x00)]);
+    }
+
+    #[test]
+    fn a_scene_gets_the_directions_of_its_own_axis() {
+        let mut p = plan(ScoutStrategy::PlayerMove);
+        p.dirs = vec![ScoutDir::Right];
+        assert_eq!(p.dirs_for(ScoutAxis::X), vec![ScoutDir::Right]);
+        // The profile names none on Y: forward (down) first, then back.
+        assert_eq!(p.dirs_for(ScoutAxis::Y), vec![ScoutDir::Down, ScoutDir::Up]);
+        p.dirs = vec![ScoutDir::Up, ScoutDir::Right];
+        assert_eq!(p.dirs_for(ScoutAxis::Y), vec![ScoutDir::Up]);
+        assert_eq!(ScoutDir::parse("up"), Some(ScoutDir::Up));
+        assert_eq!(ScoutDir::parse("sideways"), None);
+    }
+
+    #[test]
+    fn a_recipe_without_y_words_cannot_scout_a_vertical_scene_unless_it_walks() {
+        let p = plan(ScoutStrategy::PlayerMove);
+        assert!(p.can_scout(ScoutAxis::X, false));
+        assert!(!p.can_scout(ScoutAxis::Y, false));
+        assert!(p.can_scout(ScoutAxis::Y, true), "a NES pad can walk down");
+        assert!(y_plan(ScoutStrategy::PlayerMove, true).can_scout(ScoutAxis::Y, false));
+    }
+
+    #[test]
+    fn the_pad_bits_of_all_four_directions_are_the_nes_ones() {
+        assert_eq!(ScoutDir::Up.nes_pad_bit(), 1 << 4);
+        assert_eq!(ScoutDir::Down.nes_pad_bit(), 1 << 5);
+        assert_eq!(ScoutDir::Left.nes_pad_bit(), 1 << 6);
+        assert_eq!(ScoutDir::Right.nes_pad_bit(), 1 << 7);
+        assert_eq!(ScoutDir::Down.axis(), ScoutAxis::Y);
+    }
+
+    #[test]
+    fn a_vertical_pass_gets_a_lead_in_before_the_stall_rule_counts() {
+        let mut p = plan(ScoutStrategy::PlayerMove);
+        p.frame_budget = 10_000;
+        // X: stalls after `stall_frames` still frames, as before.
+        let mut r = StopRule::for_dir(ScoutDir::Right);
+        let ends: Vec<_> = (0..5).map(|_| r.observe(&p, 0, 100)).collect();
+        assert_eq!(
+            ends,
+            vec![
+                None,
+                None,
+                None,
+                Some(ScoutEnd::Stalled),
+                Some(ScoutEnd::Stalled)
+            ]
+        );
+        // Y: nothing grows for 299 frames (the player is walking to the edge
+        // of the screen) and the pass is still alive; the 300th ends it.
+        let mut r = StopRule::for_dir(ScoutDir::Down);
+        for _ in 0..(Y_LEAD_IN_FRAMES - 1) {
+            assert_eq!(r.observe(&p, 0, 100), None);
+        }
+        assert_eq!(r.observe(&p, 0, 100), Some(ScoutEnd::Stalled));
+        // Once it has grown the ordinary rule applies.
+        let mut r = StopRule::for_dir(ScoutDir::Down);
+        assert_eq!(r.observe(&p, 0, 100), None);
+        assert_eq!(r.observe(&p, 0, 200), None);
+        assert_eq!(r.observe(&p, 0, 200), None);
+        assert_eq!(r.observe(&p, 0, 200), None);
+        assert_eq!(r.observe(&p, 0, 200), Some(ScoutEnd::Stalled));
     }
 
     #[test]
@@ -1814,6 +2159,9 @@ mod tests {
             camera: vec![NES_CAMERA_X],
             player_x: vec![NES_PLAYER_X],
             player_x_hi: Vec::new(),
+            camera_y: Vec::new(),
+            player_y: Vec::new(),
+            player_y_hi: Vec::new(),
             step_px: step,
             frame_budget: budget,
             stall_frames: stall,

@@ -144,6 +144,9 @@ fn base_plan(ctx: &Context<'_>, obs: &Observed) -> ScoutPlan {
         camera: if ctx.snes { camera } else { Vec::new() },
         player_x: Vec::new(),
         player_x_hi: Vec::new(),
+        camera_y: Vec::new(),
+        player_y: Vec::new(),
+        player_y_hi: Vec::new(),
         step_px: TRIAL_STEP_PX,
         frame_budget: TRIAL_FRAMES,
         stall_frames: 90,
@@ -411,6 +414,21 @@ fn skeleton(
         });
         confidence = confidence.min(c.x.ratio * if wide { 1.0 } else { 0.5 });
     }
+    // Ticket W33-08: the vertical scene's camera, where the finder found one
+    // (it watched the scroll register's Y and the word that followed it).
+    if let Some(y) = obs.camera.filter(|_| snes).and_then(|c| c.y) {
+        rows.push(Row {
+            role: "camera_y",
+            addr: bus_address(snes, y.offset),
+            value: None,
+            notes: format!(
+                "Held the scroll register's Y low byte on {:.0}% of {} frames the screen scrolled vertically.",
+                y.ratio * 100.0,
+                y.moving
+            ),
+            confidence: y.ratio,
+        });
+    }
     if let Some(p) = player {
         rows.push(Row {
             role: "player_x",
@@ -438,6 +456,28 @@ fn skeleton(
         confidence = confidence.min(p.confidence);
     }
     if let Some(h) = hold {
+        // The hold's bytes are the finder's Y candidate (a byte that moved
+        // within 6 frames of a jump press): name them as the player's Y for a
+        // vertical pass, which then releases the hold and moves the byte
+        // itself. Only what was SEEN is claimed; a vertical trial has not
+        // confirmed it (it can be a Y speed, not a position: Super Mario
+        // World's candidate was `$7E007D`).
+        for (i, &(addr, _)) in h.pokes.iter().enumerate() {
+            let seen = obs.ys.iter().find(|y| y.offset == h.offset);
+            rows.push(Row {
+                role: if i == 0 { "player_y" } else { "player_y_hi" },
+                addr,
+                value: None,
+                notes: format!(
+                    "{} of the finder's jump candidate: it read {} standing and moved within 6 frames of a jump press in {} of {} presses; the Y recipe is untried on it (a vertical pass has not been run).",
+                    if i == 0 { "Low byte" } else { "High byte" },
+                    h.standing,
+                    seen.map_or(0, |y| y.hits),
+                    seen.map_or(0, |y| y.windows)
+                ),
+                confidence: 0.5,
+            });
+        }
         for (i, &(addr, value)) in h.pokes.iter().enumerate() {
             rows.push(Row {
                 role: "hold",
@@ -520,6 +560,9 @@ pub fn plan_of(sk: &Skeleton) -> ScoutPlan {
         camera: words("camera_x"),
         player_x: words("player_x"),
         player_x_hi: words("player_x_hi"),
+        camera_y: words("camera_y"),
+        player_y: words("player_y"),
+        player_y_hi: words("player_y_hi"),
         step_px: sk.step_px,
         frame_budget: sk.frame_budget,
         stall_frames: sk.stall_frames,
@@ -527,13 +570,7 @@ pub fn plan_of(sk: &Skeleton) -> ScoutPlan {
         dirs: sk
             .dirs
             .iter()
-            .map(|d| {
-                if *d == "left" {
-                    ScoutDir::Left
-                } else {
-                    ScoutDir::Right
-                }
-            })
+            .map(|d| ScoutDir::parse(d).unwrap_or(ScoutDir::Right))
             .collect(),
         hold: valued("hold"),
         start_when: valued("start_when"),

@@ -207,6 +207,13 @@ struct AxisTracker {
     next: usize,
     axis: Option<Axis>,
     travel: i64,
+    /// Ticket W33-08: the axis is more than a first sighting: the section was
+    /// entered by a switch from the other axis (after [`AXIS_TRAVEL_PX`] on
+    /// it), or has travelled [`AXIS_TRAVEL_PX`] along this one. A level's
+    /// first frames move the camera a little along either axis (Super Mario
+    /// World's Yoshi's Island 1 settles its camera vertically before Mario
+    /// walks), which names an axis the level does not scroll along.
+    confirmed: bool,
 }
 
 impl AxisTracker {
@@ -233,6 +240,7 @@ impl AxisTracker {
             Some(Axis::Vertical) => self.travel += delta.1.abs(),
             None => {}
         }
+        self.confirmed |= self.axis.is_some() && self.travel >= AXIS_TRAVEL_PX;
         match (self.axis, now) {
             (None, Some(a)) => {
                 self.axis = Some(a);
@@ -242,6 +250,7 @@ impl AxisTracker {
             (Some(old), Some(a)) if a != old && self.travel >= AXIS_TRAVEL_PX => {
                 self.axis = Some(a);
                 self.travel = 0;
+                self.confirmed = true;
                 true
             }
             _ => false,
@@ -524,6 +533,19 @@ impl SceneTracker {
     #[must_use]
     pub fn last_world_position(&self) -> Option<(i64, i64)> {
         self.last_world
+    }
+
+    /// Ticket W33-08: the axis the screen scrolls along in the current
+    /// section, by the rule of [`SceneHints::axis_sections`]: `Some(true)`
+    /// vertical, `Some(false)` horizontal, `None` until the screen has moved
+    /// along one far enough to be sure ([`AXIS_TRAVEL_PX`], or a switch from
+    /// the other axis) and just after a cut. The scout follows it.
+    #[must_use]
+    pub fn scrolls_vertically(&self) -> Option<bool> {
+        self.axis
+            .axis
+            .filter(|_| self.axis.confirmed)
+            .map(|a| a == Axis::Vertical)
     }
 }
 
@@ -1141,6 +1163,47 @@ mod tests {
         assert_eq!((edge.from, edge.to), (first.0, last.0));
         assert!(edge.continuous, "the picture flowed on across the switch");
         assert_eq!(t.continuous_neighbours(first).len(), 1);
+    }
+
+    // --- The axis the scout follows (ticket W33-08) -------------------------
+
+    #[test]
+    fn a_levels_first_small_vertical_settle_is_not_a_vertical_level() {
+        // Super Mario World's Yoshi's Island 1: the camera settles vertically
+        // by a few dozen pixels before Mario walks.
+        let mut t = SceneTracker::new();
+        for f in 0..40i64 {
+            step(&mut t, 0, f.min(24) * 2, 1);
+        }
+        assert_eq!(t.scrolls_vertically(), None);
+        // ...and a long walk right after it is horizontal.
+        for f in 0..120i64 {
+            step(&mut t, f * 4, 48, 1);
+        }
+        assert_ne!(t.scrolls_vertically(), Some(true));
+    }
+
+    #[test]
+    fn a_long_walk_then_a_climb_is_a_vertical_section_and_a_long_climb_alone_is_too() {
+        let mut t = SceneTracker::new();
+        for f in 0..120i64 {
+            step(&mut t, f * 4, 0, 1);
+        }
+        assert_eq!(t.scrolls_vertically(), Some(false));
+        for f in 0..60i64 {
+            step(&mut t, 480, f * 4, 1);
+        }
+        assert_eq!(t.scrolls_vertically(), Some(true), "entered by a switch");
+        // A vertical level from the start: sure after 256 px of climb.
+        let mut t = SceneTracker::new();
+        for f in 0..40i64 {
+            step(&mut t, 0, f * 4, 1);
+        }
+        assert_eq!(t.scrolls_vertically(), None, "160 px is not enough");
+        for f in 40..90i64 {
+            step(&mut t, 0, f * 4, 1);
+        }
+        assert_eq!(t.scrolls_vertically(), Some(true));
     }
 
     #[test]
