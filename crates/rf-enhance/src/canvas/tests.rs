@@ -2349,3 +2349,38 @@ fn peeking_a_delta_leaves_it_to_be_taken_and_taking_empties_it() {
     assert_eq!(taken[0], again[0]);
     assert!(acc.peek_delta(1).unwrap()[0].get(0, 0).is_none(), "taken");
 }
+
+/// A canvas gone stale whose candidate was learned from the FIRST frames of a
+/// new picture (a fade-in) used to stay stale for good: gating withheld every
+/// row, so the candidate never saw the settled picture and nothing promoted
+/// (SMB3 at a level start: layer 0 at confidence 0, scouts merged nothing).
+#[test]
+fn a_candidate_learned_from_a_fade_is_restarted_and_the_settled_picture_replaces_the_canvas() {
+    use crate::canvas::registration::{guard_rows, Confidence, STALE_FRAMES};
+    let (w, h) = (64usize, 32usize);
+    let frame = |idx: u8| -> Vec<PpuPixel> {
+        (0..w * h)
+            .map(|i| px(PixelLayer::Background(0), idx.wrapping_add((i % 7) as u8)))
+            .collect()
+    };
+    let rows: Vec<Option<RowPos>> = (0..h).map(|y| Some(RowPos { x: 0, y: y as i64 })).collect();
+    let (mut canvas, mut cand, mut conf) = (Canvas::new(), Canvas::new(), Confidence::default());
+    let step = |canvas: &mut Canvas, cand: &mut Canvas, conf: &mut Confidence, v: &[PpuPixel]| {
+        let mut r = rows.clone();
+        guard_rows(canvas, cand, conf, v, w, &mut r, &Pick::Level);
+        place_rows(canvas, v, w, &r, &Pick::Level, &mut None);
+    };
+    // The old picture, then a fade frame, then the settled picture.
+    let (old, fade, settled) = (frame(10), frame(100), frame(200));
+    step(&mut canvas, &mut cand, &mut conf, &old);
+    step(&mut canvas, &mut cand, &mut conf, &fade);
+    for _ in 0..STALE_FRAMES + 8 {
+        step(&mut canvas, &mut cand, &mut conf, &settled);
+    }
+    assert_eq!(
+        conf.resets, 1,
+        "the settled picture replaced the old canvas"
+    );
+    assert_eq!(conf.level(), MAX_LEVEL);
+    assert_eq!(canvas.get(3, 0).map(|p| p.palette_index), Some(203));
+}
