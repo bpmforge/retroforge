@@ -27,6 +27,7 @@
 use rf_core_api::PpuPixel;
 
 use super::placement::{layer_pixel, place_rows, Pick, RowPos};
+use crate::persistence::Reader;
 use crate::stitcher::{stitchable_pixel, Canvas};
 
 /// The widest offset searched around the prediction, in pixels.
@@ -154,6 +155,99 @@ impl Default for Confidence {
 }
 
 impl Confidence {
+    /// Bytes in [`Self::to_bytes`].
+    pub const ENCODED_LEN: usize = 1 + 4 * 4 + 6 * 4 + 2 + 4 + 4 * 8;
+
+    /// Fixed little-endian encoding of every field, for the cache (W33-05).
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = Vec::with_capacity(Self::ENCODED_LEN);
+        out.push(self.level);
+        for v in [
+            self.bad_streak,
+            self.good_streak,
+            self.candidate_run,
+            self.resets,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let c = &self.last;
+        for v in [
+            c.agreed,
+            c.compared,
+            c.withheld_rows,
+            c.judged_bands,
+            c.judged_rows,
+            c.picture_rows,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&[
+            u8::from(c.residual.is_some()),
+            c.residual.unwrap_or(0) as u8,
+        ]);
+        out.extend_from_slice(&c.nanos.to_le_bytes());
+        for v in [
+            self.total_agreed,
+            self.total_compared,
+            self.frames,
+            self.total_nanos,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut fixed = [0u8; Self::ENCODED_LEN];
+        fixed.copy_from_slice(&out);
+        fixed
+    }
+
+    /// The inverse of [`Self::to_bytes`]; `None` for another length, a level
+    /// above [`MAX_LEVEL`] or a flag byte that is neither 0 nor 1.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::ENCODED_LEN {
+            return None;
+        }
+        let mut r = Reader::new(bytes);
+        let level = r.u8()?;
+        if level > MAX_LEVEL {
+            return None;
+        }
+        let (bad_streak, good_streak, candidate_run, resets) =
+            (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let (agreed, compared, withheld_rows) = (r.u32()?, r.u32()?, r.u32()?);
+        let (judged_bands, judged_rows, picture_rows) = (r.u32()?, r.u32()?, r.u32()?);
+        let (flag, raw) = (r.u8()?, r.u8()? as i8);
+        let residual = match flag {
+            0 if raw == 0 => None,
+            1 => Some(raw),
+            _ => return None,
+        };
+        let nanos = r.u32()?;
+        let (total_agreed, total_compared, frames, total_nanos) =
+            (r.u64()?, r.u64()?, r.u64()?, r.u64()?);
+        Some(Self {
+            level,
+            bad_streak,
+            good_streak,
+            candidate_run,
+            resets,
+            last: Check {
+                agreed,
+                compared,
+                withheld_rows,
+                judged_bands,
+                judged_rows,
+                picture_rows,
+                residual,
+                nanos,
+            },
+            total_agreed,
+            total_compared,
+            frames,
+            total_nanos,
+        })
+    }
+
     #[must_use]
     pub fn level(&self) -> u8 {
         self.level

@@ -19,3 +19,6 @@ rf-cache = { path = "../rf-cache" }
 rf-profiles = { path = "../rf-profiles" }
 # crc32fast: the CRC32 footers of BPS and UPS patches (soft-patching, W32-01).
 crc32fast = "1.5"
+# zstd: the canvas cache entry body (W33-05), the same crate and level as
+# rf-cache and rf-state (already in the license graph, deny.toml).
+zstd = "0.13.3"

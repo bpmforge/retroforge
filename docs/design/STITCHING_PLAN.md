@@ -311,6 +311,19 @@ a half-faded frame) and excluded from compare.
 * Cache is derived, user-local pixel data; it is not ROM bytes and is not in
   git (law 5).
 
+**Built (W33-05).** One entry per `(ROM sha256, scene id)` rather than per
+layer: all four layers, the palette table, confidence, the scene's edges and a
+`scouted` flag, framed with magic, version and CRC32 and zstd-compressed
+(`rf_enhance::persistence`, `SETTINGS_HASH = "canvas-chunk-v2"`). Restored on
+the first stitch of a scene, written when the game cuts away from it, on the
+5 s snapshot flush (only if the cells changed) and when the model drops. A
+scene whose scout finished is restored with `scouted` set and the scout driver
+starts nothing for it. An entry past 48 MiB stored drops layers 3, 2, 1 in
+that order; across scenes `rf-cache` evicts whole least-recently-used entries
+to its cap. Measured: SMW YI1 3.69 MB raw, 66.7 KB stored; SMB3 1-1 1.83 MB raw,
+34.3 KB stored. Cells are written `Live`; the `Scout` source tag arrives with
+W33-06.
+
 ### 2.8 How the scout plugs in
 
 Unchanged in principle (snapshot, worker, deltas, unknown-only merge), with:

@@ -753,6 +753,10 @@ pub struct RetroForgeApp {
     /// Ticket W33-04: the stitcher's placement confidence for the frame on
     /// screen, as one Enhancements-panel line, and the figures behind it.
     margin_readout: Option<String>,
+    /// Ticket W33-05 (tests): measure how much of the margins the canvas knows.
+    measure_margins: bool,
+    /// ... and the last measurement, `(known, total)` cells.
+    margin_known: Option<(u64, usize, usize, usize)>,
     stitch_confidence: Option<[rf_enhance::canvas::Confidence; rf_enhance::canvas::LAYERS]>,
     /// Ticket W31-05: the GPU polygon pass, built on first use from
     /// [`Self::gpu`].
@@ -1760,6 +1764,8 @@ impl RetroForgeApp {
             superfx_hd: rf_renderer::superfx_hd::SuperFxHd::default(),
             superfx_hd_readout: None,
             margin_readout: None,
+            measure_margins: false,
+            margin_known: None,
             stitch_confidence: None,
             superfx_gpu: None,
             superfx_hd_native: None,
@@ -12159,6 +12165,20 @@ impl RetroForgeApp {
         }
         let have_level = !self.force_vram_margins && self.level_image().is_some();
         let canvas_ready = self.ultrawide_layers.any();
+        if self.measure_margins {
+            let pad = i64::try_from(out_w.saturating_sub(256) / 2).unwrap_or(0);
+            let fresh = scene.is_some() && scene == self.ultrawide_canvas_scene;
+            self.margin_known = layer_frames
+                .zip(self.ultrawide_layers.primary_layer())
+                .filter(|_| fresh)
+                .and_then(|(f, n)| {
+                    let canvas = self.ultrawide_layers.canvases[n].as_ref()?;
+                    let (known, total) =
+                        rf_enhance::canvas::margin_known(canvas, f.origins[n]?, pad, h as i64);
+                    let cells = canvas.cells().iter().filter(|c| c.is_some()).count();
+                    Some((f.scene, known, total, cells))
+                });
+        }
         let facts = MarginFacts {
             level_decoded: have_level,
             camera_known: self.level_camera.is_some(),
@@ -13022,6 +13042,22 @@ impl RetroForgeApp {
         &self,
     ) -> Option<[rf_enhance::canvas::Confidence; rf_enhance::canvas::LAYERS]> {
         self.stitch_confidence
+    }
+
+    /// Ticket W33-05 (tests): start measuring the margins' canvas coverage.
+    #[doc(hidden)]
+    pub fn set_measure_margins_for_test(&mut self, on: bool) {
+        self.measure_margins = on;
+    }
+
+    /// Ticket W33-05 (tests): `(scene, known, total, cells)` of the last frame
+    /// shown: the known and total margin cells, and the known cells of the
+    /// whole primary-layer canvas (the level as remembered); `None` while the
+    /// canvas is not the shown scene's.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn margin_known_for_test(&self) -> Option<(u64, usize, usize, usize)> {
+        self.margin_known
     }
 
     /// Ticket W33-04 (tests): the stitch-confidence line of the Enhancements

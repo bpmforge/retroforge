@@ -638,6 +638,9 @@ pub struct ScoutTelemetry {
     pub started: std::sync::atomic::AtomicU64,
     /// Scouts that ran every pass to its end.
     pub finished: std::sync::atomic::AtomicU64,
+    /// Ticket W33-05: scenes entered whose cached canvases already carry a
+    /// finished scout, so none was started.
+    pub skipped: std::sync::atomic::AtomicU64,
     /// Scouts that ended almost at once (they began mid-transition) and were
     /// retried.
     pub aborted: std::sync::atomic::AtomicU64,
@@ -892,6 +895,12 @@ impl ScoutDriver {
             self.attempts = 0;
             self.ready = 0;
             self.settle_left = setup.plan.settle_frames;
+            // Ticket W33-05: the cache restored this scene with a scout's
+            // work in it. A second visit starts nothing.
+            if live.canvases.scene_scouted(live.scene.0) {
+                self.done = true;
+                ScoutTelemetry::add(&setup.telemetry.skipped, 1);
+            }
         }
         if self.done {
             return;
@@ -1017,6 +1026,9 @@ impl ScoutDriver {
                         }
                         ScoutTelemetry::add(&t.finished, 1);
                         self.done = true;
+                        // Remembered with the scene (and written now): the
+                        // next visit skips the scout.
+                        live.mark_scouted(scene.0);
                     } else {
                         // It began in the middle of a transition: try again later.
                         ScoutTelemetry::add(&t.aborted, 1);
@@ -1264,6 +1276,64 @@ mod tests {
         assert_eq!(ScoutTelemetry::get(&telemetry.finished), 1);
         assert!(ScoutTelemetry::get(&telemetry.cells) > 0);
         assert!(!driver.running());
+    }
+
+    /// Ticket W33-05: a scene whose scout finished is written with that fact,
+    /// and the next session, over the same cache and the same frames, starts
+    /// no scout at all.
+    #[test]
+    fn a_scene_restored_as_scouted_is_not_scouted_again() {
+        let Some(rom) = fixture() else { return };
+        let root = std::env::temp_dir().join(format!("rf-scout-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = |ticks_after: u32| {
+            let cache = rf_cache::Cache::open(&root, 64 << 20).expect("cache");
+            let mut st = EmuStepper::open(&rom).expect("opens");
+            let mut sink = nes_sink();
+            let mut live = CanvasModel::with_cache("rom-scroller".to_string(), Some(cache));
+            let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
+            let mut driver = ScoutDriver::default();
+            driver.set(Some(ScoutSetup {
+                plan: plan_of(4, 300, 40, 90),
+                telemetry: telemetry.clone(),
+            }));
+            let mut scene = SceneId(0);
+            // Bounded: 600 live frames.
+            for f in 0..600u32 {
+                scene = live_frame(
+                    &mut st,
+                    &mut sink,
+                    &mut live,
+                    if f >= 60 { RIGHT } else { 0 },
+                );
+                driver.tick(live_view(&st, &rom, &mut live, scene));
+            }
+            // Bounded: `ticks_after` x 10 ms, until a scout has finished.
+            for _ in 0..ticks_after {
+                if ScoutTelemetry::get(&telemetry.finished) >= 1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                driver.tick(live_view(&st, &rom, &mut live, scene));
+            }
+            (
+                telemetry,
+                scene,
+                live.scene_scouted(scene.0),
+                live.scene_restored(scene.0),
+            )
+        };
+        let (first, scene, scouted, restored) = session(3_000);
+        assert_eq!(ScoutTelemetry::get(&first.started), 1);
+        assert_eq!(ScoutTelemetry::get(&first.finished), 1);
+        assert!(scouted && !restored, "the first visit is cold");
+        // The model was dropped at the end of `session`: written.
+        let (second, scene2, scouted2, restored2) = session(0);
+        assert_eq!(scene2, scene, "same frames, same scene");
+        assert!(restored2 && scouted2, "restored with its scout");
+        assert_eq!(ScoutTelemetry::get(&second.started), 0, "no scout started");
+        assert_eq!(ScoutTelemetry::get(&second.skipped), 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

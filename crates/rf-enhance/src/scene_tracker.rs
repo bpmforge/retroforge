@@ -491,6 +491,14 @@ impl SceneTracker {
         }
     }
 
+    /// Ticket W33-05: edges restored from the cache (the latest per
+    /// `(from, to)` wins, as when they were recorded).
+    pub fn restore_edges(&mut self, edges: &[SceneEdge]) {
+        for edge in edges {
+            self.record(*edge);
+        }
+    }
+
     /// Every scene change seen so far, oldest first; one per `(from, to)`
     /// pair (the latest wins). Plain data for the cache.
     #[must_use]
