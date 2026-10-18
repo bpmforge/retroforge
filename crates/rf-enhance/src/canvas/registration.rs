@@ -321,13 +321,22 @@ pub fn guard_rows(
         confidence.candidate_run = 0;
         return;
     }
-    let mut cand_rows = wanted;
+    let mut cand_rows = wanted.clone();
     let seen = gate_rows(candidate, video, width, &mut cand_rows, pick);
     place_rows(candidate, video, width, &cand_rows, pick, &mut None);
     if seen.agrees() {
         confidence.candidate_run += 1;
     } else if seen.judged_bands > 0 {
         confidence.candidate_run = 0;
+        if seen.all_disagree() {
+            // The candidate was learned from an earlier picture (a fade, the
+            // first frames of a level) and the screen has moved on: gating
+            // withheld every row, so it can never catch up. Start it over
+            // from this frame, or a canvas gone stale is never replaced and
+            // the layer sits at confidence 0 for good (SMB3 at a level start).
+            *candidate = Canvas::new();
+            place_rows(candidate, video, width, &wanted, pick, &mut None);
+        }
     }
     if confidence.candidate_run >= STALE_FRAMES {
         *canvas = std::mem::take(candidate);

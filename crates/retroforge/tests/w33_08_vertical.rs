@@ -15,6 +15,7 @@
 //! ```text
 //! cargo test --release -p retroforge --test w33_08_vertical -- --ignored --nocapture
 //! ```
+#[allow(dead_code, unused_imports)]
 mod w33_07_common;
 use w33_07_common::*;
 

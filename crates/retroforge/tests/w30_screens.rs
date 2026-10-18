@@ -455,6 +455,17 @@ fn shot_scout(readme: &mut Vec<String>) {
         return skip(readme, name, "Super Mario World (USA) not found");
     };
     use std::sync::atomic::Ordering::Relaxed;
+    // A cold canvas cache (see `shot_scout_nes`): a warm one holds the scene
+    // as scouted and the app starts no scout on a second visit.
+    let cold = std::env::temp_dir().join(format!("rf_scout_smw_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this
+    // process reads the environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
     let mut h = new_harness();
     open_and_run(&mut h, &path);
     smw_enter_yi1(&mut h);
@@ -752,16 +763,17 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
             telemetry.last_summary().unwrap_or_default(),
         );
         // W33-08: a scout that aborted at its first frame (the live model and
-        // the scout's tracker disagreeing about the level key: the core had
-        // not been sent the profile's `[scene]` key) is no scout. What it
-        // merges is another matter: a live canvas whose registration is below
-        // the top confidence (a player who has not moved since the level
-        // began) takes nothing from a scout (W33-04), so the cells merged are
-        // reported, not asserted.
+        // the scout's tracker disagreeing about the level key) is no scout.
+        // A scout at a standing start must also merge: the status bar once
+        // corrupted the canvas and dropped its confidence to 0 (W33-10).
         assert!(
             finished && telemetry.aborted.load(Relaxed) == 0,
             "{tag}: the scout did not finish cleanly (aborted {})",
             telemetry.aborted.load(Relaxed)
+        );
+        assert!(
+            telemetry.cells.load(Relaxed) > 0,
+            "{tag}: the scout merged 0 cells into the live canvas"
         );
         // W33-06: the check refuses a forced 8 px on Super Mario Bros. 3 and
         // the scout is retried at a smaller step and accepted.
