@@ -95,6 +95,33 @@ impl PaletteTable {
         self.palettes.get(usize::from(id))
     }
 
+    /// The snapshots in id order (what persistence writes, W33-05).
+    #[must_use]
+    pub fn palettes(&self) -> &[Cgram] {
+        &self.palettes
+    }
+
+    /// The table [`Self::palettes`] and [`Self::overflowed`] describe, with
+    /// its lookup rebuilt (the inverse of persisting it). `None` for more
+    /// palettes than [`MAX_PALETTES`] or two equal ones (ids would not be
+    /// unique).
+    #[must_use]
+    pub fn from_parts(palettes: Vec<Cgram>, overflowed: u64) -> Option<Self> {
+        if palettes.len() > MAX_PALETTES {
+            return None;
+        }
+        let mut table = Self::default();
+        for words in &palettes {
+            let before = table.palettes.len();
+            table.intern(words)?;
+            if table.palettes.len() == before {
+                return None;
+            }
+        }
+        table.overflowed = overflowed;
+        Some(table)
+    }
+
     /// Distinct palettes remembered.
     #[must_use]
     pub fn len(&self) -> usize {

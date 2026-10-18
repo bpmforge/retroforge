@@ -37,9 +37,11 @@
 //!   draws, the canvas is about what we remember). A HUD layer keeps its
 //!   canvas but is left out of the margins ([`LayerCanvases::hud`]).
 //! * Scenes: [`crate::scene_tracker::SceneTracker`] keeps scene identity;
-//!   each scene has its own canvases. NES layer 0 is persisted per scene
-//!   through `rf-cache` ([`crate::persistence`]); the per-layer SNES model is
-//!   not persisted yet (W33-05).
+//!   each scene has its own canvases. A scene is persisted whole (every
+//!   layer, palettes, confidence, edges) through `rf-cache`
+//!   ([`crate::persistence`], W33-05): restored lazily the first time the
+//!   scene is stitched, written when the scene is left, on
+//!   [`CanvasModel::flush`], and when the model is dropped.
 //! * **The level scout (W32-07, W32-09).** A second machine's frames are
 //!   stitched into a forked model ([`CanvasModel::fork_for_scout`]) whose
 //!   cells fill only the UNKNOWN cells of the live canvases
@@ -50,7 +52,7 @@ use std::collections::HashMap;
 use rf_cache::Cache;
 use rf_core_api::{CoreEvent, FrameBundle, PixelLayer};
 
-use crate::persistence::{load_canvas, save_canvas};
+use crate::persistence::{load_scene, save_scene, Saved, SceneView};
 use crate::scene_identity::SceneId;
 use crate::scene_tracker::{SceneEdge, SceneHints, SceneTracker, SETTLING};
 use crate::scroll_tracker::{BandWorldPos, ScanlineBand, ScrollTracker, WorldAxis};
@@ -65,7 +67,7 @@ mod registration;
 
 pub use compose::{
     backdrop_color, backdrop_rows, front_layer_pixel, front_layer_pixel_in, margin_color,
-    margin_palette_index, margin_pixel, RowFacts,
+    margin_known, margin_palette_index, margin_pixel, RowFacts,
 };
 pub use merge::{
     crop_into, merge_unknown, merge_unknown_in, rect_union, scout_agreement, scout_verdict, Rect,
@@ -201,6 +203,17 @@ pub struct SceneCanvases {
     /// ([`guard_rows`]).
     candidates: [Canvas; LAYERS],
     motion: [Motion; LAYERS],
+    /// Ticket W33-05: a scout has run every pass on this scene (restored from
+    /// the cache too): the next visit skips it.
+    scouted: bool,
+    /// Stitched or merged since the last write.
+    unsaved: bool,
+    /// Restored from the cache when first stitched.
+    restored: bool,
+    /// CRC32 of the body on disk, so an unchanged scene is not rewritten.
+    on_disk_crc: Option<u32>,
+    /// What the last write stored (the size report).
+    saved: Option<Saved>,
 }
 
 /// A scene's per-layer canvases, shipped to the UI thread. `None` = the
@@ -315,8 +328,11 @@ pub struct CanvasModel {
     /// persistence is strictly additive, never a reason to fail.
     cache: Option<Cache>,
     rom_sha256: String,
-    /// The frames come by bands (the NES): only those persist.
-    by_bands: bool,
+    /// The scene whose cells were last stitched (not [`SETTLING`]): the one
+    /// written when the model moves on.
+    resident: Option<u64>,
+    /// How many of the scene tracker's edges were seen, to find new ones.
+    edges_seen: usize,
     /// Ticket W33-04: check frames against the canvas before writing them.
     /// A scout's fork does not: its machine is the scout's own, its cells are
     /// scored against the live canvas where they meet it (W33-06), and a
@@ -348,7 +364,8 @@ impl CanvasModel {
             dirty: [None; LAYERS],
             cache,
             rom_sha256,
-            by_bands: false,
+            resident: None,
+            edges_seen: 0,
             guard: true,
         }
     }
@@ -370,8 +387,23 @@ impl CanvasModel {
             feed.mapper_state,
             feed.scene,
         );
+        self.note_new_edges();
         self.stitch(bundle, scene, feed, &bands);
         scene
+    }
+
+    /// Edges the tracker recorded since the last frame touch two scenes: both
+    /// are written again so a later visit knows the neighbour.
+    fn note_new_edges(&mut self) {
+        let edges = self.scene_tracker.edges();
+        for e in edges.iter().skip(self.edges_seen) {
+            for id in [e.from, e.to] {
+                if let Some(s) = self.scenes.get_mut(&id) {
+                    s.unsaved = true;
+                }
+            }
+        }
+        self.edges_seen = edges.len();
     }
 
     /// Feed one frame into a scene the caller already knows (a scout's
@@ -395,22 +427,20 @@ impl CanvasModel {
     ) {
         self.last = None;
         self.last_scene = Some(scene);
-        self.by_bands = feed.is_bands();
         if scene == SETTLING {
             // A cut that has not settled (a fade, a level still loading) is
             // no scene's picture: nothing is stitched, so the scene that was
-            // left, and the one that comes, keep exactly what they had.
+            // left, and the one that comes, keep exactly what they had. The
+            // scene that was left is written now, while the game loads.
+            self.flush();
             return;
         }
+        if self.resident != Some(scene.0) {
+            self.flush();
+            self.resident = Some(scene.0);
+        }
         if !self.scenes.contains_key(&scene.0) {
-            let mut set = SceneCanvases::default();
-            if self.by_bands {
-                let restored = self
-                    .cache
-                    .as_mut()
-                    .and_then(|cache| load_canvas(cache, &self.rom_sha256, scene).unwrap_or(None));
-                set.layers[0] = restored.unwrap_or_default();
-            }
+            let set = self.restore(scene);
             self.scenes.insert(scene.0, set);
         }
         let width = usize::from(bundle.width);
@@ -428,6 +458,7 @@ impl CanvasModel {
         let Some(set) = scenes.get_mut(&scene.0) else {
             return;
         };
+        set.unsaved = true;
         match feed.source {
             Source::Bands => {
                 // The NES: the whole picture is layer 0, placed by bands.
@@ -577,18 +608,113 @@ impl CanvasModel {
         out
     }
 
-    /// Persist the current scene's layer 0 to the cache, if one was
-    /// configured (NES only until W33-05's per-layer chunks). Best-effort: a
-    /// failure degrades to "not cached this time", never a crash.
-    pub fn flush(&mut self) {
-        let (true, Some(scene), Some(cache)) =
-            (self.by_bands, self.last_scene, self.cache.as_mut())
-        else {
-            return;
-        };
-        if let Some(set) = self.scenes.get(&scene.0) {
-            let _ = save_canvas(cache, &self.rom_sha256, scene, &set.layers[0]);
+    /// The scene from the cache (lazily, the first time it is stitched), or an
+    /// empty one. A file that does not decode was already ignored with a log
+    /// line ([`load_scene`]); a cache fault reads as a miss too.
+    fn restore(&mut self, scene: SceneId) -> SceneCanvases {
+        let mut set = SceneCanvases::default();
+        let loaded = self
+            .cache
+            .as_mut()
+            .and_then(|cache| load_scene(cache, &self.rom_sha256, scene).unwrap_or(None));
+        if let Some(data) = loaded {
+            set.layers = data.layers;
+            set.palettes = data.palettes;
+            set.confidence = data.confidence;
+            set.scouted = data.scouted;
+            set.restored = true;
+            set.on_disk_crc = Some(data.body_crc);
+            self.scene_tracker.restore_edges(&data.edges);
+            self.edges_seen = self.scene_tracker.edges().len();
         }
+        set
+    }
+
+    /// Persist every scene stitched or merged into since it was last written
+    /// (the current one, and one just left): the whole scene through
+    /// `rf-cache`, atomically. A scene whose body is unchanged writes
+    /// nothing. Best-effort: a failure is logged and degrades to "not cached
+    /// this time", never a crash. Returns the bytes stored by this call.
+    pub fn flush(&mut self) -> usize {
+        let Some(cache) = self.cache.as_mut() else {
+            return 0;
+        };
+        // Ascending ids: the same order every run.
+        let mut ids: Vec<u64> = self
+            .scenes
+            .iter()
+            .filter(|(_, s)| s.unsaved)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        let mut stored = 0;
+        for id in ids {
+            let edges: Vec<SceneEdge> = self
+                .scene_tracker
+                .edges()
+                .iter()
+                .filter(|e| e.from == id || e.to == id)
+                .copied()
+                .collect();
+            let Some(set) = self.scenes.get_mut(&id) else {
+                continue;
+            };
+            set.unsaved = false;
+            if set.layers.iter().all(|c| c.width() == 0 || c.height() == 0) {
+                continue;
+            }
+            let view = SceneView {
+                layers: &set.layers,
+                palettes: &set.palettes,
+                confidence: &set.confidence,
+                edges: &edges,
+                scouted: set.scouted,
+            };
+            match save_scene(cache, &self.rom_sha256, SceneId(id), &view, set.on_disk_crc) {
+                Ok(saved) => {
+                    set.on_disk_crc = Some(saved.body_crc);
+                    if !saved.unchanged {
+                        stored += saved.stored_bytes;
+                        eprintln!(
+                            "rf-enhance: canvas cache: scene {:016x}: {} bytes stored ({} raw)",
+                            id, saved.stored_bytes, saved.raw_bytes
+                        );
+                        set.saved = Some(saved);
+                    }
+                }
+                Err(e) => eprintln!("rf-enhance: canvas cache: scene {id:016x} not saved: {e}"),
+            }
+        }
+        stored
+    }
+
+    /// Whether `scene` was restored from the cache when it was first stitched.
+    #[must_use]
+    pub fn scene_restored(&self, scene: u64) -> bool {
+        self.scenes.get(&scene).is_some_and(|s| s.restored)
+    }
+
+    /// Ticket W33-05: a scout has run every pass on `scene` (this session or
+    /// a restored one): the scout driver skips it.
+    #[must_use]
+    pub fn scene_scouted(&self, scene: u64) -> bool {
+        self.scenes.get(&scene).is_some_and(|s| s.scouted)
+    }
+
+    /// Record that a scout ran every pass on `scene` and write it now, so a
+    /// quit before the next flush does not lose the fact.
+    pub fn mark_scouted(&mut self, scene: u64) {
+        if let Some(s) = self.scenes.get_mut(&scene) {
+            s.scouted = true;
+            s.unsaved = true;
+        }
+        self.flush();
+    }
+
+    /// What the last write of `scene` stored (the size report), if it wrote.
+    #[must_use]
+    pub fn scene_saved(&self, scene: u64) -> Option<Saved> {
+        self.scenes.get(&scene).and_then(|s| s.saved)
     }
 
     // ---- the level scout (W32-07, W32-09)
@@ -610,7 +736,8 @@ impl CanvasModel {
             dirty: [None; LAYERS],
             cache: None,
             rom_sha256: String::new(),
-            by_bands: self.by_bands,
+            resident: None,
+            edges_seen: 0,
             guard: false,
         }
     }
@@ -660,6 +787,7 @@ impl CanvasModel {
         let Some(live) = self.scenes.get_mut(&scene) else {
             return 0;
         };
+        live.unsaved = true;
         let SceneCanvases {
             layers, confidence, ..
         } = live;
@@ -686,6 +814,7 @@ impl CanvasModel {
         let Some(live) = self.scenes.get_mut(&scene) else {
             return 0;
         };
+        live.unsaved = true;
         let SceneCanvases {
             layers, confidence, ..
         } = live;
@@ -696,6 +825,15 @@ impl CanvasModel {
             .filter(|((_, conf), _)| conf.level() >= MAX_LEVEL)
             .map(|((live, _), scout)| merge_unknown(live, scout))
             .sum()
+    }
+}
+
+impl Drop for CanvasModel {
+    /// The model goes with its core thread: what was stitched since the last
+    /// flush is written (a model with no cache, a scout's fork, writes
+    /// nothing).
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
@@ -728,6 +866,7 @@ fn stitch_registers(
         confidence,
         candidates,
         motion,
+        ..
     } = set;
     // One interned id per picture row (rows share a palette almost always;
     // `intern` is a hash lookup either way).

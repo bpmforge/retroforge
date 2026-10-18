@@ -1361,26 +1361,129 @@ mod nes_layer0 {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A SNES session's canvases are not persisted (W33-05 does that per
-    /// layer): a flush writes nothing, so nothing restores into layer 0.
+    /// Ticket W33-05: the SNES persists again, every layer with its palettes
+    /// and confidence, and the restored scene is complete on the FIRST frame
+    /// of the next session (no scout, no walking).
     #[test]
-    fn a_register_fed_model_does_not_persist() {
+    fn a_register_fed_scene_persists_every_layer_and_restores_on_the_first_frame() {
         let root = unique_cache_dir("snes");
         let cache = Cache::open(&root, 10_000_000).unwrap();
         let mut m = CanvasModel::with_cache("rom-snes".to_string(), Some(cache));
-        let s = scrolls(0, 0);
-        m.observe_frame(
-            &bundle([0, 0], |_, _, _| {}),
-            &FrameFeed::registers(Some(&s)),
+        let id = SceneId(11);
+        let mut words = [0u16; 256];
+        words[3] = 0x1234;
+        let rows: Vec<Option<&Cgram>> = vec![Some(&words); usize::from(H)];
+        // The camera walks right; both layers fill a strip.
+        for step in 0..6u16 {
+            let (h0, h1) = (step * 16, step * 4);
+            m.feed_with_palettes(
+                &bundle([h0, h1], |_, _, _| {}),
+                id,
+                Some(&scrolls(h0, h1)),
+                &rows,
+            );
+        }
+        m.mark_scouted(id.0);
+        let saved = m.current_canvases();
+        let saved_conf = m.frames().unwrap().confidence;
+        assert!(saved.canvases[0].is_some() && saved.canvases[1].is_some());
+        assert!(!saved.palettes.is_empty());
+        drop(m); // the process ends
+
+        let cache = Cache::open(&root, 10_000_000).unwrap();
+        let mut fresh = CanvasModel::with_cache("rom-snes".to_string(), Some(cache));
+        // ONE frame, at the position the last session left the camera at.
+        let (h0, h1) = (5 * 16, 5 * 4);
+        fresh.feed_with_palettes(
+            &bundle([h0, h1], |_, _, _| {}),
+            id,
+            Some(&scrolls(h0, h1)),
+            &rows,
         );
-        m.flush();
-        let fresh_cache = Cache::open(&root, 10_000_000).unwrap();
-        let mut fresh = CanvasModel::with_cache("rom-snes".to_string(), Some(fresh_cache));
-        let scene = fresh.observe_frame(&bundle([0, 0], |_, _, _| {}), &FrameFeed::bands());
+        assert!(fresh.scene_restored(id.0));
+        assert!(fresh.scene_scouted(id.0), "a scouted scene stays scouted");
+        let back = fresh.current_canvases();
+        assert_eq!(back.canvases, saved.canvases, "every layer, cell for cell");
+        assert_eq!(back.palettes, saved.palettes);
+        let conf = fresh.frames().unwrap().confidence;
+        for n in 0..2 {
+            assert_eq!(conf[n].level(), saved_conf[n].level());
+            assert_eq!(
+                conf[n].total_agreed,
+                saved_conf[n].total_agreed + conf[n].last.agreed as u64
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Scene edges come back with the scene, so a revisit knows its
+    /// neighbours at once.
+    #[test]
+    fn a_scenes_edges_are_restored_with_it() {
+        let root = unique_cache_dir("edges");
+        let cache = Cache::open(&root, 10_000_000).unwrap();
+        let mut m = CanvasModel::with_cache("rom-nes".to_string(), Some(cache));
+        let a = observe(&mut m, &frame_bundle(0, 0, 3));
+        let mut b = a;
+        for f in 1..40u64 {
+            b = observe(&mut m, &frame_bundle(f, 300 + 3 * f as i64, 250));
+        }
+        assert_ne!(a, b);
+        let edges = m.scene_edges().to_vec();
+        assert!(edges.iter().any(|e| e.from == a.0 && e.to == b.0));
+        drop(m);
+
+        let cache = Cache::open(&root, 10_000_000).unwrap();
+        let mut fresh = CanvasModel::with_cache("rom-nes".to_string(), Some(cache));
+        assert!(fresh.scene_edges().is_empty());
+        let again = observe(&mut fresh, &frame_bundle(0, 0, 3));
+        assert_eq!(again, a);
+        assert_eq!(
+            fresh.scene_edges(),
+            edges.as_slice(),
+            "latest per pair, plain data"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An entry from another build (here: garbage under the right key) is
+    /// ignored; the scene starts empty and nothing panics.
+    #[test]
+    fn a_corrupt_cache_entry_is_ignored_and_the_scene_starts_empty() {
+        let root = unique_cache_dir("corrupt");
+        let mut cache = Cache::open(&root, 10_000_000).unwrap();
+        let mut m = CanvasModel::with_cache("rom-nes".to_string(), None);
+        let id = observe(&mut m, &frame_bundle(0, 0, 9));
+        cache
+            .put(
+                &crate::persistence::scene_cache_key("rom-nes", id),
+                b"RFSC\x02\x00truncated",
+            )
+            .unwrap();
+        let mut fresh = CanvasModel::with_cache("rom-nes".to_string(), Some(cache));
+        let again = observe(&mut fresh, &frame_bundle(0, 0, 9));
+        assert_eq!(again, id);
+        assert!(!fresh.scene_restored(id.0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A quit loses nothing: the scene is written when the model drops, and a
+    /// scene left behind is written the moment the game cuts away from it.
+    #[test]
+    fn a_scene_is_written_when_left_and_an_idle_flush_writes_nothing_again() {
+        let root = unique_cache_dir("left");
+        let cache = Cache::open(&root, 10_000_000).unwrap();
+        let mut m = CanvasModel::with_cache("rom-nes".to_string(), Some(cache));
+        let a = observe(&mut m, &frame_bundle(0, 0, 3));
+        // The cut: SETTLING frames write the scene that was left.
+        observe(&mut m, &frame_bundle(1, 300, 250));
+        let on_disk = Cache::open(&root, 10_000_000).unwrap();
         assert!(
-            fresh.scene_canvases(scene.0).unwrap()[0].width() <= usize::from(W),
-            "nothing restored"
+            on_disk.contains(&crate::persistence::scene_cache_key("rom-nes", a)),
+            "written when left, not only at exit"
         );
+        assert!(m.scene_saved(a.0).is_some());
+        assert_eq!(m.flush(), 0, "nothing changed since: nothing is written");
         std::fs::remove_dir_all(&root).ok();
     }
 

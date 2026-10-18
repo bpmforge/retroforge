@@ -717,6 +717,214 @@ fn shot_scout_nes(readme: &mut Vec<String>) {
     }
 }
 
+/// One session of [`shot_persist`].
+struct Visit {
+    /// `(live frames since widescreen went on, scene, known margin cells,
+    /// margin cells, known cells of the whole canvas)`.
+    samples: Vec<(u64, u64, usize, usize, usize)>,
+    started: u64,
+    finished: u64,
+    skipped: u64,
+    /// First visit: the live frames run before the scout started, and the
+    /// wall time from widescreen-on to the scout finishing.
+    wall_to_finish: Option<(u64, Duration)>,
+}
+
+impl Visit {
+    /// The samples of one scene.
+    fn of(&self, scene: u64) -> impl Iterator<Item = &(u64, u64, usize, usize, usize)> {
+        self.samples.iter().filter(move |s| s.1 == scene)
+    }
+
+    /// The scene with the most remembered cells at any point, and that count.
+    fn fullest(&self) -> Option<(u64, usize)> {
+        self.samples
+            .iter()
+            .map(|&(_, scene, .., cells)| (scene, cells))
+            .max_by_key(|&(_, cells)| cells)
+    }
+
+    /// The first sample of `scene` remembering at least `cells`.
+    fn first_at(&self, scene: u64, cells: usize) -> Option<u64> {
+        self.of(scene).find(|s| s.4 >= cells).map(|s| s.0)
+    }
+}
+
+/// Ticket W33-05: a second visit. Two sessions of the same level in ONE cache
+/// directory (a fresh TMPDIR, so the first starts cold): the first plays the
+/// level with the scout on and measures how long the margins take to fill;
+/// the second, a new app over the same cache, must have them on its first
+/// frames and start no scout.
+fn shot_persist(readme: &mut Vec<String>) {
+    let name = "persist";
+    if !wanted(name) {
+        return;
+    }
+    type Game = (&'static str, &'static str, &'static str, fn(&mut H));
+    let games: [Game; 2] = [
+        ("smw", "snes", "Super Mario World (USA).zip", smw_enter_yi1),
+        (
+            "smb3",
+            "nes",
+            "Super Mario Bros. 3 (USA).zip",
+            smb3_enter_level,
+        ),
+    ];
+    for (tag, console, file, enter) in games {
+        if std::env::var("RF_PERSIST_GAME").is_ok_and(|g| g != tag) {
+            continue;
+        }
+        let Some(path) = rom(console, file) else {
+            skip(
+                readme,
+                &format!("persist-{tag}"),
+                &format!("{file} not found"),
+            );
+            continue;
+        };
+        // `RF_PERSIST_REUSE=<dir>`: skip the first visit and play the second
+        // over a cache an earlier run left there (iterating on the second).
+        let reuse = std::env::var_os("RF_PERSIST_REUSE").map(PathBuf::from);
+        let cold = reuse.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("rf_persist_{tag}_{}", std::process::id()))
+        });
+        if reuse.is_none() {
+            let _ = std::fs::remove_dir_all(&cold);
+        }
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: nothing else in this process reads the environment while the
+        // harness is between sessions.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
+        println!("PERSIST {tag}: cache dir {}", cold.display());
+        let first = (reuse.is_none()).then(|| persist_visit(&path, enter, true));
+        let cache_dir = cold.join("retroforge-canvas-cache").join("entries");
+        let sizes: Vec<u64> = std::fs::read_dir(&cache_dir)
+            .map(|d| {
+                d.flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let second = persist_visit(&path, enter, false);
+        // The scene the first visit scouted: where it remembered the most.
+        let (scene, peak) = first
+            .as_ref()
+            .and_then(Visit::fullest)
+            .or_else(|| second.fullest())
+            .unwrap_or((0, 0));
+        let target = peak - peak / 100;
+        let at = |v: &Visit| {
+            v.of(scene)
+                .next()
+                .map_or(String::from("-"), |&(f, _, k, t, cells)| {
+                    format!("f{f}: {cells} cells, margins {k}/{t}")
+                })
+        };
+        let line = format!(
+            "PERSIST {tag}: scene {scene:016x}, full = {target} of {peak} remembered cells; \
+             first visit: first sample {}, full at live frame {:?}; scout started after {:?} live \
+             frames, finished {:?} after widescreen went on (started {} finished {}); \
+             second visit: first sample {}, full at live frame {:?}, scouts started {} skipped {}; \
+             cache entries {sizes:?} bytes",
+            first.as_ref().map_or(String::from("-"), &at),
+            first.as_ref().and_then(|v| v.first_at(scene, target)),
+            first.as_ref().and_then(|v| v.wall_to_finish).map(|w| w.0),
+            first.as_ref().and_then(|v| v.wall_to_finish).map(|w| w.1),
+            first.as_ref().map_or(0, |v| v.started),
+            first.as_ref().map_or(0, |v| v.finished),
+            at(&second),
+            second.first_at(scene, target),
+            second.started,
+            second.skipped,
+        );
+        println!("{line}");
+        note(readme, line);
+        assert_eq!(second.started, 0, "{tag}: the second visit started a scout");
+        assert!(second.skipped >= 1, "{tag}: the scout was not skipped");
+        assert!(
+            second.first_at(scene, target).is_some(),
+            "{tag}: the second visit never filled the margins"
+        );
+    }
+}
+
+/// One session: open the ROM, enter the level, 32:9 on, sample the margins.
+/// `first`: scout on and run until it finishes; otherwise 240 live frames.
+fn persist_visit(path: &Path, enter: fn(&mut H), first: bool) -> Visit {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut h = new_harness();
+    open_and_run(&mut h, path);
+    enter(&mut h);
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    let t0 = Instant::now();
+    h.state_mut().set_widescreen(true);
+    let base = h.state().frame_count_for_test();
+    let mut samples = Vec::new();
+    let mut wall_to_finish = None;
+    let mut sample = |h: &mut H| {
+        if let Some((scene, k, t, cells)) = h.state().margin_known_for_test() {
+            let at = h.state().frame_count_for_test() - base;
+            samples.push((at, scene, k, t, cells));
+        }
+    };
+    if first {
+        // As `shot_scout`: unpaced until the worker runs, then the live game
+        // is paused (a standing Mario dies ~220 frames in, which would end
+        // the scene being scouted) while the scout works.
+        while telemetry.started.load(Relaxed) == 0 && t0.elapsed() < Duration::from_secs(120) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+            sample(&mut h);
+        }
+        let live_at_start = h.state().frame_count_for_test() - base;
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        while telemetry.finished.load(Relaxed) == 0 && t0.elapsed() < Duration::from_secs(600) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        wall_to_finish = Some((live_at_start, t0.elapsed()));
+        h.state().send_core_command_for_test(CoreCommand::Resume);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        // The merged canvases reach the margins within a few snapshots.
+        for _ in 0..90 {
+            h.run_steps(1);
+            std::thread::sleep(Duration::from_millis(4));
+            sample(&mut h);
+        }
+    } else {
+        for _ in 0..240 {
+            let t = h.state().frame_count_for_test() + 1;
+            run_frames(&mut h, t, Duration::from_secs(10));
+            sample(&mut h);
+        }
+        // And on: no scout may start at any point of the visit.
+        let t = h.state().frame_count_for_test() + 600;
+        run_frames(&mut h, t, Duration::from_secs(120));
+    }
+    let visit = Visit {
+        samples,
+        started: telemetry.started.load(Relaxed),
+        finished: telemetry.finished.load(Relaxed),
+        skipped: telemetry.skipped.load(Relaxed),
+        wall_to_finish,
+    };
+    // The core thread writes the scene as it stops; give it the time.
+    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+    std::thread::sleep(Duration::from_secs(3));
+    drop(h);
+    visit
+}
+
 /// Ticket W33-04: a normal run (scout off, 32:9 on) walking right through
 /// SMW Yoshi's Island 1 and SMB3 1-1 with the registration check on. The
 /// check must not fire on healthy placement: the layers stay at confidence 3
@@ -1611,6 +1819,7 @@ fn w30_w31_screens() {
     shot_widescreen(&mut readme);
     shot_scout(&mut readme);
     shot_scout_nes(&mut readme);
+    shot_persist(&mut readme);
     shot_confidence(&mut readme);
     shot_fps(&mut readme);
     shot_widesnes(&mut readme);

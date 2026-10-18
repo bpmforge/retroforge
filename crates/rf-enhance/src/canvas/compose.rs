@@ -21,6 +21,25 @@ use rf_core_api::{ColorMathOp, FrameBundle, LineRegisters, PixelLayer, PpuPixel}
 use super::palette_table::Cgram;
 use super::placement::LayerFrames;
 use super::{LayerCanvases, LAYERS};
+use crate::stitcher::Canvas;
+
+/// Ticket W33-05: how many cells of `canvas` are known in the two margin
+/// bands of the frame whose 256-dot picture has its top-left at `origin`
+/// (world coordinates), `pad` dots to each side, `rows` picture rows.
+/// Returns `(known, total)`; the measure of "the margins are full". Reads
+/// only; cost is `rows * 2 * pad`, so call it for measurement, not per frame.
+#[must_use]
+pub fn margin_known(canvas: &Canvas, origin: (i64, i64), pad: i64, rows: i64) -> (usize, usize) {
+    let (mut known, mut total) = (0, 0);
+    // Bounded `for` loops over the margin box (law 8).
+    for y in 0..rows.max(0) {
+        for dx in (-pad..0).chain(256..256 + pad) {
+            total += 1;
+            known += usize::from(canvas.get(origin.0 + dx, origin.1 + y).is_some());
+        }
+    }
+    (known, total)
+}
 
 /// The margin pixel at `(dx, dy)` from the composite picture's left edge /
 /// top row: the front-most layer with a known cell at that layer's own world
