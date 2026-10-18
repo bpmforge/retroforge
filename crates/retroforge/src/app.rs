@@ -13519,6 +13519,7 @@ impl RetroForgeApp {
             layer_order: Vec::new(),
             line_regs: Vec::new(),
             tile_grids: Vec::new(),
+            sprites: Vec::new(),
         }
     }
 
