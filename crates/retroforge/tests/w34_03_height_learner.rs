@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use retroforge::stepper::EmuStepper;
 use rf_core_api::{CoreEvent, CoreSink, EventMask, FrameBundleBuilder, InputFrame, PpuPixel};
+use rf_enhance::canvas::{CanvasModel, FrameFeed};
 use rf_enhance::heights::{
     cluster, Class, Dirs, Entity, FrameObs, HeightLearner, PlayerTracker, SpriteBox,
     TileHeightTable, TileKey,
@@ -74,8 +75,19 @@ struct Game {
     nes: bool,
     unwrap_x: Option<(i64, i64)>,
     visited: BTreeMap<(i64, i64), Cell>,
-    /// Frames the tracker named a player.
+    /// Frames the tracker saw a player on.
     with_player: u32,
+    /// Frames the tracker held a name (seen or not).
+    with_tracked: u32,
+    /// The canvas model, fed as the shell feeds it: its HUD verdict per layer.
+    canvas: CanvasModel,
+    canvas_scene: u64,
+    canvas_prev: Option<[Option<rf_enhance::canvas::LayerScroll>; 4]>,
+    /// Frames some layer was flagged HUD.
+    hud_frames: u32,
+    /// Bus addresses of the player's X and Y words (a profile's `[[scout.addr]]`).
+    hint_addrs: Option<(u32, u32)>,
+    was_named: bool,
 }
 
 impl Game {
@@ -104,6 +116,13 @@ impl Game {
             unwrap_x: None,
             visited: BTreeMap::new(),
             with_player: 0,
+            with_tracked: 0,
+            canvas: CanvasModel::with_cache("w34".into(), None),
+            canvas_scene: 1,
+            canvas_prev: None,
+            hud_frames: 0,
+            hint_addrs: None,
+            was_named: false,
         }
     }
 
@@ -161,22 +180,45 @@ impl Game {
         }
         let camera = self.camera();
         let pad = self.dirs(mask);
+        // The HUD verdict is the canvas model's, as the shell reads it.
+        if self.snes {
+            let now = retroforge::core_thread::snes_layer_scrolls(&self.st);
+            let drawn_with = std::mem::replace(&mut self.canvas_prev, now);
+            self.canvas.observe_frame_in(
+                &bundle,
+                rf_enhance::scene_identity::SceneId(1),
+                &FrameFeed::registers(drawn_with.as_ref()),
+            );
+            self.canvas_scene = 1;
+        } else {
+            self.canvas_scene = self.canvas.observe_frame(&bundle, &FrameFeed::bands()).0;
+        }
+        let hud: [bool; 4] = self.canvas.hud_layers(self.canvas_scene);
+        self.hud_frames += u32::from(hud.iter().any(|h| *h));
         let grids = self
             .st
-            .tile_grids(&bundle.lines, [false; 4], usize::from(self.size.1));
+            .tile_grids(&bundle.lines, hud, usize::from(self.size.1));
         self.st.sprite_boxes(
             (i32::from(self.size.0), i32::from(self.size.1)),
             &mut self.sprites,
         );
         cluster(&self.sprites, &mut self.entities);
+        let word =
+            |g: &Game, a: u32| i64::from(g.st.peek_bus(a)) | i64::from(g.st.peek_bus(a + 1)) << 8;
+        let (hint_x, hint_y) = self.hint_addrs.map_or((None, None), |(ax, ay)| {
+            (Some(word(self, ax)), Some(word(self, ay)))
+        });
         self.tracker.observe(&rf_enhance::heights::FrameInput {
             sprites: &self.sprites,
             pad,
             camera,
-            hint_x: None,
+            hint_x,
+            hint_y,
         });
+        self.trace(pad, camera);
         let orientation = self.tracker.orientation().orientation;
         self.with_player += u32::from(self.tracker.player().is_some());
+        self.with_tracked += u32::from(self.tracker.tracked().is_some());
         let t = Instant::now();
         self.learner.observe(&FrameObs {
             grids: &grids,
@@ -190,6 +232,40 @@ impl Game {
         self.cost.push(t.elapsed().as_secs_f64() * 1e6);
         if self.truth.is_some() {
             self.record(&grids);
+        }
+    }
+
+    /// `RF_TRACE=1`: every 10th frame and every seen/unseen change, one line
+    /// of tracker state; `RF_TRACE_SPR=f1,f2` also lists the sprites on those
+    /// frames. A debugging aid for the recall numbers, silent otherwise.
+    fn trace(&mut self, pad: Dirs, camera: Option<(i64, i64)>) {
+        if std::env::var("RF_TRACE").is_err() {
+            return;
+        }
+        let seen = self.tracker.player().is_some();
+        let k = self.cost.len();
+        if k.is_multiple_of(10) || seen != self.was_named {
+            let held = self
+                .tracker
+                .tracked()
+                .map(|p| (p.track, p.visible, p.entity.x0, p.entity.y0));
+            println!(
+                "TR f{k} votes{:?} tracked{held:?} pad{pad:?} cam{camera:?} seen{seen} ents{} tracks{}",
+                self.tracker.vertical_votes(),
+                self.entities.len(),
+                self.tracker.track_evidence().count()
+            );
+        }
+        self.was_named = seen;
+        if let Ok(list) = std::env::var("RF_TRACE_SPR") {
+            if list.split(',').any(|v| v.parse::<usize>().ok() == Some(k)) {
+                let v: Vec<_> = self
+                    .sprites
+                    .iter()
+                    .map(|s| (s.x, s.y, s.w, s.h, s.tile))
+                    .collect();
+                println!("SPR f{k} {v:?}");
+            }
         }
     }
 
@@ -294,6 +370,8 @@ impl Game {
         self.visited.clear();
         self.unwrap_x = None;
         self.with_player = 0;
+        self.with_tracked = 0;
+        self.hud_frames = 0;
     }
 
     fn score(&self) -> Score {
@@ -599,9 +677,11 @@ fn real_report(label: &str, g: &Game) {
     );
     g.report_cost(label);
     println!(
-        "REAL {label}: a player was named on {} of {} frames",
+        "REAL {label}: player on screen {} / named (held through gaps) {} of {} frames; HUD flagged on {} frames",
         g.with_player,
-        g.cost.len()
+        g.with_tracked,
+        g.cost.len(),
+        g.hud_frames
     );
     let mut top: Vec<_> = t.iter().collect();
     top.sort_by_key(|(_, e)| {
@@ -623,8 +703,8 @@ fn ascii_map(label: &str, g: &mut Game) {
     f.ports[0] = 0;
     g.st.latch_and_advance_frame(f, &mut g.sink);
     let bundle = g.sink.0.take(g.st.frame_count());
-    let grids =
-        g.st.tile_grids(&bundle.lines, [false; 4], usize::from(g.size.1));
+    let hud: [bool; 4] = g.canvas.hud_layers(g.canvas_scene);
+    let grids = g.st.tile_grids(&bundle.lines, hud, usize::from(g.size.1));
     for grid in grids.iter().filter(|x| !x.hud) {
         let hg = g.learner.grid_for(grid);
         let mut solid = 0;
@@ -681,13 +761,20 @@ fn platformer(label: &str, g: &mut Game) {
     ascii_map(label, g);
 }
 
-#[test]
-#[ignore = "real ROM; run deliberately in release"]
-fn smw() {
-    let Some(raw) = rom("snes", "Super Mario World (USA).zip") else {
-        return;
-    };
+/// SMW up to the first level, optionally with the profile's player X/Y words.
+fn smw_game(hinted: bool) -> Option<Game> {
+    let raw = rom("snes", "Super Mario World (USA).zip")?;
     let mut g = Game::open(&raw);
+    if hinted {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../profiles/snes/super-mario-world/profile.toml");
+        let profile = rf_profiles::load_file(&path)
+            .expect("profile loads")
+            .profile;
+        let rows = &profile.scout.as_ref().expect("[scout]").addr;
+        let find = |role: &str| rows.iter().find(|r| r.role == role).expect(role).addr;
+        g.hint_addrs = Some((find("player_x"), find("player_y")));
+    }
     g.run(0, 200, false);
     for i in 0..10 {
         g.tap(g.mask_of(if i % 2 == 0 { "S" } else { "A" }), 6);
@@ -700,7 +787,21 @@ fn smw() {
     g.run(0, 150, false);
     g.tap(g.mask_of("A"), 8);
     g.run(0, 150, false);
+    Some(g)
+}
+
+#[test]
+#[ignore = "real ROM; run deliberately in release"]
+fn smw() {
+    let Some(mut g) = smw_game(false) else { return };
     platformer("smw", &mut g);
+}
+
+#[test]
+#[ignore = "real ROM; run deliberately in release"]
+fn smw_with_profile_hints() {
+    let Some(mut g) = smw_game(true) else { return };
+    platformer("smw-hinted", &mut g);
 }
 
 #[test]

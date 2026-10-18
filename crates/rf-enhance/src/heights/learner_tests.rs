@@ -184,6 +184,7 @@ impl Sim {
             source: PlayerSource::Pad,
             found_at: 0,
             score: 1.0,
+            visible: true,
         }
     }
 }
@@ -433,6 +434,7 @@ fn a_tile_that_hides_the_player_becomes_tall() {
             source: PlayerSource::Pad,
             found_at: 0,
             score: 1.0,
+            visible: true,
         };
         l.observe(&FrameObs {
             grids: std::slice::from_ref(&g),
@@ -536,6 +538,7 @@ fn walking_up_a_ramp_votes_a_slope() {
             source: PlayerSource::Pad,
             found_at: 0,
             score: 1.0,
+            visible: true,
         };
         l.observe(&FrameObs {
             grids: std::slice::from_ref(&g),
@@ -589,6 +592,7 @@ fn top_down_walls_are_the_tiles_he_keeps_walking_into() {
         source: PlayerSource::Pad,
         found_at: 0,
         score: 1.0,
+        visible: true,
     };
     let feed = |l: &mut HeightLearner, x0: i32, right: bool| {
         let p = at(x0);

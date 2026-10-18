@@ -125,6 +125,7 @@ impl Game {
                 pad: self.dirs(mask),
                 camera,
                 hint_x: None,
+                hint_y: None,
             });
             self.cost.push(t.elapsed().as_secs_f64() * 1e6);
         }
