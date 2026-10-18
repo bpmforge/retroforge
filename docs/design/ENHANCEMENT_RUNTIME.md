@@ -82,32 +82,83 @@ stateDiagram-v2
 - Profile `[capabilities]`/`[antiflicker]` entries may pin ladder states —
   that is precisely what a profile is for.
 
-## 3. Generic map stitching (wideNES technique)
+## 3. Generic map stitching: the per-layer canvas model (wideNES technique, W33)
 
 Verified prior art: wideNES (Prilik) — sample PPU scroll registers each
 frame, detect the delta, and blit the *newly revealed* strip of the rendered
-background into a persistent large canvas keyed by "scene". Over play, the
-canvas accumulates the level as visited.
+background into a persistent large canvas keyed by "scene". RetroForge keeps
+that idea and applies it per background layer, per line, for both consoles,
+in one module: `rf-enhance::canvas` (`CanvasModel` -> `SceneCanvases` ->
+`LayerCanvases`). Numbers: `docs/research/W33-results.md`.
 
-RetroForge implementation (`ScrollTracker` + `Stitcher`):
-- Consume `ScrollWrite`/frame-end scroll state per BG layer (mid-frame splits
-  handled by tracking per-scanline scroll bands; HUD bands auto-detected as
-  zero-delta regions and excluded).
-- Scene identity = the profile's level id (`[[scene.level_id]]`) when it
-  declares one, else the dominant palette set of the settled picture, cut by
-  level-key changes, colour-histogram moves, scroll jumps the picture does not
-  follow, and scroll-axis switches (W33-09; the edge-hash of W4-03b was one
-  constant on every NES frame, `docs/research/W33-09-scenes.md`); scene change
-  ⇒ new canvas (rooms/levels get separate canvases). Changes are recorded as
-  `SceneEdge`s; only a continuous one may show a neighbour in a margin.
-- Canvas chunks are cached in `rf-cache` keyed by ROM hash + scene id, so a
-  revisited level restores instantly across sessions.
-- Honest limitation (state clearly in UI): shows only *visited* areas; cannot
-  know unvisited geometry. That requires profile decoding (§4).
+**Layers.** NES is layer 0 (`ScrollTracker` bands become per-row positions).
+SNES has one canvas per widened background layer, including layers that
+reach the screen only through the colour-math sub-screen (SMW's hills, BG2).
+A layer that never moves while another does and covers < 75% of rows is HUD
+and is left out of the margins.
 
-This gives ultrawide/zoomed-out views for scrolling games with **zero**
-per-game work: enhanced camera renders the stitched canvas around the live
-viewport; unexplored area renders as themed fog.
+**Per-line placement.** The frame bundle carries per-line registers (per-layer
+HOFS/VOFS, TM/TS, colour math, fixed colour, brightness) and sub-screen pixels,
+captured only while widescreen is on (the accuracy hash is unchanged, tested;
+0.008 ms/frame). Each row is written at that line's own scroll, so HDMA
+parallax skies land where they were drawn. Scroll registers describe the NEXT
+frame, so stitching uses the previous read (`ScrollLag`, one rule for every
+path). `place_rows` is the single writer for both consoles; holes never erase.
+
+**Colour, sub-screen and backdrop.** A margin cell is composed like the PPU
+would (main layers from TM, sub from TS behind, colour math, brightness; fullsnes).
+Cells carry a palette id into a per-scene `PaletteTable` (exact CGRAM key,
+256 cap) so a remembered cell resolves with its own palette. Unknown cells
+take the row's backdrop rebuilt from CGRAM[0], fixed colour, colour math and
+brightness, not black.
+
+**Confidence.** Every frame each placed band is compared (subsampled, palette
+index) with the canvas at its predicted position. A disagreeing band is not
+written; a +-8 px search reports where the picture really sits. Confidence is
+0-3 per layer per scene (down 1 per 3 bad frames, up 1 per 30 clean): below 2
+a layer is left out of the margins, 0 falls back to VRAM margins. A stable
+picture that disagrees wholly (a missed scene change) is learned as a
+candidate canvas and promoted after 45 agreeing frames; a candidate learned
+from a fade restarts from the settled frame. The Enhancements panel shows the
+readout.
+
+**Scenes.** Identity = the profile's `[[scene.level_id]]` bytes when it
+declares them, else the settled picture's palette set; cuts on key or bank
+change, colour-histogram jumps, unexplained 64+ px scroll jumps and axis
+switches; a new scene is named after 12 settled frames. Transitions are
+`SceneEdge`s; only a *continuous* edge may show a neighbouring scene in a
+margin (`docs/research/W33-09-scenes.md`).
+
+**Persistence v2.** One `rf-cache` entry per (ROM sha256, scene id) under
+`canvas-chunk-v2`: the layer canvases, palette table, confidence, edges and a
+scouted flag, framed (magic, version, CRC32) with a zstd body, written
+atomically on scene cut, a 5 s flush, scout done and drop; bounded reads. Old
+or corrupt entries read as a miss. A scene restored as scouted skips the
+scout, so the second visit is instant (SMW YI1 margins full at live frame 17,
+66.7 KB on disk).
+
+**The level scout** (`crates/retroforge/src/scout.rs`, profile `[scout]`). A
+second machine restored from a snapshot of the live one, on its own thread,
+drives the game ahead of the camera so the game itself streams and draws the
+level; dirty-box deltas are merged on the core thread (<= 2 per frame) into
+UNKNOWN cells only. Cells are tagged `Live | Scout`: a live write turns a scout
+cell live, registration ignores scout evidence, and only layers at confidence
+3 take scout cells. Each delta is checked against a copy of the live canvas
+(>= 99% merge, 95-99% merge and slow down, < 95% reject), after first probing
+the step against half the step. A ladder `player_move` -> `walk` ->
+`camera_write` -> give up is tried per scene, the winning rung is stored with
+the scene; the scout follows the scene's axis (X, Y, or both) and is started
+only while a live gate says the player is in a level. Settings come from a
+hand table or from "Find scout settings for this game" (`scout_finder`:
+observation, then trials on a second machine; saved to the player's own
+profile only).
+
+**Honest limits.** Scenery is complete where the scout reaches; sprites are
+only ever the game's own live ones (the scout never contributes enemies or
+moving objects); doors, pipes, scroll locks and forward-only engines end a
+pass, so those areas stay "visited only". Settings are found by observation
+per game and can be wrong; a refused scout leaves the margins as the live
+canvas knows them.
 
 ## 4. Game-aware full-level reconstruction (profile-driven)
 

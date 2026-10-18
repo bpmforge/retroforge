@@ -282,7 +282,7 @@ rejects a bad key or row naming it.
 
 | Key | Meaning |
 |---|---|
-| `strategy` | `"player_move"` (move the player's X words; the game's own follow logic moves the camera and streams the level) or `"camera_write"` (write the camera X words; most games snap them back). |
+| `strategy` | `"player_move"` (move the player's X words; the game's own follow logic moves the camera and streams the level) `"walk"` (hold the pad direction on the scout's own controller; Mega Man 2, whose camera follows only a walking player) or `"camera_write"` (write the camera X words; most games snap them back). |
 | `step_px` | Pixels per scout frame, 1..=64. |
 | `frame_budget` | Most frames one pass may run, 1..=20000. |
 | `stall_frames` | A pass ends after this many frames with no new level, 1..=3000 (default 120). |
@@ -290,6 +290,20 @@ rejects a bad key or row naming it.
 | `dirs` | Passes, each restarting from the snapshot: `"right"` / `"left"` on a horizontal scene, `"down"` / `"up"` on a vertical one (the scout follows the axis the scene tracker names for the scene, W33-08). Default: right + left, or down + up when the profile names none on that axis. |
 | `pin` | `true` = try only `strategy`. Without it the scout starts there and falls back down the ladder (player_move, walk, camera_write) when its own self-check refuses a rung; a rung with no addresses to act on is skipped (W33-06). |
 | `[[scout.addr]]` | Rows with `role` = `camera_x` / `player_x` (16-bit little-endian words), `camera_y` / `player_y` (the same for a vertical scene, W33-08; `player_y_hi` names the high byte, a `player_y` with none is one byte as in Mega Man 2), `hold` (a byte `value` written every scout frame: invincibility, Mario kept out of reach; a hold on a `player_y` byte is released on a vertical pass) or `start_when` (a byte `value` the LIVE game must hold, for 30 frames running, before a scout starts: "in a level, player alive"). |
+
+**Auto-discovered rows (W33-07).** A profile does not have to carry a
+hand-made `[scout]`. The Enhancements action "Find scout settings for this
+game" watches a play session (walk right and left, jump >= 6 times, stand
+still), names the camera X pair, the player X word (high half by wraps), a Y
+byte and a start gate by observation, tries the candidates on a second
+machine to choose the player word, hold, hold height and strategy, and offers
+to save the result as a `[scout]` table whose rows read `source = "observed:
+auto (W33-07)"`. It is written to the PLAYER's own profile, never into the
+repo's `profiles/` (shipped profiles stay byte-identical; tested). A shipped
+or saved table is always tried with the W33-06 self-check, so a wrong row costs
+margins, never corruption. With the hand tables removed the finder reached SMW
+5120 px, SMB3 2816, MM2 2560 (100% of each), and a scout for Mega Man X with
+no hand table: 1024 px.
 
 A scout stops at its frame budget, after `stall_frames` without new level, or
 when the camera jumps (a scene change). Sprites are never taken from it. See

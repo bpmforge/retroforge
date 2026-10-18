@@ -837,28 +837,44 @@ fn shot_scout_mmx(readme: &mut Vec<String>) {
     {
         use egui::Key as K;
         wait(&mut h, "mmx", 300);
-        for _ in 0..5 {
-            tap(&mut h, K::Enter, 6);
-            wait(&mut h, "mmx", 106);
-        }
-        wait(&mut h, "mmx", 300);
-        // The level fades in at a time that depends on real-time input; wait
-        // for a picture that is not black (a dark frame is the fade or the
-        // loading, not the level).
-        for _ in 0..10 {
-            let lit = grab(&h).is_some_and(|p| {
-                p.rgba
-                    .chunks_exact(4)
-                    .map(|c| usize::from(c[0]) + usize::from(c[1]) + usize::from(c[2]))
-                    .sum::<usize>()
-                    > p.w * p.h * 3 * 30
-            });
-            if lit {
+        // Press Start only while the picture is not yet the stage (a Start
+        // press inside the stage would pause it): the stage is a lit frame
+        // with many distinct colours, the story text and the fade are not.
+        let in_stage = |h: &H| {
+            grab(h).is_some_and(|p| {
+                let mut seen = std::collections::HashSet::new();
+                for c in p.rgba.chunks_exact(4) {
+                    seen.insert([c[0], c[1], c[2]]);
+                }
+                seen.len() >= 40
+            })
+        };
+        // Intro story text (few colours) -> title (many) -> Game Start ->
+        // fade (few) -> stage (many): the stage is the second rich frame
+        // after a dark one; Start is pressed on everything before it.
+        let mut presses = 0;
+        let mut seen_title = false;
+        let mut dark_after_title = false;
+        for n in 0..60 {
+            let rich = in_stage(&h);
+            println!(
+                "MMXSEQ {n} rich {rich} frame {}",
+                h.state().frame_count_for_test()
+            );
+            if rich && seen_title && dark_after_title {
                 break;
             }
-            wait(&mut h, "mmx", 120);
+            if rich {
+                seen_title = true;
+            } else if seen_title {
+                dark_after_title = true;
+            }
+            tap(&mut h, K::Enter, 6);
+            presses += 1;
+            wait(&mut h, "mmx", 100);
         }
-        wait(&mut h, "mmx", 60);
+        println!("MMX: {presses} Start presses to reach the stage");
+        wait(&mut h, "mmx", 240);
     }
     probe(&h, "mmx-level-start");
     let telemetry = h.state().scout_telemetry_for_test();
@@ -2002,14 +2018,24 @@ fn compare_images(readme: &mut Vec<String>) {
     };
     // Only the pairs good enough for the tour: the HD-2D pair is a flat
     // test fixture, so it waits for a game with painted heights.
-    for n in ["hdmode7-4x", "lens", "widescreen-16x9", "widescreen-32x9"] {
+    for n in [
+        "hdmode7-4x",
+        "lens",
+        "widescreen-16x9",
+        "widescreen-32x9",
+        "scout-32x9",
+        "scout-smb3-32x9",
+        "scout-mm2-32x9",
+        "scout-mmx-32x9",
+        "scout-mm2-climb-32x9",
+    ] {
         let (Some(a), Some(b)) = (
             load(d.join(format!("{n}-off.png"))),
             load(d.join(format!("{n}-on.png"))),
         ) else {
             continue;
         };
-        let out = if (a.w, a.h) == (b.w, b.h) {
+        let out = if (a.w, a.h) == (b.w, b.h) && !n.starts_with("scout") {
             a.split(&b)
         } else {
             a.above_centred(&b, 8)
@@ -2080,6 +2106,61 @@ fn shot_stunt(readme: &mut Vec<String>) {
     );
 }
 
+/// Rows stacked top to bottom on the dark background (None when empty).
+fn stack_rows(rows: &[Pic]) -> Option<Pic> {
+    if rows.is_empty() {
+        return None;
+    }
+    let w = rows.iter().map(|r| r.w).max()?;
+    let gap = 10;
+    let h: usize = rows.iter().map(|r| r.h).sum::<usize>() + gap * (rows.len() - 1);
+    let mut rgba = vec![0u8; w * h * 4];
+    for px in rgba.chunks_exact_mut(4) {
+        px.copy_from_slice(&[24, 24, 28, 255]);
+    }
+    let mut y = 0;
+    for r in rows {
+        for yy in 0..r.h {
+            let dst = ((y + yy) * w) * 4;
+            rgba[dst..dst + r.w * 4].copy_from_slice(&r.rgba[yy * r.w * 4..][..r.w * 4]);
+        }
+        y += r.h + gap;
+    }
+    Some(Pic { w, h, rgba })
+}
+
+/// W33-10: the scout contact sheet, three games, each OFF over ON.
+fn scout_contact_sheet(readme: &mut Vec<String>) {
+    let d = out_dir();
+    let load = |p: PathBuf| -> Option<Pic> {
+        let img = image::open(p).ok()?.to_rgba8();
+        Some(Pic {
+            w: img.width() as usize,
+            h: img.height() as usize,
+            rgba: img.into_raw(),
+        })
+    };
+    let mut rows = Vec::new();
+    for n in ["scout-32x9", "scout-smb3-32x9", "scout-mmx-32x9"] {
+        let (Some(a), Some(b)) = (
+            load(d.join(format!("{n}-off.png"))),
+            load(d.join(format!("{n}-on.png"))),
+        ) else {
+            continue;
+        };
+        rows.push(a.fit_width(800));
+        rows.push(b.fit_width(800));
+    }
+    if let Some(sheet) = stack_rows(&rows) {
+        save(&d.join("scout-contact-sheet.png"), &sheet);
+        note(
+            readme,
+            "scout-contact-sheet|SMW, SMB3, Mega Man X|each game: scout OFF row over scout ON row"
+                .to_string(),
+        );
+    }
+}
+
 fn contact_sheet(readme: &mut Vec<String>) {
     let d = out_dir();
     let pairs = [
@@ -2115,25 +2196,10 @@ fn contact_sheet(readme: &mut Vec<String>) {
     if let Some(s) = load(d.join("superfx-3d-drawing.png")) {
         rows.push(s.fit_width(cell_w));
     }
-    if rows.is_empty() {
+    let Some(sheet) = stack_rows(&rows) else {
         return;
-    }
-    let w = rows.iter().map(|r| r.w).max().unwrap();
-    let gap = 10;
-    let h: usize = rows.iter().map(|r| r.h).sum::<usize>() + gap * (rows.len() - 1);
-    let mut rgba = vec![0u8; w * h * 4];
-    for px in rgba.chunks_exact_mut(4) {
-        px.copy_from_slice(&[24, 24, 28, 255]);
-    }
-    let mut y = 0;
-    for r in &rows {
-        for yy in 0..r.h {
-            let dst = ((y + yy) * w) * 4;
-            rgba[dst..dst + r.w * 4].copy_from_slice(&r.rgba[yy * r.w * 4..][..r.w * 4]);
-        }
-        y += r.h + gap;
-    }
-    save(&d.join("contact-sheet.png"), &Pic { w, h, rgba });
+    };
+    save(&d.join("contact-sheet.png"), &sheet);
     note(
         readme,
         "contact-sheet|-|rows in README order; pairs are OFF (left) | ON (right)".to_string(),
@@ -2176,6 +2242,9 @@ fn w30_w31_screens() {
     }
     if std::env::var("RF_SCREENS_ONLY").is_err() {
         contact_sheet(&mut readme);
+    }
+    if std::env::var("RF_SCREENS_ONLY").is_err() || wanted("scout-contact") {
+        scout_contact_sheet(&mut readme);
     }
     println!("--- summary ---");
     for l in &readme {

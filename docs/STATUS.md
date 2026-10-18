@@ -4577,3 +4577,27 @@ stories, 10 decisions).
   included). The sub-screen is now composed at the line's width with the same
   widen mask; hires lines are detected separately (both can be 512 wide).
   256-dot output unchanged. Gate: workspace **2824 passing**.
+- **W33 — Stitching wave: per-layer canvas, scout, auto-discovery** (2026-10-18,
+  W33-00..10 done). One canvas model (`rf-enhance::canvas`) for NES and SNES:
+  sub-screen pixels and per-line registers in the bundle (0.008 ms/frame core,
+  +0.5 ms UI compose, widescreen only), exact backdrop and per-scene palette
+  tables (SMW 32:9: 191/191 backdrop rows exact), per-layer confidence 0-3
+  (SMW YI1 BG1 100.000%, BG2 99.71%; SMB3 99.69%; 4-13 us per layer per
+  frame), scene keys from `[[scene.level_id]]` with continuous edges
+  (SceneTracker 116-176 us/frame), persistence v2 per (ROM, scene) with an
+  instant second visit (SMW YI1 margins at live frame 17, 66.7 KB; SMB3
+  34.3 KB, frame 5), a scout self-check and ladder (>= 99% merge, 95-99% slow,
+  < 95% reject; SMB3 8 px refused, 4 px accepted), auto-discovery of scout
+  settings ("Find scout settings for this game"; SMW 5120, SMB3 2816, MM2 2560
+  px = 100% of the hand tables, Mega Man X 1024 px with no table), vertical
+  and 8-way scouting (MM2 shaft 8 px refused, 4 px accepted, 94.9-95.5%). Also
+  fixed: SNES save states now store `$212D` (TS), a NES stale-candidate bug that
+  left NES scouts unmerged. W33-10 re-shot the tour on a cold cache (agreement:
+  SMW 100.0%, SMB3 99.8%, MM2 98.7%, MMX 100.0%, shaft 95.5%; cells merged
+  624,161 / 493,954 / 552,960 / 161,511 / 61,440), added the scout contact
+  sheet, a user chapter (`docs/site/src/widescreen.md`) and
+  `docs/research/W33-results.md` (all numbers; fps: SNES 32:9 costs about half
+  the unpaced fps, NES none measurable; scout on its own thread). Open: the
+  continuous live re-check and `Confidence.scout`; margins beyond what the
+  game draws (doors, pipes, scroll locks) stay visited-only. Workspace at the
+  last W33 merge: **3062 passing**.
