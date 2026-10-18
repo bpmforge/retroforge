@@ -139,6 +139,9 @@ pub fn load_str(text: &str) -> Result<LoadOutcome, ProfileError> {
     if let Some(scout) = profile.scout.as_ref() {
         validate_scout(scout, profile.meta.console)?;
     }
+    if let Some(scene) = profile.scene.as_ref() {
+        validate_scene(scene, profile.meta.console)?;
+    }
 
     // `[overclock]` (ticket W30-01): the cap is a whole-hundred percent.
     if let Some(max) = profile.overclock.as_ref().and_then(|o| o.superfx_max) {
@@ -362,6 +365,65 @@ fn validate_scout(scout: &crate::schema::Scout, console: Console) -> Result<(), 
     }
     Ok(())
 }
+
+/// `[scene]` (ticket W33-09): each `level_id` row cited, inside the console's
+/// RAM, 1..=4 bytes wide, its `idle` value representable; at most 8 rows and
+/// 16 bytes of key; `sections` one of the known values.
+fn validate_scene(scene: &crate::schema::Scene, console: Console) -> Result<(), ProfileError> {
+    let bad = |why: String| ProfileError::SceneInvalid(why);
+    if let Some(sections) = scene.sections.as_deref() {
+        if sections != "axis" {
+            return Err(bad(format!("sections `{sections}` (valid: \"axis\")")));
+        }
+    }
+    if scene.level_id.len() > MAX_LEVEL_ID_ROWS {
+        return Err(bad(format!(
+            "{} level_id rows (at most {MAX_LEVEL_ID_ROWS})",
+            scene.level_id.len()
+        )));
+    }
+    let (lo, hi): (u32, u32) = match console {
+        Console::Snes => (0x7E_0000, 0x7F_FFFF),
+        Console::Nes => (0, 0xFFFF),
+    };
+    let mut total = 0u32;
+    for (i, row) in scene.level_id.iter().enumerate() {
+        let len = row.len.unwrap_or(1);
+        if !(1..=4).contains(&len) {
+            return Err(bad(format!("level_id row {i}: len = {len} (valid: 1..=4)")));
+        }
+        total += u32::from(len);
+        if !(lo..=hi).contains(&row.addr) || row.addr + u32::from(len) - 1 > hi {
+            return Err(bad(format!(
+                "level_id row {i}: address 0x{:X} (+{len} bytes) outside 0x{lo:X}..=0x{hi:X}",
+                row.addr
+            )));
+        }
+        if len < 4 && row.idle.unwrap_or(0) >> (8 * u32::from(len)) != 0 {
+            return Err(bad(format!(
+                "level_id row {i}: idle 0x{:X} does not fit in {len} byte(s)",
+                row.idle.unwrap_or(0)
+            )));
+        }
+        if row.source.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(bad(format!(
+                "level_id row {i} (0x{:X}) has no `source` (FR-PROF-003)",
+                row.addr
+            )));
+        }
+    }
+    if total > MAX_LEVEL_ID_BYTES {
+        return Err(bad(format!(
+            "level_id rows read {total} bytes (at most {MAX_LEVEL_ID_BYTES})"
+        )));
+    }
+    Ok(())
+}
+
+/// Most `[[scene.level_id]]` rows a profile may declare.
+pub const MAX_LEVEL_ID_ROWS: usize = 8;
+/// Most bytes all rows together may read.
+pub const MAX_LEVEL_ID_BYTES: u32 = 16;
 
 #[cfg(test)]
 mod tests {
@@ -970,5 +1032,66 @@ mod tests {
         let text = format!("{snes}\n{SCOUT}").replacen("player_move", "walk", 1);
         let err = load_str(&text).expect_err("walk is NES only");
         assert!(matches!(err, ProfileError::ScoutInvalid(_)), "{err}");
+    }
+
+    // `[scene]` (ticket W33-09).
+    const SCENE: &str = r#"
+        [scene]
+        sections = "axis"
+
+        [[scene.level_id]]
+        addr = 0x2A
+        source = "observed: test"
+
+        [[scene.level_id]]
+        addr = 0x61
+        len = 2
+        idle = 0
+        decides = false
+        notes = "pointer word"
+        source = "observed: test"
+    "#;
+
+    #[test]
+    fn a_valid_scene_table_loads_clean() {
+        let outcome = load_str(&format!("{VALID}\n{SCENE}")).expect("valid [scene] loads");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let scene = outcome.profile.scene.expect("scene section");
+        assert_eq!(scene.level_id.len(), 2);
+        assert_eq!(scene.level_id[1].len, Some(2));
+        assert_eq!(scene.sections.as_deref(), Some("axis"));
+    }
+
+    #[test]
+    fn a_scene_table_with_a_bad_row_is_rejected_and_says_which() {
+        for (from, to) in [
+            ("sections = \"axis\"", "sections = \"zigzag\""),
+            (
+                "addr = 0x61\n        len = 2",
+                "addr = 0x61\n        len = 5",
+            ),
+            ("addr = 0x2A", "addr = 0x1_0000"),
+            (
+                "addr = 0x61\n        len = 2\n        idle = 0",
+                "addr = 0x61\n        len = 1\n        idle = 300",
+            ),
+            (
+                "source = \"observed: test\"\n\n        [[scene.level_id]]",
+                "\n\n        [[scene.level_id]]",
+            ),
+        ] {
+            let text = format!("{VALID}\n{SCENE}").replace(from, to);
+            let err = load_str(&text).expect_err(to);
+            assert!(matches!(err, ProfileError::SceneInvalid(_)), "{to}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_snes_scene_row_must_sit_in_work_ram() {
+        let snes = VALID.replace("nes", "snes");
+        let text =
+            format!("{snes}\n[[scene.level_id]]\naddr = 0x1000\nsource = \"observed: test\"\n");
+        let err = load_str(&text).expect_err("outside 7E/7F");
+        assert!(matches!(err, ProfileError::SceneInvalid(_)), "{err}");
     }
 }

@@ -52,7 +52,7 @@ use rf_core_api::{CoreEvent, FrameBundle, PixelLayer};
 
 use crate::persistence::{load_canvas, save_canvas};
 use crate::scene_identity::SceneId;
-use crate::scene_tracker::SceneTracker;
+use crate::scene_tracker::{SceneEdge, SceneHints, SceneTracker, SETTLING};
 use crate::scroll_tracker::{BandWorldPos, ScanlineBand, ScrollTracker, WorldAxis};
 use crate::stitcher::Canvas;
 
@@ -116,6 +116,9 @@ pub struct FrameFeed<'a> {
     /// Mapper bank state for scene identity (`&[]` for NROM / no banking;
     /// `rf-nes` exposes none yet, the gap `scene_tracker` already names).
     pub mapper_state: &'a [u8],
+    /// Ticket W33-09: what the profile says about the scene (the bytes of its
+    /// `[[scene.level_id]]` rows, whether to cut sections by scroll axis).
+    pub scene: SceneHints<'a>,
 }
 
 impl<'a> FrameFeed<'a> {
@@ -126,6 +129,10 @@ impl<'a> FrameFeed<'a> {
             source: Source::Bands,
             palettes: &[],
             mapper_state: &[],
+            scene: SceneHints {
+                level: None,
+                axis_sections: None,
+            },
         }
     }
 
@@ -139,7 +146,18 @@ impl<'a> FrameFeed<'a> {
             },
             palettes: &[],
             mapper_state: &[],
+            scene: SceneHints {
+                level: None,
+                axis_sections: None,
+            },
         }
+    }
+
+    /// The same feed with the profile's scene hints (ticket W33-09).
+    #[must_use]
+    pub fn with_scene_hints(mut self, scene: SceneHints<'a>) -> Self {
+        self.scene = scene;
+        self
     }
 
     /// The same feed with the scene tracker's scroll.
@@ -344,12 +362,13 @@ impl CanvasModel {
         } else {
             Vec::new()
         };
-        let scene = self.scene_tracker.observe_frame(
+        let scene = self.scene_tracker.observe(
             &bundle.video,
             bundle.width,
             bundle.height,
             &events,
             feed.mapper_state,
+            feed.scene,
         );
         self.stitch(bundle, scene, feed, &bands);
         scene
@@ -377,6 +396,12 @@ impl CanvasModel {
         self.last = None;
         self.last_scene = Some(scene);
         self.by_bands = feed.is_bands();
+        if scene == SETTLING {
+            // A cut that has not settled (a fade, a level still loading) is
+            // no scene's picture: nothing is stitched, so the scene that was
+            // left, and the one that comes, keep exactly what they had.
+            return;
+        }
         if !self.scenes.contains_key(&scene.0) {
             let mut set = SceneCanvases::default();
             if self.by_bands {
@@ -472,10 +497,28 @@ impl CanvasModel {
         }
     }
 
-    /// The scene of the last frame observed.
+    /// The scene of the last frame observed ([`SETTLING`] while a cut has
+    /// not settled: no canvases then).
     #[must_use]
     pub fn current_scene(&self) -> Option<SceneId> {
         self.last_scene
+    }
+
+    /// Ticket W33-09: every scene change seen this session, with the scroll
+    /// position it happened at (`SceneTracker::edges`).
+    #[must_use]
+    pub fn scene_edges(&self) -> &[SceneEdge] {
+        self.scene_tracker.edges()
+    }
+
+    /// Ticket W33-09: the scenes a margin of `scene` may show past the edge
+    /// of its canvas: across CONTINUOUS edges only. A door, a pipe or a fade
+    /// never joins two scenes. (The margins compose from the current scene's
+    /// canvas alone today; this is the one rule any neighbour fill must go
+    /// through.)
+    #[must_use]
+    pub fn margin_neighbours(&self, scene: SceneId) -> Vec<SceneEdge> {
+        self.scene_tracker.continuous_neighbours(scene)
     }
 
     /// Where the latest frame sits on each layer's canvas.

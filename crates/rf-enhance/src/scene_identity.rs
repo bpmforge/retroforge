@@ -179,6 +179,78 @@ pub fn compute_scene_id(
     SceneId(hash)
 }
 
+/// Ticket W33-09: identity of a picture by its COLOURS, for the frames the
+/// tracker has settled on (`crate::scene_tracker`). The edge signature above
+/// is flat on every NES frame (module doc, W4-03d), so `compute_scene_id` is
+/// ONE constant for a whole play session (measured 2026-10-17 on Super Mario
+/// Bros. 3 and Mega Man 2: `6570426d2c2e2fa3` on the title, the map and every
+/// level, which is `FNV-1a` of 112 "flat" edges). The colour set is not: a
+/// title, a map and a level each draw with their own palette.
+///
+/// `histogram[i]` counts the background pixels drawn with palette index `i`.
+/// The id covers the indices that make up at least [`DOMINANT_PERMILLE`] of
+/// them (tiny colour counts come and go with a sprite's shadow, a HUD digit
+/// or a fade step), the number of such colours, the 32-index ranges holding at
+/// least 5 % of them, and `mapper_bank_state`.
+#[must_use]
+pub fn palette_scene_id(histogram: &[u32], mapper_bank_state: &[u8]) -> SceneId {
+    let total: u64 = histogram.iter().map(|&c| u64::from(c)).sum();
+    let mut hash = fnv_mix_u64(FNV_OFFSET_BASIS, PALETTE_TAG);
+    let mut dominant = 0u64;
+    for (index, &count) in histogram.iter().enumerate() {
+        if u64::from(count) * 1000 >= total * u64::from(DOMINANT_PERMILLE) && count > 0 {
+            hash = fnv_mix_u64(hash, index as u64);
+            dominant += 1;
+        }
+    }
+    hash = fnv_mix_u64(hash, dominant);
+    // A picture drawn with very many colours (a gradient, a dither) has none
+    // that reaches the share above: its eight 32-index ranges tell it apart.
+    for (range, counts) in histogram.chunks(32).enumerate() {
+        let share: u64 = counts.iter().map(|&c| u64::from(c)).sum();
+        if share > 0 && share * 1000 >= total * u64::from(RANGE_PERMILLE) {
+            hash = fnv_mix_u64(hash, 0x100 + range as u64);
+        }
+    }
+    for byte in mapper_bank_state {
+        hash = fnv_mix(hash, *byte);
+    }
+    SceneId(hash)
+}
+
+/// Ticket W33-09: identity of a level the profile names
+/// (`[[scene.level_id]]`): the bytes the rows read, nothing about the
+/// picture. The same bytes are the same scene on every visit, which is what
+/// brings the canvas of a level back after a pipe room.
+#[must_use]
+pub fn level_scene_id(level_bytes: &[u8]) -> SceneId {
+    let mut hash = fnv_mix_u64(FNV_OFFSET_BASIS, LEVEL_TAG);
+    hash = fnv_mix_u64(hash, level_bytes.len() as u64);
+    for byte in level_bytes {
+        hash = fnv_mix(hash, *byte);
+    }
+    SceneId(hash)
+}
+
+/// Ticket W33-09: the `n`-th section of a scene (a scroll-axis switch, see
+/// `crate::scene_tracker`). Section 0 is the scene itself.
+#[must_use]
+pub fn section_scene_id(base: SceneId, n: u32) -> SceneId {
+    if n == 0 {
+        return base;
+    }
+    SceneId(fnv_mix_u64(fnv_mix_u64(base.0, SECTION_TAG), u64::from(n)))
+}
+
+/// Share of a frame's background pixels (per mille) a colour needs to count
+/// in [`palette_scene_id`].
+pub const DOMINANT_PERMILLE: u32 = 20;
+/// Share (per mille) of a 32-index range of the palette that makes it count.
+const RANGE_PERMILLE: u32 = 50;
+const PALETTE_TAG: u64 = 0x50_414C; // "PAL"
+const LEVEL_TAG: u64 = 0x4C_564C; // "LVL"
+const SECTION_TAG: u64 = 0x53_4543; // "SEC"
+
 fn fnv_mix(hash: u64, byte: u8) -> u64 {
     (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
 }
@@ -600,6 +672,68 @@ mod tests {
             "cumulative_drift_over_a_scrolling_session: {} distinct scene ids across 50 frames \
              advancing 3px/frame (150px total travel)",
             seen.len()
+        );
+    }
+
+    // --- W33-09: identity by colours, by level bytes, by section --------
+
+    fn histogram_of(colours: &[(usize, u32)]) -> Vec<u32> {
+        let mut h = vec![0u32; 256];
+        for &(i, c) in colours {
+            h[i] = c;
+        }
+        h
+    }
+
+    #[test]
+    fn the_same_colours_are_the_same_scene_and_other_colours_are_not() {
+        let a = histogram_of(&[(15, 30_000), (22, 20_000), (40, 10_000)]);
+        let a_again = histogram_of(&[(15, 30_100), (22, 19_900), (40, 10_000)]);
+        let b = histogram_of(&[(15, 30_000), (22, 20_000), (41, 10_000)]);
+        assert_eq!(palette_scene_id(&a, &[]), palette_scene_id(&a_again, &[]));
+        assert_ne!(palette_scene_id(&a, &[]), palette_scene_id(&b, &[]));
+        assert_ne!(palette_scene_id(&a, &[]), palette_scene_id(&a, &[1]));
+    }
+
+    #[test]
+    fn a_sprite_shadow_or_a_hud_digit_does_not_change_the_scene() {
+        // A colour of a few hundred pixels (under 2 %) is not part of the id.
+        let base = histogram_of(&[(15, 30_000), (22, 20_000)]);
+        let with_shadow = histogram_of(&[(15, 30_000), (22, 20_000), (7, 300)]);
+        assert_eq!(
+            palette_scene_id(&base, &[]),
+            palette_scene_id(&with_shadow, &[])
+        );
+    }
+
+    #[test]
+    fn a_picture_of_very_many_colours_is_still_told_apart_by_its_palette_range() {
+        // 128 colours at under 1 % each: none is dominant.
+        let low = histogram_of(&(0..128).map(|i| (i, 480)).collect::<Vec<_>>());
+        let high = histogram_of(&(128..256).map(|i| (i, 480)).collect::<Vec<_>>());
+        assert_ne!(palette_scene_id(&low, &[]), palette_scene_id(&high, &[]));
+    }
+
+    #[test]
+    fn level_bytes_name_a_scene_and_the_length_is_part_of_the_name() {
+        assert_eq!(level_scene_id(&[1, 2]), level_scene_id(&[1, 2]));
+        assert_ne!(level_scene_id(&[1, 2]), level_scene_id(&[2, 1]));
+        assert_ne!(level_scene_id(&[0]), level_scene_id(&[0, 0]));
+        assert_ne!(
+            level_scene_id(&[7]),
+            palette_scene_id(&histogram_of(&[]), &[7])
+        );
+    }
+
+    #[test]
+    fn section_zero_is_the_scene_itself_and_the_others_are_distinct() {
+        let base = level_scene_id(&[3]);
+        assert_eq!(section_scene_id(base, 0), base);
+        assert_ne!(section_scene_id(base, 1), base);
+        assert_ne!(section_scene_id(base, 1), section_scene_id(base, 2));
+        assert_ne!(
+            section_scene_id(base, 1),
+            section_scene_id(level_scene_id(&[4]), 1)
         );
     }
 }

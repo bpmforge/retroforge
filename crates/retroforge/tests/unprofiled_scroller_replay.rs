@@ -143,15 +143,17 @@ fn the_checked_in_replay_grows_a_canvas_under_one_stable_scene() {
         rf_renderer::frame::NES_HEIGHT as u16,
     );
 
-    // `SceneId` is not `Ord`, so collect and dedup rather than using a set.
-    let mut scene_ids: Vec<rf_enhance::scene_identity::SceneId> = Vec::new();
+    // W33-09: every change of the returned id with its frame. The boot (a
+    // blank screen, then the level appearing) is a cut and settles; what the
+    // claim is about is the scrolling that follows.
+    let mut changes: Vec<(usize, rf_enhance::scene_identity::SceneId)> = Vec::new();
     let mut sizes = Vec::new();
     for (i, input) in log.frames.iter().enumerate() {
         stepper.latch_and_advance_frame(*input, &mut builder);
         let bundle = builder.take(stepper.frame_count());
         let id = accum.observe_frame(&bundle, &FrameFeed::bands());
-        if !scene_ids.contains(&id) {
-            scene_ids.push(id);
+        if changes.last().map(|c| c.1) != Some(id) {
+            changes.push((i, id));
         }
         if i % 100 == 0 {
             sizes.push(
@@ -178,12 +180,27 @@ fn the_checked_in_replay_grows_a_canvas_under_one_stable_scene() {
     );
 
     // W4-03d's property, re-asserted over this session: one level is one
-    // scene, not one scene per few block-widths.
-    assert_eq!(
-        scene_ids.len(),
-        1,
-        "a single continuous scroll produced {} scene ids; scene identity is not stable and the \
-         canvas would be fragmented across them",
-        scene_ids.len()
+    // scene, not one scene per few block-widths. W33-09: a cut settles before
+    // it is named, so the boot may show a blank scene and an unsettled stretch
+    // (`SETTLING`); after frame 100 the scrolling must not change scene.
+    let late: Vec<_> = changes.iter().filter(|c| c.0 >= 100).collect();
+    assert!(
+        late.is_empty(),
+        "a single continuous scroll changed scene after the boot: {changes:?}; scene identity is \
+         not stable and the canvas would be fragmented"
+    );
+    let real: Vec<_> = changes
+        .iter()
+        .map(|c| c.1)
+        .filter(|&i| i != rf_enhance::scene_tracker::SETTLING)
+        .collect();
+    assert!(
+        !real.is_empty() && real.len() <= 2,
+        "boot screen plus level at most: {changes:?}"
+    );
+    assert_ne!(
+        changes.last().map(|c| c.1),
+        Some(rf_enhance::scene_tracker::SETTLING),
+        "the session ended unsettled"
     );
 }

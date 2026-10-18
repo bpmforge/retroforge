@@ -164,6 +164,10 @@ const MIN_BAND_ROWS: u16 = 8;
 /// is read as a wrap of the LOW BYTE alone (see [`WorldAxis::advance_x`]).
 const BYTE_WRAP_MAX_STEP_PX: i64 = 32;
 
+/// Ticket W33-09: rows in one NES nametable, where a Y register that never
+/// sets the nametable bit wraps.
+const NAMETABLE_HEIGHT: i64 = 240;
+
 /// `delta` folded into `(-modulus/2, modulus/2]`: the shortest way round.
 fn shortest(delta: i64, modulus: i64) -> i64 {
     let d = delta.rem_euclid(modulus);
@@ -239,11 +243,25 @@ impl WorldAxis {
     /// made. A real scene cut (a jump of 300) is not a small low-byte step
     /// and still reads as the jump it is.
     pub fn advance_x(&mut self, raw: u16, modulus: i64) -> i64 {
+        self.advance_low_wrap(raw, modulus, 256)
+    }
+
+    /// Ticket W33-09: the vertical twin of [`Self::advance_x`]. A game with a
+    /// vertical level that never sets the nametable bit writes Y `0..239`
+    /// and starts over (Mega Man 2's vertical section, measured: `236 -> 0`
+    /// every 240 px of climb), which the 480 wrap reads as 236 px BACKWARDS,
+    /// smearing the canvas and, to the scene tracker, a cut. The register
+    /// wraps at the nametable height, 240, not at 256.
+    pub fn advance_y(&mut self, raw: u16, modulus: i64) -> i64 {
+        self.advance_low_wrap(raw, modulus, NAMETABLE_HEIGHT)
+    }
+
+    fn advance_low_wrap(&mut self, raw: u16, modulus: i64, low: i64) -> i64 {
         let raw = i64::from(raw).rem_euclid(modulus);
         let world = match (self.world, self.last_raw) {
             (Some(prev_world), Some(prev_raw)) => {
                 let full = shortest(raw - prev_raw, modulus);
-                let byte = shortest(raw - prev_raw, 256);
+                let byte = shortest(raw - prev_raw, low);
                 let delta = if full.abs() > modulus / 8 && byte.abs() <= BYTE_WRAP_MAX_STEP_PX {
                     byte
                 } else {
@@ -401,7 +419,7 @@ impl ScrollTracker {
             let world_pos = if Some(i) == primary_index {
                 BandWorldPos {
                     world_x: self.world_x.advance_x(band.x(), X_WRAP),
-                    world_y_at_start: self.world_y.advance(band.base_scroll.1, Y_WRAP),
+                    world_y_at_start: self.world_y.advance_y(band.base_scroll.1, Y_WRAP),
                 }
             } else {
                 // HUD bands (and any additional non-primary non-HUD bands
@@ -552,6 +570,39 @@ mod tests {
         assert_eq!(axis.advance_x(5, 512), 261);
         // And back over the same boundary.
         assert_eq!(axis.advance_x(254, 512), 254);
+    }
+
+    #[test]
+    fn advance_y_reads_a_y_register_wrapping_at_240_as_a_forward_step() {
+        // Mega Man 2's vertical section (W33-09): 236 -> 0 is 4 px down.
+        let mut axis = WorldAxis::new();
+        axis.advance_y(232, 480);
+        assert_eq!(axis.advance_y(236, 480), 236);
+        assert_eq!(axis.advance_y(0, 480), 240);
+        assert_eq!(axis.advance_y(4, 480), 244);
+        // And the same wrap going back up.
+        assert_eq!(axis.advance_y(0, 480), 240);
+        assert_eq!(axis.advance_y(236, 480), 236);
+    }
+
+    #[test]
+    fn advance_y_keeps_a_true_480_wrap_and_a_big_jump() {
+        let mut axis = WorldAxis::new();
+        axis.advance_y(476, 480);
+        assert_eq!(axis.advance_y(4, 480), 484);
+        let mut cut = WorldAxis::new();
+        cut.advance_y(0, 480);
+        assert_eq!(
+            cut.advance_y(300, 480),
+            -180,
+            "a real cut stays the jump it is"
+        );
+        // The one blind spot: a jump of exactly one nametable height IS the
+        // low wrap (no step at all). The picture tells those apart
+        // (`crate::scene_tracker`), the scroll cannot.
+        let mut blind = WorldAxis::new();
+        blind.advance_y(0, 480);
+        assert_eq!(blind.advance_y(240, 480), 0);
     }
 
     #[test]

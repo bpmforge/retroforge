@@ -720,6 +720,10 @@ pub enum CoreCommand {
     /// from the profile's `[scout]` table. It only ever runs while
     /// widescreen is on, and only on the scene it was started for.
     SetScout(Option<crate::scout::ScoutSetup>),
+    /// Ticket W33-09: the profile's `[scene]` table, so the scene tracker is
+    /// told which level the game is in (`None`: no table, the picture and
+    /// the scroll decide).
+    SetSceneKey(Option<crate::scene_key::SceneKeySpec>),
     /// Ticket W11-05: record the tiles the PPU draws, for HD packs.
     ///
     /// **Pay-for-use, and that is why it is a command rather than always
@@ -1371,6 +1375,8 @@ fn core_thread_main(
     let mut canvases = rf_enhance::canvas::CanvasModel::with_cache(rom_sha256, cache);
     // Ticket W32-07: the level scout (a second machine; see `crate::scout`).
     let mut scout_driver = crate::scout::ScoutDriver::default();
+    // Ticket W33-09: the profile's scene key, read from the bus every frame.
+    let mut scene_key: Option<crate::scene_key::SceneKeySpec> = None;
     // The scroll read after the previous frame (W32-08).
     let mut scroll_lag = rf_enhance::canvas::ScrollLag::default();
     // When the canvas was last persisted (see `CoreCommand::RequestCanvasSnapshot`).
@@ -1598,6 +1604,9 @@ fn core_thread_main(
                 }
                 CoreCommand::SetScout(setup) => {
                     scout_driver.set(setup);
+                }
+                CoreCommand::SetSceneKey(spec) => {
+                    scene_key = spec;
                 }
                 CoreCommand::SetEventMask(mask) => {
                     stepper.set_event_mask(mask);
@@ -2022,6 +2031,14 @@ fn core_thread_main(
                 rf_enhance::canvas::FrameFeed::bands()
             }
             .with_palettes(&line_words);
+            // Ticket W33-09: which level the game says it is in.
+            let level_bytes = scene_key
+                .as_ref()
+                .and_then(|k| k.read(|addr| stepper.peek_bus(addr)));
+            let feed = feed.with_scene_hints(rf_enhance::scene_tracker::SceneHints {
+                level: level_bytes.as_deref(),
+                axis_sections: scene_key.as_ref().and_then(|k| k.axis_sections),
+            });
             let scene = canvases.observe_frame(&bundle, &feed);
             let bundle_size = (bundle.width, bundle.height);
             // Ticket W4-01: publish before sending `FrameMsg` so a reader

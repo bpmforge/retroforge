@@ -82,6 +82,9 @@ pub enum ProfileError {
     },
     /// A `[scout]` key or row was invalid (ticket W32-07). `why` says what.
     ScoutInvalid(String),
+    /// A `[scene]` key or `[[scene.level_id]]` row was invalid (ticket
+    /// W33-09). `why` says what.
+    SceneInvalid(String),
     /// A `[superfx_polygons]` key was out of range or malformed (ticket
     /// W31-02). `key` names it; `valid` says what it accepts.
     SuperfxPolygonsInvalid {
@@ -151,6 +154,7 @@ impl fmt::Display for ProfileError {
                 "`[overclock].{key}` = {value} (0x{value:X}) is invalid (valid: {valid})"
             ),
             ProfileError::ScoutInvalid(why) => write!(f, "`[scout]` is invalid: {why}"),
+            ProfileError::SceneInvalid(why) => write!(f, "`[scene]` is invalid: {why}"),
             ProfileError::SuperfxPolygonsInvalid { key, value, valid } => write!(
                 f,
                 "`[superfx_polygons].{key}` = {value} is invalid (valid: {valid})"

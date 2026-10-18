@@ -77,6 +77,10 @@ pub struct Profile {
     /// `[scout]` — how the level scout drives a second copy of the machine
     /// to draw the level ahead of the camera (ticket W32-07).
     pub scout: Option<Scout>,
+    /// `[scene]` — the RAM bytes that name the level the game is in, so
+    /// scenes are keyed by what the game says, not by what the picture looks
+    /// like (ticket W33-09).
+    pub scene: Option<Scene>,
     /// `[text]` — translation and accessibility overlay declarations
     /// (ticket W8-12).
     pub text: Option<Text>,
@@ -653,6 +657,44 @@ pub struct ScoutAddr {
     pub source: Option<String>,
 }
 
+/// `[scene]` (ticket W33-09): how the canvas model tells scenes apart.
+///
+/// - `[[scene.level_id]]` — rows naming the bytes that identify the level
+///   (or room) the game is in. The scene key is the concatenation of every
+///   row's bytes; the same bytes are the same scene on every visit, so a pipe
+///   room and the level it came from stay two scenes and the level's canvas
+///   is intact when the player returns. When EVERY row reads its `idle` value
+///   the game is "not in a level" (a title, a map) and the picture decides
+///   instead. Addresses are found by observation and each needs a `source`.
+/// - `sections` — `"axis"`: a switch of the scroll axis (a horizontal section
+///   into a vertical one) starts a new section scene joined to the old one by
+///   a continuous edge. Default: off when `level_id` rows exist.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Scene {
+    #[serde(default)]
+    pub level_id: Vec<LevelId>,
+    pub sections: Option<String>,
+}
+
+/// One `[[scene.level_id]]` row.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LevelId {
+    /// NES `0..=0xFFFF`, SNES `0x7E0000..=0x7FFFFF`.
+    pub addr: u32,
+    /// Bytes read, little-endian, `1..=4` (default 1).
+    pub len: Option<u8>,
+    /// What the row reads when the game is not in a level (default 0).
+    pub idle: Option<u32>,
+    /// Whether this row reading something other than `idle` says a level is
+    /// running (default true). `false`: the row's bytes join the key but do
+    /// not decide on their own, for a word that holds stale values on the
+    /// map but is level-specific inside a level.
+    pub decides: Option<bool>,
+    pub notes: Option<String>,
+    /// Required: where the address was found (FR-PROF-003).
+    pub source: Option<String>,
+}
+
 /// `[loading]` (§2).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Loading {
@@ -963,6 +1005,7 @@ mod tests {
             mods: None,
             widescreen: None,
             scout: None,
+            scene: None,
             text: None,
         }
     }

@@ -110,6 +110,13 @@ NOT cuts, so two rooms share one canvas; a long fall in a vertical level that
 exceeds 64 px in one frame IS a cut. The scout's own `JUMP_PX = 64`
 (scout.rs:198) duplicates the rule with the same blind spots.
 
+*W33-09 measured and fixed this (`docs/research/W33-09-scenes.md`): the NES
+scene id was ONE constant for a whole session because the edge hash is flat on
+NES palette indices, title/map/level cuts land at scroll 0 and were never seen,
+and a Y wrap at 240 read as a 236 px jump. Scenes are now keyed by the
+profile's level id, else by the settled picture, and cuts need the picture to
+disagree with the measured scroll.*
+
 **F7. HUD detection is three different heuristics.** Zero-delta bands and
 `MIN_BAND_ROWS` (scroll_tracker.rs:159-161, 364-397), `hud_layers` by
 "never moved while another did, and draws a band" (layer_canvas.rs:294-307),

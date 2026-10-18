@@ -1173,8 +1173,16 @@ mod nes_layer0 {
             let (a, b) = (first.origins[0].unwrap().0, second.origins[0].unwrap().0);
             assert_eq!(b - a, 4, "scrolled 4 dots right");
         }
-        let cut = observe(&mut m, &frame_bundle(2, 300, 250));
+        // A cut is unsettled at first (W33-09): no scene, nothing placed.
+        let first_cut_frame = observe(&mut m, &frame_bundle(2, 300, 250));
+        assert_eq!(first_cut_frame, crate::scene_tracker::SETTLING);
+        assert_eq!(m.frames(), None);
+        let mut cut = first_cut_frame;
+        for f in 3..40u64 {
+            cut = observe(&mut m, &frame_bundle(f, 300, 250));
+        }
         assert_ne!(cut, id, "a cut is a different scene");
+        assert_ne!(cut, crate::scene_tracker::SETTLING, "and it settles");
         assert_eq!(m.frames().unwrap().scene, cut.0);
     }
 
@@ -1297,7 +1305,11 @@ mod nes_layer0 {
         let mut m = CanvasModel::new();
         let before = observe(&mut m, &frame_bundle(0, 0, 3));
         let canvas_before = layer0(&m).unwrap();
-        let after = observe(&mut m, &frame_bundle(1, 300, 250));
+        let mut after = observe(&mut m, &frame_bundle(1, 300, 250));
+        assert_eq!(after, crate::scene_tracker::SETTLING, "a cut settles first");
+        for f in 2..40u64 {
+            after = observe(&mut m, &frame_bundle(f, 300 + 3 * f as i64, 250));
+        }
         assert_ne!(before, after, "a scroll jump this large is a scene cut");
         assert_ne!(canvas_before, layer0(&m).unwrap());
         assert_eq!(
@@ -1686,5 +1698,205 @@ mod scout_agreement_checks {
             None,
             "too few shared cells to judge"
         );
+    }
+}
+
+// ---- scenes: level ids, settling, pipe rooms (ticket W33-09)
+
+mod scenes {
+    use super::*;
+    use crate::scene_tracker::{SceneHints, SETTLE_FRAMES, SETTLING};
+
+    const WIDTH: u16 = 256;
+    const HEIGHT: u16 = 240;
+
+    fn cell_colour(cx: i64, cy: i64, base: u8) -> u8 {
+        base + (cx.wrapping_mul(7919) ^ cy.wrapping_mul(104_729) ^ (cx * cy)).rem_euclid(24) as u8
+    }
+
+    /// The level at world scroll `shift`: 8x8 cells of 24 colours (`base`
+    /// shifts the palette), one full-screen band scrolled to `shift`.
+    fn picture(frame_count: u64, shift: i64, base: u8) -> FrameBundle {
+        let (width, height) = (usize::from(WIDTH), usize::from(HEIGHT));
+        let mut video = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let (wx, wy) = (x as i64 + shift, y as i64);
+                video.push(px(
+                    PixelLayer::Background(0),
+                    cell_colour(wx.div_euclid(8), wy.div_euclid(8), base),
+                ));
+            }
+        }
+        let events = vec![
+            CoreEvent::ScrollWrite {
+                x: shift.rem_euclid(512) as u16,
+                y: 0,
+                layer: PixelLayer::Background(0),
+            },
+            CoreEvent::Scanline(0),
+            CoreEvent::Scanline(HEIGHT - 1),
+        ];
+        FrameBundle::new(frame_count, WIDTH, HEIGHT, video, events)
+    }
+
+    fn black(frame_count: u64) -> FrameBundle {
+        let video =
+            vec![px(PixelLayer::Background(0), 15); usize::from(WIDTH) * usize::from(HEIGHT)];
+        FrameBundle::new(frame_count, WIDTH, HEIGHT, video, Vec::new())
+    }
+
+    fn feed<'a>(level: Option<&'a [u8]>) -> FrameFeed<'a> {
+        FrameFeed::bands().with_scene_hints(SceneHints {
+            level,
+            axis_sections: None,
+        })
+    }
+
+    fn cells(m: &CanvasModel, scene: SceneId) -> usize {
+        m.scene_canvases(scene.0)
+            .map_or(0, |c| c[0].cells().iter().flatten().count())
+    }
+
+    /// Walk the level: `n` frames from scroll `from`, 3 px a frame.
+    fn walk(m: &mut CanvasModel, key: &[u8], from: i64, n: i64, frame: &mut u64) -> SceneId {
+        let mut id = SETTLING;
+        for i in 0..n {
+            *frame += 1;
+            id = m.observe_frame(&picture(*frame, from + i * 3, 1), &feed(Some(key)));
+        }
+        id
+    }
+
+    #[test]
+    fn a_pipe_room_and_back_leaves_the_levels_canvas_intact() {
+        let mut m = CanvasModel::new();
+        let mut frame = 0;
+        let level = walk(&mut m, &[1], 0, 60, &mut frame);
+        assert_ne!(level, SETTLING);
+        let before = cells(&m, level);
+        let snapshot = m.scene_canvases(level.0).expect("canvas").clone();
+        assert!(before > 0);
+
+        // The pipe: the key changes under a black frame; the room is another
+        // picture, scrolling slowly (a picture standing still is a HUD band and
+        // is never stitched, whatever the scene).
+        for _ in 0..4 {
+            frame += 1;
+            assert_eq!(m.observe_frame(&black(frame), &feed(Some(&[2]))), SETTLING);
+        }
+        let mut room = SETTLING;
+        for _ in 0..SETTLE_FRAMES + 10 {
+            frame += 1;
+            room = m.observe_frame(&picture(frame, frame as i64, 40), &feed(Some(&[2])));
+        }
+        assert!(
+            room != SETTLING && room != level,
+            "the room is a scene of its own"
+        );
+        assert!(cells(&m, room) > 0, "the room has a canvas");
+        assert_eq!(
+            cells(&m, level),
+            before,
+            "the level's cell count changed in the room"
+        );
+
+        // Back out: the SAME scene id, so the same canvas, every cell as it
+        // was and the walk goes on from there.
+        let back = walk(&mut m, &[1], 180, 40, &mut frame);
+        assert_eq!(back, level);
+        let after = m.scene_canvases(level.0).expect("canvas");
+        assert!(cells(&m, level) >= before);
+        let (ox, oy) = snapshot[0].origin();
+        for y in 0..snapshot[0].height() as i64 {
+            for x in 0..snapshot[0].width() as i64 {
+                if let Some(p) = snapshot[0].get(ox + x, oy + y) {
+                    assert_eq!(
+                        after[0].get(ox + x, oy + y),
+                        Some(p),
+                        "cell ({x},{y}) changed"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frames_while_a_cut_settles_are_stitched_nowhere() {
+        let mut m = CanvasModel::new();
+        let mut frame = 0;
+        let level = walk(&mut m, &[1], 0, 30, &mut frame);
+        let before = cells(&m, level);
+        // A level that is still loading: its key moves every frame.
+        for i in 0..SETTLE_FRAMES - 1 {
+            frame += 1;
+            let key = [2, i as u8];
+            let id = m.observe_frame(
+                &picture(frame, 500 + i64::from(i) * 3, 60),
+                &feed(Some(&key)),
+            );
+            assert_eq!(id, SETTLING);
+            assert_eq!(m.current_scene(), Some(SETTLING));
+            assert!(
+                !m.current_canvases().any(),
+                "no canvas to show while unsettled"
+            );
+            assert_eq!(m.frames(), None);
+        }
+        assert_eq!(cells(&m, level), before);
+        assert!(
+            m.scene_canvases(SETTLING.0).is_none(),
+            "nothing was stitched under SETTLING"
+        );
+    }
+
+    #[test]
+    fn only_a_continuous_edge_offers_a_neighbour_to_the_margin() {
+        let mut m = CanvasModel::new();
+        let mut frame = 0;
+        // A section change the picture scrolls straight across (MM2's
+        // horizontal section into the climb): continuous.
+        let a = walk(&mut m, &[1], 0, 40, &mut frame);
+        let b = walk(&mut m, &[2], 120, 60, &mut frame);
+        assert!(a != b && b != SETTLING);
+        let neighbours = m.margin_neighbours(a);
+        assert_eq!(neighbours.len(), 1, "{:?}", m.scene_edges());
+        assert_eq!((neighbours[0].from, neighbours[0].to), (a.0, b.0));
+        // A pipe (a black frame between): never.
+        for _ in 0..4 {
+            frame += 1;
+            m.observe_frame(&black(frame), &feed(Some(&[3])));
+        }
+        let c = walk(&mut m, &[3], 0, 40, &mut frame);
+        assert!(c != b && c != SETTLING);
+        assert!(m.margin_neighbours(c).is_empty(), "{:?}", m.scene_edges());
+        assert_eq!(
+            m.margin_neighbours(b).len(),
+            1,
+            "b only has the continuous edge to a"
+        );
+    }
+
+    #[test]
+    fn without_a_profile_a_title_a_map_and_a_level_each_get_their_own_canvas() {
+        let mut m = CanvasModel::new();
+        let mut ids = Vec::new();
+        let mut frame = 0;
+        for base in [1u8, 30, 70] {
+            let mut id = SETTLING;
+            for i in 0..40 {
+                frame += 1;
+                id = m.observe_frame(&picture(frame, i * 2, base), &FrameFeed::bands());
+            }
+            ids.push(id);
+        }
+        assert!(ids.iter().all(|&i| i != SETTLING));
+        assert!(
+            ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
+            "{ids:?}"
+        );
+        for id in ids {
+            assert!(cells(&m, id) > 0, "{id:?} has no canvas of its own");
+        }
     }
 }

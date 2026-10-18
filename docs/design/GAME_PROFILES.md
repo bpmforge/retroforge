@@ -295,6 +295,47 @@ when the camera jumps (a scene change). Sprites are never taken from it. See
 `docs/research/W32-07-scout-smw.md` for the evidence behind the Super Mario
 World table, and for which recipes failed there.
 
+### `[scene]` (ticket W33-09)
+
+`[scene]` (`rf_profiles::schema::Scene`) is optional. It says which RAM bytes
+name the level (or the room behind a pipe) the game is in, so the canvas model
+(`rf_enhance::canvas`) keys its scenes by what the game says and not by what
+the picture looks like. Without it the picture and the scroll decide
+(`rf_enhance::scene_tracker`), which already tells a title, a map and a level
+apart; with it a pipe room and the level it came from are two scenes and the
+level's canvas is intact when the player comes back out. The rows are found by
+observation (`docs/research/W33-09-scenes.md`); every row needs a `source`.
+
+| Key | Meaning |
+|---|---|
+| `[[scene.level_id]]` | One row per field of the key: `addr` (NES `0..=0xFFFF`, SNES `0x7E0000..=0x7FFFFF`), `len` (bytes, little-endian, `1..=4`, default 1), `idle` (what the row reads when no level is running, default 0), `decides` (default true), `notes`, `source`. At most 8 rows and 16 bytes. |
+| `sections` | `"axis"`: a switch of the scroll axis (a horizontal section into a climb) starts a new section scene, joined to the old one by a continuous edge. Off by default when `level_id` rows exist, on for a game without any. |
+
+The scene key is the bytes of every row, concatenated. While every `decides`
+row reads its `idle` value the game is "not in a level" (a title, a map) and
+the picture names the scene instead. A row with `decides = false` joins the
+key without deciding on its own: a word that holds stale values on the map but
+is level-specific inside a level. A level that is still writing its pointers
+(Super Mario Bros. 3's first word settles over five frames, Super Mario
+World's pointer ahead of its flag by eight) is not named until the key has
+held for `SETTLE_FRAMES` frames, and the frames in between are not stitched
+into any scene.
+
+```toml
+[scene]
+sections = "axis"                    # Mega Man 2: the stage has no section byte
+
+[[scene.level_id]]
+addr = 0x002A
+notes = "Stage index (1 = Air Man for the whole stage)."
+source = "observed: W33-09 note"
+```
+
+A scene change is recorded as an edge (`SceneEdge`: from, to, the scroll
+position at each end, `continuous`). Only a `continuous` edge, one the picture
+flowed across as the scroll said, may show the neighbouring scene in a margin;
+a door, a pipe or a fade never does.
+
 ### `[superfx_polygons]` (ticket W31-02)
 
 `[superfx_polygons]` (`rf_profiles::schema::SuperfxPolygons`) is optional and

@@ -186,3 +186,25 @@ addr = 0x7E0071
 value = 0
 notes = "Player animation state: 0 while Mario walks, jumps and stands; 9 once he is hit by an enemy (the death animation, ending in the level restarting ~200 frames later). The scout starts only while it is 0, otherwise it gets as far as that restart and no further."
 source = "observed: W32-07 note"
+
+# W33-09: which level (or pipe room) the game is in
+# (docs/research/W33-09-scenes.md). `$57` is 0 on the title and the map and
+# non-zero for as long as a level or a pipe room runs: it says "in a level"
+# ($70 in Yoshi's Island 1, $12 in the coin room behind its pipe). `$68..$6A`
+# is a 24-bit pointer, constant for the whole level and different in the
+# room, but it holds stale values on the map, so it joins the key without
+# deciding on its own.
+[scene]
+
+[[scene.level_id]]
+addr = 0x7E0057
+len = 1
+notes = "0 on the title and the map; $70 in Yoshi's Island 1 for the whole level, $12 in its pipe room."
+source = "observed: W33-09 note"
+
+[[scene.level_id]]
+addr = 0x7E0068
+len = 3
+decides = false
+notes = "A 24-bit pointer: $0CD900 in Yoshi's Island 1, $0CE8FE in its pipe room; stale on the map."
+source = "observed: W33-09 note"

@@ -159,3 +159,24 @@ addr = 0x000F
 value = 0x01
 notes = "1 while Mario is in a level and alive (0 on the map and during the death animation; observed 1-1 alive for 135 frames, 0 after the first goomba hit)."
 source = "observed: W32-09 note"
+
+# W33-09: which level the game is in. Both rows are 16-bit little-endian words
+# that read 0 on the title and the map and a level-specific value from the
+# moment a level starts to the moment it ends (docs/research/W33-09-scenes.md:
+# 1-1 -> $BC92 / $C527, 1-2 -> $B0DC / $C6AA; the first word settles over
+# five frames after the level starts, the second at once). Two words, not
+# one: a single byte (the tile set at $070A reads 1 in 1-1 and 3 in 1-2) is
+# shared by levels.
+[scene]
+
+[[scene.level_id]]
+addr = 0x0061
+len = 2
+notes = "A pointer word, written over five frames after a level starts ($BB82, $BB8E, $BBBC, $BC0F, $BC74, $BC92 in 1-1), then constant for the whole level; 0 on the title and the map."
+source = "observed: W33-09 note"
+
+[[scene.level_id]]
+addr = 0x0065
+len = 2
+notes = "A second pointer word: $C527 in 1-1, $C6AA in 1-2, written at once; 0 on the title and the map."
+source = "observed: W33-09 note"

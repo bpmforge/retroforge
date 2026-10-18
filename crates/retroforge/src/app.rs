@@ -10854,6 +10854,13 @@ impl RetroForgeApp {
         self.scout_plan = matched
             .as_ref()
             .and_then(|(p, _)| Some(crate::scout::ScoutPlan::from_profile(p.scout.as_ref()?)));
+        // Ticket W33-09: the `[scene]` table (which RAM bytes name the level).
+        self.send_command(CoreCommand::SetSceneKey(
+            matched
+                .as_ref()
+                .and_then(|(p, _)| p.scene.as_ref())
+                .map(crate::scene_key::SceneKeySpec::from_profile),
+        ));
         self.matched_profile = matched.map(|(_, path)| path);
         // Ticket W16-06 bug fix: `self.profile_matched` (the `bool` this
         // struct's own doc comment calls "false until a profile loader is
