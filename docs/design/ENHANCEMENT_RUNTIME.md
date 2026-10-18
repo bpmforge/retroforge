@@ -93,8 +93,13 @@ RetroForge implementation (`ScrollTracker` + `Stitcher`):
 - Consume `ScrollWrite`/frame-end scroll state per BG layer (mid-frame splits
   handled by tracking per-scanline scroll bands; HUD bands auto-detected as
   zero-delta regions and excluded).
-- Scene identity = perceptual hash of framebuffer edges + mapper bank state;
-  scene change ⇒ new canvas (rooms/levels get separate canvases).
+- Scene identity = the profile's level id (`[[scene.level_id]]`) when it
+  declares one, else the dominant palette set of the settled picture, cut by
+  level-key changes, colour-histogram moves, scroll jumps the picture does not
+  follow, and scroll-axis switches (W33-09; the edge-hash of W4-03b was one
+  constant on every NES frame, `docs/research/W33-09-scenes.md`); scene change
+  ⇒ new canvas (rooms/levels get separate canvases). Changes are recorded as
+  `SceneEdge`s; only a continuous one may show a neighbour in a margin.
 - Canvas chunks are cached in `rf-cache` keyed by ROM hash + scene id, so a
   revisited level restores instantly across sessions.
 - Honest limitation (state clearly in UI): shows only *visited* areas; cannot

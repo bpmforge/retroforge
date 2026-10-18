@@ -178,3 +178,19 @@ addr = 0x06C0
 value = 0x1C
 notes = "Mega Man's health, 0x1c (28) at the start of a stage. The scout starts only at full health: health is not an alive flag (it still read 0x1a after the fall that ended a run), so a hurt Mega Man is not scouted."
 source = "observed: W32-09 note"
+
+# W33-09: which stage the game is in, and how a stage is cut into scenes.
+# `$2A` holds the stage's index from the moment the stage starts (Air Man 1,
+# Metal Man 2, Wood Man 3, Bubble Man 5; docs/research/W33-09-scenes.md); the
+# menus use it as a cursor, so it is non-zero there too and each cursor
+# position is its own (empty) scene. No byte names the SECTION of a stage
+# (measured over the first horizontal section and the climb that follows it),
+# so sections are cut by the scroll axis: the screen stops going right and
+# starts climbing.
+[scene]
+sections = "axis"
+
+[[scene.level_id]]
+addr = 0x002A
+notes = "Stage index: 1 in Air Man's stage for its whole length (horizontal and vertical sections), 3 Wood Man, 5 Bubble Man, 2 Metal Man; 0 on the title."
+source = "observed: W33-09 note"

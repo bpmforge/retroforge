@@ -286,7 +286,10 @@ fn nine_hundred_frames_of_real_scrolling_play_stay_one_scene_id_with_bounded_con
     let mut cpu = Cpu::power_on(&mut bus);
     let mut tracker = SceneTracker::new();
 
-    let mut ids = std::collections::HashSet::new();
+    // W33-09: every change of the returned id, with its frame. The boot
+    // (a blank screen, then the level appearing) is a cut and settles; what
+    // the property is about is the scrolling that follows.
+    let mut changes: Vec<(u64, rf_enhance::scene_identity::SceneId)> = Vec::new();
     let mut max_abs_delta = 0i64;
     let mut first_world: Option<(i64, i64)> = None;
     let mut last_world: Option<(i64, i64)> = None;
@@ -304,7 +307,9 @@ fn nine_hundred_frames_of_real_scrolling_play_stay_one_scene_id_with_bounded_con
             &bundle.events,
             &[], // NROM: no mapper bank state (module doc's NROM note)
         );
-        ids.insert(id);
+        if changes.last().map(|c| c.1) != Some(id) {
+            changes.push((frame, id));
+        }
         let after = tracker.last_world_position();
         if let (Some(b), Some(a)) = (before, after) {
             max_abs_delta = max_abs_delta.max((a.0 - b.0).abs()).max((a.1 - b.1).abs());
@@ -383,15 +388,30 @@ fn nine_hundred_frames_of_real_scrolling_play_stay_one_scene_id_with_bounded_con
     );
 
     // Acceptance 1's own literal wording ("one scene id for one level") --
-    // true here, but see module doc for why this alone would not have
-    // discriminated a broken implementation on this specific fixture; the
-    // two assertions above are what does that job.
-    assert_eq!(
-        ids.len(),
-        1,
-        "a sustained real scrolling session over one level must be one scene id -- got {} \
-         distinct ids",
+    // after the boot settles. W33-09: a cut now settles before it is named
+    // (`SETTLING` is not a scene), so the boot may show a blank scene, a
+    // settling stretch and then the level; the 800 frames of scrolling after
+    // frame 100 must be ONE scene, with no cut among them.
+    let late: Vec<_> = changes.iter().filter(|c| c.0 >= 100).collect();
+    assert!(
+        late.is_empty(),
+        "a sustained real scrolling session over one level must not change scene after the \
+         boot -- changes: {changes:?}"
+    );
+    let ids: std::collections::HashSet<_> = changes
+        .iter()
+        .map(|c| c.1)
+        .filter(|&i| i != rf_enhance::scene_tracker::SETTLING)
+        .collect();
+    assert!(
+        (1..=2).contains(&ids.len()),
+        "boot screen plus level at most -- got {} distinct scenes: {changes:?}",
         ids.len()
+    );
+    assert_ne!(
+        changes.last().map(|c| c.1),
+        Some(rf_enhance::scene_tracker::SETTLING),
+        "the session ended unsettled"
     );
 
     eprintln!(

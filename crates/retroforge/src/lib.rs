@@ -74,6 +74,7 @@ pub mod reveal;
 pub mod rom_open;
 pub mod run_ahead;
 pub mod save_state;
+pub mod scene_key;
 pub mod scout;
 pub mod script_panel;
 pub mod settings;

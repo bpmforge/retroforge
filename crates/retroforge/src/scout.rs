@@ -878,6 +878,12 @@ impl ScoutDriver {
         let Some(setup) = self.setup.clone() else {
             return;
         };
+        if live.scene == rf_enhance::scene_tracker::SETTLING {
+            // A cut that has not settled belongs to no scene yet (ticket
+            // W33-09): nothing starts, and a pass that is running is left to
+            // the scene it was started for.
+            return;
+        }
         if self.scene != Some(live.scene.0) {
             // A new scene: whatever ran belongs to the old one.
             self.scene = Some(live.scene.0);

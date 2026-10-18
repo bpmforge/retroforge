@@ -277,6 +277,23 @@ fn known_shape() -> Shape {
             ]),
         ),
         (
+            "scene",
+            Shape::Object(vec![
+                ("sections", Shape::Leaf),
+                (
+                    "level_id",
+                    Shape::ArrayOfObjects(vec![
+                        ("addr", Shape::Leaf),
+                        ("len", Shape::Leaf),
+                        ("idle", Shape::Leaf),
+                        ("decides", Shape::Leaf),
+                        ("notes", Shape::Leaf),
+                        ("source", Shape::Leaf),
+                    ]),
+                ),
+            ]),
+        ),
+        (
             "widescreen",
             Shape::Object(vec![
                 ("bg1", Shape::Leaf),
