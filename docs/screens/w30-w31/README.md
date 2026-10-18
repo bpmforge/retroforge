@@ -44,3 +44,26 @@ fixture shot is a flat strip).
 | File | Game | What it shows |
 |---|---|---|
 | `widesnes-352.png` | Super Mario World (USA) + wide-snes 1.11 patch (user-supplied; soft-patched in memory) | The game itself drawing 352x224 (bsnes-hd convention, W32-03): level, HUD re-centred, and the Banzai Bill sprite live in the right margin. Needed the SA-1 second-reset fix. |
+
+## W33 stitching tour (2026-10-18, W33-10)
+
+Re-shot on the W33 build (release, every ROM shot from a cold canvas cache so
+the scout really runs; one process at a time). `scout-*` pairs are the same
+paused moment with the scout OFF then ON (widescreen 32:9 both times). The
+live game is paused once the scout worker starts, so no player dies in these.
+
+| File | Game | What it shows |
+|---|---|---|
+| `scout-32x9-off.png` / `-on.png` | Super Mario World (USA), Yoshi's Island 1 | 800x224. OFF: only the 4:3 screen has level. ON: the hills (BG2, colour-math only) and the slope, coin and bushes ahead fill the right margin. The left margin is flat sky: the level starts there. 1078 scout frames, agreement 100.0%. |
+| `scout-smb3-32x9-off.png` / `-on.png` | Super Mario Bros. 3 (USA), World 1-1 | 856x240. ON: question blocks, the big pastel blocks and a pipe to the right. Agreement 99.8% (one slow delta). |
+| `scout-mm2-32x9-off.png` / `-on.png` | Mega Man 2 (USA), Air Man (horizontal part) | 856x240. ON: the next platform and two Air Man faces to the right. Agreement 98.7%. |
+| `scout-mm2-climb-32x9-off.png` / `-on.png` | Mega Man 2 (USA), Air Man shaft (vertical part) | 856x240. Honest: a vertical scout widens the shaft vertically, so on a 32:9 frame ON looks the same as OFF (plain sky margins, same platforms). It is here to show the vertical scout ran (61,440 cells, agreement 95.5%), not a visible gain. |
+| `scout-mmx-32x9-off.png` / `-on.png` | Mega Man X (USA), highway | 800x224, settings found by the auto-finder (no hand table). ON: the highway ramp and lamp post to the right. Agreement 100.0%, 161,511 cells. |
+| `compare-scout-*.png` | the five above | OFF over ON, centred. |
+| `scout-contact-sheet.png` | SMW, SMB3, Mega Man X | Per game: scout OFF row over scout ON row. |
+| `widescreen-16x9-*.png`, `widescreen-32x9-*.png`, `compare-widescreen-*.png` | Super Mario World (USA), Yoshi's Island 1 | Re-shot after walking right and back (RUN 120 / BACK 80 frames; the earlier 300/160 timing let Bullet Bill kill Mario). Mario at the level start, stitched margins; the 32:9 left margin is blue because that is the level's own left edge. |
+| `widesnes-352.png` | Super Mario World (USA) + wide-snes patch | Re-shot: 352x224 drawn by the patched game itself, Banzai Bill in the right margin. |
+
+`scout-mmx-*` needed a re-timed script (intro story text, then title, then
+Start, then fade, then stage): the shot now presses Start only until it has
+seen the title and then a dark frame followed by the stage.
