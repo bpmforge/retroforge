@@ -810,6 +810,15 @@ impl Scout {
             .map_or(0, |set| set.iter().map(|c| c.width() * c.height()).sum())
     }
 
+    /// Width of the widest canvas of the scout's scene (how far it has seen
+    /// sideways; [`Self::extent`] also counts height).
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.acc
+            .scene_canvases(self.scene.0)
+            .map_or(0, |set| set.iter().map(|c| c.width()).max().unwrap_or(0))
+    }
+
     fn end_pass(&mut self, why: ScoutEnd) {
         self.ends.push(why);
         self.pass += 1;
