@@ -540,12 +540,24 @@ look Brad asked for; 07-09 widen it.
   fps off / on 110.7 / 104.9, gate p95 3.62 ms, Diorama still rendering at the
   end (a trip would have dropped it to flat; the harness reads the end state,
   not every frame).
-- **A finding for the learner (not fixed here).** The SMW shot's learned
-  table depends on the timeline of the scripted play: 1500 frames gave 16 to 32
-  raised cells, 1800 and 2100 gave about 790 (hills and the status bar
-  extruded into spikes) with 4 or 5 "solid" tiles. Same code, same ROM, only
-  the play length differs. W34-03/04's table needs a guard against a run that
-  calls most of the screen solid; the shots use `RF_DIORAMA_FRAMES=1500`.
+- **A finding for the learner (fixed in W34-03b).** The SMW shot's learned
+  table depended on the timeline of the scripted play: 1500 frames gave 16 to
+  32 raised cells, 1800 and 2100 about 790 (hills and the status bar extruded
+  into spikes). Instrumented per signal and per key, the causes were: (1) S3
+  "hides the player" on a fade/wipe layer, one key over 28% of BG3, drawn over
+  Mario during the level exit, learned Tall (265 raised cells), and the
+  votes were counted once per cell, so a wall of one tile reached the bar four
+  times too fast; (2) the playfield was "the widest band", so on a screen where
+  only a fill or status layer was full height that layer became the playfield
+  and was extruded; (3) S4 mass on fill keys, kept (it is how ground fill is
+  learned) but now bounded by the global guard. Fixes: S3 skips blank cells
+  (`TileCell::BLANK`, set by the capture) and fills (>= 25% of the grid) and
+  votes once per key per frame; the playfield is the widest band among the
+  layers that scroll with the camera; only that grid is ever raised
+  (`grids_for`); a table raising more than 40% of the playfield is drawn flat,
+  its keys forgotten and `GuardTrip` logged. SMW YI1 at 1500/2100/3600 frames:
+  raised cells peak at 79 of 960 (was 183 to 267) and the hills and status bar
+  are never raised.
 - **Not done here.** Per-call ground upload is still a `write_texture` of the
   whole picture (the live path's picture changes every frame; the decoded
   path's level image does not and could be keyed); the decoded-level window is

@@ -2611,6 +2611,11 @@ fn shot_diorama_side_smw(readme: &mut Vec<String>) {
         &[(0x1490, 0xFF)],
         enter_smw,
     );
+    // End in the level, alive: the last lap may have ended on the map or in
+    // a fade, so re-enter and walk a little (as the SMB3 shot does).
+    enter_smw(&mut h);
+    wait(&mut h, "smw", 150);
+    play_script(&mut h, "R40 B+R20");
     release_all(&mut h);
     probe(&h, "smw-diorama-after-play");
     diorama_pair(

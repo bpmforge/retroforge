@@ -407,6 +407,9 @@ fn an_unknown_orientation_learns_nothing_but_sightings() {
 #[test]
 fn a_tile_that_hides_the_player_becomes_tall() {
     let mut l = HeightLearner::new();
+    // S3 alone: a player who never moves gives S4 nothing to tell sky from
+    // wall, and the sanity guard would (rightly) refuse a table of all wall.
+    l.set_signals(Signals::ALL.without(Signals::S4_MASS));
     let mut g = TileGrid {
         layer: 0,
         cell_px: 16,
@@ -626,4 +629,243 @@ fn top_down_walls_are_the_tiles_he_keeps_walking_into() {
     assert!(wall.learned.confidence >= 1, "{wall:?}");
     let air = l.table().get(&key(SKY)).unwrap();
     assert_eq!(air.learned.class, Class::Floor, "{air:?}");
+}
+
+// ---------------------------------------------------------------------
+// W34-03b: sanity guards (a wipe, a fill, a blank cell, a wall of one tile,
+// a table that raises the screen, the wrong layer as playfield)
+// ---------------------------------------------------------------------
+
+fn grid_of(
+    layer: u8,
+    cols: u16,
+    rows: u16,
+    rows_px: (u16, u16),
+    x: i64,
+    c: &[TileCell],
+) -> TileGrid {
+    TileGrid {
+        layer,
+        cell_px: 16,
+        hud: false,
+        exact: true,
+        rows_px,
+        origin_world: (x, 0),
+        offset: (0, 0),
+        cols,
+        rows,
+        cells: c.to_vec(),
+    }
+}
+
+fn hidden_player(n: i32) -> Player {
+    Player {
+        track: 1,
+        entity: Entity {
+            x0: 16 + (n % 3),
+            y0: 16,
+            x1: 28 + (n % 3),
+            y1: 32,
+            sprites: 1,
+            look: 0,
+        },
+        source: PlayerSource::Pad,
+        found_at: 0,
+        score: 1.0,
+        visible: true,
+    }
+}
+
+/// Watch a still player hidden behind `g` for `frames`.
+fn hide_behind(g: &TileGrid, signals: Signals, frames: i32) -> HeightLearner {
+    let mut l = HeightLearner::new();
+    l.set_signals(signals);
+    for n in 0..frames {
+        let p = hidden_player(n);
+        l.observe(&FrameObs {
+            grids: std::slice::from_ref(g),
+            sprites: &[],
+            entities: &[p.entity],
+            player: Some(&p),
+            pad: Dirs::default(),
+            orientation: Orientation::TopDown,
+            hidden: Some((16, 16, 28, 32)),
+        });
+    }
+    l
+}
+
+fn prio(k: u64) -> TileCell {
+    TileCell {
+        flags: TileCell::PRIORITY,
+        ..tile(k, 0)
+    }
+}
+
+const WIPE: u64 = 90;
+
+#[test]
+fn a_fill_that_covers_the_screen_cannot_hide_the_player() {
+    // A fade mask / letterbox: one key over (nearly) the whole grid, drawn
+    // over the player. It is a wipe, not an object.
+    let g = grid_of(0, 4, 4, (0, 64), 0, &[prio(WIPE); 16]);
+    let l = hide_behind(&g, Signals::ALL.without(Signals::S4_MASS), 200);
+    let e = l.table().get(&key(WIPE)).unwrap();
+    assert_eq!(e.evidence.hides_player, 0, "{e:?}");
+    assert!(!e.learned.class.is_solid(), "{e:?}");
+}
+
+#[test]
+fn a_blank_cell_cannot_hide_the_player() {
+    let mut cells = vec![tile(SKY, 0); 16];
+    cells[5] = TileCell {
+        flags: TileCell::BLANK,
+        ..tile(PIPE, 0)
+    };
+    let g = grid_of(0, 4, 4, (0, 64), 0, &cells);
+    let l = hide_behind(&g, Signals::ALL.without(Signals::S4_MASS), 200);
+    let e = l.table().get(&key(PIPE)).unwrap();
+    assert_eq!(e.evidence.hides_player, 0, "{e:?}");
+}
+
+#[test]
+fn a_wall_of_one_tile_is_one_witness_per_frame() {
+    // Four cells of one key under the player's box: one vote a frame, not
+    // four (what made S3 reach its bar four times too fast).
+    let mut cells = vec![tile(SKY, 0); 64];
+    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+        cells[r * 8 + c] = prio(PIPE);
+    }
+    let g = grid_of(0, 8, 8, (0, 128), 0, &cells);
+    let mut l = HeightLearner::new();
+    l.set_signals(Signals::ALL.without(Signals::S4_MASS));
+    for n in 0..50 {
+        let p = Player {
+            entity: Entity {
+                x0: 16,
+                y0: 16,
+                x1: 48,
+                y1: 48,
+                ..hidden_player(n).entity
+            },
+            ..hidden_player(n)
+        };
+        l.observe(&FrameObs {
+            grids: std::slice::from_ref(&g),
+            sprites: &[],
+            entities: &[p.entity],
+            player: Some(&p),
+            pad: Dirs::default(),
+            orientation: Orientation::TopDown,
+            hidden: Some((16, 16, 48, 48)),
+        });
+    }
+    let e = l.table().get(&key(PIPE)).unwrap();
+    assert!(
+        e.evidence.hides_player > 0 && e.evidence.hides_player <= 50,
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_table_that_would_raise_most_of_the_screen_is_refused_and_forgotten() {
+    // A player who never moves in a top-down room next to one wall: S4 calls
+    // every untouched sky cell mass. The guard must keep what is drawn under
+    // the bar on every single frame, and say so.
+    let mut cells = vec![tile(SKY, 0); 16];
+    cells[5] = tile(PIPE, 0);
+    let g = grid_of(0, 4, 4, (0, 64), 0, &cells);
+    let mut l = HeightLearner::new();
+    let mut worst = 0;
+    for n in 0..300 {
+        let p = hidden_player(n);
+        l.observe(&FrameObs {
+            grids: std::slice::from_ref(&g),
+            sprites: &[],
+            entities: &[p.entity],
+            player: Some(&p),
+            pad: Dirs::default(),
+            orientation: Orientation::TopDown,
+            hidden: Some((16, 16, 28, 32)),
+        });
+        let h = l.grid_for(&g);
+        worst = worst.max(h.depth.iter().filter(|d| **d > 0).count());
+    }
+    assert!(
+        l.guard_trips() >= 1,
+        "the degenerate table was never refused"
+    );
+    assert!(
+        worst * 100 <= 16 * MAX_RAISED_PCT,
+        "{worst} of 16 cells drawn raised"
+    );
+}
+
+#[test]
+fn a_sane_level_never_trips_the_guard() {
+    let l = play(3600, Signals::ALL, &ident);
+    assert_eq!(l.guard_trips(), 0);
+}
+
+#[test]
+fn the_layer_that_scrolls_is_the_playfield_not_the_widest_still_one() {
+    // Layer 0 is full height and still (a fill / HUD / title card); layer 2
+    // is the same height and scrolls. Before any layer has travelled far
+    // enough to be called a backdrop, the tie used to go to layer 0.
+    let still = grid_of(0, 4, 4, (0, 64), 0, &[tile(WIPE, 0); 16]);
+    let mut l = HeightLearner::new();
+    let mut last = Vec::new();
+    for n in 0..40i64 {
+        let moving = grid_of(2, 4, 4, (0, 64), n * 2, &[tile(PLAT, 2); 16]);
+        last = vec![still.clone(), moving];
+        l.observe(&FrameObs {
+            grids: &last,
+            sprites: &[],
+            entities: &[],
+            player: None,
+            pad: Dirs::default(),
+            orientation: Orientation::SideView,
+            hidden: None,
+        });
+    }
+    assert_eq!(l.foreground_index(&last), Some(1));
+}
+
+#[test]
+fn only_the_playfield_grid_rises() {
+    // Two layers, both with a wall tile at confidence 3. The playfield is
+    // the wider band; the other layer (a status bar, say) reads flat.
+    let mut walls = vec![tile(SKY, 0); 16];
+    walls[5] = tile(PIPE, 0);
+    let fg = grid_of(0, 4, 4, (0, 64), 0, &walls);
+    let mut bar = grid_of(2, 4, 1, (0, 16), 0, &[tile(PIPE, 2); 4]);
+    bar.cells[0] = tile(PIPE, 2);
+    let mut table = TileHeightTable::new();
+    for (layer, g) in [(0u8, &fg), (2u8, &bar)] {
+        let k = TileKey {
+            pattern: PIPE,
+            palette: 1,
+            layer,
+            cell_px: g.cell_px,
+        };
+        table.entry_mut(k).unwrap().learned = Learned {
+            class: Class::Wall,
+            height_eighths: 8,
+            confidence: 3,
+        };
+    }
+    let mut l = HeightLearner::with_table(table);
+    let grids = [bar.clone(), fg.clone()];
+    l.observe(&FrameObs {
+        grids: &grids,
+        sprites: &[],
+        entities: &[],
+        player: None,
+        pad: Dirs::default(),
+        orientation: Orientation::Unknown,
+        hidden: None,
+    });
+    let out = l.grids_for(&grids);
+    assert!(out[0].depth.iter().all(|d| *d == 0), "the bar stays flat");
+    assert_eq!(out[1].depth.iter().filter(|d| **d > 0).count(), 1);
 }

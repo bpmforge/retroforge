@@ -64,6 +64,8 @@ pub struct LiveHeights {
     entities: Vec<Entity>,
     snes_cam: (i64, i64, Option<(u16, u16)>),
     snes: bool,
+    /// Guard refusals already logged.
+    guard_logged: u32,
 }
 
 impl LiveHeights {
@@ -76,6 +78,7 @@ impl LiveHeights {
             entities: Vec::new(),
             snes_cam: (0, 0, None),
             snes,
+            guard_logged: 0,
         }
     }
 
@@ -160,9 +163,23 @@ impl LiveHeights {
             orientation: orientation.orientation,
             hidden: None,
         });
+        match (self.learner.guard_trip(), self.guard_logged) {
+            (Some(t), n) if n != self.learner.guard_trips() => {
+                self.guard_logged = self.learner.guard_trips();
+                log::warn!(
+                    "height learner: refused a table raising {} of {} cells of layer {} \
+                     (over {}%); drawing flat and forgetting those tiles",
+                    t.raised,
+                    t.cells,
+                    t.layer,
+                    rf_enhance::heights::learner::MAX_RAISED_PCT
+                );
+            }
+            _ => {}
+        }
         let shown = self.tracker.player().or_else(|| self.tracker.tracked());
         HeightsFrame {
-            grids: grids.iter().map(|g| self.learner.grid_for(g)).collect(),
+            grids: self.learner.grids_for(grids),
             foreground: self.learner.foreground_index(grids),
             orientation,
             stats: self.learner.stats(),
