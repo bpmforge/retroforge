@@ -67,7 +67,8 @@ mod registration;
 
 pub use compose::{
     backdrop_color, backdrop_rows, front_layer_pixel, front_layer_pixel_in, margin_color,
-    margin_known, margin_palette_index, margin_pixel, RowFacts,
+    margin_color_layer, margin_known, margin_palette_index, margin_pixel, margin_pixel_layer,
+    RowFacts,
 };
 pub use merge::{
     crop_into, merge_unknown, merge_unknown_in, rect_union, scout_agreement,

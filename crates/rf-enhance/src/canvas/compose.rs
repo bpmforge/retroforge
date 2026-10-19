@@ -71,6 +71,20 @@ pub fn front_layer_pixel_in(
     order: Option<&[u8; LAYERS]>,
     screen: u8,
 ) -> Option<PpuPixel> {
+    front_layer_in(layers, origin_of, dx, dy, order, screen).map(|(_, p)| p)
+}
+
+/// [`front_layer_pixel_in`] that also says which layer's canvas the cell
+/// came from (ticket W34-09).
+#[must_use]
+pub fn front_layer_in(
+    layers: &LayerCanvases,
+    origin_of: impl Fn(usize) -> Option<(i64, i64)>,
+    dx: i64,
+    dy: i64,
+    order: Option<&[u8; LAYERS]>,
+    screen: u8,
+) -> Option<(usize, PpuPixel)> {
     const DEFAULT: [u8; LAYERS] = [0, 1, 2, 3];
     order.unwrap_or(&DEFAULT).iter().find_map(|&n| {
         let n = usize::from(n);
@@ -79,7 +93,7 @@ pub fn front_layer_pixel_in(
         }
         let canvas = layers.canvases.get(n)?.as_ref()?;
         let (ox, oy) = origin_of(n)?;
-        canvas.get(ox + dx, oy + dy)
+        canvas.get(ox + dx, oy + dy).map(|p| (n, p))
     })
 }
 
@@ -114,16 +128,34 @@ pub fn margin_color(
     regs: &LineRegisters,
     current: &Cgram,
 ) -> [u8; 3] {
+    margin_color_layer(layers, frames, row, dx, order, regs, current).0
+}
+
+/// [`margin_color`] with the background layer the dot belongs to (ticket
+/// W34-09, so the Diorama can stand each margin dot on its own plane): the
+/// main screen's front-most known layer, else, where the row shows the sub
+/// screen through colour math, the sub screen's (Super Mario World keeps
+/// its hills there), else `None` (the backdrop). The same rule the core's
+/// own per-dot layer map uses inside the 256 dots.
+#[must_use]
+pub fn margin_color_layer(
+    layers: &LayerCanvases,
+    frames: &LayerFrames,
+    row: usize,
+    dx: i64,
+    order: Option<&[u8; LAYERS]>,
+    regs: &LineRegisters,
+    current: &Cgram,
+) -> ([u8; 3], Option<u8>) {
     let dy = row as i64;
-    let at = |screen: u8| {
-        front_layer_pixel_in(layers, |n| frames.origin_at(n, row), dx, dy, order, screen)
-    };
+    let at =
+        |screen: u8| front_layer_in(layers, |n| frames.origin_at(n, row), dx, dy, order, screen);
     // W33-02: a remembered cell shows under the palette it was seen with.
     let word = |p: &PpuPixel| layers.palettes.word(p, current);
     let main = at(regs.tm & 0x0F);
-    let (main_word, main_bit) = match main {
-        Some(p) => (
-            word(&p),
+    let (main_word, main_bit) = match &main {
+        Some((_, p)) => (
+            word(p),
             match p.layer {
                 PixelLayer::Background(n) => u32::from(n),
                 _ => 5,
@@ -131,12 +163,11 @@ pub fn margin_color(
         ),
         None => (regs.backdrop_color, 5),
     };
-    let sub = regs
-        .use_subscreen
-        .then(|| at(regs.ts & 0x0F))
-        .flatten()
-        .map(|p| word(&p));
-    shade(regs, main_word, main_bit, sub)
+    let sub = regs.use_subscreen.then(|| at(regs.ts & 0x0F)).flatten();
+    let sub_word = sub.as_ref().map(|(_, p)| word(p));
+    // The layer the dot shows: the main screen's, else the sub screen's.
+    let layer = main.as_ref().or(sub.as_ref()).map(|(n, _)| *n as u8);
+    (shade(regs, main_word, main_bit, sub_word), layer)
 }
 
 /// One dot's final colour: the row's colour math over `main_word` (a
@@ -297,8 +328,22 @@ pub fn margin_pixel(
     facts: &RowFacts<'_>,
     fixed_rgb: &dyn Fn(u8) -> [u8; 3],
 ) -> Option<[u8; 3]> {
+    margin_pixel_layer(layers, frames, row, dx, facts, fixed_rgb).map(|(rgb, _)| rgb)
+}
+
+/// [`margin_pixel`] with the background layer the dot belongs to
+/// (`None`: the row's backdrop). Ticket W34-09.
+#[must_use]
+pub fn margin_pixel_layer(
+    layers: &LayerCanvases,
+    frames: &LayerFrames,
+    row: usize,
+    dx: i64,
+    facts: &RowFacts<'_>,
+    fixed_rgb: &dyn Fn(u8) -> [u8; 3],
+) -> Option<([u8; 3], Option<u8>)> {
     if let (Some(regs), Some((words, _))) = (facts.regs, facts.palette) {
-        return Some(margin_color(
+        return Some(margin_color_layer(
             layers,
             frames,
             row,
@@ -308,7 +353,7 @@ pub fn margin_pixel(
             words,
         ));
     }
-    let cell = front_layer_pixel_in(
+    let cell = front_layer_in(
         layers,
         |n| frames.origin_at(n, row),
         dx,
@@ -316,15 +361,18 @@ pub fn margin_pixel(
         facts.order,
         0x0F,
     );
-    let Some(cell) = cell else {
+    let Some((layer, cell)) = cell else {
         // Nothing known: the row's own backdrop colour, else CGRAM 0.
         return facts
             .backdrop
-            .or_else(|| facts.palette.map(|(w, b)| bgr555_to_rgb(w[0], b)));
+            .or_else(|| facts.palette.map(|(w, b)| bgr555_to_rgb(w[0], b)))
+            .map(|c| (c, None));
     };
+    let layer = Some(layer as u8);
     // With the palette the cell was seen under, not the row's current one.
-    Some(match facts.palette {
+    let rgb = match facts.palette {
         Some((words, brightness)) => bgr555_to_rgb(layers.palettes.word(&cell, words), brightness),
         None => fixed_rgb(cell.palette_index),
-    })
+    };
+    Some((rgb, layer))
 }

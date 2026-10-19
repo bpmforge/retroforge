@@ -3457,14 +3457,18 @@ fn layers_cost(h: &mut H, name: &str, readme: &mut Vec<String>) {
     for layers in [false, true, false, true] {
         h.state_mut().set_diorama_layers_for_test(layers);
         run_n(h, 20);
+        let _ = h.state_mut().diorama_stage_ms_for_test();
         let f0 = h.state().frame_count_for_test();
         let t0 = Instant::now();
         run_frames(h, f0 + 240, Duration::from_secs(300));
         let n = h.state().frame_count_for_test() - f0;
+        let ([wide, split, pass, mesh], _) = h.state_mut().diorama_stage_ms_for_test();
         rows.push((
             layers,
             n as f64 / t0.elapsed().as_secs_f64(),
             h.state().diorama_p95_ms_for_test(),
+            h.state().diorama_p50_ms_for_test(),
+            [wide, split, pass, mesh],
         ));
     }
     h.state()
@@ -3472,9 +3476,9 @@ fn layers_cost(h: &mut H, name: &str, readme: &mut Vec<String>) {
     h.state_mut().set_diorama_layers_for_test(true);
     let text: Vec<String> = rows
         .iter()
-        .map(|(l, fps, p95)| {
+        .map(|(l, fps, p95, p50, [wide, split, pass, mesh])| {
             format!(
-                "{} {fps:.1} fps p95 {p95:.2} ms",
+                "{} {fps:.1} fps p50 {p50:.2} p95 {p95:.2} ms (mean wide {wide:.2} split {split:.2} pass {pass:.2} of which mesh {mesh:.2})",
                 if *l { "layers" } else { "one plane" }
             )
         })
@@ -3565,6 +3569,206 @@ fn shot_diorama_layers_smw(readme: &mut Vec<String>) {
     h.state_mut().set_diorama_layers_for_test(true);
     h.state_mut().set_diorama_camera_for_test(52, 0, 100, false);
     layers_cost(&mut h, name, readme);
+}
+
+/// W34-09 acceptance: the Diorama at 16:9 and 32:9 (Super Mario World, planes
+/// standing in the canvas margins, the flat HUD in the middle) and at 16:9 on a
+/// top-down game (A Link to the Past). One 1700 x 760 window, so the play rect
+/// is wide; the cost rows are `RF_WIDE_COST=1`. `RF_SCREENS_ONLY=diorama-wide`
+/// (or `-smw`, `-alttp`).
+fn shot_diorama_wide(readme: &mut Vec<String>) {
+    if !(wanted("diorama-wide-smw") || wanted("diorama-wide-alttp")) {
+        return;
+    }
+    // SAFETY: set before any harness of this shot is built.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RF_SCREENS_WINDOW", "1900x800");
+        std::env::set_var("RF_SCREENS_KEEP", "1");
+    }
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    if wanted("diorama-wide-smw") {
+        use std::sync::atomic::Ordering::Relaxed;
+        let name = "smw";
+        // Cold cache for the first visit (the level's tiles are learned in
+        // session 1 at 4:3, as `shot_diorama_level_smw` does; session 2
+        // starts the level again at the wide aspect).
+        let cold = std::env::temp_dir().join(format!("rf_wide_smw_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cold);
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: nothing else in this process reads the environment while
+        // the harness is between sessions.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
+        match rom("snes", "Super Mario World (USA).zip") {
+            None => skip(readme, name, "Super Mario World (USA).zip not found"),
+            Some(path) => 'smw: {
+                {
+                    let Some(mut h) = smw_yi1_harness(&path) else {
+                        skip(
+                            readme,
+                            name,
+                            "no wgpu adapter, or never reached Yoshi's Island 1",
+                        );
+                        break 'smw;
+                    };
+                    h.state_mut().set_mode_for_test(Mode::Enhanced);
+                    h.state_mut().set_diorama_for_test(true);
+                    run_n(&mut h, 30);
+                    play_for(
+                        &mut h,
+                        frames,
+                        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+                        &[(0x1490, 0xFF), (0x1497, 0xFF)],
+                        enter_smw,
+                    );
+                    release_all(&mut h);
+                    println!(
+                        "WIDE session 1 learned at 4:3: {:?}",
+                        h.state().heights_numbers_for_test()
+                    );
+                    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+                let Some(mut h) = smw_yi1_harness(&path) else {
+                    skip(readme, name, "never reached Yoshi's Island 1 again");
+                    break 'smw;
+                };
+                h.state_mut().set_mode_for_test(Mode::Enhanced);
+                h.state_mut()
+                    .set_widescreen_aspect_for_test(Aspect::Wide16x9);
+                h.state_mut().set_diorama_for_test(true);
+                run_n(&mut h, 30);
+                // A fresh start of the level; the scout fills the canvas
+                // beyond what the camera has seen (Live and Scout cells),
+                // as `shot_diorama_level_smw` does (`RF_WIDE_NOSCOUT=1`
+                // leaves it to the live frames).
+                if std::env::var("RF_WIDE_NOSCOUT").is_err() {
+                    let telemetry = h.state().scout_telemetry_for_test();
+                    h.state_mut().set_scout_enabled_for_test(true);
+                    h.state()
+                        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+                    let t1 = Instant::now();
+                    h.state_mut().set_widescreen(true);
+                    while telemetry.started.load(Relaxed) == 0
+                        && t1.elapsed() < Duration::from_secs(60)
+                    {
+                        let t = h.state().frame_count_for_test() + 2;
+                        run_frames(&mut h, t, Duration::from_secs(10));
+                    }
+                    h.state().send_core_command_for_test(CoreCommand::Pause);
+                    while t1.elapsed() < Duration::from_secs(300) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        run_n(&mut h, 1);
+                        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+                            break;
+                        }
+                    }
+                    run_n(&mut h, 120);
+                } else {
+                    h.state_mut().set_widescreen(true);
+                    run_n(&mut h, 120);
+                }
+                probe(&h, "wide-smw-ready");
+                set_time_of_day(&mut h, 40);
+                for (aspect, tag) in [(Aspect::Wide16x9, "16x9"), (Aspect::Wide32x9, "32x9")] {
+                    h.state_mut().set_widescreen_aspect_for_test(aspect);
+                    h.state_mut().set_widescreen(true);
+                    diorama_pair_as(
+                        &mut h,
+                        "diorama-wide",
+                        &format!("smw-{tag}"),
+                        &format!("Super Mario World, Yoshi's Island 1, {tag}: the planes stand in the canvas margins, the status bar flat in the middle"),
+                        readme,
+                    );
+                    note(
+                        readme,
+                        format!(
+                            "DIORAMA-WIDE smw-{tag}: image {:?}; {}",
+                            h.state().diorama_size_for_test(),
+                            level_numbers(&h)
+                        ),
+                    );
+                    // A swung, raised camera: the planes and the edges.
+                    h.state_mut()
+                        .set_diorama_camera_for_test(70, 20, 100, false);
+                    run_n(&mut h, 20);
+                    step_from(&mut h);
+                    step_from(&mut h);
+                    if let Some(p) = grab_play_area(&mut h) {
+                        save(
+                            &out_dir().join(format!("diorama-wide-smw-{tag}-yaw.png")),
+                            &p.opaque(),
+                        );
+                    }
+                    h.state_mut().set_diorama_camera_for_test(52, 0, 100, false);
+                    run_n(&mut h, 10);
+                }
+                // The cost rows last: they run the game unpaced.
+                if std::env::var("RF_WIDE_COST").is_ok() {
+                    for (aspect, tag) in [(Aspect::Wide16x9, "16x9"), (Aspect::Wide32x9, "32x9")] {
+                        h.state_mut().set_widescreen_aspect_for_test(aspect);
+                        h.state_mut().set_widescreen(true);
+                        layers_cost(&mut h, &format!("smw-{tag}"), readme);
+                    }
+                }
+                h.state().send_core_command_for_test(CoreCommand::Shutdown);
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        }
+    }
+    if wanted("diorama-wide-alttp") {
+        let name = "alttp";
+        match rom(
+            "snes",
+            "Legend of Zelda, The - A Link to the Past (USA).zip",
+        ) {
+            None => skip(readme, name, "A Link to the Past (USA).zip not found"),
+            Some(path) => 'alttp: {
+                let mut h = new_harness();
+                open_and_run(&mut h, &path);
+                if !h.state().gpu_available_for_test() {
+                    skip(readme, name, "no wgpu adapter");
+                    break 'alttp;
+                }
+                alttp_take_control(&mut h);
+                h.state_mut().set_mode_for_test(Mode::Enhanced);
+                h.state_mut()
+                    .set_widescreen_aspect_for_test(Aspect::Wide16x9);
+                h.state_mut().set_widescreen(true);
+                h.state_mut().set_diorama_for_test(true);
+                run_n(&mut h, 30);
+                let end = h.state().frame_count_for_test() + frames;
+                while h.state().frame_count_for_test() < end {
+                    play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+                }
+                release_all(&mut h);
+                set_time_of_day(&mut h, 40);
+                diorama_pair_as(
+                    &mut h,
+                    "diorama-wide",
+                    "alttp-16x9",
+                    "A Link to the Past, Link's house, 16:9: the floor goes on into the margins, the HUD flat in the middle",
+                    readme,
+                );
+                note(
+                    readme,
+                    format!(
+                        "DIORAMA-WIDE alttp-16x9: image {:?}",
+                        h.state().diorama_size_for_test()
+                    ),
+                );
+                if std::env::var("RF_WIDE_COST").is_ok() {
+                    layers_cost(&mut h, "alttp-16x9", readme);
+                }
+            }
+        }
+    }
 }
 
 fn shot_diorama_layers_smb3(readme: &mut Vec<String>) {
@@ -3741,6 +3945,7 @@ fn w30_w31_screens() {
     shot_diorama_light_smw(&mut readme);
     shot_diorama_level_smw(&mut readme);
     shot_diorama_level_smb3(&mut readme);
+    shot_diorama_wide(&mut readme);
     shot_hd2d_full(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);

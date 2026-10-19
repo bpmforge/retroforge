@@ -89,6 +89,11 @@ pub mod kind {
     /// into the shadow map -- a plane that shadowed the planes behind it
     /// would darken them in the shape of its own outline.
     pub const PLANE: u32 = 4;
+    /// A plane standing further back than the playfield's (the hills, the
+    /// sky; W34-09): [`PLANE`] that also never RECEIVES a shadow. A sprite's
+    /// shadow falls on the plane it stands on; on a plane tens of pixels
+    /// behind it, it would land displaced and read as a floating blob.
+    pub const BACK: u32 = 5;
 }
 
 /// World-space height (pixels) of one [`WALL_HEIGHT_EIGHTHS`]-style

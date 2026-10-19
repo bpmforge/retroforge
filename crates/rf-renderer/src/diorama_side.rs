@@ -69,6 +69,9 @@ use crate::diorama_mesh::{kind, Vertex};
 pub const SIDE_TINT: f32 = 0.62;
 /// Tint of the front faces: a hair under full so the top reads as lit.
 pub const FRONT_TINT: f32 = 0.94;
+/// How far behind its plane the overscan cells stand, picture pixels (the
+/// picture's own quad wins the depth test over them).
+const OVERSCAN_Z: f32 = 0.02;
 /// Depth, in eighths of a tile, below which a cell is flat.
 const MIN_DEPTH_EIGHTHS: u8 = 1;
 
@@ -157,6 +160,12 @@ pub struct SideScene<'a> {
     /// camera straight in front of the target): from there they look
     /// exactly like the flat picture.
     pub ref_eye: [f32; 3],
+    /// Ticket W34-09: how far every plane goes on past the picture's edge on
+    /// all four sides, picture pixels, in the edge texels' own colours (the
+    /// edge strips of the picture pinned to the slot's border). A pitched or
+    /// swung camera looks past the picture's edge; without this it saw the
+    /// clear colour there. `0.0` is the picture exactly.
+    pub overscan_px: f32,
 }
 
 impl SideScene<'_> {
@@ -240,7 +249,6 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
     }
     let back = scene.back_px.max(0.0);
     let mut verts = Vec::new();
-    let (w, h) = (scene.plane_w, scene.plane_h);
     // The planes standing further back, furthest first.
     let mut planes: Vec<BackPlane> = scene.back_planes.to_vec();
     planes.sort_by(|a, b| b.back_px.total_cmp(&a.back_px));
@@ -248,22 +256,12 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
         push_back_plane(scene, bp, &mut verts);
     }
     // The plane: the whole picture, upright.
-    quad(
-        &mut verts,
-        [
-            [0.0, h, -back],
-            [w, h, -back],
-            [w, 0.0, -back],
-            [0.0, 0.0, -back],
-        ],
-        [
-            [0.0, scene.v(0.0)],
-            [1.0, scene.v(0.0)],
-            [1.0, scene.v(h)],
-            [0.0, scene.v(h)],
-        ],
-        1.0,
+    push_plane(
+        scene,
+        scene.atlas.playfield,
+        &|x, y| [x, y, -back],
         kind::PLANE,
+        &mut verts,
     );
 
     let mut pieces: Vec<Piece> = Vec::new();
@@ -292,7 +290,6 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
 /// scaled about the reference eye so it covers what the main plane covers
 /// as seen from there.
 fn push_back_plane(scene: &SideScene<'_>, bp: &BackPlane, out: &mut Vec<Vertex>) {
-    let (w, h) = (scene.plane_w, scene.plane_h);
     let z = -(scene.back_px.max(0.0) + bp.back_px.max(0.0));
     let e = scene.ref_eye;
     // The ray from the eye through a point at `z = -back_px` of the main
@@ -305,17 +302,85 @@ fn push_back_plane(scene: &SideScene<'_>, bp: &BackPlane, out: &mut Vec<Vertex>)
         1.0
     };
     let at = |x: f32, y: f32| [e[0] + (x - e[0]) * k, e[1] + (y - e[1]) * k, z];
+    push_plane(scene, bp.slot, &at, kind::BACK, out);
+}
+
+/// One plane of the atlas: the whole picture of `slot`, upright, each of its
+/// world points `(x, y)` (y up) placed by `place`. With
+/// [`SideScene::overscan_px`] it is a 3 x 3 grid whose outer cells repeat the
+/// picture's edge texels (half a texel in, so filtering never reads the
+/// transparent gap between two slots).
+fn push_plane(
+    scene: &SideScene<'_>,
+    slot: u32,
+    place: &dyn Fn(f32, f32) -> [f32; 3],
+    k: u32,
+    out: &mut Vec<Vertex>,
+) {
+    let (w, h) = (scene.plane_w, scene.plane_h);
+    let e = scene.overscan_px.max(0.0);
+    if e <= 0.0 {
+        quad(
+            out,
+            [place(0.0, h), place(w, h), place(w, 0.0), place(0.0, 0.0)],
+            [
+                [0.0, scene.atlas.v(slot, 0.0)],
+                [1.0, scene.atlas.v(slot, 0.0)],
+                [1.0, scene.atlas.v(slot, h)],
+                [0.0, scene.atlas.v(slot, h)],
+            ],
+            1.0,
+            k,
+        );
+        return;
+    }
+    // The eight outer cells (picture coordinates, y down), each running 1 px
+    // in under the picture so the picture's own edge pixels, which filtering
+    // blends half-way into the transparent gap, lie over cells of their own
+    // colour: they are drawn first and a hair further back, so the picture
+    // wins wherever they overlap.
+    let spans_x = [(-e, 1.0), (0.0, w), (w - 1.0, w + e)];
+    let spans_y = [(-e, 1.0), (0.0, h), (h - 1.0, h + e)];
+    // The texel a cell repeats on an axis it stands outside the picture on:
+    // half a texel in from the edge.
+    let pin = |i: usize, p: f32, dim: f32| match i {
+        0 => 0.5 / dim,
+        2 => (dim - 0.5) / dim,
+        _ => p.clamp(0.5, dim - 0.5) / dim,
+    };
+    let world = |px: f32, py: f32| place(px, h - py);
+    let behind = |p: [f32; 3]| [p[0], p[1], p[2] - OVERSCAN_Z];
+    for (j, &(y0, y1)) in spans_y.iter().enumerate() {
+        for (i, &(x0, x1)) in spans_x.iter().enumerate() {
+            if (i, j) == (1, 1) {
+                continue;
+            }
+            let c = |px: f32, py: f32| [pin(i, px, w), scene.atlas.v(slot, pin(j, py, h) * h)];
+            quad(
+                out,
+                [
+                    behind(world(x0, y0)),
+                    behind(world(x1, y0)),
+                    behind(world(x1, y1)),
+                    behind(world(x0, y1)),
+                ],
+                [c(x0, y0), c(x1, y0), c(x1, y1), c(x0, y1)],
+                1.0,
+                k,
+            );
+        }
+    }
     quad(
         out,
-        [at(0.0, h), at(w, h), at(w, 0.0), at(0.0, 0.0)],
+        [place(0.0, h), place(w, h), place(w, 0.0), place(0.0, 0.0)],
         [
-            [0.0, scene.atlas.v(bp.slot, 0.0)],
-            [1.0, scene.atlas.v(bp.slot, 0.0)],
-            [1.0, scene.atlas.v(bp.slot, h)],
-            [0.0, scene.atlas.v(bp.slot, h)],
+            [0.0, scene.atlas.v(slot, 0.0)],
+            [1.0, scene.atlas.v(slot, 0.0)],
+            [1.0, scene.atlas.v(slot, h)],
+            [0.0, scene.atlas.v(slot, h)],
         ],
         1.0,
-        kind::PLANE,
+        k,
     );
 }
 
@@ -648,6 +713,7 @@ mod tests {
             atlas: Atlas::single(rows as f32 * 16.0),
             back_planes: &[],
             ref_eye: [0.0; 3],
+            overscan_px: 0.0,
         }
     }
 

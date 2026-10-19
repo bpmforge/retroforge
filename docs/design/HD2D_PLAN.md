@@ -935,3 +935,126 @@ sprites), `kind::PLANE`, and the wiring in `live_learn` / `app.rs`.
   `-smw-{yaw15,oneplane-yaw15,pitch-lo,pitch-hi,oneplane-pitch-hi,zoom,
   oneplane-zoom}`, `-smb3-{yaw15,oneplane-yaw15,pitch-hi,oneplane-pitch-hi}`,
   `-alttp-oneplane`.
+
+## W34-09 as built (2026-10-19)
+
+The widescreen Diorama (D2 at 16:9 / 21:9 / 32:9), the layers in the canvas
+margins, and the 4x cost. Code: `retroforge::app` (`widen_margins_layered`,
+`widen_margins_for_frame`, `wide_ground`, `display_grid`),
+`retroforge::diorama_layers`, `diorama_learned`, `play_view`,
+`rf_enhance::canvas::compose` (`margin_pixel_layer`, `margin_color_layer`,
+`front_layer_in`), `rf-renderer` `diorama_side` / `diorama.wgsl`.
+
+- **Which layer drew a margin dot.** The compose that fills the margins from
+  the canvases (`margin_pixel`) already found the front-most known cell; it
+  now also says which layer's canvas it came from (`margin_pixel_layer`), by
+  the core's own rule inside the 256 dots: the main screen's front-most layer,
+  else the sub screen's where the row blends it in (SMW's hills), else the
+  backdrop. `widen_margins_layered` returns that beside the picture as a layer
+  map of the WIDE picture (the core's ids for the 256 hardware dots in the
+  middle, the compose's in the margins, the backdrop where nothing is known).
+  The core records its map for the 256 dots only (`bundle.video` is the
+  centre of a widened line), so the map's size is `256 x rows` there, not the
+  core frame's; `refresh_learned_diorama` checks that.
+- **One compose per frame.** The flat view composes the margins first; while
+  a layered Diorama is wanted it keeps that picture and map (`wide_cache`) and
+  the Diorama stands on them. Before, the Diorama composed the margins a second
+  time (1.9 ms mean at 32:9 in a 1829 x 448 window). The sprites stay in the
+  cached picture; `split` takes them out by the ids' `LAYER_SPRITE`
+  (`sprite_rgba` may now be empty), so a layer-less frame (layers off) still
+  takes the old second compose with the sprites removed.
+- **Planes in the margins.** `split` runs on the wide picture: every plane
+  (playfield, one per slower layer, sky) has its margin dots on its own slot,
+  the carry-down and the row fill work on the wide width, and a margin dot no
+  layer knew is the row's backdrop colour on the sky plane. The HUD is the
+  game's own 256 dots (`LayerSplit::hud_cols`, `without_hud`'s `hud_cols`):
+  a HUD band's rows reach only the middle columns, the margins of those rows
+  stay in the scene, and the overlay is the wide picture's size with alpha
+  only in the middle, so `composite` lands it centred and unstretched.
+  Heights are W34-07's (`Lattice::from_level`). Sprites are the live game's.
+- **Top-down at 16:9.** `usable` used to need a 256-wide frame or a
+  side-view level, so ALttP at 16:9 turned the Diorama off. A floor plan on
+  a widened frame now takes the lattice in the 256 dots' coordinates
+  (`Lattice::shifted_right` by the margin), the wide picture as its floor
+  (`TopFrame::screen` the wide size, `sprite_size` / `pads` for the sprite
+  texture and the boxes), and `without_hud` on the wide map. Its walls come
+  from the painted / learned grids of the 256 dots only; the floor in the
+  margins is flat (the heights-from-the-canvas of W34-07 are side view only).
+  `without_hud` also lifts the sprites off the floor now (Link was drawn
+  twice, once on the floor and once as a billboard, in W34-08's shot too).
+- **The play rect at 21:9 and 32:9 (a bug in the shell, found here).** The
+  core's frame is capped at the PPU's 512 dots and `DisplayGrid::for_frame`
+  folds any frame 512 wide or more as hires, so at 32:9 (and 21:9: 523) the
+  rect was sized from a 256-dot picture: 4:3, the picture squeezed to a
+  quarter of its width (the W34-07 note "the window crop stretches a wide frame
+  to 4:3" was this). With widescreen on the play view now lays out by the
+  widened picture (`display_frame_size`, `DisplayGrid::for_widened_frame`,
+  never for exactly 512). `tests/w34_09_wide_diorama.rs` asserts the rect's
+  aspect is the picture's at 16:9, 21:9 and 32:9 and that the Diorama image has
+  the rect's aspect (it fails, 1.31:1 against 2.69:1, without the fix).
+- **The planes stand on past the picture's edge** (W34-08's void at the left
+  and bottom). `SideScene::overscan_px` (the app passes the plane's height)
+  makes every plane a picture quad plus eight cells that repeat the picture's
+  edge texels (half a texel in, so filtering never reads the transparent gap
+  between two slots; each runs 1 px under the picture and a hair further back,
+  because the picture's own edge pixels are blended half-way into that gap).
+  A second W34-08 fault found on the way: with planes the plane was the
+  frame's 240 rows but the atlas slot only the 224 the game shows, so the 16
+  rows below the picture read the gap and the next slot (a band of sky under
+  the ground); the plane is now `rows` tall.
+- **Mario's shadow on the hills.** A back plane is `kind::BACK`: shaded like
+  a plane (never a caster) and it receives no shadow, so a sprite's shadow
+  falls on the plane it stands on and not displaced onto one 48 px behind.
+  `rf-renderer/tests/w34_09_planes.rs` pins it (and fails, 2,000 px darkened,
+  when the hills receive it at a low sun).
+- **Cost: where it went.** Machine shared (load 2 to 12 during the runs; rows
+  alternate in one binary, pacing off, 240 frames per row, SMW YI1, image 1170 x
+  896). `w34_09_cost` (the pass alone on an SMW-shaped scene with three planes,
+  mesh + upload + draw + readback): one plane 0.83 p50 / 1.52 p95 ms; three
+  planes as W34-08 built them (planes receive the shadow) 1.11 / 1.65;
+  three planes now 0.83 / 1.05; three planes without the shadow map 0.69 /
+  0.93, unlit 0.68 / 0.91, 585 x 448 0.54, 64 x 64 (fixed cost) 0.42. So the
+  W34-08 "unmeasured 0.6 ms" was the 3 x 3 PCF lookup on three full-image
+  planes: skipping it on the back planes takes 0.28 ms off the median and 0.6
+  off the p95, and the fill of three planes with the lookup gone is the same as
+  one (the plane texture is opaque and noisy in the bench). A depth pre-pass was
+  not needed. In the app, per frame (stage means): split 0.41 -> 0.30 ms
+  (row-major carry-down, one slot index per pixel, one clear copy of the picture
+  for every slot), HUD composite 0.12, mesh 0.01, the pass 1.5 to 1.8 (the
+  harness shares the GPU with the UI). The app gate (split + mesh + pass +
+  readback + HUD of the previous frame, and now the wide picture) at the 4x
+  window, p50 / p95, W34-08 -> now: SMW layers 3.37 / 3.43 p95 -> 1.6 to 1.9
+  p50, 2.1 to 2.9 p95 (four rows, 2.1 / 2.1 / 2.3 / 2.9), one-plane control
+  1.3 to 1.4 p50, 1.6 to 2.7 p95; ALttP layers 3.32 / 2.86 p95 -> 1.8 to 2.2
+  p50, 2.0 to 3.1 p95, control 1.4 to 1.9 p50, 1.6 to 3.1 p95. The p95 of a
+  row moves by a millisecond with the machine's load (the control does too);
+  the median is steady, so the target is met at p50 unconditionally and at p95
+  when the machine is not loaded. Layers cost about 0.4 ms over one plane at
+  4:3 (both rows have no wide picture there). At wide aspects the one-plane
+  control is NOT comparable: it makes its own margin compose (`wide` 1.9 ms
+  at 32:9) while the layered path rides the flat view's, which the gate does
+  not count; the layered 32:9 row reading cheaper than one plane is where the
+  compose is counted, not a win. 1371 x 672 (16:9): layers p50 2.1 p95 3.0;
+  1829 x 448 (32:9): p50 2.5 to 2.6 p95 3.2 to 3.4, of which the split is 0.7.
+  No GPU timestamps (the device is requested without the feature): "where it
+  went" is pass by pass, with knobs toggled in `w34_09_cost` and CPU stage
+  timers in the app, not a GPU profile.
+- **Shots** (`docs/screens/w30-w31/`, uncommitted; sun fixed at 40 %, a 1900 x
+  800 window, so 16:9 is 1371 x 672 and 32:9 is 1829 x 448; SMW learned at 4:3
+  in a first session, then a fresh start with the scout): `diorama-wide-smw-16x9-
+  {off,on}`, `-32x9-{off,on}`, `-16x9-yaw` (yaw 15), `diorama-wide-alttp-16x9-
+  {off,on}`; `RF_SCREENS_ONLY=diorama-wide` (`RF_WIDE_COST=1` for the cost
+  rows, `RF_WIDE_NOSCOUT=1` to skip the scout).
+- **Not done / limits.** `wide_cache` clones the wide picture every frame
+  (3.3 MB at 32:9, about 0.1 ms; a refcount would drop it). VRAM-drawn margin
+  dots between the 256 hardware dots and the core's frame width that no canvas
+  knows get the backdrop id but keep their VRAM colour (ground-coloured dots on
+  the sky plane, if it ever happens; the canvases normally know them). The
+  floor of a top-down Diorama in the margins is flat
+  (no walls from the canvas); the NES at 21:9 / 32:9 gets the same planes only
+  as far as its one layer goes; 16x16 / hires / Mode 7 untouched; the stretched
+  edge of the planes (the picture's last column or row repeated) shows at a
+  steep pitch or yaw on a screen with something on the edge (the map screen
+  shows tall streaks of the picture's edge colours); the cost at 32:9 is the
+  split (0.7 ms) plus the pass, both over D6's 3 ms line at p95 on a loaded
+  machine.

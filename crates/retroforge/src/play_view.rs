@@ -58,6 +58,18 @@ impl DisplayGrid {
         Self { columns, lines }
     }
 
+    /// Ticket W34-09: [`Self::for_frame`] for a frame the widescreen policy
+    /// widened. Its width is the picture's, not hires samples: a 21:9 frame
+    /// (523 wide) or a 32:9 one (796) is not twice as many samples over a
+    /// 4:3 picture, and folding it showed it squeezed to half its width.
+    #[must_use]
+    pub fn for_widened_frame(width: f32, height: f32) -> Self {
+        Self {
+            columns: width,
+            lines: Self::for_frame(width, height).lines,
+        }
+    }
+
     /// A non-console image (the diorama render) whose pixels are already
     /// display pixels: no folding.
     #[must_use]
@@ -440,6 +452,12 @@ mod tests {
         );
         // Decoded widescreen is genuinely wider and keeps its width.
         assert_eq!(DisplayGrid::for_frame(400.0, 224.0).columns, 400.0);
+        // A widened frame keeps its width at any aspect, 21:9 and 32:9
+        // included (W34-09); only its lines fold.
+        for w in [400.0, 523.0, 796.0] {
+            assert_eq!(DisplayGrid::for_widened_frame(w, 224.0).columns, w);
+        }
+        assert_eq!(DisplayGrid::for_widened_frame(796.0, 448.0).lines, 224.0);
     }
 
     #[test]

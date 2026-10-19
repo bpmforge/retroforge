@@ -1142,6 +1142,7 @@ fn caster_runs(vertices: &[Vertex]) -> Vec<std::ops::Range<u32>> {
     let casts = |tri: &[Vertex]| {
         tri[0].kind != kind::SHADOW
             && tri[0].kind != kind::PLANE
+            && tri[0].kind != kind::BACK
             && !(tri[0].kind == kind::GROUND && tri.iter().all(|v| v.pos[1] < 0.01))
     };
     let mut runs: Vec<std::ops::Range<u32>> = Vec::new();

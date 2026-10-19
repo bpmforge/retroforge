@@ -89,6 +89,7 @@ fn render(gpu: &GpuContext, f: &Fixture, camera: &DioramaCamera) -> Vec<u8> {
         },
         back_planes: &f.back,
         ref_eye: [target.0, target.1, placement.distance],
+        overscan_px: 0.0,
     };
     let vertices = build_vertices_side(&scene, placement.eye);
     let vp = camera_matrices::view_proj_side(w, h, aspect, WINDOW_FOV_Y_DEG, camera, target);
@@ -340,6 +341,7 @@ fn a_back_plane_is_not_shadowed_by_the_plane_in_front_of_it() {
                 },
                 back_planes: &f.back,
                 ref_eye: [32.0, 32.0, placement.distance],
+                overscan_px: 0.0,
             };
             let v = build_vertices_side(&scene, placement.eye);
             let vp = camera_matrices::view_proj_side(
@@ -434,6 +436,7 @@ fn atlas_upload_cost() {
             },
             back_planes: &[],
             ref_eye: [target.0, target.1, placement.distance],
+            overscan_px: 0.0,
         };
         let v = build_vertices_side(&scene, placement.eye);
         let mut ms = Vec::new();

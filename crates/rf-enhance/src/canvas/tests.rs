@@ -1055,6 +1055,30 @@ fn the_margin_shows_a_sub_screen_layer_behind_the_backdrop_through_colour_math()
 }
 
 #[test]
+fn a_margin_dot_says_which_layer_it_belongs_to() {
+    let (layers, frames, pal) = compose_fixture();
+    let layer = |dx: i64, r: &LineRegisters| {
+        let (rgb, layer) = margin_color_layer(&layers, &frames, 0, dx, None, r, &pal);
+        assert_eq!(rgb, margin_color(&layers, &frames, 0, dx, None, r, &pal));
+        layer
+    };
+    // BG1 known on the main screen at x = 7: the main layer.
+    assert_eq!(layer(7, &regs()), Some(0));
+    // Nothing on the main screen at x = 5, BG2's hill on the sub screen the
+    // row blends in (Super Mario World): the hill's layer, not the backdrop.
+    assert_eq!(layer(5, &regs()), Some(1));
+    // The sub screen not selected: the hill is not shown, so the dot is the
+    // backdrop's.
+    let fixed_only = LineRegisters {
+        use_subscreen: false,
+        ..regs()
+    };
+    assert_eq!(layer(5, &fixed_only), None);
+    // Nothing known at x = 6: the backdrop.
+    assert_eq!(layer(6, &regs()), None);
+}
+
+#[test]
 fn math_applies_to_the_main_layer_only_when_its_own_enable_bit_is_set() {
     let (layers, frames, pal) = compose_fixture();
     // BG1 known at x = 7 on the main screen.
@@ -1678,6 +1702,33 @@ mod nes_layer0 {
         assert_eq!(
             margin_pixel(&layers, &frames, 0, 6, &RowFacts::default(), &nes_rgb),
             None
+        );
+    }
+
+    /// Ticket W34-09: the NES's one layer is layer 0; the backdrop has none.
+    #[test]
+    fn margin_pixel_layer_names_the_layer_of_a_known_cell_and_none_for_the_backdrop() {
+        let layers = LayerCanvases {
+            canvases: [Some(canvas_with(&[(5, 0, 7)])), None, None, None],
+            ..Default::default()
+        };
+        let frames = LayerFrames {
+            scene: 1,
+            origins: [Some((0, 0)), None, None, None],
+            row_dx: Vec::new(),
+            confidence: Default::default(),
+        };
+        let facts = RowFacts {
+            backdrop: Some([9, 9, 9]),
+            ..RowFacts::default()
+        };
+        assert_eq!(
+            margin_pixel_layer(&layers, &frames, 0, 5, &facts, &nes_rgb),
+            Some((nes_rgb(7), Some(0)))
+        );
+        assert_eq!(
+            margin_pixel_layer(&layers, &frames, 0, 6, &facts, &nes_rgb),
+            Some(([9, 9, 9], None))
         );
     }
 }

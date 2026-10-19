@@ -98,6 +98,8 @@ const KIND_SPRITE: u32 = 1u;
 const KIND_SHADOW: u32 = 2u;
 const KIND_SIDE: u32 = 3u;
 const KIND_PLANE: u32 = 4u;
+// A plane behind the playfield's (W34-09): a PLANE that receives no shadow.
+const KIND_BACK: u32 = 5u;
 
 // Below this a fragment is invisible: it is dropped so it cannot write depth.
 const MIN_ALPHA: f32 = 0.02;
@@ -143,7 +145,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dy = dpdy(in.world);
     if (light.params.x < 0.5) {
         // Lighting off: the original shader.
-        if (in.kind == KIND_GROUND || in.kind == KIND_PLANE) {
+        if (in.kind == KIND_GROUND || in.kind == KIND_PLANE || in.kind == KIND_BACK) {
             let tex = textureSample(ground_tex, samp, in.uv);
             if (tex.a * in.color.a < MIN_ALPHA) {
                 discard;
@@ -181,11 +183,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Slope-scaled bias: a surface at a grazing angle to the light needs more.
     let bias = light.params.z * (1.0 + 4.0 * (1.0 - clamp(nl, 0.0, 1.0)));
     var shadow = 1.0;
-    if (light.params.y > 0.5 && direct > 0.0) {
+    if (light.params.y > 0.5 && direct > 0.0 && in.kind != KIND_BACK) {
         shadow = shadow_lookup(in.lpos, bias);
     }
 
-    if (in.kind == KIND_GROUND || in.kind == KIND_PLANE) {
+    if (in.kind == KIND_GROUND || in.kind == KIND_PLANE || in.kind == KIND_BACK) {
         let tex = textureSample(ground_tex, samp, in.uv);
         if (tex.a * in.color.a < MIN_ALPHA) {
             discard;
