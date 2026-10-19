@@ -1,7 +1,8 @@
 //! The one-click "HD-2D" look (ticket W30-06 part B).
 //!
 //! Settings only; there is no rendering here. The preset turns on, together,
-//! what already exists: the W30-04 lens (glow, miniature focus, soft shadows),
+//! what already exists: the W30-04 lens (glow, miniature focus, soft shadows,
+//! and the colour grade at a mid-morning time of day),
 //! Diorama walls (heights learned from play, painted, or decoded), and the
 //! W30-05 camera tilted down and zoomed in, following the player. Turning it
 //! off puts back what the player had, which [`apply`] hands back as a
@@ -21,6 +22,12 @@ pub const BLOOM_PCT: u8 = 35;
 pub const TILTSHIFT_PCT: u8 = 50;
 /// Soft-shadow strength, percent.
 pub const SHADOWS_PCT: u8 = 50;
+/// Colour-grade strength, percent (Brad 2026-10-19: the preset turns the
+/// grade on by default).
+pub const GRADE_PCT: u8 = 100;
+/// Time of day the grade (and the Diorama sun) uses, percent of a day: 30 is
+/// mid-morning, so shadows fall long and the light is warm.
+pub const TIME_OF_DAY_PCT: u8 = 30;
 /// Camera tilt, degrees (the default view is 52).
 pub const PITCH_DEG: u8 = 40;
 /// Camera zoom, percent (1.6x).
@@ -36,6 +43,9 @@ pub struct Remembered {
     lens_shadows: bool,
     lens_shadows_pct: u8,
     lens_grade: bool,
+    lens_grade_pct: u8,
+    lens_time_of_day: u8,
+    lens_follow_clock: bool,
     lens_weather: Weather,
     diorama: bool,
     diorama_pitch: u8,
@@ -54,6 +64,9 @@ impl Remembered {
             lens_shadows: s.lens_shadows,
             lens_shadows_pct: s.lens_shadows_pct,
             lens_grade: s.lens_grade,
+            lens_grade_pct: s.lens_grade_pct,
+            lens_time_of_day: s.lens_time_of_day,
+            lens_follow_clock: s.lens_follow_clock,
             lens_weather: s.lens_weather,
             diorama: s.diorama,
             diorama_pitch: s.diorama_pitch,
@@ -92,7 +105,10 @@ pub fn is_applied(s: &GameSettings) -> bool {
         && s.lens_tiltshift_pct == TILTSHIFT_PCT
         && s.lens_shadows
         && s.lens_shadows_pct == SHADOWS_PCT
-        && !s.lens_grade
+        && s.lens_grade
+        && s.lens_grade_pct == GRADE_PCT
+        && s.lens_time_of_day == TIME_OF_DAY_PCT
+        && !s.lens_follow_clock
         && s.lens_weather == Weather::None
         && s.diorama
         && s.diorama_pitch == PITCH_DEG
@@ -109,7 +125,10 @@ pub fn apply(s: &mut GameSettings) -> Remembered {
     s.lens_tiltshift_pct = TILTSHIFT_PCT;
     s.lens_shadows = true;
     s.lens_shadows_pct = SHADOWS_PCT;
-    s.lens_grade = false;
+    s.lens_grade = true;
+    s.lens_grade_pct = GRADE_PCT;
+    s.lens_time_of_day = TIME_OF_DAY_PCT;
+    s.lens_follow_clock = false;
     s.lens_weather = Weather::None;
     s.diorama = true;
     s.diorama_pitch = PITCH_DEG;
@@ -128,6 +147,9 @@ pub fn restore(s: &mut GameSettings, before: &Remembered) {
     s.lens_shadows = before.lens_shadows;
     s.lens_shadows_pct = before.lens_shadows_pct;
     s.lens_grade = before.lens_grade;
+    s.lens_grade_pct = before.lens_grade_pct;
+    s.lens_time_of_day = before.lens_time_of_day;
+    s.lens_follow_clock = before.lens_follow_clock;
     s.lens_weather = before.lens_weather;
     s.diorama = before.diorama;
     s.diorama_pitch = before.diorama_pitch;
@@ -186,7 +208,10 @@ mod tests {
         let mut s = settings(Mode::GameAware);
         s.lens_bloom = true;
         s.lens_bloom_pct = 80;
-        s.lens_grade = true;
+        s.lens_grade = false;
+        s.lens_grade_pct = 40;
+        s.lens_time_of_day = 75;
+        s.lens_follow_clock = true;
         s.lens_weather = Weather::Rain;
         s.diorama_pitch = 65;
         s.diorama_yaw = -12;
@@ -198,7 +223,12 @@ mod tests {
         assert!(is_applied(&s));
         assert_eq!((s.lens_bloom_pct, s.lens_tiltshift_pct), (35, 50));
         assert_eq!((s.lens_shadows, s.lens_shadows_pct), (true, 50));
-        assert!(!s.lens_grade);
+        assert!(s.lens_grade, "the preset turns the grade on");
+        assert_eq!(
+            (s.lens_grade_pct, s.lens_time_of_day),
+            (GRADE_PCT, TIME_OF_DAY_PCT)
+        );
+        assert!(!s.lens_follow_clock);
         assert_eq!(s.lens_weather, Weather::None);
         assert_eq!((s.diorama_pitch, s.diorama_zoom), (40, 160));
         assert!(s.diorama && s.diorama_follow);
