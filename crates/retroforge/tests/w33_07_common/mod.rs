@@ -520,6 +520,7 @@ pub fn discover_game(
         snes: rig.snes,
         scrolls,
         scene_key: rig.scene_key.clone(),
+        vertical: None,
     };
     let t0 = std::time::Instant::now();
     let (skeleton, report) = match discover(snap_find, ctx, &observed) {
@@ -593,4 +594,59 @@ pub fn accept(game: (&str, &str, &str), to_level: &str, play: &str) {
         found * 10 >= hand * 9,
         "the discovered table reached {found} of the hand-made {hand}: under 90%"
     );
+}
+
+// ---- Super Metroid (W35-02) ------------------------------------------------------------------
+
+pub const SM: (&str, &str, &str) = (
+    "snes",
+    "Super Metroid (Japan, USA) (En,Ja).zip",
+    "../../profiles/snes/super-metroid/profile.toml",
+);
+
+/// Boot, option screen, new game, the story pages (A advances each), to Ceres's first room with
+/// Samus on the elevator platform in control (about frame 11,800).
+pub fn sm_to_free_play() -> String {
+    let mut s = String::from("w300 w300 S6 w120 S6 w120 A6 w120 A6 w120 S6 w120 A6 w600");
+    for _ in 0..55 {
+        s += " A6 w150";
+    }
+    s + " w500 w600 w300"
+}
+
+/// Free play down the shaft (the screen scrolls up and down) and through its door into the
+/// corridor, a room two screens wide, then the door's fade.
+pub const SM_SHAFT: &str = "R40 w60 R40 w60 L40 w60 R40 w60 D10 w60 L40 w60 L40 w60 R40 w60 D10 w60 R40 R+A25 R30 R+A25 R30 w250";
+
+/// In the corridor (its entry door is on the left: never walk left from the entry): right over
+/// the step, left a little, six standing jumps, right and left again, right to the far end, stand.
+pub const SM_PLAY: &str = "R+A30 R60 L45 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R+A30 R60 L50 R50 L50 R+A30 R60 R+A30 w60";
+
+/// The finder as the core thread runs it ("Find scout settings for this game"): one session from
+/// free play (the shaft, the door, the corridor), then standing still until the trials answer.
+/// `after_shaft` runs between the shaft and the corridor play (a snapshot there starts a scout at
+/// the corridor's door).
+pub fn sm_find_table(
+    rig: &mut Rig,
+    secs: u64,
+    after_shaft: &mut dyn FnMut(&mut Rig),
+) -> Box<rf_enhance::scout_finder::Skeleton> {
+    use retroforge::scout_find::{Out, ScoutFind};
+    rig.find = Some(ScoutFind::new(true));
+    rig.script(SM_SHAFT);
+    after_shaft(rig);
+    rig.script(SM_PLAY);
+    let t0 = std::time::Instant::now();
+    let mut found = None;
+    // Bounded: `secs` seconds of idle frames.
+    while t0.elapsed() < std::time::Duration::from_secs(secs) && found.is_none() {
+        rig.script("w30");
+        for out in rig.find_out.drain(..) {
+            if let Out::Done(r) = out {
+                found = Some(r);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    found.expect("an answer").expect("a table, not an error")
 }

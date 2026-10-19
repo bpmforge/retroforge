@@ -409,6 +409,22 @@ and `retroforge::scout_find` (the core-thread half of the in-app action).
   still for a second. The app starts the trials when the player has stood
   still for 20 frames after that.
 
+**Built (W35-02, Super Metroid).** Evidence and every address in
+`docs/research/W35-02-super-metroid.md`. The generic changes the first game
+with rooms, doors and a camera that eases needed: a player-X test over 16-frame
+windows (a camera that follows late and a player who moves in fractions of a
+pixel agree over a window, not a frame); a Y byte must change on 5 window
+frames and may fall in two of five control windows (a joypad shadow byte was
+named, the real Y was refused for the ledges the player walked off); the
+gate's scene histograms no longer lose the level when a session has more than
+six scenes before it, gates must hold in the neighbouring rooms, be gone in
+doors and survive a scouting run (`gate_survival`); and the Y recipe is
+confirmed by a vertical pass from a second snapshot taken where the screen
+scrolled vertically (`scout_discovery::Vertical`, captured by
+`scout_find::ScoutFind`), so `player_y`/`player_y_hi` are named only for a Y
+word the game obeys. SMW 5120/5120, SMB3 2816/2816, MM2 2560/2560 px
+unchanged; Mega Man X 1024 -> 2820 px (its Y word is now named, a hold found).
+
 ### 3.2 Generic strategy ladder with fallbacks
 
 Try in order per scene, each with the self-check of §3.3; stop at the first

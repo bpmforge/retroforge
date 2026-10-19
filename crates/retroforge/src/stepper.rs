@@ -359,6 +359,7 @@ impl Machine {
 
 /// Ticket W30-07: a machine captured by [`EmuStepper::snapshot`] for
 /// run-ahead; opaque, in memory only.
+#[derive(Clone)]
 pub struct MachineSnapshot {
     container: rf_state::Container,
     frames: u64,

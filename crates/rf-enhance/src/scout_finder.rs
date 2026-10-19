@@ -15,7 +15,11 @@
 //!   and the carry check for its high byte.
 //! * **Player X.** A byte (the word's low half) that
 //!   1. steps by the camera's step on at least 85 % of the frames the camera
-//!      moves, and
+//!      moves, **or** (W35-02) adds up to the camera's travel over at least
+//!      half of the 16-frame windows the camera moved 8 px or more in (a
+//!      camera that eases toward the player and a player who walks in
+//!      fractions of a pixel never step together frame by frame: Super
+//!      Metroid; windows that hold a cut are skipped), and
 //!   2. goes UP while Right is held and DOWN while Left is held, and
 //!   3. **keeps changing on frames the camera does not move while a direction
 //!      is held** (the player walking towards a wall the camera stops at).
@@ -26,12 +30,20 @@
 //!   frames the low half wraps (adjacent or not: Super Mario Bros. 3 keeps it
 //!   a page away).
 //! * **Player Y.** A byte that deviates by 6..=110 within 40 frames of a jump
-//!   button press made while standing, comes back, and does NOT do so in
-//!   control windows opened at random while the pad is idle (timers, animation
-//!   counters).
-//! * **Start gate.** A byte that holds one value on at least 98 % of the
+//!   button press made while standing, on at least 5 of those frames (a flag a
+//!   press sets changes once), comes back, and does NOT do so in more than
+//!   two of five control windows opened at random while the pad is idle
+//!   (timers, animation counters; a player who walks off a ledge falls in
+//!   some).
+//! * **Start gate.** A byte that holds one value on at least 95 % of the
 //!   frames of the level (the scene with the most scrolling frames) and holds
 //!   a different value on the frames of every other scene (title, map, fades).
+//!   Since W35-02: the other rooms the player scrolled through must hold it
+//!   too, where doors were seen it must be gone in them, it takes at most
+//!   three values while the player plays and 24 over the session, and a byte
+//!   that lets go in a door ranks first. (`retroforge::scout_discovery` then
+//!   keeps only the gates that stay true through a scouting run and, where a
+//!   vertical room was met, through one there.)
 //!
 //! The hold value for Y and the choice between the candidates are NOT made
 //! here: they need a machine to try them on (`retroforge::scout_discovery`).
@@ -82,6 +94,22 @@ pub const MIN_PLAYER_STEP: f32 = 0.85;
 /// Frames a player word must keep changing, in the direction held, while the
 /// camera stood still.
 pub const MIN_WALL: u32 = 6;
+/// Frames of one lag-tolerant window (see [`ScoutFinder`]'s `wstep`): a camera
+/// that eases toward the player and a player that moves in fractions of a pixel
+/// step together over a window, not frame by frame.
+const LAG_WINDOW: u32 = 16;
+/// Share of the camera-moving windows a word must match: lower than the frame
+/// by frame bar, because the camera's own catching up (a window where it starts
+/// to follow, or the player turns) and a scripted scroll (a door) move it
+/// without the player.
+const MIN_LAG_RATIO: f32 = 0.5;
+/// A window counts only when the camera moved at least this far in it.
+const LAG_MIN_CAMERA: i16 = 8;
+/// Windows the lag-tolerant test needs before it can name a word.
+const LAG_MIN_WINDOWS: u32 = 6;
+/// Frames a Y byte must change in a window (an arc changes nearly every frame;
+/// a flag a button press sets changes once).
+const MIN_Y_CHANGES: u8 = 5;
 /// Frames a Y window watches after a press (a hop is about 40).
 const Y_WINDOW: u32 = 48;
 /// A Y byte starts to move within this many frames of the jump press.
@@ -95,6 +123,29 @@ pub const MIN_JUMPS: u32 = 2;
 /// Jump windows seen before the finder calls itself ready (more evidence,
 /// fewer wrong Y candidates to try).
 pub const MIN_JUMP_WINDOWS: u32 = 6;
+/// The key of the shared histogram of the scenes the gate stopped tracking.
+const OTHER_SCENE: Option<u64> = Some(u64::MAX - 1);
+/// The same for the scenes the player scrolled through.
+const OTHER_PLAY: Option<u64> = Some(u64::MAX - 2);
+/// Camera-moving frames that make another scene a room the player played in.
+pub const MIN_SIBLING_FRAMES: u32 = 60;
+/// Most distinct values a mode byte takes while the player plays.
+pub const MAX_PLAYED_VALUES: usize = 3;
+/// Most distinct values a mode byte takes over the whole session.
+pub const MAX_MODE_VALUES: usize = 24;
+/// The share of a transition's frames a gate's value must be gone from, where
+/// transitions were seen.
+pub const MIN_TRANSIT_DIFFERS: f32 = 0.5;
+/// Frames a scene needs to be a room, not a transition between two.
+pub const MIN_ROOM_FRAMES: u32 = 200;
+/// Camera-moving frames, at the pad, that make a short scene a transition.
+pub const MIN_TRANSIT_FRAMES: u32 = 20;
+/// The share of the level's frames a mode byte must hold its value on (the
+/// rest: a door's frames inside the scene).
+pub const MIN_CONSTANCY: f32 = 0.95;
+/// The share of such a room's frames a mode byte must hold its value on (the
+/// rest: a door's frames).
+pub const SIBLING_SHARE: f32 = 0.6;
 /// Scenes whose frames the gate keeps a histogram of.
 pub const MAX_SCENES: usize = 6;
 /// Frames of the level the gate wants.
@@ -182,6 +233,10 @@ struct Window {
     first: Vec<u8>,
     /// The byte had not changed for 8 frames when the window opened.
     quiet: Vec<bool>,
+    /// The byte's value on the previous window frame.
+    last: Vec<u8>,
+    /// Window frames on which the byte changed (capped).
+    changed: Vec<u8>,
 }
 
 /// One scene's histograms of every offset's value.
@@ -208,6 +263,7 @@ pub struct ScoutFinder {
     /// Frames each byte has held its value (capped).
     quiet_run: Vec<u8>,
     prev_scroll: Vec<Option<u8>>,
+    prev_scroll_y: Vec<Option<u8>>,
     prev_pad: Pad,
     prev_jump: u8,
     // player X
@@ -215,6 +271,18 @@ pub struct ScoutFinder {
     right_frames: u32,
     left_frames: u32,
     step: Vec<[u32; 2]>,
+    /// The lag-tolerant window: per byte the sum of its small changes since
+    /// the window opened, the camera's sum, the frames so far; per byte the
+    /// windows it matched; the windows judged.
+    win_sum: Vec<i16>,
+    win_cam: i16,
+    win_frames: u32,
+    /// The scene the window opened in, and whether a cut or a settling frame
+    /// fell inside it (a door's scroll moves the camera and not the player).
+    win_scene: Option<Option<u64>>,
+    win_dirty: bool,
+    wstep: Vec<u32>,
+    wwindows: u32,
     right_up: Vec<u32>,
     left_down: Vec<u32>,
     wrong: Vec<u32>,
@@ -245,6 +313,9 @@ pub struct ScoutFinder {
     // gate
     scenes: HashMap<Option<u64>, SceneHist>,
     scene_moving: HashMap<Option<u64>, u32>,
+    /// Per scene, the frames the camera moved after the player first pressed a
+    /// direction (a title that scrolls by itself is not play).
+    scene_play: HashMap<Option<u64>, u32>,
 }
 
 impl ScoutFinder {
@@ -259,12 +330,20 @@ impl ScoutFinder {
             last_delta: vec![0; len],
             quiet_run: vec![0; len],
             prev_scroll: vec![None; layers.max(1)],
+            prev_scroll_y: vec![None; layers.max(1)],
             prev_pad: Pad::Idle,
             prev_jump: 0,
             moving: 0,
             right_frames: 0,
             left_frames: 0,
             step: vec![[0; 2]; len],
+            win_sum: vec![0; len],
+            win_cam: 0,
+            win_frames: 0,
+            win_scene: None,
+            win_dirty: false,
+            wstep: vec![0; len],
+            wwindows: 0,
             right_up: vec![0; len],
             left_down: vec![0; len],
             wrong: vec![0; len],
@@ -286,6 +365,7 @@ impl ScoutFinder {
             standing: vec![0; len],
             scenes: HashMap::new(),
             scene_moving: HashMap::new(),
+            scene_play: HashMap::new(),
         }
     }
 
@@ -311,13 +391,14 @@ impl ScoutFinder {
         let armed = self.camera.armed() || f.pad != Pad::Idle;
         self.camera.observe(f.scroll, f.ram, armed);
         let cd = self.camera_delta(f.scroll);
+        let cdy = self.camera_delta_y(f.scroll);
         if self.prev.is_empty() {
             self.prev = f.ram[..n].to_vec();
             self.prev_pad = f.pad;
             self.prev_jump = f.jump;
             return;
         }
-        self.gate_frame(f, n, cd);
+        self.gate_frame(f, n, cd, armed && (cd != 0 || cdy != 0));
         if armed {
             self.player_frame(f, n, cd);
         }
@@ -343,6 +424,21 @@ impl ScoutFinder {
         let mut out = 0i16;
         for (prev, (xs, _)) in self.prev_scroll.iter_mut().zip(scroll) {
             let Some(&now) = xs.last() else { continue };
+            if let Some(before) = prev.replace(now) {
+                let d = i16::from(now.wrapping_sub(before) as i8);
+                if out == 0 && d != 0 {
+                    out = d;
+                }
+            }
+        }
+        out
+    }
+
+    /// The same for the y scroll byte.
+    fn camera_delta_y(&mut self, scroll: &[(&[u8], &[u8])]) -> i16 {
+        let mut out = 0i16;
+        for (prev, (_, ys)) in self.prev_scroll_y.iter_mut().zip(scroll) {
+            let Some(&now) = ys.last() else { continue };
             if let Some(before) = prev.replace(now) {
                 let d = i16::from(now.wrapping_sub(before) as i8);
                 if out == 0 && d != 0 {
@@ -379,6 +475,7 @@ impl ScoutFinder {
             if d == 0 || d.abs() > MAX_STEP {
                 continue;
             }
+            self.win_sum[b] += d;
             if right && d > 0 {
                 self.right_up[b] += 1;
             }
@@ -392,7 +489,38 @@ impl ScoutFinder {
                 self.wall[b] += 1;
             }
         }
+        if cam_moved {
+            self.win_cam += cd;
+        }
+        self.win_frames += 1;
+        match self.win_scene {
+            None => self.win_scene = Some(f.scene),
+            Some(first) => self.win_dirty |= first != f.scene,
+        }
+        self.win_dirty |= f.scene.is_none();
+        if self.win_frames >= LAG_WINDOW {
+            self.close_lag_window(n);
+        }
         self.wrap_pairs(f, n);
+    }
+
+    /// Judge the lag window: every byte whose changes added up to the camera's
+    /// travel (give or take a pixel and an eighth) matched it.
+    fn close_lag_window(&mut self, n: usize) {
+        if self.win_cam.abs() >= LAG_MIN_CAMERA && !self.win_dirty {
+            self.wwindows += 1;
+            let tol = 2 + self.win_cam.abs() / 8;
+            for b in 0..n {
+                if (self.win_sum[b] - self.win_cam).abs() <= tol {
+                    self.wstep[b] += 1;
+                }
+            }
+        }
+        self.win_sum[..n].fill(0);
+        self.win_cam = 0;
+        self.win_frames = 0;
+        self.win_scene = None;
+        self.win_dirty = false;
     }
 
     /// Count the wraps of every byte and the bytes that stepped with them.
@@ -456,8 +584,16 @@ impl ScoutFinder {
             .filter_map(|b| {
                 let steps = self.step[b][0].max(self.step[b][1]);
                 #[allow(clippy::cast_precision_loss)]
-                let ratio = steps as f32 / self.moving as f32;
-                let ok = ratio >= MIN_PLAYER_STEP
+                let exact = steps as f32 / self.moving as f32;
+                #[allow(clippy::cast_precision_loss)]
+                let lagged = if self.wwindows >= LAG_MIN_WINDOWS {
+                    self.wstep[b] as f32 / self.wwindows as f32
+                } else {
+                    0.0
+                };
+                let ratio = exact.max(lagged);
+                let follows = exact >= MIN_PLAYER_STEP || lagged >= MIN_LAG_RATIO;
+                let ok = follows
                     && (!wall_test || self.wall[b] >= min_wall)
                     && self.right_up[b] >= 10
                     && (self.left_frames < 30 || self.left_down[b] >= 2)
@@ -555,6 +691,8 @@ impl ScoutFinder {
                     .iter()
                     .map(|&q| q >= QUIET_FRAMES)
                     .collect(),
+                last: self.prev[..n].to_vec(),
+                changed: vec![0; n],
             });
         }
     }
@@ -573,6 +711,10 @@ impl ScoutFinder {
                     w.sign[b] = d.signum();
                 }
                 w.maxdev[b] = dev;
+            }
+            if f.ram[b] != w.last[b] {
+                w.changed[b] = w.changed[b].saturating_add(1);
+                w.last[b] = f.ram[b];
             }
             if dev >= 2 && w.first[b] == u8::MAX {
                 w.first[b] = w.frames.min(254) as u8;
@@ -603,6 +745,7 @@ impl ScoutFinder {
                 self.jump_quiet[b] += 1;
             }
             let moved = (6..=127).contains(&w.maxdev[b])
+                && w.changed[b] >= MIN_Y_CHANGES
                 && w.quiet[b]
                 && (!w.jump || w.first[b] <= FIRST_DEVIATION);
             if !moved {
@@ -621,17 +764,23 @@ impl ScoutFinder {
         }
     }
 
-    fn gate_frame(&mut self, f: &Frame<'_>, n: usize, cd: i16) {
+    /// `played`: the player has the pad in hand and the screen moved (on
+    /// either axis).
+    fn gate_frame(&mut self, f: &Frame<'_>, n: usize, cd: i16, played: bool) {
         let key = f.scene;
         if cd != 0 && cd.abs() <= MAX_STEP {
             *self.scene_moving.entry(key).or_insert(0) += 1;
         }
-        // The shared "other" histogram takes any scene beyond the cap.
-        let key = if self.scenes.contains_key(&key) || self.scenes.len() < MAX_SCENES {
-            key
-        } else {
-            Some(u64::MAX - 1)
-        };
+        if played {
+            *self.scene_play.entry(key).or_insert(0) += 1;
+        }
+        // A scene beyond the cap takes the place of the one that scrolled
+        // least, whose frames fold into the shared "other" histogram: a
+        // session with many scenes before the level (a title, menus, a story
+        // told in pages) must not leave the level without a histogram.
+        if !self.scenes.contains_key(&key) && self.scenes.len() >= MAX_SCENES {
+            self.evict_quietest_scene();
+        }
         let len = self.len;
         let hist = self.scenes.entry(key).or_insert_with(|| SceneHist {
             frames: 0,
@@ -641,6 +790,37 @@ impl ScoutFinder {
         for (b, &v) in f.ram[..n].iter().enumerate() {
             let slot = &mut hist.bins[b * 256 + usize::from(v)];
             *slot = slot.saturating_add(1);
+        }
+    }
+
+    /// Fold the histogram of the scene that scrolled least into the shared
+    /// "other" one.
+    fn evict_quietest_scene(&mut self) {
+        let victim = self
+            .scenes
+            .keys()
+            .copied()
+            .filter(|k| k.is_some() && *k != OTHER_SCENE && *k != OTHER_PLAY)
+            .min_by_key(|k| (self.scene_play.get(k).copied().unwrap_or(0), *k));
+        let Some(victim) = victim else { return };
+        let Some(gone) = self.scenes.remove(&victim) else {
+            return;
+        };
+        let into = if self.scene_play.get(&victim).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES
+            && gone.frames >= MIN_ROOM_FRAMES
+        {
+            OTHER_PLAY
+        } else {
+            OTHER_SCENE
+        };
+        let len = self.len;
+        let other = self.scenes.entry(into).or_insert_with(|| SceneHist {
+            frames: 0,
+            bins: vec![0; len * 256],
+        });
+        other.frames += gone.frames;
+        for (o, g) in other.bins.iter_mut().zip(&gone.bins) {
+            *o = o.saturating_add(*g);
         }
     }
 
@@ -666,7 +846,7 @@ impl ScoutFinder {
     pub fn probe(&self, b: usize) -> String {
         format!(
             "off {b:#06x}: moving {} step {:?} right_up {} left_down {} wrong {} wall {} changes {} | \
-             jump_hit {}/{} control_hit {}/{} | frames {} camera moving {}",
+             jump_hit {}/{} control_hit {}/{} | frames {} camera moving {} | lag windows {}/{}",
             self.moving,
             self.step[b],
             self.right_up[b],
@@ -680,6 +860,8 @@ impl ScoutFinder {
             self.control_windows,
             self.frames,
             self.camera.moving(),
+            self.wstep[b],
+            self.wwindows,
         )
     }
 
@@ -760,7 +942,7 @@ impl ScoutFinder {
                     && self.jump_hit[b] * 10 >= self.jump_quiet[b] * 5
                     && self.up_sum[b].unsigned_abs() * 10 >= self.jump_hit[b] * 8
                     && self.jump_back[b] >= 1
-                    && self.control_hit[b] * 5 <= self.control_windows
+                    && self.control_hit[b] * 5 <= self.control_windows * 2
             })
             .map(|b| {
                 #[allow(clippy::cast_precision_loss)]
@@ -789,7 +971,7 @@ impl ScoutFinder {
         let Some((level_key, _)) = self
             .scene_moving
             .iter()
-            .filter(|(k, _)| k.is_some())
+            .filter(|(k, _)| k.is_some() && self.scenes.contains_key(k))
             .max_by_key(|(k, v)| (**v, std::cmp::Reverse(k.unwrap_or(0))))
         else {
             return Vec::new();
@@ -797,12 +979,40 @@ impl ScoutFinder {
         let Some(level) = self.scenes.get(level_key) else {
             return Vec::new();
         };
-        let other_frames: u32 = self
-            .scenes
-            .iter()
-            .filter(|(k, _)| *k != level_key)
-            .map(|(_, h)| h.frames)
-            .sum();
+        // The other scenes the player also scrolled in (the next room, the
+        // other half of a level) are play as well: a mode byte holds its value
+        // there too, and a byte that does not is something about THIS room.
+        // They are not evidence of what "not playing" looks like, so the
+        // difference is measured against the rest (title, menus, cuts).
+        let scrolled = |k: &Option<u64>| {
+            *k == OTHER_PLAY
+                || (k.is_some()
+                    && *k != OTHER_SCENE
+                    && self.scene_play.get(k).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES)
+        };
+        let mut siblings: Vec<&SceneHist> = Vec::new();
+        let mut rest: Vec<&SceneHist> = Vec::new();
+        // The short scenes the camera moved in while the player was at the pad
+        // (a door's scroll, a fade): what "not playing" looks like inside a
+        // game.
+        let mut transit: Vec<&SceneHist> = Vec::new();
+        for (k, h) in self.scenes.iter().filter(|(k, _)| *k != level_key) {
+            if scrolled(k) && (*k == OTHER_PLAY || h.frames >= MIN_ROOM_FRAMES) {
+                siblings.push(h);
+            } else {
+                rest.push(h);
+                if self.scene_play.get(k).copied().unwrap_or(0) >= MIN_TRANSIT_FRAMES {
+                    transit.push(h);
+                }
+            }
+        }
+        let transit_frames: u32 = transit.iter().map(|h| h.frames).sum();
+        let mut other_frames: u32 = rest.iter().map(|h| h.frames).sum();
+        if other_frames < MIN_OTHER_FRAMES {
+            // Nothing but play was seen: the old rule, against every scene.
+            rest.append(&mut siblings);
+            other_frames = rest.iter().map(|h| h.frames).sum();
+        }
         if level.frames < MIN_LEVEL_FRAMES || other_frames < MIN_OTHER_FRAMES {
             return Vec::new();
         }
@@ -815,35 +1025,94 @@ impl ScoutFinder {
             };
             #[allow(clippy::cast_precision_loss)]
             let constancy = f32::from(count) / level.frames as f32;
-            if constancy < 0.98 {
+            if constancy < MIN_CONSTANCY {
                 continue;
             }
-            let same: u32 = self
-                .scenes
+            #[allow(clippy::cast_precision_loss)]
+            let holds_in_siblings = siblings
                 .iter()
-                .filter(|(k, _)| *k != level_key)
-                .map(|(_, h)| u32::from(h.bins[b * 256 + mode]))
-                .sum();
+                .all(|h| f32::from(h.bins[b * 256 + mode]) >= SIBLING_SHARE * h.frames as f32);
+            if !holds_in_siblings {
+                continue;
+            }
+            let same: u32 = rest.iter().map(|h| u32::from(h.bins[b * 256 + mode])).sum();
             #[allow(clippy::cast_precision_loss)]
             let differs = 1.0 - same as f32 / other_frames as f32;
             if differs < 0.6 {
                 continue;
             }
+            // A mode byte takes a handful of values over a whole session; a
+            // scratch variable or a pointer takes dozens and happens to sit
+            // still through the level.
+            let distinct = (0..256)
+                .filter(|&v| self.scenes.values().any(|h| h.bins[b * 256 + v] > 0))
+                .count();
+            if distinct > MAX_MODE_VALUES {
+                continue;
+            }
+            // How often the value is gone on a transition's frames: 1.0 when
+            // none were seen (no evidence either way).
+            let in_transit: u32 = transit
+                .iter()
+                .map(|h| u32::from(h.bins[b * 256 + mode]))
+                .sum();
+            #[allow(clippy::cast_precision_loss)]
+            let transit_differs = if transit_frames >= MIN_TRANSIT_FRAMES {
+                1.0 - in_transit as f32 / transit_frames as f32
+            } else {
+                1.0
+            };
+            // Whether it took more than one value while the player played
+            // (the level, the rooms beside it, the doors between them): a
+            // mode byte lets go of its value at a door or a pause, a flag set
+            // when the game began never does.
+            let played_values = (0..256)
+                .filter(|&v| {
+                    level.bins[b * 256 + v] > 0
+                        || siblings
+                            .iter()
+                            .chain(&transit)
+                            .any(|h| h.bins[b * 256 + v] > 0)
+                })
+                .count();
+            // ...but only a few values: a byte that takes many while the
+            // player plays (a pose, a speed) sits at its level value only by
+            // chance, and a gate that is false for a stretch of ordinary play
+            // keeps the scout from ever starting.
+            if played_values > MAX_PLAYED_VALUES {
+                continue;
+            }
+            let reacts = played_values >= 2;
+            // Where doors were seen, a gate is gone in them: that is what it
+            // is for (the scout must not start in a transition).
+            if transit_differs < MIN_TRANSIT_DIFFERS {
+                continue;
+            }
             #[allow(clippy::cast_possible_truncation)]
-            out.push(GateCandidate {
-                offset: b,
-                value: mode as u8,
-                constancy,
-                differs,
-                confidence: constancy * differs,
-            });
+            out.push((
+                GateCandidate {
+                    offset: b,
+                    value: mode as u8,
+                    constancy,
+                    differs,
+                    confidence: constancy * differs,
+                },
+                (reacts, distinct, transit_differs),
+            ));
         }
-        out.sort_by(|a, b| {
-            b.confidence
-                .total_cmp(&a.confidence)
+        // Equally good bytes (to a tenth) are told apart by which of them
+        // lets go in a door or a fade: a mode byte does, a flag set once at the
+        // start of the game does not.
+        out.sort_by(|(a, (ar, ad, at)), (b, (br, bd, bt))| {
+            let (ac, bc) = ((a.confidence * 10.0).round(), (b.confidence * 10.0).round());
+            bc.total_cmp(&ac)
+                .then(br.cmp(ar))
+                .then(ad.cmp(bd))
+                .then(bt.total_cmp(at))
                 .then(a.offset.cmp(&b.offset))
         });
-        out.truncate(KEEP);
+        let mut out: Vec<GateCandidate> = out.into_iter().map(|(g, _)| g).collect();
+        out.truncate(4 * KEEP);
         out
     }
 }
@@ -932,6 +1201,13 @@ mod tests {
         y: i32,
         split_hi: bool,
         t: u32,
+        /// A button flag the game sets while a face button is held (0x80).
+        flag: u8,
+        /// The player walks in fractions of a pixel (1, 3, 1, 2, 1...) and the
+        /// camera follows two frames late: no frame-by-frame match between them.
+        eased: bool,
+        /// The player's X on the last frames (the eased camera follows 2 late).
+        hist: Vec<i32>,
     }
 
     impl Game {
@@ -944,12 +1220,16 @@ mod tests {
                 y: 0x80,
                 split_hi,
                 t: 0,
+                flag: 0,
+                eased: false,
+                hist: Vec::new(),
             };
             g.store();
             g
         }
 
         fn store(&mut self) {
+            self.ram[0x80] = self.flag;
             let px = self.px as u16;
             self.ram[0x10] = px as u8;
             if self.split_hi {
@@ -968,15 +1248,27 @@ mod tests {
 
         fn frame(&mut self, pad: Pad, jump: bool, level: bool) {
             self.t += 1;
+            self.flag = if jump { 0x80 } else { 0 };
             if level {
+                let step = if self.eased {
+                    [1, 3, 1, 2, 1][(self.t % 5) as usize]
+                } else {
+                    2
+                };
                 let dx = match pad {
-                    Pad::Right => 2,
-                    Pad::Left => -2,
+                    Pad::Right => step,
+                    Pad::Left => -step,
                     Pad::Idle => 0,
                 };
                 self.px = (self.px + dx).clamp(0, 6000);
                 // The camera follows past screen x 120 and never goes back.
-                self.cam = self.cam.max((self.px - 120).max(0));
+                self.hist.push(self.px);
+                let late = self.hist[self.hist.len().saturating_sub(3)];
+                self.cam = if self.eased {
+                    self.cam.max((late - 120).max(0))
+                } else {
+                    self.cam.max((self.px - 120).max(0))
+                };
                 if jump && self.y == 0x80 && self.vy == 0 {
                     self.vy = -6;
                 }
@@ -994,6 +1286,49 @@ mod tests {
             }
             self.store();
         }
+    }
+
+    /// The session of `run_finder`, with `pre` menu scenes before the level and
+    /// optionally the eased game.
+    fn run_scenario(pre: u64, eased: bool) -> ScoutFinder {
+        let mut finder = ScoutFinder::new(0x100, 1);
+        let mut g = Game::new(false, 40);
+        g.eased = eased;
+        let mut feed = |g: &Game, pad: Pad, jump: bool, scene: u64| {
+            let scroll = [g.ram[0x20]];
+            finder.observe(&Frame {
+                ram: &g.ram,
+                pad,
+                jump: u8::from(jump),
+                scroll: &[(&scroll, &[0])],
+                scene: Some(scene),
+            });
+        };
+        for s in 0..pre {
+            for _ in 0..70 {
+                g.frame(Pad::Idle, false, false);
+                feed(&g, Pad::Idle, false, 100 + s);
+            }
+        }
+        for _ in 0..40 {
+            g.frame(Pad::Idle, false, true);
+            feed(&g, Pad::Idle, false, 2);
+        }
+        for _ in 0..60 {
+            g.frame(Pad::Left, false, true);
+            feed(&g, Pad::Left, false, 2);
+        }
+        for _ in 0..6 {
+            for i in 0..80 {
+                g.frame(Pad::Idle, i < 8, true);
+                feed(&g, Pad::Idle, i < 8, 2);
+            }
+        }
+        for _ in 0..900 {
+            g.frame(Pad::Right, false, true);
+            feed(&g, Pad::Right, false, 2);
+        }
+        finder
     }
 
     fn run(split_hi: bool, mirror_only: bool) -> Observed {
@@ -1132,6 +1467,50 @@ mod tests {
         assert!(
             f.observed().players.is_empty(),
             "and with it nobody is named"
+        );
+    }
+
+    /// Ticket W35-02: a camera that eases toward the player, and a player who
+    /// walks in fractions of a pixel, never step together frame by frame (Super
+    /// Metroid). Over a window of frames their travel agrees.
+    #[test]
+    fn a_camera_that_eases_still_names_the_player() {
+        let f = run_scenario(1, true);
+        let o = f.observed();
+        let p = o.players.first().expect("a player");
+        assert_eq!(p.lo, 0x10, "{o:?}");
+        let exact = f.step[0x10][0].max(f.step[0x10][1]) as f32 / f.moving as f32;
+        assert!(
+            exact < MIN_PLAYER_STEP,
+            "the frame-by-frame test alone would not have named him: {exact}"
+        );
+        // ...and the mirrors are still not him.
+        assert!(o
+            .players
+            .iter()
+            .all(|p| ![0x20, 0x30, 0x32].contains(&p.lo)));
+    }
+
+    /// Ticket W35-02: a flag a button press sets and a release clears changes
+    /// once, not along a jump's arc: not a Y.
+    #[test]
+    fn a_button_flag_is_not_the_player_y() {
+        let o = run(false, false);
+        assert!(o.ys.iter().any(|y| y.offset == 0x50), "{:?}", o.ys);
+        assert!(o.ys.iter().all(|y| y.offset != 0x80), "{:?}", o.ys);
+    }
+
+    /// Ticket W35-02: ten menu scenes before the level must not leave the level
+    /// without a histogram to find its gate in (the cap used to send it to the
+    /// shared one).
+    #[test]
+    fn a_level_after_many_scenes_still_has_a_gate() {
+        let o = run_scenario(10, false).observed();
+        assert_eq!(
+            o.gates.first().map(|g| (g.offset, g.value)),
+            Some((0x70, 1)),
+            "{:?}",
+            o.gates
         );
     }
 }
