@@ -3440,6 +3440,268 @@ fn shot_diorama_level_smb3(readme: &mut Vec<String>) {
     }
 }
 
+/// W34-08: the Diorama with layers. Per game: the off/on pair (the picture
+/// pulled apart into planes, the HUD flat on top), then the layered cost
+/// against the one-plane picture of W34-07 in the same binary.
+/// `RF_SCREENS_ONLY=diorama-layers-smw` (or `-smb3`, `-alttp`).
+fn layers_cost(h: &mut H, name: &str, readme: &mut Vec<String>) {
+    if std::env::var("RF_LAYERS_NO_COST").is_ok() {
+        return;
+    }
+    h.state_mut().set_diorama_for_test(true);
+    h.state_mut().resume_for_test();
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    run_n(h, 10);
+    let mut rows = Vec::new();
+    for layers in [false, true, false, true] {
+        h.state_mut().set_diorama_layers_for_test(layers);
+        run_n(h, 20);
+        let f0 = h.state().frame_count_for_test();
+        let t0 = Instant::now();
+        run_frames(h, f0 + 240, Duration::from_secs(300));
+        let n = h.state().frame_count_for_test() - f0;
+        rows.push((
+            layers,
+            n as f64 / t0.elapsed().as_secs_f64(),
+            h.state().diorama_p95_ms_for_test(),
+        ));
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    h.state_mut().set_diorama_layers_for_test(true);
+    let text: Vec<String> = rows
+        .iter()
+        .map(|(l, fps, p95)| {
+            format!(
+                "{} {fps:.1} fps p95 {p95:.2} ms",
+                if *l { "layers" } else { "one plane" }
+            )
+        })
+        .collect();
+    note(
+        readme,
+        format!(
+            "DIORAMA-LAYERS-COST {name} (240 frames per row, alternating, pacing off, image {:?}): {}",
+            h.state().diorama_size_for_test(),
+            text.join(" | ")
+        ),
+    );
+}
+
+fn shot_diorama_layers_smw(readme: &mut Vec<String>) {
+    let name = "smw";
+    if !wanted("diorama-layers-smw") {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smw_enter_yi1(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    play_for(
+        &mut h,
+        frames,
+        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+        &[(0x1490, 0xFF)],
+        enter_smw,
+    );
+    enter_smw(&mut h);
+    wait(&mut h, "smw", 150);
+    play_script(&mut h, "R40 B+R20");
+    release_all(&mut h);
+    // A fixed mid-morning sun (the wall clock would make the shots depend on
+    // the hour they are taken).
+    set_time_of_day(&mut h, 40);
+    diorama_pair_as(
+        &mut h,
+        "diorama-layers",
+        name,
+        "Super Mario World, Yoshi's Island 1: ground, hills and sky on their own planes, the status bar flat on top",
+        readme,
+    );
+    // A resized window is for the cost rows: its pictures stay out of the docs.
+    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok()
+        && std::env::var("RF_SCREENS_KEEP").is_err()
+    {
+        probe_dir()
+    } else {
+        out_dir()
+    };
+    // The hills behind the ground: a yawed camera, planes on and off.
+    for (tag, layers, pitch, yaw, zoom, follow) in [
+        ("yaw15", true, 52u8, 15i8, 100u16, false),
+        ("oneplane-yaw15", false, 52, 15, 100, false),
+        ("pitch-lo", true, 20, 0, 100, false),
+        ("pitch-hi", true, 80, 0, 100, false),
+        ("oneplane-pitch-hi", false, 80, 0, 100, false),
+        ("zoom", true, 40, 0, 160, true),
+        ("oneplane-zoom", false, 40, 0, 160, true),
+    ] {
+        h.state_mut().set_diorama_layers_for_test(layers);
+        h.state_mut()
+            .set_diorama_camera_for_test(pitch, yaw, zoom, follow);
+        run_n(&mut h, 20);
+        step_from(&mut h);
+        step_from(&mut h);
+        if let Some(p) = grab_play_area(&mut h) {
+            save(
+                &d.join(format!("diorama-layers-{name}-{tag}.png")),
+                &p.opaque(),
+            );
+        }
+    }
+    h.state_mut().set_diorama_layers_for_test(true);
+    h.state_mut().set_diorama_camera_for_test(52, 0, 100, false);
+    layers_cost(&mut h, name, readme);
+}
+
+fn shot_diorama_layers_smb3(readme: &mut Vec<String>) {
+    let name = "smb3";
+    if !wanted("diorama-layers-smb3") {
+        return;
+    }
+    let Some(path) = rom("nes", "Super Mario Bros. 3 (USA).zip") else {
+        return skip(readme, name, "Super Mario Bros. 3 (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smb3_enter_level(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    play_for(
+        &mut h,
+        frames,
+        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+        &[],
+        enter_smb3,
+    );
+    enter_smb3(&mut h);
+    play_script(&mut h, "R60 B+R20");
+    release_all(&mut h);
+    // A fixed mid-morning sun (the wall clock would make the shots depend on
+    // the hour they are taken).
+    set_time_of_day(&mut h, 40);
+    diorama_pair_as(
+        &mut h,
+        "diorama-layers",
+        name,
+        "Super Mario Bros. 3, world 1-1: sky behind the playfield, the status bar flat on top",
+        readme,
+    );
+    // A resized window is for the cost rows: its pictures stay out of the docs.
+    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok()
+        && std::env::var("RF_SCREENS_KEEP").is_err()
+    {
+        probe_dir()
+    } else {
+        out_dir()
+    };
+    for (tag, layers, pitch, yaw, zoom, follow) in [
+        ("yaw15", true, 52u8, 15i8, 100u16, false),
+        ("oneplane-yaw15", false, 52, 15, 100, false),
+        ("pitch-hi", true, 80, 0, 100, false),
+        ("oneplane-pitch-hi", false, 80, 0, 100, false),
+    ] {
+        h.state_mut().set_diorama_layers_for_test(layers);
+        h.state_mut()
+            .set_diorama_camera_for_test(pitch, yaw, zoom, follow);
+        run_n(&mut h, 20);
+        step_from(&mut h);
+        step_from(&mut h);
+        if let Some(p) = grab_play_area(&mut h) {
+            save(
+                &d.join(format!("diorama-layers-{name}-{tag}.png")),
+                &p.opaque(),
+            );
+        }
+    }
+    h.state_mut().set_diorama_layers_for_test(true);
+    h.state_mut().set_diorama_camera_for_test(52, 0, 100, false);
+    layers_cost(&mut h, name, readme);
+}
+
+fn shot_diorama_layers_alttp(readme: &mut Vec<String>) {
+    let name = "alttp";
+    if !wanted("diorama-layers-alttp") {
+        return;
+    }
+    let Some(path) = rom(
+        "snes",
+        "Legend of Zelda, The - A Link to the Past (USA).zip",
+    ) else {
+        return skip(readme, name, "A Link to the Past (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    alttp_take_control(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let laps: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    let end = h.state().frame_count_for_test() + laps;
+    while h.state().frame_count_for_test() < end {
+        play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+    }
+    release_all(&mut h);
+    // A fixed mid-morning sun (the wall clock would make the shots depend on
+    // the hour they are taken).
+    set_time_of_day(&mut h, 40);
+    diorama_pair_as(
+        &mut h,
+        "diorama-layers",
+        name,
+        "A Link to the Past, Link's house, top-down: the HUD flat on top, Link one billboard",
+        readme,
+    );
+    // A resized window is for the cost rows: its pictures stay out of the docs.
+    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok()
+        && std::env::var("RF_SCREENS_KEEP").is_err()
+    {
+        probe_dir()
+    } else {
+        out_dir()
+    };
+    // The same frame on one plane, for the comparison.
+    h.state_mut().set_diorama_layers_for_test(false);
+    run_n(&mut h, 20);
+    step_from(&mut h);
+    step_from(&mut h);
+    if let Some(p) = grab_play_area(&mut h) {
+        save(
+            &d.join(format!("diorama-layers-{name}-oneplane.png")),
+            &p.opaque(),
+        );
+    }
+    h.state_mut().set_diorama_layers_for_test(true);
+    layers_cost(&mut h, name, readme);
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -3472,6 +3734,9 @@ fn w30_w31_screens() {
     shot_diorama_side_smw(&mut readme);
     shot_diorama_side_smb3(&mut readme);
     shot_diorama_top_alttp(&mut readme);
+    shot_diorama_layers_smw(&mut readme);
+    shot_diorama_layers_smb3(&mut readme);
+    shot_diorama_layers_alttp(&mut readme);
     shot_diorama_light_alttp(&mut readme);
     shot_diorama_light_smw(&mut readme);
     shot_diorama_level_smw(&mut readme);

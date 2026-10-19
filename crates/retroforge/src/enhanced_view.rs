@@ -920,6 +920,7 @@ pub fn compose_diorama(
                 width_px: b.width_px,
                 height_px: b.height_px,
                 uv: b.uv,
+                behind_bg: false,
             })
             .collect();
         let (cx, cy) = smoothed;
@@ -934,6 +935,7 @@ pub fn compose_diorama(
                 sprite_rgba,
                 sprite_size: (sprite_w, sprite_h),
                 back_px: 0.0,
+                planes: None,
                 window: (f32::from(viewport.0), f32::from(viewport.1)),
                 centre: if view.follow {
                     (cx, cy)

@@ -1400,6 +1400,15 @@ pub struct RetroForgeApp {
     /// Diorama degrades silently to the flat view (`enhanced_view::
     /// select_active_view`'s own doc explains why).
     diorama_render: Option<enhanced_view::DioramaRender>,
+    /// Ticket W34-08: the HUD of the Diorama frame being stored, drawn flat
+    /// over the finished 3D image (and the lens's output) in screen space.
+    diorama_hud: crate::diorama_layers::HudOverlay,
+    /// Ticket W34-08: what drawing the HUD over the last frame cost, ms
+    /// (added to the next frame's sample for the budget gate).
+    diorama_hud_ms: f64,
+    /// Ticket W34-08: pull the picture apart into planes and lift the HUD
+    /// off it (off: the one-plane Diorama of W34-07, for A/B cost).
+    diorama_layers: bool,
     /// The egui texture built from [`Self::diorama_render`]'s `rgba`, same
     /// "persistent `TextureHandle`, `.set()` on later frames" shape
     /// [`Self::ultrawide_texture`] already uses.
@@ -2008,6 +2017,9 @@ impl RetroForgeApp {
             fm13_message: None,
             diorama_pass: None,
             diorama_render: None,
+            diorama_hud: crate::diorama_layers::HudOverlay::default(),
+            diorama_hud_ms: 0.0,
+            diorama_layers: true,
             diorama_texture: None,
             diorama_lensed_rgba: None,
             diorama_wanted: false,
@@ -5727,6 +5739,43 @@ impl RetroForgeApp {
             screen_centre
         };
         let start = std::time::Instant::now();
+        // Ticket W34-08: the picture pulled apart into planes with its HUD
+        // lifted off (the layer map is the core thread's, and must be the
+        // frame's own size), or just the HUD lifted off the floor.
+        let info = msg.heights.as_deref().map(|h| &h.layers).filter(|l| {
+            self.diorama_layers
+                && width > 0
+                && l.ids.len() == msg.rgba.len() / 4
+                && l.ids.len() == (width * height) as usize
+        });
+        let playfield = msg
+            .heights
+            .as_deref()
+            .and_then(|h| msg.tile_grids.get(h.foreground?))
+            .map(|g| g.layer);
+        let mut planes: Option<crate::diorama_layers::Planes> = None;
+        let mut top_ground: Option<(Vec<u8>, crate::diorama_layers::HudOverlay)> = None;
+        if let (Some(l), Some(playfield)) = (info, playfield) {
+            match plan {
+                dl::Plan::Side if wide.is_none() => {
+                    planes = crate::diorama_layers::split(&crate::diorama_layers::LayerSplit {
+                        rgba: &msg.rgba,
+                        sprite_rgba: &msg.sprite_rgba,
+                        ids: &l.ids,
+                        width,
+                        rows,
+                        playfield,
+                        ratios: l.ratios,
+                        hud: &l.hud,
+                    });
+                }
+                dl::Plan::Top => {
+                    top_ground =
+                        crate::diorama_layers::without_hud(&msg.rgba, &l.ids, &l.hud, width, rows);
+                }
+                _ => {}
+            }
+        }
         let result = match plan {
             dl::Plan::Side => {
                 let own;
@@ -5737,7 +5786,11 @@ impl RetroForgeApp {
                         dl::side_billboards_wide(sprites, (width, height), core_pad, plane_pad),
                     ),
                     None => {
-                        own = dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
+                        own = if planes.is_some() {
+                            Vec::new()
+                        } else {
+                            dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width)
+                        };
                         (
                             &own,
                             (width, height),
@@ -5759,6 +5812,7 @@ impl RetroForgeApp {
                             msg.heights.as_ref().and_then(|h| h.backdrop_ratio),
                             lattice.tile_px as f32,
                         ),
+                        planes: planes.as_ref(),
                         window: (plane.0 as f32, rows as f32),
                         centre,
                         out,
@@ -5771,7 +5825,7 @@ impl RetroForgeApp {
                 pass,
                 &dl::TopFrame {
                     lattice: &lattice,
-                    frame_rgba: &msg.rgba,
+                    frame_rgba: top_ground.as_ref().map_or(&msg.rgba, |(g, _)| g),
                     screen: (width, height),
                     sprites,
                     sprite_rgba: &msg.sprite_rgba,
@@ -5782,8 +5836,13 @@ impl RetroForgeApp {
                 },
             ),
         };
+        self.diorama_hud = match (planes, top_ground) {
+            (Some(p), _) => p.hud,
+            (None, Some((_, h))) => h,
+            (None, None) => crate::diorama_layers::HudOverlay::default(),
+        };
         self.diorama_budget
-            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
+            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0 + self.diorama_hud_ms);
         self.store_diorama_result(result, msg.frame_count);
     }
 
@@ -5894,13 +5953,28 @@ impl RetroForgeApp {
         result: Result<enhanced_view::DioramaRender, String>,
         frame_count: u64,
     ) {
+        let hud = std::mem::take(&mut self.diorama_hud);
         match result {
-            Ok(render) => {
+            Ok(mut render) => {
                 // W34-06b: the lens (bloom, tilt-shift, grade, weather) runs
                 // over the 3D image when it is the picture shown. `render`
                 // keeps the raw pass output (tests and the accuracy checks
                 // read it); the texture gets the lensed copy.
-                let lensed = self.lens_over_diorama(&render, frame_count);
+                let mut lensed = self.lens_over_diorama(&render, frame_count);
+                // W34-08: the HUD goes on last, flat, in screen space: not
+                // in the scene, not lit, not pitched, not cropped by the
+                // zoom (it maps the whole picture onto the whole image).
+                let started = std::time::Instant::now();
+                let size = (render.width, render.height);
+                hud.composite(&mut render.rgba, size);
+                if let Some(l) = lensed.as_mut() {
+                    hud.composite(l, size);
+                }
+                self.diorama_hud_ms = if hud.is_empty() {
+                    0.0
+                } else {
+                    started.elapsed().as_secs_f64() * 1000.0
+                };
                 let shown = lensed.as_deref().unwrap_or(&render.rgba);
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [render.width as usize, render.height as usize],
@@ -13651,6 +13725,13 @@ impl RetroForgeApp {
         self.current_game_settings.diorama = on;
     }
 
+    /// Ticket W34-08: turn the layered Diorama (planes, flat HUD, entity
+    /// billboards' behind-the-background placement) off, for the A/B cost
+    /// rows: the picture is then one plane as in W34-07.
+    pub fn set_diorama_layers_for_test(&mut self, on: bool) {
+        self.diorama_layers = on;
+    }
+
     /// Ticket W30-05: set the diorama camera exactly as its sliders do
     /// (settings only; the next repaint acts on them).
     #[doc(hidden)]
@@ -14119,6 +14200,14 @@ impl RetroForgeApp {
     #[must_use]
     pub fn diorama_p95_ms_for_test(&self) -> f64 {
         self.diorama_budget.p95()
+    }
+
+    /// Ticket W34-08: the raw Diorama image of the last frame (RGBA, what
+    /// the pass drew plus the flat HUD) and its size.
+    #[doc(hidden)]
+    pub fn diorama_pixels_for_test(&self) -> Option<(&[u8], (u32, u32))> {
+        let r = self.diorama_render.as_ref()?;
+        Some((&r.rgba, (r.width, r.height)))
     }
 
     /// Ticket W30-06: how many pixels of the current Diorama render are not

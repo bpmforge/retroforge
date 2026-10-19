@@ -502,6 +502,24 @@ impl HeightLearner {
             .min_by(f32::total_cmp)
     }
 
+    /// Ticket W34-08: how fast each layer scrolled compared with the fastest
+    /// one (1.0 is the playfield, 0.5 a plane that travels half as far; 0.0
+    /// does not move at all). `None` for a layer with no band, and for every
+    /// layer until anything has scrolled. Measured travel, as
+    /// [`Self::backdrop_ratio`].
+    #[must_use]
+    pub fn layer_ratios(&self) -> [Option<f32>; 4] {
+        let fastest = (0..4)
+            .filter(|&l| self.motion[l].band.is_some())
+            .map(|l| self.motion[l].travel)
+            .max()
+            .unwrap_or(0);
+        std::array::from_fn(|l| {
+            (fastest >= MIN_TRAVEL && self.motion[l].band.is_some())
+                .then(|| self.motion[l].travel as f32 / fastest as f32)
+        })
+    }
+
     /// Fold one frame in.
     pub fn observe(&mut self, f: &FrameObs<'_>) {
         self.frames = self.frames.wrapping_add(1);

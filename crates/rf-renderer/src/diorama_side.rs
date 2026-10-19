@@ -43,7 +43,21 @@
 //!
 //! Sprites stand upright in the XY plane at the middle of the depth of the
 //! cell under their feet, so a player walking over a block stands on its top
-//! face. Billboards are emitted last (they always draw over the blocks).
+//! face. A sprite the game draws behind the background (OAM priority) stands
+//! just behind the picture plane instead, so a tall block and the plane's own
+//! opaque pixels hide it through the depth buffer, as they do in the game.
+//! Billboards are emitted last.
+//!
+//! ## Layers (ticket W34-08, D4)
+//!
+//! The ground texture can be an [`Atlas`]: picture-sized slots stacked one
+//! above the other. Slot [`Atlas::playfield`] is the plane the blocks grow
+//! from (`z = -back_px`); every [`BackPlane`] is another slot, a whole
+//! picture standing further back (a slower-scrolling layer, the sky). Each
+//! back plane is scaled about [`SideScene::ref_eye`] by the ratio of its
+//! distance to the plane's, so from that eye it covers exactly what it would
+//! at `z = 0`: the picture looks the same from the front, and the layers part
+//! company when the camera moves (parallax).
 //!
 //! No loop here is a hand-rolled walk (law 8): every loop is a range or an
 //! iterator over a fixed-size grid, and each merge extends by `take_while`
@@ -69,6 +83,47 @@ pub struct SideBillboard {
     pub height_px: f32,
     /// UV rect (`u0, v0, u1, v1`) into the sprite-cutout texture.
     pub uv: [f32; 4],
+    /// The game draws it behind the background (OAM priority 0).
+    pub behind_bg: bool,
+}
+
+/// A ground texture made of `slots` picture-sized slots stacked vertically,
+/// each `pitch_px` texels tall (the picture plus a transparent gap, so linear
+/// filtering never reads the slot above or below).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Atlas {
+    pub slots: u32,
+    pub pitch_px: f32,
+    /// The slot the blocks and the main plane use.
+    pub playfield: u32,
+}
+
+impl Atlas {
+    /// One slot exactly as tall as the picture: the whole texture is the
+    /// picture.
+    #[must_use]
+    pub fn single(plane_h: f32) -> Self {
+        Self {
+            slots: 1,
+            pitch_px: plane_h,
+            playfield: 0,
+        }
+    }
+
+    /// The atlas's V for picture row `y` of `slot`.
+    #[must_use]
+    pub fn v(&self, slot: u32, y: f32) -> f32 {
+        (slot as f32 * self.pitch_px + y) / (self.slots.max(1) as f32 * self.pitch_px).max(1.0)
+    }
+}
+
+/// A whole picture standing further back than the main plane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackPlane {
+    /// Its slot in the [`Atlas`].
+    pub slot: u32,
+    /// How far behind the main plane it stands, picture pixels.
+    pub back_px: f32,
 }
 
 /// What [`build_vertices_side`] needs.
@@ -94,6 +149,14 @@ pub struct SideScene<'a> {
     /// How far behind the blocks' origin the plane sits (set-back
     /// backdrop), picture pixels.
     pub back_px: f32,
+    /// The ground texture's layout ([`Atlas::single`] for one picture).
+    pub atlas: Atlas,
+    /// Planes standing further back than the main one (W34-08); any order.
+    pub back_planes: &'a [BackPlane],
+    /// The eye the back planes are scaled to match (world space, the
+    /// camera straight in front of the target): from there they look
+    /// exactly like the flat picture.
+    pub ref_eye: [f32; 3],
 }
 
 impl SideScene<'_> {
@@ -130,7 +193,7 @@ impl SideScene<'_> {
     }
 
     fn v(&self, y: f32) -> f32 {
-        y / self.plane_h.max(1.0)
+        self.atlas.v(self.atlas.playfield, y)
     }
 
     /// Clamp a picture rectangle to the plane; `None` when nothing is left.
@@ -177,8 +240,14 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
     }
     let back = scene.back_px.max(0.0);
     let mut verts = Vec::new();
-    // The plane: the whole picture, upright, furthest back.
     let (w, h) = (scene.plane_w, scene.plane_h);
+    // The planes standing further back, furthest first.
+    let mut planes: Vec<BackPlane> = scene.back_planes.to_vec();
+    planes.sort_by(|a, b| b.back_px.total_cmp(&a.back_px));
+    for bp in &planes {
+        push_back_plane(scene, bp, &mut verts);
+    }
+    // The plane: the whole picture, upright.
     quad(
         &mut verts,
         [
@@ -187,9 +256,14 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
             [w, 0.0, -back],
             [0.0, 0.0, -back],
         ],
-        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        [
+            [0.0, scene.v(0.0)],
+            [1.0, scene.v(0.0)],
+            [1.0, scene.v(h)],
+            [0.0, scene.v(h)],
+        ],
         1.0,
-        kind::GROUND,
+        kind::PLANE,
     );
 
     let mut pieces: Vec<Piece> = Vec::new();
@@ -212,6 +286,37 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
         push_billboard(scene, b, back, &mut verts);
     }
     verts
+}
+
+/// One back plane: the whole picture of its atlas slot at `z = -back_px`,
+/// scaled about the reference eye so it covers what the main plane covers
+/// as seen from there.
+fn push_back_plane(scene: &SideScene<'_>, bp: &BackPlane, out: &mut Vec<Vertex>) {
+    let (w, h) = (scene.plane_w, scene.plane_h);
+    let z = -(scene.back_px.max(0.0) + bp.back_px.max(0.0));
+    let e = scene.ref_eye;
+    // The ray from the eye through a point at `z = -back_px` of the main
+    // plane meets this plane at the scaled point.
+    let near = e[2] + scene.back_px.max(0.0);
+    let far = e[2] - z;
+    let k = if near > 1.0 && far > near {
+        far / near
+    } else {
+        1.0
+    };
+    let at = |x: f32, y: f32| [e[0] + (x - e[0]) * k, e[1] + (y - e[1]) * k, z];
+    quad(
+        out,
+        [at(0.0, h), at(w, h), at(w, 0.0), at(0.0, 0.0)],
+        [
+            [0.0, scene.atlas.v(bp.slot, 0.0)],
+            [1.0, scene.atlas.v(bp.slot, 0.0)],
+            [1.0, scene.atlas.v(bp.slot, h)],
+            [0.0, scene.atlas.v(bp.slot, h)],
+        ],
+        1.0,
+        kind::PLANE,
+    );
 }
 
 /// Greedy rectangles of equal-depth plain blocks, one front quad each.
@@ -469,7 +574,18 @@ fn push_billboard(scene: &SideScene<'_>, b: &SideBillboard, back: f32, out: &mut
         .then(|| scene.depth_px(col as u32, row as u32))
         .filter(|d| *d > 0.0);
     let stage = under.unwrap_or(scene.tile_px);
-    let z = (stage - back) / 2.0;
+    let z = if b.behind_bg {
+        // Just behind the picture plane, in front of every plane behind it.
+        let gap = scene
+            .back_planes
+            .iter()
+            .map(|p| p.back_px)
+            .filter(|g| *g > 0.0)
+            .fold(2.0_f32, f32::min);
+        -back - gap / 2.0
+    } else {
+        (stage - back) / 2.0
+    };
     let feet = scene.world_y(b.feet_y_px);
     if under.is_some() {
         let (hw, hd) = (b.width_px * 0.65, b.width_px * 0.35);
@@ -529,6 +645,9 @@ mod tests {
             slope,
             billboards,
             back_px: 0.0,
+            atlas: Atlas::single(rows as f32 * 16.0),
+            back_planes: &[],
+            ref_eye: [0.0; 3],
         }
     }
 
@@ -542,7 +661,7 @@ mod tests {
         let s = [0i8; 8];
         let v = build_vertices_side(&scene(4, 2, &d, &s, &[]), EYE);
         assert_eq!(v.len(), 6);
-        assert!(v.iter().all(|x| x.kind == kind::GROUND));
+        assert!(v.iter().all(|x| x.kind == kind::PLANE));
     }
 
     #[test]
@@ -650,6 +769,7 @@ mod tests {
             width_px: 8.0,
             height_px: 16.0,
             uv: [0.0, 0.0, 1.0, 1.0],
+            behind_bg: false,
         }];
         let v = build_vertices_side(&scene(2, 2, &d, &s, &b), [24.0, 300.0, 400.0]);
         let sprite: Vec<_> = v.iter().filter(|x| x.kind == kind::SPRITE).collect();
@@ -673,6 +793,7 @@ mod tests {
             width_px: 8.0,
             height_px: 8.0,
             uv: [0.0; 4],
+            behind_bg: false,
         }];
         let v = build_vertices_side(&scene(1, 1, &[0], &[0], &b), EYE);
         assert_eq!(count(&v, kind::SHADOW), 0);
@@ -709,5 +830,70 @@ mod tests {
     #[should_panic(expected = "depth length")]
     fn a_short_depth_array_is_a_caller_bug() {
         let _ = build_vertices_side(&scene(2, 2, &[0, 0, 0], &[0; 4], &[]), EYE);
+    }
+
+    #[test]
+    fn back_planes_come_first_furthest_first_in_their_own_atlas_slot() {
+        let d = [0u8; 8];
+        let sl = [0i8; 8];
+        let planes = [
+            BackPlane {
+                slot: 1,
+                back_px: 20.0,
+            },
+            BackPlane {
+                slot: 2,
+                back_px: 50.0,
+            },
+        ];
+        let sc = SideScene {
+            atlas: Atlas {
+                slots: 3,
+                pitch_px: 34.0,
+                playfield: 0,
+            },
+            back_planes: &planes,
+            ref_eye: [32.0, 16.0, 100.0],
+            ..scene(4, 2, &d, &sl, &[])
+        };
+        let v = build_vertices_side(&sc, EYE);
+        assert_eq!(v.len(), 18, "two back planes and the main plane");
+        let z = |q: usize| v[q * 6].pos[2];
+        assert_eq!((z(0), z(1), z(2)), (-50.0, -20.0, 0.0));
+        // Slot 2 is the third strip of the atlas, slot 0 the first.
+        assert!((v[0].uv[1] - 68.0 / 102.0).abs() < 1e-5, "{:?}", v[0].uv);
+        assert!((v[12].uv[1] - 0.0).abs() < 1e-6);
+        // Scaled about the reference eye: 50 further back at 100 away is
+        // 1.5x, so the plane covers [-16, 80] x [-8, 40] (it is 64 x 32).
+        let xs: Vec<f32> = v[..6].iter().map(|x| x.pos[0]).collect();
+        assert!(xs.iter().any(|x| (*x - (-16.0)).abs() < 1e-3), "{xs:?}");
+        assert!(xs.iter().any(|x| (*x - 80.0).abs() < 1e-3), "{xs:?}");
+    }
+
+    #[test]
+    fn a_single_slot_atlas_maps_uv_exactly_as_the_picture_did() {
+        let d = [0u8; 8];
+        let sl = [0i8; 8];
+        let v = build_vertices_side(&scene(4, 2, &d, &sl, &[]), EYE);
+        let uvs: Vec<[f32; 2]> = v.iter().map(|x| x.uv).collect();
+        assert!(uvs.contains(&[0.0, 0.0]) && uvs.contains(&[1.0, 1.0]));
+    }
+
+    #[test]
+    fn a_billboard_behind_the_background_stands_just_behind_the_plane() {
+        let d = [0u8; 4];
+        let sl = [0i8; 4];
+        let b = [SideBillboard {
+            center_x_px: 8.0,
+            feet_y_px: 16.0,
+            width_px: 8.0,
+            height_px: 8.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            behind_bg: true,
+        }];
+        let v = build_vertices_side(&scene(2, 2, &d, &sl, &b), EYE);
+        let sprite: Vec<&Vertex> = v.iter().filter(|x| x.kind == kind::SPRITE).collect();
+        assert_eq!(sprite.len(), 6);
+        assert!(sprite.iter().all(|x| x.pos[2] < 0.0 && x.pos[2] > -2.0));
     }
 }

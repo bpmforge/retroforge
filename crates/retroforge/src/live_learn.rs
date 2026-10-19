@@ -22,6 +22,7 @@ use rf_enhance::heights::{
 };
 use rf_enhance::scene_tracker::SceneTracker;
 
+use crate::hud_watch::{self, HudInfo, HudWatch};
 use crate::level_heights::{grid_phase, LayerFormat, LevelHeights, LevelTracker};
 use crate::stepper::EmuStepper;
 
@@ -44,6 +45,54 @@ pub struct PlayerView {
     pub visible: bool,
 }
 
+/// Ticket W34-08: what the Diorama needs to pull the picture apart into
+/// planes: which layer drew each pixel, how fast each layer scrolled, and
+/// which part of the picture is HUD.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LayerInfo {
+    /// Per pixel of the frame, the background layer (0..=3) that drew it,
+    /// [`hud_watch::LAYER_BACKDROP`] for the backdrop colour and
+    /// [`hud_watch::LAYER_SPRITE`] for a sprite. Empty when the frame is not
+    /// the bundle's own size.
+    pub ids: Vec<u8>,
+    /// Scroll ratio per layer against the fastest (1.0 is the playfield).
+    pub ratios: [Option<f32>; 4],
+    pub hud: HudInfo,
+}
+
+/// The layer map of a frame's pixels (`LayerInfo::ids`).
+///
+/// A pixel the main screen leaves to the backdrop can still show a layer: one
+/// the game draws on the SUB screen and blends in with colour math (Super
+/// Mario World's hills are such a layer; the main-screen metadata calls every
+/// one of those dots backdrop). Where the sub screen's own pixel at that dot
+/// belongs to a background layer, the dot is that layer's.
+#[must_use]
+pub fn layer_ids(bundle: &rf_core_api::FrameBundle) -> Vec<u8> {
+    use rf_core_api::{ColorMathOp, PixelLayer};
+    let width = usize::from(bundle.width).max(1);
+    bundle
+        .video
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p.layer {
+            PixelLayer::Background(n) => n.min(3),
+            PixelLayer::Sprite => hud_watch::LAYER_SPRITE,
+            PixelLayer::Backdrop => bundle
+                .sub
+                .get(i / width)
+                .and_then(Option::as_ref)
+                .and_then(|line| line.pixels.get(i % width))
+                .filter(|sp| !sp.fixed && sp.op != ColorMathOp::None)
+                .and_then(|sp| match sp.layer {
+                    PixelLayer::Background(n) => Some(n.min(3)),
+                    _ => None,
+                })
+                .unwrap_or(hud_watch::LAYER_BACKDROP),
+        })
+        .collect()
+}
+
 /// What the learner knew after one frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeightsFrame {
@@ -61,6 +110,8 @@ pub struct HeightsFrame {
     /// Ticket W34-07: the scene's heights over its whole canvas as they stand
     /// (shared, a pointer per frame; the shell keeps the latest).
     pub level: Option<Arc<LevelHeights>>,
+    /// Ticket W34-08: the layers of the picture and its HUD.
+    pub layers: LayerInfo,
 }
 
 /// The learner and everything that feeds it, for one session.
@@ -82,6 +133,8 @@ pub struct LiveHeights {
     /// The call an earlier session settled on, used until this one's own
     /// evidence is sure (a profile's hint wins over it).
     prior: Option<Orientation>,
+    /// Ticket W34-08: which part of the picture is HUD.
+    hud: HudWatch,
 }
 
 impl LiveHeights {
@@ -99,6 +152,7 @@ impl LiveHeights {
             restored: false,
             hint: None,
             prior: None,
+            hud: HudWatch::new(),
         }
     }
 
@@ -271,10 +325,21 @@ impl LiveHeights {
             false,
         );
         let shown = self.tracker.player().or_else(|| self.tracker.tracked());
+        let foreground = self.learner.foreground_index(grids);
+        let ids = layer_ids(bundle);
+        let visible = hud_watch::visible_rows(&ids, usize::from(bundle.width));
+        let hud = self
+            .hud
+            .observe(grids, foreground, &visible, u32::from(bundle.height));
         HeightsFrame {
+            layers: LayerInfo {
+                ids,
+                ratios: self.learner.layer_ratios(),
+                hud,
+            },
             level,
             grids: self.learner.grids_for(grids),
-            foreground: self.learner.foreground_index(grids),
+            foreground,
             orientation,
             stats: self.learner.stats(),
             backdrop_ratio: self.learner.backdrop_ratio(),
@@ -443,5 +508,64 @@ mod tests {
         assert!(snes.dirs(s).right && !snes.dirs(s).left);
         assert!(nes.dirs(n).right && !nes.dirs(n).up);
         assert_eq!(snes.dirs(0), Dirs::default());
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+    use rf_core_api::{ColorMathOp, FrameBundle, PixelLayer, PpuPixel, SubLine, SubPixel};
+
+    fn px(layer: PixelLayer) -> PpuPixel {
+        PpuPixel {
+            palette_index: 0,
+            layer,
+            sprite_id: None,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn a_sub_screen_layer_blended_over_the_backdrop_is_that_layers_pixel() {
+        let video = vec![
+            px(PixelLayer::Background(0)),
+            px(PixelLayer::Backdrop),
+            px(PixelLayer::Backdrop),
+            px(PixelLayer::Backdrop),
+            px(PixelLayer::Sprite),
+        ];
+        let mut b = FrameBundle::new(1, 5, 1, video, Vec::new());
+        let sub = |layer, op, fixed| SubPixel {
+            layer,
+            op,
+            fixed,
+            ..SubPixel::default()
+        };
+        b.sub = vec![Some(SubLine {
+            pixels: vec![
+                sub(PixelLayer::Background(1), ColorMathOp::Add, false),
+                // Backdrop dot over a BG2 sub-screen pixel with math: BG2's.
+                sub(PixelLayer::Background(1), ColorMathOp::Add, false),
+                // Over the fixed colour: the sky.
+                sub(PixelLayer::Background(1), ColorMathOp::Add, true),
+                // No colour math here: the sub screen is not shown.
+                sub(PixelLayer::Background(1), ColorMathOp::None, false),
+                sub(PixelLayer::Backdrop, ColorMathOp::None, false),
+            ],
+            fixed_color: 0,
+        })];
+        assert_eq!(
+            layer_ids(&b),
+            [
+                0,
+                1,
+                hud_watch::LAYER_BACKDROP,
+                hud_watch::LAYER_BACKDROP,
+                hud_watch::LAYER_SPRITE
+            ]
+        );
+        // A frame the builder did not capture sub screens for: all backdrop.
+        b.sub.clear();
+        assert_eq!(layer_ids(&b)[1], hud_watch::LAYER_BACKDROP);
     }
 }

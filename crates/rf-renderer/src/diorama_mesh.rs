@@ -84,6 +84,11 @@ pub mod kind {
     /// A box side face: flat-shaded, no texture — `color` carries the
     /// already-darkened tint.
     pub const SIDE: u32 = 3;
+    /// A whole picture standing upright as a backdrop (the side view's
+    /// planes, W34-08): shaded exactly like [`GROUND`], but it never casts
+    /// into the shadow map -- a plane that shadowed the planes behind it
+    /// would darken them in the shape of its own outline.
+    pub const PLANE: u32 = 4;
 }
 
 /// World-space height (pixels) of one [`WALL_HEIGHT_EIGHTHS`]-style

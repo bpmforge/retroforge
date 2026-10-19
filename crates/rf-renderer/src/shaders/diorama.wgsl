@@ -97,6 +97,7 @@ const KIND_GROUND: u32 = 0u;
 const KIND_SPRITE: u32 = 1u;
 const KIND_SHADOW: u32 = 2u;
 const KIND_SIDE: u32 = 3u;
+const KIND_PLANE: u32 = 4u;
 
 // Below this a fragment is invisible: it is dropped so it cannot write depth.
 const MIN_ALPHA: f32 = 0.02;
@@ -142,7 +143,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dy = dpdy(in.world);
     if (light.params.x < 0.5) {
         // Lighting off: the original shader.
-        if (in.kind == KIND_GROUND) {
+        if (in.kind == KIND_GROUND || in.kind == KIND_PLANE) {
             let tex = textureSample(ground_tex, samp, in.uv);
             if (tex.a * in.color.a < MIN_ALPHA) {
                 discard;
@@ -184,7 +185,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         shadow = shadow_lookup(in.lpos, bias);
     }
 
-    if (in.kind == KIND_GROUND) {
+    if (in.kind == KIND_GROUND || in.kind == KIND_PLANE) {
         let tex = textureSample(ground_tex, samp, in.uv);
         if (tex.a * in.color.a < MIN_ALPHA) {
             discard;
