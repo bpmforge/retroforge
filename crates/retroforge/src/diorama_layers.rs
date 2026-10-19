@@ -74,6 +74,11 @@ pub struct LayerSplit<'a> {
     pub playfield: u8,
     pub ratios: [Option<f32>; 4],
     pub hud: &'a HudInfo,
+    /// W35-01 (D4): the layer a profile pins as atmosphere (fog, mist). It
+    /// is never given a plane of its own, slow or not: it stays in the
+    /// picture the game drew it in, and the fog pass draws over the 3D image
+    /// from its density.
+    pub atmosphere: Option<u8>,
     /// The picture columns `[from, to)` where the game's own HUD is (all of
     /// them, unless the picture is a widescreen one whose margins the
     /// canvas filled: the HUD stays the game's own 256 dots in the middle).
@@ -332,6 +337,7 @@ pub fn split(s: &LayerSplit<'_>) -> Option<Planes> {
         let li = usize::from(l);
         let ratio = s.ratios[li];
         let separate = l != s.playfield
+            && Some(l) != s.atmosphere
             && seen[li]
             && !s.hud.layers[li]
             && ratio.is_some_and(|r| r < MERGE_RATIO);
@@ -562,6 +568,16 @@ mod tests {
         ratios: [Option<f32>; 4],
         hud: &HudInfo,
     ) -> Option<Planes> {
+        run_with(rows, playfield, ratios, hud, None)
+    }
+
+    fn run_with(
+        rows: [&str; H],
+        playfield: u8,
+        ratios: [Option<f32>; 4],
+        hud: &HudInfo,
+        atmosphere: Option<u8>,
+    ) -> Option<Planes> {
         let (rgba, ids) = frame(rows);
         let mut sprite = vec![0u8; W * H * 4];
         for (i, id) in ids.iter().enumerate() {
@@ -578,6 +594,7 @@ mod tests {
             playfield,
             ratios,
             hud,
+            atmosphere,
             hud_cols: (0, W as u32),
         })
     }
@@ -666,6 +683,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.back.len(), 0);
+    }
+
+    #[test]
+    fn an_atmosphere_layer_never_gets_a_plane_of_its_own() {
+        let rows = ["11110000"; H];
+        let ratios = [Some(1.0), Some(0.3), None, None];
+        let slow = run_with(rows, 0, ratios, &NO_HUD, None).unwrap();
+        assert_eq!(slow.back.len(), 1, "a slow layer stands behind");
+        let fog = run_with(rows, 0, ratios, &NO_HUD, Some(1)).unwrap();
+        assert_eq!(
+            fog.back.len(),
+            0,
+            "the pinned atmosphere layer stays on the playfield"
+        );
     }
 
     #[test]
@@ -758,6 +789,7 @@ mod tests {
             playfield: 0,
             ratios: [Some(1.0), None, None, None],
             hud: &hud,
+            atmosphere: None,
             hud_cols: (2, 6),
         })
         .unwrap();
@@ -927,6 +959,7 @@ mod tests {
             playfield: 0,
             ratios: [None; 4],
             hud: &hud,
+            atmosphere: None,
             hud_cols: (0, 4),
         })
         .is_none());
@@ -987,6 +1020,7 @@ mod tests {
             playfield: 0,
             ratios: [Some(1.0), Some(0.3), Some(0.0), None],
             hud: &hud,
+            atmosphere: None,
             hud_cols: (0, w as u32),
         };
         let mut times = Vec::new();

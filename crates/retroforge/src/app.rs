@@ -702,6 +702,15 @@ pub struct RetroForgeApp {
     fog_budget: rf_renderer::fog::BudgetGate,
     fog_failed: bool,
     fog_started: Option<std::time::Instant>,
+    /// W35-01 (D4): the atmosphere density map of the latest frame
+    /// (`pixels`, `(w, h)`), and the window of the picture the Diorama's
+    /// camera shows (centre, half extents), so the fog can be drawn over the
+    /// 3D image where the layer is on screen.
+    diorama_fog: Option<(Vec<u8>, (u32, u32))>,
+    diorama_window: Option<((f32, f32), (f32, f32))>,
+    /// The follow camera's last inputs and output, for tests: the player
+    /// seen this frame (picture pixels), where the camera looks, the zoom ramp.
+    diorama_follow_dbg: (Option<(f32, f32)>, (f32, f32), f32),
     fog_scroll: Option<((i64, i64), std::time::Instant)>,
     fog_drift: (f32, f32),
     /// Ticket W30-04: the HD-2D lens pass over the live picture (built on
@@ -1454,6 +1463,9 @@ pub struct RetroForgeApp {
     /// Ticket W34-05 (D1): the Diorama camera's target, gliding to where the
     /// player is (or the middle of the game's window) instead of jumping.
     diorama_smoother: rf_renderer::diorama::CameraSmoother,
+    /// W35-01: how far the follow camera has closed in from the whole
+    /// window to its zoom (0 until it knows the player).
+    diorama_zoom_ramp: f32,
     /// Ticket W16-14: whether this session has ever seen a live
     /// `CoreEvent::Mode7` (BG mode 7 actually running) — the fact
     /// `enhance_ui::feature_rows`'s "mode7_ground" row is gated on
@@ -1595,6 +1607,23 @@ fn stitch_readout(
         "Placement confidence: {} \u{2014} check {:.2} ms",
         parts.join(", "),
         nanos as f64 / 1e6
+    )
+}
+
+/// The fog pass's parameters now: time since the fog started, the pinned
+/// plane's drift and the profile's strength (W20-17; shared by the flat view
+/// and the Diorama's 3D image, W35-01).
+fn fog_params(
+    started: &mut Option<std::time::Instant>,
+    pin: Option<&rf_enhance::atmosphere::AtmospherePin>,
+    drift: (f32, f32),
+) -> rf_renderer::fog::FogParams {
+    let since = *started.get_or_insert_with(std::time::Instant::now);
+    rf_renderer::fog::FogParams::new(
+        since.elapsed().as_secs_f32(),
+        drift.0,
+        drift.1,
+        pin.and_then(|p| p.strength).unwrap_or(FOG_DEFAULT_STRENGTH),
     )
 }
 
@@ -1881,6 +1910,9 @@ impl RetroForgeApp {
             fog_budget: rf_renderer::fog::BudgetGate::new(),
             fog_failed: false,
             fog_started: None,
+            diorama_fog: None,
+            diorama_window: None,
+            diorama_follow_dbg: (None, (0.0, 0.0), 0.0),
             fog_scroll: None,
             fog_drift: (0.0, 0.0),
             lens_pass: None,
@@ -2052,6 +2084,7 @@ impl RetroForgeApp {
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
             diorama_stage: [0.0; 5],
             diorama_smoother: rf_renderer::diorama::CameraSmoother::default(),
+            diorama_zoom_ramp: 0.0,
             mode7_seen: false,
             mode7_ground_wanted: false,
             live_heights: None,
@@ -4430,6 +4463,9 @@ impl RetroForgeApp {
             }
             _ => None,
         };
+        self.diorama_fog = fog_source
+            .as_ref()
+            .map(|(density, w, h)| (density.clone(), (*w, *h)));
         if let Some(msg) = latest_frame {
             self.camera_search = msg.camera_search;
             self.item_values.clone_from(&msg.items);
@@ -4721,8 +4757,13 @@ impl RetroForgeApp {
             // peek (which wipes to the original) and the shader (a display
             // look) — never over the compare pair and never into a capture,
             // the shader's rules. The pass keeps to its own budget gate.
+            // W35-01: with the Diorama's 3D image on screen the fog runs over
+            // that (`fog_over_diorama`), not over this flat frame nobody sees.
+            let diorama_shown = self.diorama_render.is_some() && self.diorama_view_active();
             let fogged = match (&fog_source, &self.gpu) {
-                (Some((density, sw, sh)), Some(gpu)) if compare_rgba.is_none() => {
+                (Some((density, sw, sh)), Some(gpu))
+                    if compare_rgba.is_none() && !diorama_shown =>
+                {
                     let (w32, h32) = (
                         u32::try_from(dw).unwrap_or(0),
                         u32::try_from(dh).unwrap_or(0),
@@ -4731,16 +4772,10 @@ impl RetroForgeApp {
                     let pass = self
                         .fog_pass
                         .get_or_insert_with(|| rf_renderer::fog::FogPass::new(gpu));
-                    let since = *self.fog_started.get_or_insert_with(std::time::Instant::now);
-                    let strength = self
-                        .atmosphere_pin
-                        .and_then(|p| p.strength)
-                        .unwrap_or(FOG_DEFAULT_STRENGTH);
-                    let params = rf_renderer::fog::FogParams::new(
-                        since.elapsed().as_secs_f32(),
-                        self.fog_drift.0,
-                        self.fog_drift.1,
-                        strength,
+                    let params = fog_params(
+                        &mut self.fog_started,
+                        self.atmosphere_pin.as_ref(),
+                        self.fog_drift,
                     );
                     if density.is_empty() {
                         None
@@ -4784,7 +4819,7 @@ impl RetroForgeApp {
             // W34-06b: while the 3D Diorama is the picture on screen the lens
             // runs over THAT image (`store_diorama_result`), not over this
             // flat frame nobody would see.
-            let diorama_has_lens = self.diorama_render.is_some() && self.diorama_view_active();
+            let diorama_has_lens = diorama_shown;
             let lensed = match &self.gpu {
                 Some(gpu)
                     if compare_rgba.is_none() && !diorama_has_lens && self.lens_effective() =>
@@ -5726,6 +5761,7 @@ impl RetroForgeApp {
             self.diorama_render = None;
             self.diorama_texture = None;
             self.diorama_smoother.reset();
+            self.diorama_zoom_ramp = 0.0;
             return;
         };
         let clock = self.diorama_clock();
@@ -5772,14 +5808,14 @@ impl RetroForgeApp {
         };
         let core_pad = (width as i32 - 256).div_euclid(2);
         let out = self.diorama_out_size(plane.0, plane.1);
-        // D1: look at the player (else the middle of the screen) and glide
+        // D1: look at the player's feet (else the middle of the screen) and glide
         // there. A jump of more than a third of the screen is a room change.
         let player = msg
             .heights
             .as_ref()
             .and_then(|h| h.player)
             .filter(|p| p.visible)
-            .map(|p| ((p.centre.0 + plane_pad) as f32, p.centre.1 as f32));
+            .map(|p| ((p.centre.0 + plane_pad) as f32, p.feet_y as f32));
         let screen_centre = (plane.0 as f32 / 2.0, rows as f32 / 2.0);
         let centre = if view.follow {
             self.diorama_smoother
@@ -5788,6 +5824,16 @@ impl RetroForgeApp {
             self.diorama_smoother.reset();
             screen_centre
         };
+        // Until the detector has named the player (it needs the pad moved:
+        // a level's first frames) the whole window is framed, so Mario is
+        // never cropped out; the camera closes in to the chosen zoom after.
+        self.diorama_zoom_ramp = enhanced_view::next_zoom_ramp(
+            self.diorama_zoom_ramp,
+            view.follow,
+            self.diorama_smoother.tracking(),
+        );
+        let view = view.with_zoom_ramp(self.diorama_zoom_ramp);
+        self.diorama_follow_dbg = (player, centre, self.diorama_zoom_ramp);
         let start = std::time::Instant::now();
         // Ticket W34-08: the picture pulled apart into planes with its HUD
         // lifted off (the layer map is the core thread's, and must be the
@@ -5795,6 +5841,16 @@ impl RetroForgeApp {
         // The core records the map for the 256 hardware dots, in the middle
         // of a widened frame (the wide picture's own map is made from it).
         let wide_view = wide.is_some() || wide_top.is_some();
+        // D4: the part of the picture the camera shows, for the fog drawn
+        // over the 3D image (the picture's own columns only).
+        self.diorama_window = (!wide_view).then(|| {
+            let zoom = view.camera.clamped().zoom;
+            let extent = (plane.0 as f32, rows as f32);
+            (
+                dl::clamp_window_centre(centre, extent, zoom, extent),
+                (extent.0 / 2.0 / zoom, extent.1 / 2.0 / zoom),
+            )
+        });
         let info = msg.heights.as_deref().map(|h| &h.layers).filter(|l| {
             self.diorama_layers
                 && width > 0
@@ -5809,6 +5865,8 @@ impl RetroForgeApp {
             .as_deref()
             .and_then(|h| msg.tile_grids.get(h.foreground?))
             .map(|g| g.layer);
+        // D4: a layer the profile pins as atmosphere is fog, not a plane.
+        let atmosphere = self.atmosphere_pin.map(|p| p.plane);
         let t_split = std::time::Instant::now();
         let mut planes: Option<crate::diorama_layers::Planes> = None;
         let mut top_ground: Option<(Vec<u8>, crate::diorama_layers::HudOverlay)> = None;
@@ -5827,6 +5885,7 @@ impl RetroForgeApp {
                         playfield,
                         ratios: l.ratios,
                         hud: &l.hud,
+                        atmosphere,
                         hud_cols: (0, width),
                     });
                 }
@@ -5844,6 +5903,7 @@ impl RetroForgeApp {
                             playfield,
                             ratios: l.ratios,
                             hud: &l.hud,
+                            atmosphere,
                             hud_cols,
                         });
                     }
@@ -6165,7 +6225,25 @@ impl RetroForgeApp {
                 // over the 3D image when it is the picture shown. `render`
                 // keeps the raw pass output (tests and the accuracy checks
                 // read it); the texture gets the lensed copy.
-                let mut lensed = self.lens_over_diorama(&render, frame_count);
+                // D4: atmosphere layers stay fog: the fog pass runs over the
+                // 3D image first (the lens then grades the fogged picture).
+                let fogged = self.fog_over_diorama(&render);
+                let fogged_render;
+                let base = match fogged {
+                    Some(rgba) => {
+                        fogged_render = enhanced_view::DioramaRender {
+                            rgba,
+                            width: render.width,
+                            height: render.height,
+                        };
+                        Some(&fogged_render)
+                    }
+                    None => None,
+                };
+                let mut lensed = self.lens_over_diorama(base.unwrap_or(&render), frame_count);
+                if lensed.is_none() {
+                    lensed = base.map(|b| b.rgba.clone());
+                }
                 // W34-08: the HUD goes on last, flat, in screen space: not
                 // in the scene, not lit, not pitched, not cropped by the
                 // zoom (it maps the whole picture onto the whole image).
@@ -6213,6 +6291,63 @@ impl RetroForgeApp {
         !self.peeking_original
             && self.height_painter.is_none()
             && matches!(self.camera, CameraToggle::Original)
+    }
+
+    /// W35-01 (D4, "atmosphere layers stay fog"): the fog pass over a finished
+    /// Diorama frame, or `None` when no fog is pinned and effective, the 3D
+    /// image is not the picture shown, the window is unknown (widescreen),
+    /// the pass is over budget or failed (the plain image is shown). The
+    /// density is the pinned plane's own, cut to the window the camera shows.
+    fn fog_over_diorama(&mut self, render: &enhanced_view::DioramaRender) -> Option<Vec<u8>> {
+        if !self.diorama_view_active() || self.fog_failed || !self.fog_budget.is_enabled() {
+            return None;
+        }
+        let (density, size) = self.diorama_fog.as_ref()?;
+        let (centre, half) = self.diorama_window?;
+        let density = enhanced_view::crop_density_to_window(
+            density,
+            *size,
+            centre,
+            half,
+            (render.width, render.height),
+        );
+        if density.is_empty() {
+            return None;
+        }
+        let gpu = self.gpu.as_ref()?;
+        let pass = self
+            .fog_pass
+            .get_or_insert_with(|| rf_renderer::fog::FogPass::new(gpu));
+        let params = fog_params(
+            &mut self.fog_started,
+            self.atmosphere_pin.as_ref(),
+            self.fog_drift,
+        );
+        let started = std::time::Instant::now();
+        match pass.render(
+            gpu,
+            &render.rgba,
+            &density,
+            render.width,
+            render.height,
+            params,
+        ) {
+            Ok(out) => {
+                if self
+                    .fog_budget
+                    .record_sample_ms(started.elapsed().as_secs_f64() * 1000.0)
+                {
+                    self.status =
+                        "Fog paused: this machine cannot draw it at full speed.".to_string();
+                }
+                Some(out)
+            }
+            Err(e) => {
+                self.fog_failed = true;
+                self.status = format!("Fog failed ({e}); showing the plain picture.");
+                None
+            }
+        }
     }
 
     /// Ticket W34-06b: the HD-2D lens over a finished Diorama frame, or
@@ -14456,6 +14591,22 @@ impl RetroForgeApp {
     #[must_use]
     pub fn diorama_p95_ms_for_test(&self) -> f64 {
         self.diorama_budget.p95()
+    }
+
+    /// Ticket W35-01: the follow camera's last frame: the player seen (picture
+    /// pixels), where the camera looks, and how far the zoom has closed in.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_follow_for_test(&self) -> (Option<(f32, f32)>, (f32, f32), f32) {
+        self.diorama_follow_dbg
+    }
+
+    /// Ticket W35-01: how many times the Diorama's budget gate has switched
+    /// the Diorama off (a soak run asserts 0).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_gate_trips_for_test(&self) -> u32 {
+        self.diorama_budget.disable_transitions()
     }
 
     /// Ticket W34-09: the median of the same window.

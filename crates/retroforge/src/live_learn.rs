@@ -41,6 +41,9 @@ pub fn orientation_of_mode(mode: &str) -> Option<Orientation> {
 pub struct PlayerView {
     /// Screen pixels, centre of the entity's box.
     pub centre: (i32, i32),
+    /// The y of the entity's bottom edge: where the player stands (the
+    /// follow camera's target, D1).
+    pub feet_y: i32,
     /// On screen this frame (false: held where it was last seen).
     pub visible: bool,
 }
@@ -348,6 +351,7 @@ impl LiveHeights {
                     (p.entity.x0 + p.entity.x1) / 2,
                     (p.entity.y0 + p.entity.y1) / 2,
                 ),
+                feet_y: p.entity.y1,
                 visible: p.visible,
             }),
             frames: self.learner.frames(),

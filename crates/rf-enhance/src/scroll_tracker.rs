@@ -315,6 +315,17 @@ impl ScrollTracker {
         }
     }
 
+    /// Ticket W35-01: start the world axes over, so the next frame's world
+    /// position is its raw scroll. A scene cut calls this: the offset the old
+    /// scene's travel had built up (a world map scrolled 300 px, then a level
+    /// at 0 reads as a forward step of 212 and a world 512 further on) must
+    /// not become the new scene's coordinates, or a canvas restored from an
+    /// earlier session lands that far from the live one.
+    pub fn rebase_world(&mut self) {
+        self.world_x = WorldAxis::new();
+        self.world_y = WorldAxis::new();
+    }
+
     /// Process one frame's events, returning its bands (HUD-classified)
     /// alongside each band's world position. Bands are matched to the
     /// previous frame's by scanline-range equality — a band whose rows

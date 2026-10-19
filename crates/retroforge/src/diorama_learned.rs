@@ -402,6 +402,19 @@ pub struct SideFrame<'a> {
     pub view: DioramaView,
 }
 
+/// The largest yaw, degrees, at which a camera `distance` from its target
+/// still sees only plane when the plane goes on `reach` pixels from the target
+/// on its nearer side: the ray through the far edge of the frame meets the
+/// plane `distance * tan(yaw + half the horizontal field of view)` away. At
+/// most the camera's own 30 degrees; never below 0.
+#[must_use]
+pub fn yaw_cap_deg(distance: f32, fovy_deg: f32, aspect: f32, reach: f32) -> f32 {
+    let half_h = (aspect * (fovy_deg.to_radians() / 2.0).tan()).atan();
+    ((reach / distance.max(1e-3)).atan() - half_h)
+        .to_degrees()
+        .clamp(0.0, rf_renderer::diorama::DioramaCamera::YAW_LIMIT)
+}
+
 /// Render one side-view frame.
 ///
 /// # Errors
@@ -421,14 +434,32 @@ pub fn render_side(
     let cx = f.centre.0.clamp(hw.min(gw / 2.0), (gw - hw).max(gw / 2.0));
     let cy = f.centre.1.clamp(hh.min(gh / 2.0), (gh - hh).max(gh / 2.0));
     let target = (cx, gh - cy);
-    let placement = camera_matrices::side_placement(
-        f.window.0,
-        f.window.1,
-        aspect,
+    let place = |camera: &rf_renderer::diorama::DioramaCamera| {
+        camera_matrices::side_placement(
+            f.window.0,
+            f.window.1,
+            aspect,
+            rf_renderer::diorama::WINDOW_FOV_Y_DEG,
+            camera,
+            target,
+        )
+    };
+    let mut camera = camera;
+    let mut placement = place(&camera);
+    // W35-01: the planes go on a picture's width past each side (mirrored),
+    // which a view swung far enough still looks past on a very wide picture
+    // (32:9): hold the yaw to what the extension covers.
+    let overscan = gh.max(gw);
+    let cap = yaw_cap_deg(
+        placement.distance,
         rf_renderer::diorama::WINDOW_FOV_Y_DEG,
-        &camera,
-        target,
+        aspect,
+        cx.min(gw - cx) + overscan.min(gw),
     );
+    if camera.yaw_deg.abs() > cap {
+        camera.yaw_deg = cap.copysign(camera.yaw_deg);
+        placement = place(&camera);
+    }
     let (atlas, back_planes, back_px, ground_rgba, ground_size) = match f.planes {
         Some(p) => (
             p.atlas,
@@ -461,10 +492,12 @@ pub fn render_side(
         // The eye straight in front of the target at the camera's distance:
         // the back planes are scaled to look the same from there.
         ref_eye: [target.0, target.1, placement.distance],
-        // The planes go on past the picture's edge, in its edge colours, so
-        // a pitched or swung camera never looks off them into the clear
-        // colour (W34-08's void at the left and bottom).
-        overscan_px: gh,
+        // The planes go on past the picture's edge as the picture mirrored
+        // about it (W35-01; they were its edge texels stretched), so a
+        // pitched or swung camera never looks off them into the clear colour
+        // (W34-08's void) nor at streaks; the yaw is capped where the
+        // extension stops covering the view (`yaw_cap_deg`).
+        overscan_px: overscan,
     };
     let t_mesh = std::time::Instant::now();
     let vertices = rf_renderer::diorama_mesh::build_vertices_side(&scene, placement.eye);
@@ -683,6 +716,23 @@ pub const EDGE_MARGIN_CELLS: u32 = 16;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_yaw_is_capped_only_where_the_planes_stop_covering_the_view() {
+        // A 32:9 picture 1829 wide, the window fitted to its width at
+        // distance ~840: the extension a picture's width each side leaves a
+        // little less than the camera's 30 degrees.
+        let fov = rf_renderer::diorama::WINDOW_FOV_Y_DEG;
+        let wide = super::yaw_cap_deg(840.0, fov, 1829.0 / 448.0, 914.0 + 1829.0);
+        assert!((20.0..30.0).contains(&wide), "{wide}");
+        // A 4:3 picture with the same reach in pictures: room to spare.
+        let std = super::yaw_cap_deg(300.0, fov, 256.0 / 224.0, 128.0 + 256.0);
+        assert_eq!(std, 30.0);
+        // More reach, more yaw; none at all is no yaw.
+        let more = super::yaw_cap_deg(840.0, fov, 1829.0 / 448.0, 2.0 * 1829.0);
+        assert!(more >= wide);
+        assert_eq!(super::yaw_cap_deg(840.0, fov, 4.0, 0.0), 0.0);
+    }
+
     use super::*;
 
     #[test]

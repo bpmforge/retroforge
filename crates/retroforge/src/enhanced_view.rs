@@ -624,6 +624,44 @@ pub fn atmosphere_density_rgba(pixels: &[PpuPixel], layer: u8) -> Vec<u8> {
     out
 }
 
+/// W35-01 (D4): the atmosphere density map as the Diorama's camera sees the
+/// picture: the part of the `src` map inside the window `centre +- half`
+/// (picture pixels), stretched to the `out` image, so the fog drawn over the 3D
+/// image lies where the layer is on the screen (exact with the camera straight
+/// on, near enough at the side view's gentle tilt). An empty `Vec` when the
+/// map's size and `src` disagree.
+#[must_use]
+pub fn crop_density_to_window(
+    density: &[u8],
+    src: (u32, u32),
+    centre: (f32, f32),
+    half: (f32, f32),
+    out: (u32, u32),
+) -> Vec<u8> {
+    let (sw, sh, ow, oh) = (
+        src.0 as usize,
+        src.1 as usize,
+        out.0 as usize,
+        out.1 as usize,
+    );
+    if sw == 0 || sh == 0 || ow == 0 || oh == 0 || density.len() != sw * sh * 4 {
+        return Vec::new();
+    }
+    let at = |c: f32, h: f32, i: usize, n: usize, max: usize| {
+        let p = c - h + (i as f32 + 0.5) / n as f32 * 2.0 * h;
+        (p.floor().max(0.0) as usize).min(max - 1)
+    };
+    let mut rgba = Vec::with_capacity(ow * oh * 4);
+    for y in 0..oh {
+        let row = at(centre.1, half.1, y, oh, sh) * sw;
+        for x in 0..ow {
+            let i = (row + at(centre.0, half.0, x, ow, sw)) * 4;
+            rgba.extend_from_slice(&density[i..i + 4]);
+        }
+    }
+    rgba
+}
+
 /// Convert an atmosphere layer's raw hardware scroll delta between two
 /// captures into `rf_renderer::fog::FogParams`'s UV-space drift-per-second
 /// — the "follows the layer's scroll telemetry" half of acceptance
@@ -787,6 +825,29 @@ impl DioramaView {
         }
     }
 
+    /// The view with its zoom taken `ramp` of the way from 1.0 (the whole
+    /// window) to the chosen zoom. W35-01: a follow camera that does not know
+    /// the player yet frames the whole window (a zoomed crop around the
+    /// middle of the screen could leave the player out at a level start) and
+    /// closes in once it does ([`next_zoom_ramp`]).
+    #[must_use]
+    pub fn with_zoom_ramp(self, ramp: f32) -> Self {
+        let k = if ramp.is_finite() {
+            ramp.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let zoom = self.camera.zoom;
+        let zoom = if zoom.is_finite() { zoom } else { 1.0 };
+        Self {
+            camera: rf_renderer::diorama::DioramaCamera {
+                zoom: 1.0 + (zoom - 1.0).max(0.0) * k,
+                ..self.camera
+            },
+            ..self
+        }
+    }
+
     /// The aspect the projection is built with for a frame of `out` pixels:
     /// the frame's own aspect with the display's pixel shape taken out.
     #[must_use]
@@ -802,6 +863,26 @@ impl DioramaView {
             follow: self.follow.then_some(live_centre),
             ..self.camera
         }
+    }
+}
+
+/// Frames the follow camera takes to close in from the whole window to its
+/// zoom once it knows the player (and to open out when it loses them).
+pub const ZOOM_RAMP_FRAMES: f32 = 24.0;
+
+/// One step of the zoom ramp (W35-01, D1): up while the follow camera is on
+/// the player, down while it is not, and always full when it does not follow
+/// (a fixed camera takes the zoom as chosen).
+#[must_use]
+pub fn next_zoom_ramp(ramp: f32, follow: bool, tracking: bool) -> f32 {
+    if !follow {
+        return 1.0;
+    }
+    let step = 1.0 / ZOOM_RAMP_FRAMES;
+    if tracking {
+        (ramp + step).min(1.0)
+    } else {
+        (ramp - step).max(0.0)
     }
 }
 
@@ -1157,6 +1238,54 @@ pub fn compose_mode7_ground(
 mod tests {
     use super::*;
     use rf_core_api::{PixelLayer, PpuPixel};
+
+    #[test]
+    fn the_fog_density_is_cut_to_the_window_the_camera_shows() {
+        // A 4 x 2 map with a different density in each column.
+        let px = |d: u8| [d, d, d, 255];
+        let src: Vec<u8> = (0..2)
+            .flat_map(|_| [10u8, 20, 30, 40])
+            .flat_map(px)
+            .collect();
+        // The whole picture to a same-sized image: the map itself.
+        let whole = crop_density_to_window(&src, (4, 2), (2.0, 1.0), (2.0, 1.0), (4, 2));
+        assert_eq!(whole, src);
+        // Zoom 2 on the left half: the right-hand columns are not in view.
+        let left = crop_density_to_window(&src, (4, 2), (1.0, 1.0), (1.0, 1.0), (4, 2));
+        let cols: Vec<u8> = left[..16].chunks(4).map(|p| p[0]).collect();
+        assert_eq!(cols, [10, 10, 20, 20]);
+        assert!(crop_density_to_window(&src, (3, 2), (1.0, 1.0), (1.0, 1.0), (4, 2)).is_empty());
+    }
+
+    #[test]
+    fn a_follow_camera_frames_the_whole_window_until_it_knows_the_player() {
+        let mut settings = crate::game_settings::GameSettings::default();
+        settings.diorama_zoom = 160;
+        settings.diorama_follow = true;
+        let view = DioramaView::from_settings(&settings);
+        assert!(
+            (view.camera.zoom - 1.6).abs() < 1e-3,
+            "{}",
+            view.camera.zoom
+        );
+        // Unknown player: the ramp sits at 0 and the zoom is the whole window.
+        let mut ramp = 0.0;
+        for _ in 0..100 {
+            ramp = next_zoom_ramp(ramp, true, false);
+        }
+        assert_eq!(view.with_zoom_ramp(ramp).camera.zoom, 1.0);
+        // Known: it closes in over `ZOOM_RAMP_FRAMES` and stops at the zoom.
+        for _ in 0..ZOOM_RAMP_FRAMES as usize {
+            ramp = next_zoom_ramp(ramp, true, true);
+        }
+        assert!((view.with_zoom_ramp(ramp).camera.zoom - 1.6).abs() < 1e-3);
+        let half = next_zoom_ramp(0.0, true, true) * ZOOM_RAMP_FRAMES / 2.0;
+        assert!(half < 1.0);
+        // Lost: it opens out again; not following: always the chosen zoom.
+        assert!(next_zoom_ramp(1.0, true, false) < 1.0);
+        assert_eq!(next_zoom_ramp(0.0, false, false), 1.0);
+        assert_eq!(view.with_zoom_ramp(f32::NAN).camera.zoom, 1.6);
+    }
 
     fn bg(v: u8) -> PpuPixel {
         PpuPixel {

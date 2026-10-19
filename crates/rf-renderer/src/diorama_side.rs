@@ -161,8 +161,10 @@ pub struct SideScene<'a> {
     /// exactly like the flat picture.
     pub ref_eye: [f32; 3],
     /// Ticket W34-09: how far every plane goes on past the picture's edge on
-    /// all four sides, picture pixels, in the edge texels' own colours (the
-    /// edge strips of the picture pinned to the slot's border). A pitched or
+    /// all four sides, picture pixels: sideways as the picture mirrored about
+    /// its edge (W35-01; the edge column repeated smeared into streaks), up
+    /// and down the edge row repeated; at most one picture's width / height
+    /// each way. A pitched or
     /// swung camera looks past the picture's edge; without this it saw the
     /// clear colour there. `0.0` is the picture exactly.
     pub overscan_px: f32,
@@ -307,9 +309,10 @@ fn push_back_plane(scene: &SideScene<'_>, bp: &BackPlane, out: &mut Vec<Vertex>)
 
 /// One plane of the atlas: the whole picture of `slot`, upright, each of its
 /// world points `(x, y)` (y up) placed by `place`. With
-/// [`SideScene::overscan_px`] it is a 3 x 3 grid whose outer cells repeat the
-/// picture's edge texels (half a texel in, so filtering never reads the
-/// transparent gap between two slots).
+/// [`SideScene::overscan_px`] it is a 3 x 3 grid whose outer cells show the
+/// picture mirrored about its left and right edges and its top and bottom
+/// rows repeated (half a texel in, so filtering never reads the transparent
+/// gap between two slots).
 fn push_plane(
     scene: &SideScene<'_>,
     slot: u32,
@@ -338,12 +341,29 @@ fn push_plane(
     // in under the picture so the picture's own edge pixels, which filtering
     // blends half-way into the transparent gap, lie over cells of their own
     // colour: they are drawn first and a hair further back, so the picture
-    // wins wherever they overlap.
-    let spans_x = [(-e, 1.0), (0.0, w), (w - 1.0, w + e)];
-    let spans_y = [(-e, 1.0), (0.0, h), (h - 1.0, h + e)];
-    // The texel a cell repeats on an axis it stands outside the picture on:
-    // half a texel in from the edge.
-    let pin = |i: usize, p: f32, dim: f32| match i {
+    // wins wherever they overlap. W35-01: past the LEFT and RIGHT edges a
+    // cell shows the picture mirrored about that edge (the edge column
+    // stretched sideways was long horizontal streaks through the hills and
+    // sky), so a swung camera sees the scenery go on. Past the TOP and BOTTOM
+    // the edge row is repeated (sky above, ground below: a mirrored ground
+    // would show its grass upside down). A side cell is at most one picture
+    // wide, which is as far as a mirror reaches.
+    let (ex, ey) = (e.min(w), e.min(h));
+    let spans_x = [(-ex, 1.0), (0.0, w), (w - 1.0, w + ex)];
+    let spans_y = [(-ey, 1.0), (0.0, h), (h - 1.0, h + ey)];
+    // The texel a point of a cell reads, as a fraction of the picture, half
+    // a texel in from the border: sideways, itself inside the picture and its
+    // reflection about the nearest edge outside it.
+    let mirror = |i: usize, p: f32, dim: f32| {
+        let q = match i {
+            0 => -p,
+            2 => 2.0 * dim - p,
+            _ => p,
+        };
+        q.clamp(0.5, dim - 0.5) / dim
+    };
+    // Up and down: the edge texel repeated.
+    let pin = |j: usize, p: f32, dim: f32| match j {
         0 => 0.5 / dim,
         2 => (dim - 0.5) / dim,
         _ => p.clamp(0.5, dim - 0.5) / dim,
@@ -355,7 +375,7 @@ fn push_plane(
             if (i, j) == (1, 1) {
                 continue;
             }
-            let c = |px: f32, py: f32| [pin(i, px, w), scene.atlas.v(slot, pin(j, py, h) * h)];
+            let c = |px: f32, py: f32| [mirror(i, px, w), scene.atlas.v(slot, pin(j, py, h) * h)];
             quad(
                 out,
                 [

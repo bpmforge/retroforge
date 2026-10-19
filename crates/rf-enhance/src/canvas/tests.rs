@@ -1425,6 +1425,26 @@ mod nes_layer0 {
         );
     }
 
+    /// Ticket W35-01: a scene that follows a scrolled one is in the canvas
+    /// coordinates its own scroll gives it (a map scrolled to 87, then a level
+    /// at 400 read as a step back of 199, a world 512 away from its scroll, so a canvas restored from an
+    /// earlier session landed beside the live one).
+    #[test]
+    fn a_scene_after_a_scrolled_one_starts_at_its_own_scroll() {
+        let mut m = CanvasModel::new();
+        for f in 0..30u64 {
+            observe(&mut m, &frame_bundle(f, 3 * f as i64, 3));
+        }
+        // Scene B's scroll starts at 400 (after the cut settles it is a few
+        // steps on); its canvas must begin there, not a wrap further.
+        for f in 30..70u64 {
+            observe(&mut m, &frame_bundle(f, 400 + 3 * (f - 30) as i64, 250));
+        }
+        let canvas = layer0(&m).expect("canvas");
+        let x = canvas.origin().0;
+        assert!((400..=520).contains(&x), "scene B's canvas starts at x {x}");
+    }
+
     #[test]
     fn flush_with_no_cache_configured_is_a_harmless_no_op() {
         let mut m = CanvasModel::new();

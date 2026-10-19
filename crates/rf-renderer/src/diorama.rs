@@ -199,6 +199,14 @@ impl CameraSmoother {
     /// and goes to the fallback (two seconds).
     pub const HOLD_STEPS: u32 = 120;
 
+    /// Whether the camera is on a target the game gave it (the player, seen
+    /// now or held for [`Self::HOLD_STEPS`] steps) rather than on the
+    /// fallback. Valid after a [`Self::step`].
+    #[must_use]
+    pub fn tracking(&self) -> bool {
+        self.held.is_some()
+    }
+
     /// Forget where the camera was; the next step lands on its target.
     pub fn reset(&mut self) {
         self.state = None;
@@ -2664,6 +2672,24 @@ mod smoother_tests {
             peak = peak.max(p.0 - x);
         }
         assert!(peak <= 0.5, "overshoot after stopping {peak}");
+    }
+
+    #[test]
+    fn the_smoother_says_whether_it_is_on_a_real_target() {
+        let mut s = CameraSmoother::default();
+        // Never given a target: on the fallback.
+        s.step(None, (5.0, 5.0), 100.0);
+        assert!(!s.tracking());
+        // A target: tracking, and still tracking while it is held ...
+        s.step(Some((9.0, 9.0)), (5.0, 5.0), 100.0);
+        assert!(s.tracking());
+        for _ in 0..CameraSmoother::HOLD_STEPS {
+            s.step(None, (5.0, 5.0), 100.0);
+            assert!(s.tracking());
+        }
+        // ... until the hold runs out.
+        s.step(None, (5.0, 5.0), 100.0);
+        assert!(!s.tracking());
     }
 
     #[test]
