@@ -869,3 +869,40 @@ fn only_the_playfield_grid_rises() {
     assert!(out[0].depth.iter().all(|d| *d == 0), "the bar stays flat");
     assert_eq!(out[1].depth.iter().filter(|d| **d > 0).count(), 1);
 }
+
+// ---------------------------------------------------------------------
+// W34-08: per-layer scroll ratios (the renderer sets each plane back by them)
+// ---------------------------------------------------------------------
+
+#[test]
+fn layer_ratios_are_travel_over_the_fastest_layers_and_none_until_it_moved() {
+    let cell = [tile(SKY, 0); 4];
+    let mut l = HeightLearner::new();
+    let observe = |l: &mut HeightLearner, x: i64| {
+        // Layer 0 travels `x`, layer 1 half as far, layer 2 not at all.
+        let gs = [
+            grid_of(0, 2, 2, (0, 32), x, &cell),
+            grid_of(1, 2, 2, (0, 32), x / 2, &cell),
+            grid_of(2, 2, 2, (0, 32), 0, &cell),
+        ];
+        l.observe(&FrameObs {
+            grids: &gs,
+            sprites: &[],
+            entities: &[],
+            player: None,
+            pad: Dirs::default(),
+            orientation: Orientation::SideView,
+            hidden: None,
+        });
+    };
+    observe(&mut l, 0);
+    assert_eq!(l.layer_ratios(), [None; 4], "nothing has scrolled yet");
+    for x in 1..=120 {
+        observe(&mut l, x);
+    }
+    let r = l.layer_ratios();
+    assert_eq!(r[0], Some(1.0));
+    assert!((r[1].unwrap() - 0.5).abs() < 0.03, "{r:?}");
+    assert_eq!(r[2], Some(0.0));
+    assert_eq!(r[3], None, "no band for layer 3");
+}

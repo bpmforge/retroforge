@@ -276,32 +276,12 @@ pub fn fill_transparent(ground: &[u8], backdrop: [u8; 3]) -> Vec<u8> {
     out
 }
 
-/// Side-view billboards for the sprites on a `screen`-sized picture; those
-/// wholly off it are dropped.
+/// Side-view billboards for the sprites on a `screen`-sized picture, one per
+/// entity (touching sprites stand together, W34-08); those wholly off it are
+/// dropped.
 #[must_use]
 pub fn side_billboards(sprites: &[SpriteBox], screen: (u32, u32)) -> Vec<SideBillboard> {
-    let (sw, sh) = (screen.0.max(1) as f32, screen.1.max(1) as f32);
-    sprites
-        .iter()
-        .filter_map(|s| {
-            let (x, y, w, h) = (
-                f32::from(s.x),
-                f32::from(s.y),
-                f32::from(s.w),
-                f32::from(s.h),
-            );
-            if w <= 0.0 || h <= 0.0 || y >= sh || y + h <= 0.0 || x >= sw || x + w <= 0.0 {
-                return None;
-            }
-            Some(SideBillboard {
-                center_x_px: x + w / 2.0,
-                feet_y_px: y + h,
-                width_px: w,
-                height_px: h,
-                uv: [x / sw, y / sh, (x + w) / sw, (y + h) / sh],
-            })
-        })
-        .collect()
+    crate::diorama_layers::entity_billboards(sprites, screen)
 }
 
 /// [`side_billboards`] for a picture wider than the frame the sprite layer
@@ -332,7 +312,8 @@ pub fn side_billboards_wide(
         .collect()
 }
 
-/// Top-down billboards on a [`LiveGrid`] lattice (feet at the bottom edge).
+/// Top-down billboards on a [`LiveGrid`] lattice (feet at the bottom edge),
+/// one per entity (touching sprites stand together, W34-08).
 #[must_use]
 pub fn top_billboards(
     sprites: &[SpriteBox],
@@ -340,15 +321,11 @@ pub fn top_billboards(
     screen: (u32, u32),
 ) -> Vec<Billboard> {
     let (sw, sh) = (screen.0.max(1) as f32, screen.1.max(1) as f32);
-    sprites
-        .iter()
-        .filter_map(|s| {
-            let (x, y, w, h) = (
-                f32::from(s.x),
-                f32::from(s.y),
-                f32::from(s.w),
-                f32::from(s.h),
-            );
+    crate::diorama_layers::entities_of(sprites)
+        .into_iter()
+        .filter_map(|(e, _)| {
+            let (x, y) = (e.x0 as f32, e.y0 as f32);
+            let (w, h) = (e.width() as f32, e.height() as f32);
             if w <= 0.0 || h <= 0.0 || y >= sh || y + h <= 0.0 || x >= sw || x + w <= 0.0 {
                 return None;
             }
@@ -382,6 +359,11 @@ pub struct SideFrame<'a> {
     pub sprite_rgba: &'a [u8],
     pub sprite_size: (u32, u32),
     pub back_px: f32,
+    /// Ticket W34-08: the picture pulled apart into planes. When set,
+    /// `ground_rgba` is not read (the planes' atlas is the ground texture),
+    /// `ground` is still the size of ONE picture (the plane) and `back_px`
+    /// is ignored: the playfield is the plane the blocks grow from.
+    pub planes: Option<&'a crate::diorama_layers::Planes>,
     /// The window of the picture the game shows: its size, and the centre
     /// to look at (picture pixels, y down).
     pub window: (f32, f32),
@@ -400,18 +382,6 @@ pub fn render_side(
     f: &SideFrame<'_>,
 ) -> Result<DioramaRender, String> {
     let (gw, gh) = (f.ground.0 as f32, f.ground.1 as f32);
-    let scene = SideScene {
-        plane_w: gw,
-        plane_h: gh,
-        origin: [f.lattice.origin.0 as f32, f.lattice.origin.1 as f32],
-        tile_px: f.lattice.tile_px as f32,
-        cols: f.lattice.cols,
-        rows: f.lattice.rows,
-        depth: &f.lattice.depth,
-        slope: &f.lattice.slope,
-        billboards: f.sprites,
-        back_px: f.back_px,
-    };
     let camera = f.view.camera_at((f.centre.0, f.centre.1)).clamped();
     let aspect = f.view.projection_aspect(f.out);
     // Following with a zoom: the window narrows around the centre and may
@@ -429,6 +399,39 @@ pub fn render_side(
         &camera,
         target,
     );
+    let (atlas, back_planes, back_px, ground_rgba, ground_size) = match f.planes {
+        Some(p) => (
+            p.atlas,
+            p.back.as_slice(),
+            0.0,
+            p.atlas_rgba.as_slice(),
+            p.atlas_size,
+        ),
+        None => (
+            rf_renderer::diorama_side::Atlas::single(gh),
+            &[][..],
+            f.back_px,
+            f.ground_rgba,
+            f.ground,
+        ),
+    };
+    let scene = SideScene {
+        plane_w: gw,
+        plane_h: gh,
+        origin: [f.lattice.origin.0 as f32, f.lattice.origin.1 as f32],
+        tile_px: f.lattice.tile_px as f32,
+        cols: f.lattice.cols,
+        rows: f.lattice.rows,
+        depth: &f.lattice.depth,
+        slope: &f.lattice.slope,
+        billboards: f.sprites,
+        back_px,
+        atlas,
+        back_planes,
+        // The eye straight in front of the target at the camera's distance:
+        // the back planes are scaled to look the same from there.
+        ref_eye: [target.0, target.1, placement.distance],
+    };
     let vertices = rf_renderer::diorama_mesh::build_vertices_side(&scene, placement.eye);
     let vp = camera_matrices::view_proj_side(
         f.window.0,
@@ -441,9 +444,9 @@ pub fn render_side(
     let rgba = pass.render_with_vp(
         gpu,
         &vertices,
-        f.ground_rgba,
-        f.ground.0,
-        f.ground.1,
+        ground_rgba,
+        ground_size.0,
+        ground_size.1,
         f.sprite_rgba,
         f.sprite_size.0,
         f.sprite_size.1,

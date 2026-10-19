@@ -109,6 +109,7 @@ fn learned(orientation: Orientation, grid: HeightGrid) -> HeightsFrame {
         player: None,
         frames: 1200,
         level: None,
+        layers: Default::default(),
     }
 }
 

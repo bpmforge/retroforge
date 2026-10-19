@@ -811,3 +811,127 @@ ALttP floor edge. Code: `retroforge::level_heights` (new), `live_learn`,
   662 solid blocks (630 scouted), 0 scouts started; 4:3 raised cells from the
   restored table alone at frame 63. SMB3 1-1: blocks stand 2 frames after Diorama
   goes on.
+
+## W34-08 as built (2026-10-19)
+
+Layer separation, the flat HUD and entity billboards (D3, D4, D7). Code:
+`retroforge::diorama_layers` (new: the split, the HUD overlay, entities),
+`retroforge::hud_watch` (new: which part of the picture is HUD),
+`rf-renderer::diorama_side` (atlas, back planes, behind-the-background
+sprites), `kind::PLANE`, and the wiring in `live_learn` / `app.rs`.
+
+- **Which layer drew each dot.** The core thread records it per pixel
+  (`LayerInfo::ids`, 61 KB a frame, only while Diorama captures) next to the
+  learner's scroll ratio per layer (`HeightLearner::layer_ratios`, travel over
+  the fastest layer's) and the HUD verdict. A dot the main screen leaves to the
+  backdrop can still be a layer: one the game puts on the SUB screen and
+  blends in with colour math. That is Super Mario World's hills (the PPU
+  metadata calls 80 % of a level frame "backdrop"); `layer_ids` reads the sub
+  screen's own pixel at that dot (`FrameBundle::sub`, captured while Diorama is
+  on) and gives the dot to that layer. Without it the hills and the sky were
+  one plane.
+- **Planes (D4).** The picture is pulled apart into one slot per plane of a
+  single stacked texture (the pass keeps its two textures): the playfield
+  (blocks grow from it, plus every layer scrolling at 90 % or more of its
+  speed or with no ratio yet), one plane per slower layer at
+  `(1 - ratio) * 48 px + 0.5 px * layer` behind it, and the backdrop dots as the
+  sky 24 px behind the furthest. Each back plane is scaled about the eye
+  straight in front of the target (`SideScene::ref_eye`), so from the front it
+  covers exactly what it covers flat and the planes part company only when the
+  camera moves. A back plane's own pixels are carried down through what is in
+  front of it (nearest of its own above in the column, else below, else along
+  the row), because the console only kept what won: without that a swinging
+  camera shows slivers of the plane behind through the ground. Pixels a sprite
+  covered are filled from their row, so the player is not drawn twice.
+  `kind::PLANE` is shaded like ground but never casts into the shadow map: the
+  first build cast, and each plane darkened the one behind it in the shape of
+  its own outline (a test pins it, and fails if it casts).
+- **HUD (D4, D7).** `HudWatch` (two 240-frame windows) calls a layer HUD when
+  it is not the playfield, its dots sit in one band at an edge (under three
+  quarters of the rows, within 16 rows of the top or bottom), its scroll never
+  moved, and either the playfield did or the two are scrolled apart (a room that
+  never scrolls: ALttP). It calls a band HUD when the playfield's widest band of
+  a layer stops short of an edge and the band reaching that edge keeps its
+  scroll (the NES split under SMB3's level; the little bands a split writes in
+  between belong to it). Super Mario World's status bar is BG3 rows 9 to 36;
+  SMB3's is rows 193 to 240; ALttP's is BG3 at the top. The canvas model's own
+  `hud_layers` was not usable here: it only exists while widescreen stitches
+  the scene (`TileGrid::hud` was false on every captured grid). HUD dots are
+  taken out of the scene (filled from their row, a fully covered row from the
+  nearest row) and kept as a `HudOverlay`, composited over the finished 3D image
+  AFTER the lens, by mapping the whole picture onto the whole image (nearest),
+  so zoom and follow cannot crop it and pitch cannot move it. It is not lit,
+  lensed, shadowed or weathered. The learner never raised HUD grids (only the
+  playfield grid is extruded); D7's synthetic-layer test was already
+  `a_hud_grid_is_never_raised`.
+- **Billboards (D3).** Touching sprites are one entity (`cluster`, the W34-02
+  clustering) and one upright billboard standing at its bottom edge on the
+  height field, as before; behind-the-background sprites cluster apart and
+  stand just behind the playfield plane (so the plane's opaque dots and a Tall
+  box hide them through the depth buffer, and they show through its holes).
+  Both kinds are shadow casters (billboards were already, alpha-tested). The
+  top-down builder takes the same entities.
+- **Contract change.** `DioramaRender::rgba` (and the lensed copy that is
+  uploaded) now carry the flat HUD, composited last; W34-06b's "stays the raw
+  pass output" holds for the 3D part only, and a fingerprint over `rgba`
+  includes the HUD. Frames with no HUD, and every other path (decoded level,
+  Mode 7, wide ground, layering off), are byte-for-byte what they were.
+- **Not done / limits.** D4's "atmosphere layers stay fog" is not addressed:
+  fog / rain / weather layers are whatever the picture drew (a fast layer joins
+  the playfield plane; a slow one gets a plane) and the fog pass is untouched.
+  Widescreen (W34-07's wide ground) stays ONE plane with
+  its old set-back and its HUD in the picture: the canvas margins carry no
+  per-dot layer, so W34-09 has to bring them. 16x16 hires, Mode 7 and the
+  decoded-level path are untouched. The HUD call is a heuristic (a layer that
+  only draws a band at an edge and never scrolls); a wrong call flattens a band
+  and learns nothing. A sprite's shadow on a far plane lands displaced and
+  reads as a floating blob at some sun angles (physically right: the plane is
+  48 px behind). The planes' set-back is fixed (48 / 24 px), not scaled by the
+  tile size.
+- **Cost** (M4 Max, release, machine shared; whole-app diorama gate p95 =
+  split + mesh + pass + readback + the HUD of the previous frame, 240 frames
+  per row, pacing off, layers and one plane alternating in the same binary).
+  Default window (image 585 x 448): SMW 1.91 / 1.70 ms vs 1.74 / 1.51 on one
+  plane; SMB3 (585 x 480) 1.74 / 2.78 vs 1.54 / 1.38; ALttP 1.82 / 1.97 vs
+  1.38 / 2.26. At the 4x window (image 1170 x 896): SMW 3.37 / 3.43 vs 2.02 /
+  1.81; ALttP 3.32 / 2.86 vs 1.92 / 2.09, so about +1.3 ms at 4x, over D6's 3 ms
+  line at 1170 x 896 (the pass alone, W34-06b: 0.93 to 1.45 ms at 1024 x 896).
+  Timed on their own: the split 0.41 ms (256 x 224, three planes), the HUD
+  composite 0.12 ms at 1170 x 896, and the four-slot atlas against a one-picture
+  ground in the pass (`atlas_upload_cost`, same mesh, 1170 x 896) 0.16 to 0.2 ms
+  more (p50 1.83 -> 1.99, p95 2.25 -> 2.44). That is about 0.7 of the ~1.3 ms;
+  the other ~0.6 is not measured and is probably the fill of three more
+  full-image planes at 4x MSAA. `fps` is the core's (about 100 for SMW, 330 for
+  SMB3, 127 for ALttP) and does not move.
+- **Proofs.** `rf-renderer/tests/w34_08_layers.rs` (4): a back plane matches
+  the flat picture from the front and shows parallax at yaw 25 (one plane
+  shows none); a behind sprite is hidden by an opaque plane, shows only through
+  a hole, and a Tall box hides it there; a plane casts no shadow on the plane
+  behind (fails when it casts). `retroforge/tests/w34_08_layers_app.rs`: the
+  status-bar rows of the Diorama are identical at pitch 30 and 75 and at zoom
+  100 and 250 with follow (and differ with layering off), planes change the
+  picture, a layer map of the wrong size is ignored. Units: `diorama_layers`
+  (12), `hud_watch` (9), `layer_ids` (1), `layer_ratios` (1), side builder (3).
+- **Shots** (`docs/screens/w30-w31/`, uncommitted; sun fixed at 40 %).
+  What is in them, as seen: **SMW** `-on`: status bar flat and sharp across the
+  top, hills and clouds on their own plane behind the ground (the hills read
+  as one slab behind the grass, lit and shadowed separately from the sky),
+  Mario's shadow lands on the hills as a displaced grey blob, a sliver of void
+  at the left and bottom edge where the picture's own edge shows under the
+  pitch; `-yaw15` against `-oneplane-yaw15`: the hills and clouds slide against
+  the ground and the sky plane's edge shows on the right (parallax), where the
+  one-plane picture only skews; `-pitch-lo`/`-pitch-hi` against
+  `-oneplane-pitch-hi`: the status bar is the same pixels, on one plane it
+  tilts with the picture; `-zoom` against `-oneplane-zoom` (preset 160 %,
+  following Mario): the status bar is whole, the one-plane view crops it.
+  **SMB3** (NES, one background layer): only the sky is a separate plane (24 px
+  behind), so `-yaw15` shows the sky plane's edge sliding from the bushes' and
+  nothing else moves; the status bar is flat at the bottom in `-on` and
+  `-pitch-hi`, identical, and tilted with the floor in `-oneplane-*`. **ALttP**
+  `-on`: hearts, magic meter and item box flat and sharp at the top, Link one
+  billboard with his shadow on the floor; `-oneplane` is the W34-07 look, the
+  HUD floating over the room as a tilted band. Soft smudges above the HUD are in
+  both (not from this ticket). Files: `diorama-layers-{smw,smb3,alttp}-{off,on}`,
+  `-smw-{yaw15,oneplane-yaw15,pitch-lo,pitch-hi,oneplane-pitch-hi,zoom,
+  oneplane-zoom}`, `-smb3-{yaw15,oneplane-yaw15,pitch-hi,oneplane-pitch-hi}`,
+  `-alttp-oneplane`.

@@ -1136,11 +1136,12 @@ fn scene_bounds(vertices: &[Vertex]) -> Option<Aabb> {
 
 /// The vertex ranges that cast into the shadow map: everything except the
 /// contact ellipses and a triangle lying flat on the floor, which has
-/// nothing to cast onto but itself.
+/// nothing to cast onto but itself, and the side view's backdrop planes.
 fn caster_runs(vertices: &[Vertex]) -> Vec<std::ops::Range<u32>> {
     use crate::diorama_mesh::kind;
     let casts = |tri: &[Vertex]| {
         tri[0].kind != kind::SHADOW
+            && tri[0].kind != kind::PLANE
             && !(tri[0].kind == kind::GROUND && tri.iter().all(|v| v.pos[1] < 0.01))
     };
     let mut runs: Vec<std::ops::Range<u32>> = Vec::new();
