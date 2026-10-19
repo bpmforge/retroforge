@@ -160,6 +160,15 @@ impl Lattice {
         }
     }
 
+    /// The same cells on a picture whose left edge is `dx` dots further
+    /// left (a widescreen picture: the game's 256 dots sit `dx` in from its
+    /// left edge).
+    #[must_use]
+    pub fn shifted_right(mut self, dx: i32) -> Self {
+        self.origin.0 += dx;
+        self
+    }
+
     /// Cells that will be raised.
     #[must_use]
     pub fn raised(&self) -> usize {
@@ -320,22 +329,39 @@ pub fn top_billboards(
     grid: &LiveGrid,
     screen: (u32, u32),
 ) -> Vec<Billboard> {
+    top_billboards_wide(sprites, grid, screen, screen, (0, 0))
+}
+
+/// [`top_billboards`] for a floor wider than the frame the sprite layer was
+/// cut from (ticket W34-09): `screen` is the floor's picture, `sprite_size`
+/// the sprite texture's (the core's frame), and `pads` where the 256 hardware
+/// dots the boxes are in sit in the core's frame and on the floor.
+#[must_use]
+pub fn top_billboards_wide(
+    sprites: &[SpriteBox],
+    grid: &LiveGrid,
+    screen: (u32, u32),
+    sprite_size: (u32, u32),
+    (core_pad, plane_pad): (i32, i32),
+) -> Vec<Billboard> {
     let (sw, sh) = (screen.0.max(1) as f32, screen.1.max(1) as f32);
+    let (tw, th) = (sprite_size.0.max(1) as f32, sprite_size.1.max(1) as f32);
     crate::diorama_layers::entities_of(sprites)
         .into_iter()
         .filter_map(|(e, _)| {
-            let (x, y) = (e.x0 as f32, e.y0 as f32);
+            let (x, y) = ((e.x0 + plane_pad) as f32, e.y0 as f32);
             let (w, h) = (e.width() as f32, e.height() as f32);
             if w <= 0.0 || h <= 0.0 || y >= sh || y + h <= 0.0 || x >= sw || x + w <= 0.0 {
                 return None;
             }
             let (gx, gy) = grid.screen_to_grid(x, y);
+            let u = (e.x0 + core_pad) as f32;
             Some(Billboard {
                 center_x_px: gx + w / 2.0,
                 center_z_px: gy + h,
                 width_px: w,
                 height_px: h,
-                uv: [x / sw, y / sh, (x + w) / sw, (y + h) / sh],
+                uv: [u / tw, y / th, (u + w) / tw, (y + h) / th],
             })
         })
         .collect()
@@ -348,6 +374,10 @@ pub fn top_billboards(
 pub fn set_back_px(ratio: Option<f32>, tile_px: f32) -> f32 {
     ratio.map_or(0.0, |r| (1.0 - r.clamp(0.0, 1.0)) * tile_px * 2.0)
 }
+
+/// How long the last side-view mesh took to build, microseconds (a
+/// measurement the cost rows read; nothing depends on it).
+pub static LAST_MESH_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What a side-view frame is drawn from.
 pub struct SideFrame<'a> {
@@ -431,8 +461,17 @@ pub fn render_side(
         // The eye straight in front of the target at the camera's distance:
         // the back planes are scaled to look the same from there.
         ref_eye: [target.0, target.1, placement.distance],
+        // The planes go on past the picture's edge, in its edge colours, so
+        // a pitched or swung camera never looks off them into the clear
+        // colour (W34-08's void at the left and bottom).
+        overscan_px: gh,
     };
+    let t_mesh = std::time::Instant::now();
     let vertices = rf_renderer::diorama_mesh::build_vertices_side(&scene, placement.eye);
+    LAST_MESH_US.store(
+        u64::try_from(t_mesh.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let vp = camera_matrices::view_proj_side(
         f.window.0,
         f.window.1,
@@ -465,9 +504,16 @@ pub fn render_side(
 pub struct TopFrame<'a> {
     pub lattice: &'a Lattice,
     pub frame_rgba: &'a [u8],
+    /// The size of `frame_rgba`, the floor's picture (wider than the game's
+    /// 256 dots on a widescreen Diorama, W34-09).
     pub screen: (u32, u32),
     pub sprites: &'a [SpriteBox],
     pub sprite_rgba: &'a [u8],
+    /// The sprite texture's size (the core's frame) and where the boxes' 256
+    /// dots sit in it and on the floor (`core_pad`, `plane_pad`); the floor's
+    /// own size and `(0, 0)` when the picture is not widened.
+    pub sprite_size: (u32, u32),
+    pub pads: (i32, i32),
     /// How many rows of `screen` the game shows (an SNES frame without
     /// overscan draws 224 of the host's 240): the window the camera fits.
     pub rows: u32,
@@ -590,7 +636,7 @@ pub fn render_top(
     let grid = base.with_margin(EDGE_MARGIN_CELLS);
     let ground = crate::live_heights::padded_ground(f.frame_rgba, f.screen.0, shown, &grid);
     let (ground_w, ground_h) = grid.extent();
-    let billboards = top_billboards(f.sprites, &grid, f.screen);
+    let billboards = top_billboards_wide(f.sprites, &grid, f.screen, f.sprite_size, f.pads);
     let scene = DioramaScene {
         tiles_w: grid.cols,
         tiles_h: grid.rows,
@@ -623,7 +669,7 @@ pub fn render_top(
             ground_rgba: &ground,
             ground: (ground_w, ground_h),
             sprite_rgba: f.sprite_rgba,
-            sprite_size: f.screen,
+            sprite_size: f.sprite_size,
             window,
             target,
             out: f.out,

@@ -510,13 +510,23 @@ impl BudgetGate {
     /// fills.
     #[must_use]
     pub fn p95(&self) -> f64 {
+        self.percentile(0.95)
+    }
+
+    /// The window's median (nearest rank), `0.0` while it is empty.
+    #[must_use]
+    pub fn p50(&self) -> f64 {
+        self.percentile(0.5)
+    }
+
+    fn percentile(&self, p: f64) -> f64 {
         if self.window.is_empty() {
             return 0.0;
         }
         let mut sorted: Vec<f64> = self.window.iter().copied().collect();
         sorted.sort_by(f64::total_cmp);
         let n = sorted.len();
-        let idx = ((0.95 * n as f64).ceil() as usize)
+        let idx = ((p * n as f64).ceil() as usize)
             .saturating_sub(1)
             .min(n - 1);
         sorted[idx]

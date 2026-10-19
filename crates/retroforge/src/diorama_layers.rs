@@ -62,7 +62,8 @@ pub const MIN_SLOTS: u32 = 4;
 pub struct LayerSplit<'a> {
     /// The picture as displayed, `width * height * 4` (at least `rows` rows).
     pub rgba: &'a [u8],
-    /// The sprite layer of the same frame (alpha where a sprite won).
+    /// The sprite layer of the same frame (alpha where a sprite won), or
+    /// empty when `ids` alone says where the sprites are.
     pub sprite_rgba: &'a [u8],
     /// The layer of each pixel (`LayerInfo::ids`), `width * height` long.
     pub ids: &'a [u8],
@@ -73,6 +74,10 @@ pub struct LayerSplit<'a> {
     pub playfield: u8,
     pub ratios: [Option<f32>; 4],
     pub hud: &'a HudInfo,
+    /// The picture columns `[from, to)` where the game's own HUD is (all of
+    /// them, unless the picture is a widescreen one whose margins the
+    /// canvas filled: the HUD stays the game's own 256 dots in the middle).
+    pub hud_cols: (u32, u32),
 }
 
 /// The planes of one frame.
@@ -204,6 +209,7 @@ fn take_hud(
     info: &HudInfo,
     w: usize,
     rows: usize,
+    cols: (usize, usize),
 ) -> (HudOverlay, Vec<bool>) {
     let mut mask = vec![false; w * rows];
     if !info.any() || w == 0 {
@@ -217,7 +223,7 @@ fn take_hud(
     let (mut first, mut last) = (u32::MAX, 0u32);
     for y in 0..rows {
         let band = info.row(u16::try_from(y).unwrap_or(u16::MAX));
-        for x in 0..w {
+        for x in cols.0.min(w)..cols.1.min(w) {
             let i = y * w + x;
             let layer = info
                 .layers
@@ -243,9 +249,12 @@ fn take_hud(
     (hud, mask)
 }
 
-/// The picture with the HUD taken out (filled from its row, as [`split`]
-/// does) and the HUD kept apart, for a view that is not layered (the top-down
-/// floor). `None` when there is no HUD or the buffers do not fit.
+/// The picture with the HUD and the sprites taken out (each filled from its
+/// row, as [`split`] does) and the HUD kept apart (only in the columns
+/// `hud_cols`), for a view that is not layered (the top-down floor: the
+/// player and the monsters stand on it as billboards, so they are not
+/// drawn on it as well). `None` when there is neither or the buffers do
+/// not fit.
 #[must_use]
 pub fn without_hud(
     rgba: &[u8],
@@ -253,19 +262,24 @@ pub fn without_hud(
     hud: &HudInfo,
     width: u32,
     rows: u32,
+    hud_cols: (u32, u32),
 ) -> Option<(Vec<u8>, HudOverlay)> {
     let (w, rows) = (width as usize, rows as usize);
     let n = w * rows;
-    if !hud.any() || n == 0 || ids.len() < n || rgba.len() < n * 4 {
+    if n == 0 || ids.len() < n || rgba.len() < n * 4 {
         return None;
     }
     let mut out = rgba[..n * 4].to_vec();
     let mut ids = ids[..n].to_vec();
-    let (overlay, mask) = take_hud(&out, &ids, hud, w, rows);
-    if overlay.is_empty() {
+    let cols = (hud_cols.0 as usize, hud_cols.1 as usize);
+    let (overlay, mut covered) = take_hud(&out, &ids, hud, w, rows, cols);
+    for (c, id) in covered.iter_mut().zip(&ids) {
+        *c |= *id == LAYER_SPRITE;
+    }
+    if !covered.iter().any(|c| *c) {
         return None;
     }
-    fill_covered(&mut out, &mut ids, &mask, w, rows);
+    fill_covered(&mut out, &mut ids, &covered, w, rows);
     Some((out, overlay))
 }
 
@@ -276,12 +290,6 @@ struct SlotMap {
     back: Vec<f32>,
 }
 
-impl SlotMap {
-    fn slot(&self, id: u8) -> usize {
-        usize::from(self.of[usize::from(id)])
-    }
-}
-
 /// Pull the frame apart. `None` when the buffers do not fit each other.
 #[must_use]
 pub fn split(s: &LayerSplit<'_>) -> Option<Planes> {
@@ -290,15 +298,19 @@ pub fn split(s: &LayerSplit<'_>) -> Option<Planes> {
         return None;
     }
     let n = w * rows;
-    if s.ids.len() < n || s.rgba.len() < n * 4 || s.sprite_rgba.len() < n * 4 {
+    // An empty sprite layer means the picture has no sprite pixels in it
+    // beyond what `ids` marks.
+    let sprites = !s.sprite_rgba.is_empty();
+    if s.ids.len() < n || s.rgba.len() < n * 4 || (sprites && s.sprite_rgba.len() < n * 4) {
         return None;
     }
     let mut rgba = s.rgba[..n * 4].to_vec();
     let mut ids = s.ids[..n].to_vec();
     // The HUD first: its pixels are kept, and hidden from the scene.
-    let (hud, mut covered) = take_hud(&rgba, &ids, s.hud, w, rows);
+    let cols = (s.hud_cols.0 as usize, s.hud_cols.1 as usize);
+    let (hud, mut covered) = take_hud(&rgba, &ids, s.hud, w, rows, cols);
     for (i, c) in covered.iter_mut().enumerate() {
-        *c |= ids[i] == LAYER_SPRITE || s.sprite_rgba[i * 4 + 3] != 0;
+        *c |= ids[i] == LAYER_SPRITE || (sprites && s.sprite_rgba[i * 4 + 3] != 0);
     }
     fill_covered(&mut rgba, &mut ids, &covered, w, rows);
 
@@ -340,47 +352,57 @@ pub fn split(s: &LayerSplit<'_>) -> Option<Planes> {
     let slots = used.max(MIN_SLOTS);
     let pitch = s.rows + SLOT_GAP;
     let atlas_size = (s.width, slots * pitch);
-    let mut atlas = vec![0u8; (atlas_size.0 * atlas_size.1 * 4) as usize];
+    let slot_len = pitch as usize * w * 4;
+    let mut atlas = vec![0u8; atlas_size.0 as usize * atlas_size.1 as usize * 4];
     // Every slot carries the picture's colours (so linear filtering at a
     // hole's edge never pulls in black); alpha is set below.
+    let mut clear = rgba.clone();
+    for px in clear.chunks_exact_mut(4) {
+        px[3] = 0;
+    }
     for slot in 0..used as usize {
-        let base = slot * pitch as usize * w * 4;
-        atlas[base..base + n * 4].copy_from_slice(&rgba);
-        for px in atlas[base..base + n * 4].chunks_exact_mut(4) {
-            px[3] = 0;
-        }
+        atlas[slot * slot_len..slot * slot_len + n * 4].copy_from_slice(&clear);
     }
-    for (i, id) in ids.iter().enumerate() {
-        let o = (map.slot(*id) * pitch as usize * w + i) * 4;
-        atlas[o + 3] = 255;
+    // The slot of every pixel, once (the passes below read it many times).
+    let slot_of: Vec<u8> = ids.iter().map(|id| map.of[usize::from(*id)]).collect();
+    for (i, slot) in slot_of.iter().enumerate() {
+        atlas[usize::from(*slot) * slot_len + i * 4 + 3] = 255;
     }
-    // Carry each back plane down through what stands in front of it.
-    let mut pending: Vec<usize> = Vec::new();
+    // Carry each back plane down through what stands in front of it, one
+    // row-major sweep per plane (the column's state is two arrays).
+    let mut above = vec![usize::MAX; w];
+    let mut first = vec![usize::MAX; w];
     let mut had = vec![false; w];
     let mut left = vec![usize::MAX; w];
     for slot in 1..used as usize {
-        let mine = |i: usize| map.slot(ids[i]) == slot;
-        let nearer = |i: usize| map.back[map.slot(ids[i])] < map.back[slot];
-        for x in 0..w {
-            let mut above: Option<usize> = None;
-            pending.clear();
-            for y in 0..rows {
+        let mine = |i: usize| usize::from(slot_of[i]) == slot;
+        let my_back = map.back[slot];
+        let nearer = |i: usize| map.back[usize::from(slot_of[i])] < my_back;
+        above.fill(usize::MAX);
+        first.fill(usize::MAX);
+        for y in 0..rows {
+            for x in 0..w {
                 let i = y * w + x;
                 if mine(i) {
-                    above = Some(i);
-                } else if nearer(i) {
-                    match above {
-                        Some(a) => paint(&mut atlas, slot, pitch, w, i, &rgba, a),
-                        None => pending.push(i),
+                    above[x] = i;
+                    if first[x] == usize::MAX {
+                        first[x] = i;
                     }
+                } else if above[x] != usize::MAX && nearer(i) {
+                    paint(&mut atlas, slot, pitch, w, i, &rgba, above[x]);
                 }
             }
-            // Nothing of its own above: take the first of its own below.
-            if !pending.is_empty() {
-                if let Some(b) = (0..rows).map(|y| y * w + x).find(|i| mine(*i)) {
-                    for i in pending.drain(..) {
-                        paint(&mut atlas, slot, pitch, w, i, &rgba, b);
-                    }
+        }
+        // Nothing of its own above: take the first of its own below (only
+        // the rows above a column's first own pixel can be in that case).
+        for (x, &f) in first.iter().enumerate() {
+            if f == usize::MAX {
+                continue;
+            }
+            for y in 0..f / w {
+                let i = y * w + x;
+                if nearer(i) {
+                    paint(&mut atlas, slot, pitch, w, i, &rgba, f);
                 }
             }
         }
@@ -394,17 +416,19 @@ pub fn split(s: &LayerSplit<'_>) -> Option<Planes> {
             for (x, h) in had.iter_mut().enumerate() {
                 *h = atlas[(row + x) * 4 + 3] != 0;
             }
-            let filled = |x: usize| had[x];
+            if had.iter().all(|h| *h) {
+                continue;
+            }
             let mut last = usize::MAX;
             for (x, slot_left) in left.iter_mut().enumerate() {
-                if filled(x) {
+                if had[x] {
                     last = x;
                 }
                 *slot_left = last;
             }
             let mut next = usize::MAX;
             for x in (0..w).rev() {
-                if filled(x) {
+                if had[x] {
                     next = x;
                     continue;
                 }
@@ -554,6 +578,7 @@ mod tests {
             playfield,
             ratios,
             hud,
+            hud_cols: (0, W as u32),
         })
     }
 
@@ -714,6 +739,99 @@ mod tests {
         assert_eq!(texel(&p, 0, 5, 5), px(1));
     }
 
+    /// Ticket W34-09: on a wide picture the HUD is the game's own dots in the
+    /// middle; a band of HUD rows does not reach the canvas margins beside it.
+    #[test]
+    fn a_hud_band_takes_only_the_columns_the_game_draws_it_in() {
+        let hud = HudInfo {
+            layers: [false; 4],
+            rows: vec![(4, 6)],
+        };
+        let (rgba, ids) = frame(["00000000"; H]);
+        let sprite = vec![0u8; W * H * 4];
+        let p = split(&LayerSplit {
+            rgba: &rgba,
+            sprite_rgba: &sprite,
+            ids: &ids,
+            width: W as u32,
+            rows: H as u32,
+            playfield: 0,
+            ratios: [Some(1.0), None, None, None],
+            hud: &hud,
+            hud_cols: (2, 6),
+        })
+        .unwrap();
+        assert_eq!(p.hud.rows, (4, 6));
+        for x in 0..W {
+            let opaque = p.hud.rgba[(4 * W + x) * 4 + 3] == 255;
+            assert_eq!(opaque, (2..6).contains(&x), "column {x}");
+        }
+        // The margin dots of the band stay in the scene, on the playfield.
+        assert_eq!(texel(&p, 0, 0, 4), px(1));
+        assert_eq!(texel(&p, 0, 7, 5), px(1));
+    }
+
+    /// Ticket W34-09: the top-down floor has neither the HUD nor the sprites
+    /// on it (they stand on it, or float over it, as their own things).
+    #[test]
+    fn the_floor_loses_its_sprites_and_hud_and_keeps_the_rest() {
+        let hud = HudInfo {
+            layers: [false, false, true, false],
+            rows: Vec::new(),
+        };
+        let (rgba, ids) = frame([
+            "22222222", "00000000", "000ss000", "000ss000", "00000000", "00000000",
+        ]);
+        let (floor, overlay) = without_hud(&rgba, &ids, &hud, W as u32, H as u32, (0, W as u32))
+            .expect("there is a HUD and a sprite to lift");
+        assert_eq!(overlay.rows, (0, 1));
+        let sprite_colour = LAYER_SPRITE.wrapping_mul(10).wrapping_add(1);
+        assert!(
+            floor.chunks_exact(4).all(|t| t[0] != sprite_colour),
+            "no sprite left on the floor"
+        );
+        // The sprite's dots took the floor beside them (layer 0's colour).
+        assert_eq!(floor[(2 * W + 3) * 4..(2 * W + 3) * 4 + 3], px(1)[..3]);
+        // No HUD, no sprite: nothing to lift.
+        let (plain, plain_ids) = frame(["00000000"; H]);
+        assert!(without_hud(
+            &plain,
+            &plain_ids,
+            &NO_HUD,
+            W as u32,
+            H as u32,
+            (0, W as u32)
+        )
+        .is_none());
+    }
+
+    /// Ticket W34-09: margin dots the canvas gave no layer to are the
+    /// backdrop's, and land on the sky plane; the hills the canvas knows stand
+    /// on theirs.
+    #[test]
+    fn a_wide_picture_stands_its_margins_on_their_own_planes() {
+        // 8 columns: 2 margin dots each side of 4 game dots.
+        let p = run(
+            [
+                "..0000..", "1.0000.1", "1.0000.1", "11000011", "11000011", "11000011",
+            ],
+            0,
+            [Some(1.0), Some(0.5), None, None],
+            &NO_HUD,
+        )
+        .unwrap();
+        // Slot 1 is the hills, slot 2 the sky; the margin hills are on slot 1,
+        // the margin sky on slot 2.
+        assert_eq!(texel(&p, 1, 0, 3), px(11));
+        assert_eq!(texel(&p, 1, 7, 4), px(11));
+        assert_eq!(
+            texel(&p, 2, 0, 0),
+            px(LAYER_BACKDROP.wrapping_mul(10).wrapping_add(1))
+        );
+        // The game's own ground is on the playfield plane.
+        assert_eq!(texel(&p, 0, 3, 4)[3], 255);
+    }
+
     #[test]
     fn the_hud_lands_at_the_same_place_in_every_image_whatever_the_scene_does() {
         let hud = HudOverlay {
@@ -809,6 +927,7 @@ mod tests {
             playfield: 0,
             ratios: [None; 4],
             hud: &hud,
+            hud_cols: (0, 4),
         })
         .is_none());
     }
@@ -868,6 +987,7 @@ mod tests {
             playfield: 0,
             ratios: [Some(1.0), Some(0.3), Some(0.0), None],
             hud: &hud,
+            hud_cols: (0, w as u32),
         };
         let mut times = Vec::new();
         let mut overlay = HudOverlay::default();

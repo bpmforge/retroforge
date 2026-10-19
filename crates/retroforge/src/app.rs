@@ -1334,6 +1334,10 @@ pub struct RetroForgeApp {
     /// Ticket W30-03 (tests): keep the core's own frame, before any fill.
     keep_core_frame: bool,
     core_frame_copy: Option<Vec<u8>>,
+    /// Ticket W34-09: the wide picture the flat view just composed for a
+    /// frame, with its layer map, kept for the Diorama to stand on (so the
+    /// margins are composed once per frame, not twice).
+    wide_cache: Option<WideCache>,
     /// The most recent [`enhanced_view::compose_ultrawide`] result over
     /// [`Self::ultrawide_layers`]'s map canvas — `Err` (e.g. "canvas is empty") is kept
     /// distinct from `None` ("never even tried yet") so
@@ -1443,6 +1447,10 @@ pub struct RetroForgeApp {
     /// synchronously there (see that method's own doc for why sync is the
     /// right call at the ~2 ms this pass measures).
     diorama_budget: rf_renderer::fog::BudgetGate,
+    /// Ticket W34-09: where a layered Diorama frame's CPU time goes, summed
+    /// since the test hook last read it: `[wide picture, split, pass, frames,
+    /// mesh (side view; the pass's own mesh build)]`.
+    diorama_stage: [f64; 5],
     /// Ticket W34-05 (D1): the Diorama camera's target, gliding to where the
     /// player is (or the middle of the game's window) instead of jumping.
     diorama_smoother: rf_renderer::diorama::CameraSmoother,
@@ -1625,6 +1633,22 @@ fn picture_backdrop_rows(
 
 /// The per-row facts a widened frame's margins are composed from:
 /// backdrop colours (W31-07), layer order (W32-08), registers (W33-01).
+/// The flat view's wide picture of one core frame, kept for the Diorama.
+struct WideCache {
+    frame: u64,
+    ground: WideGround,
+}
+
+/// Ticket W34-09: the wide picture a widescreen Diorama stands on.
+struct WideGround {
+    /// The picture without its sprites, margins filled from the canvas.
+    rgba: Vec<u8>,
+    size: (u32, u32),
+    /// The background layer of every dot ([`crate::hud_watch`] ids), when
+    /// the core recorded them.
+    ids: Option<Vec<u8>>,
+}
+
 type MarginRows<'a> = (
     &'a [Option<[u8; 3]>],
     &'a [[u8; rf_enhance::canvas::LAYERS]],
@@ -1907,6 +1931,7 @@ impl RetroForgeApp {
             force_vram_margins: false,
             keep_core_frame: false,
             core_frame_copy: None,
+            wide_cache: None,
             console_label: "NES",
             script_host: None,
             script_overlay: Vec::new(),
@@ -2025,6 +2050,7 @@ impl RetroForgeApp {
             diorama_wanted: false,
             diorama_ground_rgba: None,
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
+            diorama_stage: [0.0; 5],
             diorama_smoother: rf_renderer::diorama::CameraSmoother::default(),
             mode7_seen: false,
             mode7_ground_wanted: false,
@@ -4490,13 +4516,7 @@ impl RetroForgeApp {
                         // (an HD pack or HD Mode 7 frame is already at a
                         // different scale, so it is left alone).
                         if self.widescreen_on {
-                            self.widen_margins(
-                                native.0,
-                                native.1,
-                                msg.layer_frames.as_ref(),
-                                (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
-                                &msg.line_palettes,
-                            )
+                            self.widen_margins_for_frame(&msg, native.0, native.1)
                         } else {
                             native
                         }
@@ -5589,14 +5609,26 @@ impl RetroForgeApp {
             u32::try_from(msg.width).unwrap_or(0),
             u32::try_from(msg.height).unwrap_or(0),
         );
+        let orientation = msg
+            .heights
+            .as_ref()
+            .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
+                h.orientation.orientation
+            });
+        // Ticket W34-09: a widescreen floor plan (the core's frame is wider
+        // than the 256 dots the grids are made for): the lattice stays in
+        // the 256 dots' coordinates and is laid on the wide picture below.
+        let top_wide = self.widescreen_on
+            && width > 256
+            && orientation != rf_enhance::heights::Orientation::SideView;
         let painted = match (&self.live_heights, &msg.snes) {
-            (Some(table), Some(snes)) if !table.is_empty() && width == 256 => {
+            (Some(table), Some(snes)) if !table.is_empty() && (width == 256 || top_wide) => {
                 crate::live_heights::build_grid(
                     table,
                     &snes.vram,
                     &snes.ppu_regs,
                     snes.bg_scroll,
-                    (width, height),
+                    (256, height),
                 )
                 .map(|g| dl::Lattice::from_painted(&g))
             }
@@ -5625,14 +5657,9 @@ impl RetroForgeApp {
                     .as_ref()
                     .is_some_and(|f| f.scene == l.scene)
             });
-        let orientation = msg
-            .heights
-            .as_ref()
-            .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
-                h.orientation.orientation
-            });
         // The wide picture: the margin-filled ground, and the level's heights
         // laid on it. Only a side view stands up from the canvas for now.
+        let t_wide = std::time::Instant::now();
         let wide = level
             .filter(|_| orientation == rf_enhance::heights::Orientation::SideView)
             .and_then(|l| {
@@ -5643,14 +5670,33 @@ impl RetroForgeApp {
             });
         let lattice = match &wide {
             Some((l, origin, g)) => {
-                let pad = (i64::from(g.1 .0) - 256).div_euclid(2);
+                let pad = (i64::from(g.size.0) - 256).div_euclid(2);
                 Some(dl::Lattice::from_level(
                     &l.canvas,
                     (origin.0 - pad, origin.1),
-                    g.1,
+                    g.size,
                 ))
             }
             None => painted.or_else(learned),
+        };
+        // A widescreen floor plan: the margin-filled picture the floor and
+        // the lattice stand on (the lattice is the 256 dots', so it moves in
+        // by the margin).
+        let wide_top = match (
+            &lattice,
+            top_wide && dl::plan_for(orientation, is_painted) == dl::Plan::Top,
+        ) {
+            (Some(_), true) => self.wide_ground(msg, width, Self::diorama_rows(msg, height)),
+            _ => None,
+        };
+        let lattice = match (lattice, &wide_top) {
+            (Some(l), Some(g)) => Some(l.shifted_right((g.size.0 as i32 - 256).div_euclid(2))),
+            (l, _) => l,
+        };
+        let wide_ms = if wide.is_some() || wide_top.is_some() {
+            t_wide.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
         };
         let plan = dl::plan_for(orientation, is_painted);
         self.heights_note = msg.heights.as_deref().map(|h| HeightsNote {
@@ -5672,7 +5718,7 @@ impl RetroForgeApp {
         });
         let usable = lattice.is_some()
             && plan != dl::Plan::Flat
-            && (width == 256 || wide.is_some())
+            && (width == 256 || wide.is_some() || wide_top.is_some())
             && !msg.sprite_rgba.is_empty()
             && self.diorama_budget.is_enabled()
             && self.gpu.is_some();
@@ -5714,8 +5760,12 @@ impl RetroForgeApp {
         let rows = Self::diorama_rows(msg, height);
         // Ticket W34-07: the picture the camera frames is the margin-filled
         // one when the level's heights stand on it.
-        let plane = wide.as_ref().map_or((width, rows), |(_, _, g)| g.1);
-        let plane_pad = if wide.is_some() {
+        let plane = wide
+            .as_ref()
+            .map(|(_, _, g)| g.size)
+            .or(wide_top.as_ref().map(|g| g.size))
+            .unwrap_or((width, rows));
+        let plane_pad = if wide.is_some() || wide_top.is_some() {
             (plane.0 as i32 - 256).div_euclid(2)
         } else {
             0
@@ -5742,22 +5792,32 @@ impl RetroForgeApp {
         // Ticket W34-08: the picture pulled apart into planes with its HUD
         // lifted off (the layer map is the core thread's, and must be the
         // frame's own size), or just the HUD lifted off the floor.
+        // The core records the map for the 256 hardware dots, in the middle
+        // of a widened frame (the wide picture's own map is made from it).
+        let wide_view = wide.is_some() || wide_top.is_some();
         let info = msg.heights.as_deref().map(|h| &h.layers).filter(|l| {
             self.diorama_layers
                 && width > 0
-                && l.ids.len() == msg.rgba.len() / 4
-                && l.ids.len() == (width * height) as usize
+                && if wide_view {
+                    l.ids.len() == (256 * height) as usize
+                } else {
+                    l.ids.len() == msg.rgba.len() / 4 && l.ids.len() == (width * height) as usize
+                }
         });
         let playfield = msg
             .heights
             .as_deref()
             .and_then(|h| msg.tile_grids.get(h.foreground?))
             .map(|g| g.layer);
+        let t_split = std::time::Instant::now();
         let mut planes: Option<crate::diorama_layers::Planes> = None;
         let mut top_ground: Option<(Vec<u8>, crate::diorama_layers::HudOverlay)> = None;
         if let (Some(l), Some(playfield)) = (info, playfield) {
-            match plan {
-                dl::Plan::Side if wide.is_none() => {
+            // The HUD is the game's own 256 dots, in the middle of a wide
+            // picture (W34-09), never its canvas margins.
+            let hud_cols = (plane_pad as u32, plane_pad as u32 + 256);
+            match (plan, &wide) {
+                (dl::Plan::Side, None) => {
                     planes = crate::diorama_layers::split(&crate::diorama_layers::LayerSplit {
                         rgba: &msg.rgba,
                         sprite_rgba: &msg.sprite_rgba,
@@ -5767,22 +5827,56 @@ impl RetroForgeApp {
                         playfield,
                         ratios: l.ratios,
                         hud: &l.hud,
+                        hud_cols: (0, width),
                     });
                 }
-                dl::Plan::Top => {
-                    top_ground =
-                        crate::diorama_layers::without_hud(&msg.rgba, &l.ids, &l.hud, width, rows);
+                (dl::Plan::Side, Some((_, _, g))) => {
+                    if let Some(ids) = &g.ids {
+                        // The sprites in the wide picture are the ids' own
+                        // (the sprite layer is the core frame's, not this
+                        // picture's).
+                        planes = crate::diorama_layers::split(&crate::diorama_layers::LayerSplit {
+                            rgba: &g.rgba,
+                            sprite_rgba: &[],
+                            ids,
+                            width: g.size.0,
+                            rows,
+                            playfield,
+                            ratios: l.ratios,
+                            hud: &l.hud,
+                            hud_cols,
+                        });
+                    }
+                }
+                (dl::Plan::Top, _) => {
+                    top_ground = match &wide_top {
+                        Some(g) => g.ids.as_deref().and_then(|ids| {
+                            crate::diorama_layers::without_hud(
+                                &g.rgba, ids, &l.hud, g.size.0, rows, hud_cols,
+                            )
+                        }),
+                        None => crate::diorama_layers::without_hud(
+                            &msg.rgba,
+                            &l.ids,
+                            &l.hud,
+                            width,
+                            rows,
+                            (0, width),
+                        ),
+                    };
                 }
                 _ => {}
             }
         }
+        let split_ms = t_split.elapsed().as_secs_f64() * 1000.0;
+        let t_pass = std::time::Instant::now();
         let result = match plan {
             dl::Plan::Side => {
                 let own;
                 let (ground, ground_size, billboards) = match &wide {
                     Some((_, _, g)) => (
-                        &g.0,
-                        g.1,
+                        &g.rgba,
+                        g.size,
                         dl::side_billboards_wide(sprites, (width, height), core_pad, plane_pad),
                     ),
                     None => {
@@ -5791,9 +5885,14 @@ impl RetroForgeApp {
                         } else {
                             dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width)
                         };
+                        // With planes the plane is the rows the game shows
+                        // (the atlas slots are that tall): a plane taller
+                        // than its slot read the gap and the next slot below
+                        // the picture (W34-09).
+                        let plane_rows = if planes.is_some() { rows } else { height };
                         (
                             &own,
-                            (width, height),
+                            (width, plane_rows),
                             dl::side_billboards(sprites, (width, height)),
                         )
                     }
@@ -5825,10 +5924,15 @@ impl RetroForgeApp {
                 pass,
                 &dl::TopFrame {
                     lattice: &lattice,
-                    frame_rgba: top_ground.as_ref().map_or(&msg.rgba, |(g, _)| g),
-                    screen: (width, height),
+                    frame_rgba: top_ground.as_ref().map_or_else(
+                        || wide_top.as_ref().map_or(&msg.rgba, |g| &g.rgba),
+                        |(g, _)| g,
+                    ),
+                    screen: wide_top.as_ref().map_or((width, height), |g| g.size),
                     sprites,
                     sprite_rgba: &msg.sprite_rgba,
+                    sprite_size: (width, height),
+                    pads: (core_pad, plane_pad),
                     rows,
                     centre,
                     out,
@@ -5841,14 +5945,70 @@ impl RetroForgeApp {
             (None, Some((_, h))) => h,
             (None, None) => crate::diorama_layers::HudOverlay::default(),
         };
-        self.diorama_budget
-            .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0 + self.diorama_hud_ms);
+        // The wide picture is built before the clock above starts: it is part
+        // of what the Diorama costs, so it is counted.
+        self.diorama_budget.record_sample_ms(
+            start.elapsed().as_secs_f64() * 1000.0 + self.diorama_hud_ms + wide_ms,
+        );
+        let stage = &mut self.diorama_stage;
+        stage[0] += wide_ms;
+        stage[1] += split_ms;
+        stage[2] += t_pass.elapsed().as_secs_f64() * 1000.0;
+        stage[3] += 1.0;
+        stage[4] += crate::diorama_learned::LAST_MESH_US.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1000.0;
         self.store_diorama_result(result, msg.frame_count);
+    }
+
+    /// [`Self::widen_margins_layered`] for a frame the core sent. While a layered
+    /// Diorama is wanted it also keeps the wide picture and its layer map
+    /// (`Self::wide_ground` stands the Diorama on them: the margins are
+    /// composed once per frame).
+    fn widen_margins_for_frame(
+        &mut self,
+        msg: &core_thread::FrameMsg,
+        rgba: Vec<u8>,
+        size: (usize, usize),
+    ) -> (Vec<u8>, (usize, usize)) {
+        let rows: MarginRows<'_> = (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs);
+        let narrow = usize::from(rf_enhance::widescreen::NARROW_WIDTH);
+        let core_ids = msg
+            .heights
+            .as_deref()
+            .map(|h| h.layers.ids.as_slice())
+            .filter(|ids| {
+                self.diorama_wanted
+                    && self.diorama_layers
+                    && ids.len() == narrow * msg.height
+                    && size.1 <= msg.height
+            })
+            .map(|ids| &ids[..narrow * size.1]);
+        let (picture, out_size, ids) = self.widen_margins_layered(
+            rgba,
+            size,
+            msg.layer_frames.as_ref(),
+            rows,
+            &msg.line_palettes,
+            core_ids,
+        );
+        self.wide_cache = match (ids, u32::try_from(out_size.0), u32::try_from(out_size.1)) {
+            (Some(ids), Ok(w), Ok(h)) => Some(WideCache {
+                frame: msg.frame_count,
+                ground: WideGround {
+                    rgba: picture.clone(),
+                    size: (w, h),
+                    ids: Some(ids),
+                },
+            }),
+            _ => None,
+        };
+        (picture, out_size)
     }
 
     /// Ticket W34-07: the ground of a widescreen Diorama -- this frame's
     /// picture without its sprites, with the margins filled from the canvas
-    /// exactly as the flat view fills them (`widen_margins`), cut to the rows
+    /// exactly as the flat view fills them (`widen_margins_layered`), cut to the rows
     /// the game shows. `None` when the frame has no sprite layer to take the
     /// sprites out with.
     fn wide_ground(
@@ -5856,7 +6016,15 @@ impl RetroForgeApp {
         msg: &core_thread::FrameMsg,
         width: u32,
         rows: u32,
-    ) -> Option<(Vec<u8>, (u32, u32))> {
+    ) -> Option<WideGround> {
+        // The flat view composed this frame's margins a moment ago.
+        if let Some(c) = self
+            .wide_cache
+            .take()
+            .filter(|c| c.frame == msg.frame_count)
+        {
+            return Some(c.ground);
+        }
         if msg.sprite_rgba.len() != msg.rgba.len() || width == 0 {
             return None;
         }
@@ -5873,15 +6041,28 @@ impl RetroForgeApp {
         // wrote): state added there that depends on the call count would
         // break that.
         let keep = std::mem::replace(&mut self.keep_core_frame, false);
-        let (rgba, (w, h)) = self.widen_margins(
+        // The core's per-dot layer map, when it fits this frame: the wide
+        // picture's own map is made from it beside the picture.
+        let core_ids = msg
+            .heights
+            .as_deref()
+            .map(|h| h.layers.ids.as_slice())
+            .filter(|ids| self.diorama_layers && ids.len() == 256 * msg.height)
+            .map(|ids| &ids[..256 * rows_n]);
+        let (rgba, (w, h), ids) = self.widen_margins_layered(
             cut,
             (msg.width, rows_n),
             msg.layer_frames.as_ref(),
             (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
             &msg.line_palettes,
+            core_ids,
         );
         self.keep_core_frame = keep;
-        Some((rgba, (u32::try_from(w).ok()?, u32::try_from(h).ok()?)))
+        Some(WideGround {
+            rgba,
+            size: (u32::try_from(w).ok()?, u32::try_from(h).ok()?),
+            ids,
+        })
     }
 
     /// Ticket W34-04: the readout line under the Diorama controls -- what has
@@ -5914,6 +6095,30 @@ impl RetroForgeApp {
         )
     }
 
+    /// The size the play view lays its picture out by: the core's own frame,
+    /// or, with widescreen on, the widened picture (the core's frame is
+    /// capped at the PPU's 512 dots, so at 21:9 and 32:9 it is not the
+    /// picture's width; ticket W34-09).
+    fn display_frame_size(&self) -> Option<(usize, usize)> {
+        if self.widescreen_on {
+            self.last_frame_size.or(self.core_frame_size)
+        } else {
+            self.core_frame_size
+        }
+    }
+
+    /// The logical grid of a frame on screen: a widescreen frame keeps its
+    /// width (W34-09), any other folds hires and interlace
+    /// ([`crate::play_view::DisplayGrid::for_frame`]).
+    fn display_grid(&self, width: f32, height: f32) -> crate::play_view::DisplayGrid {
+        // 512 exactly is the PPU's hires width, not an aspect's.
+        if self.widescreen_on && width > 512.0 {
+            crate::play_view::DisplayGrid::for_widened_frame(width, height)
+        } else {
+            crate::play_view::DisplayGrid::for_frame(width, height)
+        }
+    }
+
     /// Ticket W34-05 (D5): how many pixels the Diorama is rendered with --
     /// the rect the flat view would fill, in physical pixels, so the 3D
     /// image is sharp rather than a 256-wide picture scaled up. Never below
@@ -5928,7 +6133,7 @@ impl RetroForgeApp {
             return (frame_w, frame_h);
         };
         #[allow(clippy::cast_precision_loss)]
-        let grid = crate::play_view::DisplayGrid::for_frame(frame_w as f32, frame_h as f32);
+        let grid = self.display_grid(frame_w as f32, frame_h as f32);
         let par = crate::play_view::pixel_aspect_ratio(self.video.pixel_aspect);
         let rect = crate::play_view::play_rect(area, grid, par, self.video.scale_mode);
         let ppp = self.ctx.pixels_per_point();
@@ -12928,14 +13133,24 @@ impl RetroForgeApp {
     /// rows' palettes, used to resolve canvas cells (which are indexed).
     /// `(backdrops, order, line_regs)` are its per-row backdrop colours, per-row
     /// layer order (W32-08) and per-row registers (W33-01).
-    fn widen_margins(
+    ///
+    /// Ticket W34-09: when `core_ids` is given (the core's per-dot layer map,
+    /// recorded for the 256 hardware dots), the third result says which
+    /// background layer each dot of the wide picture belongs to: the core's
+    /// id where the picture keeps the core's dots, the canvas compose's layer
+    /// where a margin dot is read from a layer's canvas, the backdrop id
+    /// where nothing is known.
+    fn widen_margins_layered(
         &mut self,
         rgba: Vec<u8>,
         size: (usize, usize),
         layer_frames: Option<&rf_enhance::canvas::LayerFrames>,
         (backdrops, order, line_regs): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
-    ) -> (Vec<u8>, (usize, usize)) {
+        core_ids: Option<&[u8]>,
+    ) -> (Vec<u8>, (usize, usize), Option<Vec<u8>>) {
+        /// A dot whose layer no compose decided.
+        const UNSET: u8 = 0xFD;
         use rf_enhance::widescreen::{
             choose_margin_source, fill_margins_keeping, MarginFacts, MarginSource,
         };
@@ -13003,16 +13218,17 @@ impl RetroForgeApp {
         );
         self.widescreen_source = source;
         if source == MarginSource::Vram && out_w <= w {
-            return (rgba, size);
+            return (rgba, size, core_ids.map(<[u8]>::to_vec));
         }
         let hud = self.declared_hud;
         let keep =
             move |y: usize| hud.is_some_and(|r| u16::try_from(y).is_ok_and(|y| r.contains(y)));
+        let mut canvas_layer_ids: Option<Vec<u8>> = None;
         let filled = match (source, position) {
             (MarginSource::DecodedLevel, _) => {
                 let (cx, cy) = self.level_camera.unwrap_or((0, 0));
                 let Some((img, iw, ih)) = self.level_image.as_ref() else {
-                    return (rgba, size);
+                    return (rgba, size, core_ids.map(<[u8]>::to_vec));
                 };
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
                     let (x, y) = (usize::try_from(wx).ok()?, usize::try_from(wy).ok()?);
@@ -13031,8 +13247,13 @@ impl RetroForgeApp {
                 // palette make it the picture's own colour math, and what no
                 // layer knows shows the row's backdrop colour.
                 let (Some(frames), layers) = (layer_frames, &self.ultrawide_layers) else {
-                    return (rgba, size);
+                    return (rgba, size, core_ids.map(<[u8]>::to_vec));
                 };
+                // The layer of each dot the canvas decided, beside the colour
+                // (`UNSET` where the compose never ran: the kept 256 dots).
+                let pad_256 =
+                    (out_w as i64 - i64::from(rf_enhance::widescreen::NARROW_WIDTH)).div_euclid(2);
+                let canvas_ids = core_ids.map(|_| std::cell::RefCell::new(vec![UNSET; out_w * h]));
                 let world = |wx: i64, wy: i64| -> Option<[u8; 3]> {
                     let (dx, dy) = (wx - origin.0, wy - origin.1);
                     let row = usize::try_from(dy).unwrap_or(0);
@@ -13045,15 +13266,50 @@ impl RetroForgeApp {
                             .and_then(Option::as_ref)
                             .map(|p| (&p.words, p.brightness)),
                     };
-                    rf_enhance::canvas::margin_pixel(layers, frames, row, dx, &facts, &|i| {
-                        rf_renderer::resolve_index(i, None)
-                    })
+                    let (rgb, layer) = rf_enhance::canvas::margin_pixel_layer(
+                        layers,
+                        frames,
+                        row,
+                        dx,
+                        &facts,
+                        &|i| rf_renderer::resolve_index(i, None),
+                    )?;
+                    if let (Some(ids), Ok(x)) = (&canvas_ids, usize::try_from(dx + pad_256)) {
+                        if let Some(slot) = ids.borrow_mut().get_mut(row * out_w + x) {
+                            *slot = layer.unwrap_or(crate::hud_watch::LAYER_BACKDROP);
+                        }
+                    }
+                    Some(rgb)
                 };
-                fill_margins_keeping(&rgba, w, h, out_w, origin, &world, &keep, keep_w)
+                let filled =
+                    fill_margins_keeping(&rgba, w, h, out_w, origin, &world, &keep, keep_w);
+                canvas_layer_ids = canvas_ids.map(std::cell::RefCell::into_inner);
+                filled
             }
             _ => fill_margins_keeping(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep, keep_w),
         };
-        (filled, (out_w, h))
+        // Where the canvas did not decide a dot, it keeps the core's: its
+        // own layer id (the core records them for the 256 hardware dots, in
+        // the middle of the picture), and the backdrop beyond them.
+        let ids = core_ids.map(|core| {
+            let pad =
+                (out_w as i64 - i64::from(rf_enhance::widescreen::NARROW_WIDTH)).div_euclid(2);
+            let narrow = usize::from(rf_enhance::widescreen::NARROW_WIDTH);
+            let mut ids = canvas_layer_ids.unwrap_or_else(|| vec![UNSET; out_w * h]);
+            for (i, id) in ids.iter_mut().enumerate() {
+                if *id != UNSET {
+                    continue;
+                }
+                let (x, y) = ((i % out_w) as i64 - pad, i / out_w);
+                *id = usize::try_from(x)
+                    .ok()
+                    .filter(|x| *x < narrow)
+                    .and_then(|x| core.get(y * narrow + x).copied())
+                    .unwrap_or(crate::hud_watch::LAYER_BACKDROP);
+            }
+            ids
+        });
+        (filled, (out_w, h), ids)
     }
 
     /// Stop the running core and return to the library home (ticket
@@ -14200,6 +14456,23 @@ impl RetroForgeApp {
     #[must_use]
     pub fn diorama_p95_ms_for_test(&self) -> f64 {
         self.diorama_budget.p95()
+    }
+
+    /// Ticket W34-09: the median of the same window.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_p50_ms_for_test(&self) -> f64 {
+        self.diorama_budget.p50()
+    }
+
+    /// Ticket W34-09: the mean milliseconds per frame of the wide picture,
+    /// the layer split and the pass (mesh + render + readback) since the
+    /// last call, and how many frames that was.
+    #[doc(hidden)]
+    pub fn diorama_stage_ms_for_test(&mut self) -> ([f64; 4], u32) {
+        let s = std::mem::replace(&mut self.diorama_stage, [0.0; 5]);
+        let n = s[3].max(1.0);
+        ([s[0] / n, s[1] / n, s[2] / n, s[4] / n], s[3] as u32)
     }
 
     /// Ticket W34-08: the raw Diorama image of the last frame (RGBA, what
@@ -17427,9 +17700,9 @@ impl RetroForgeApp {
                         // core's own frame size (an HD pack's texture is
                         // N times larger but covers the same picture).
                         let [tw, th] = texture.size();
-                        let (fw, fh) = self.core_frame_size.unwrap_or((tw, th));
+                        let (fw, fh) = self.display_frame_size().unwrap_or((tw, th));
                         #[allow(clippy::cast_precision_loss)]
-                        let grid = crate::play_view::DisplayGrid::for_frame(fw as f32, fh as f32);
+                        let grid = self.display_grid(fw as f32, fh as f32);
                         let response =
                             crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
                         self.last_play_rect = Some(response.rect);
@@ -17487,7 +17760,7 @@ impl RetroForgeApp {
                         // aspect and integer rule apply as for Original.
                         let [tw, th] = texture.size();
                         #[allow(clippy::cast_precision_loss)]
-                        let grid = crate::play_view::DisplayGrid::for_frame(tw as f32, th as f32);
+                        let grid = self.display_grid(tw as f32, th as f32);
                         crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
                     } else {
                         ui.centered_and_justified(|ui| {
@@ -17512,9 +17785,9 @@ impl RetroForgeApp {
                         // the render was made at this rect's size, so toggling
                         // Diorama neither jumps nor letterboxes.
                         let [tw, th] = texture.size();
-                        let (fw, fh) = self.core_frame_size.unwrap_or((tw, th));
+                        let (fw, fh) = self.display_frame_size().unwrap_or((tw, th));
                         #[allow(clippy::cast_precision_loss)]
-                        let grid = crate::play_view::DisplayGrid::for_frame(fw as f32, fh as f32);
+                        let grid = self.display_grid(fw as f32, fh as f32);
                         let response =
                             crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
                         self.last_play_rect = Some(response.rect);
