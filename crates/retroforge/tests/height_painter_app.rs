@@ -59,7 +59,7 @@ fn the_hd2d_preset_is_gated_on_a_height_table_sets_the_look_and_restores_it() {
     harness.state_mut().edit_game_settings_for_test(|s| {
         s.lens_bloom = true;
         s.lens_bloom_pct = 90;
-        s.lens_grade = true;
+        s.lens_grade = false;
         s.diorama_pitch = 70;
         s.diorama_zoom = 300;
     });
@@ -79,7 +79,8 @@ fn the_hd2d_preset_is_gated_on_a_height_table_sets_the_look_and_restores_it() {
         (s.diorama_pitch, s.diorama_zoom, s.diorama_follow),
         (40, 160, true)
     );
-    assert!(s.diorama && !s.lens_grade);
+    // The preset turns the colour grade on (Brad 2026-10-19).
+    assert!(s.diorama && s.lens_grade);
     assert!(harness.state().diorama_wanted_for_test(), "Diorama is on");
 
     // Off again: the player's own values are back, Diorama included.
