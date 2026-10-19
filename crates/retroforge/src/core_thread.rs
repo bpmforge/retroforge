@@ -896,6 +896,11 @@ pub enum CoreCommand {
     /// time it reaches here the question "did this state have to be
     /// migrated?" has been asked and answered.
     ApplyState(Box<rf_state::Container>),
+    /// Ticket W35-02: put the machine exactly where an in-memory snapshot of
+    /// the same ROM was taken, on either console (`ApplyState` is a NES
+    /// container). The screens harness uses it to start a session in a room
+    /// a long scripted opening reaches, such as Super Metroid's Ceres.
+    ApplySnapshot(Box<crate::stepper::MachineSnapshot>),
     /// Ticket W20-13: turn rewind on (snapshot every `interval` running
     /// frames, keep `depth` of them) or off (`None`, which frees the ring).
     SetRewind(Option<rf_state::RewindConfig>),
@@ -1768,6 +1773,10 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
+                    clocks.resync();
+                }
+                CoreCommand::ApplySnapshot(snapshot) => {
+                    let _ = stepper.restore(&snapshot);
                     clocks.resync();
                 }
                 CoreCommand::SetRewind(config) => {

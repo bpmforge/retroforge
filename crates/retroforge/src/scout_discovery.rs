@@ -51,6 +51,13 @@ pub const MAX_Y: usize = 16;
 /// follow the player anywhere.
 const MIN_SCREENS: usize = 2;
 
+/// A vertical trial that grew the canvases to this many fifths of a screen
+/// (counting the first screen as five) moved the screen: the Y word is the
+/// game's.
+const VERTICAL_FIFTHS: usize = 6;
+/// Frames of a vertical trial (4 px a frame covers a three-screen shaft).
+pub const VERTICAL_FRAMES: u32 = 420;
+
 /// What the trials run on.
 pub struct Context<'a> {
     pub rom: &'a [u8],
@@ -63,6 +70,22 @@ pub struct Context<'a> {
     pub scrolls: crate::scout::ScrollReader,
     /// The profile's `[scene]` key, if it has one (the live model is fed it).
     pub scene_key: Option<crate::scene_key::SceneKeySpec>,
+    /// A machine in a room that scrolls vertically, if the session met one
+    /// (the Y recipe cannot be tried anywhere else).
+    pub vertical: Option<Vertical<'a>>,
+}
+
+/// Ticket W35-02: where the player's Y word is tried. A Y byte is named by
+/// what it does at a jump, which says nothing about whether the game obeys a
+/// poke of it (a sprite table holds a copy, a speed is not a position); the
+/// only judge is a scout that moves it in a room that scrolls vertically.
+pub struct Vertical<'a> {
+    /// A snapshot of the live machine standing in that room.
+    pub snapshot: MachineSnapshot,
+    /// The live model then (axes and trackers are copied, no canvases): it
+    /// has to know the scene scrolls vertically.
+    pub live: &'a CanvasModel,
+    pub scene: SceneId,
 }
 
 /// How one trial ended.
@@ -212,6 +235,129 @@ struct Hold {
     delta: i32,
     offset: usize,
     standing: u8,
+}
+
+/// A gate that is false for a stretch of ordinary play keeps the scout from
+/// ever starting. The share of a scouting run's frames a gate's value must hold
+/// on (the run moves the player through every pose the level allows).
+const GATE_SURVIVAL: f32 = 0.98;
+
+/// Run `plan` and count, per gate candidate, the frames its value held.
+fn gate_survival(
+    scout: &mut Scout,
+    plan: ScoutPlan,
+    gates: &[GateCandidate],
+    ctx: &Context<'_>,
+) -> Result<Vec<f32>, DiscoveryError> {
+    let frames = plan.frame_budget;
+    scout
+        .restart_with(plan)
+        .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+    let reader = ctx.scrolls;
+    let mut held = vec![0u32; gates.len()];
+    let mut run = 0u32;
+    // Bounded: the plan's own frame budget.
+    for _ in 0..frames {
+        let status = scout.step(&reader);
+        run += 1;
+        for (n, g) in held.iter_mut().zip(gates) {
+            let now = scout.peek_word(bus_address(ctx.snes, g.offset)) & 0xFF;
+            *n += u32::from(now == u16::from(g.value));
+        }
+        if matches!(status, ScoutStatus::Finished(_)) {
+            break;
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Ok(held
+        .into_iter()
+        .map(|n| n as f32 / run.max(1) as f32)
+        .collect())
+}
+
+/// The player's Y word, by a vertical pass from a room that scrolls that way:
+/// each Y candidate is poked as the player's Y (the whole word, then the byte
+/// alone) and the one that scrolls the screen furthest wins.
+fn confirm_y(
+    ctx: &Context<'_>,
+    obs: &Observed,
+    mover: &ScoutPlan,
+    report: &mut Report,
+) -> Result<VerticalOutcome, DiscoveryError> {
+    let (Some(v), true) = (ctx.vertical.as_ref(), ctx.snes) else {
+        return Ok(VerticalOutcome::default());
+    };
+    let Some(cam_y) = obs.camera.and_then(|c| c.y) else {
+        return Ok(VerticalOutcome::default());
+    };
+    let mut base = mover.clone();
+    base.hold.clear();
+    base.camera_y = vec![bus_address(true, cam_y.offset)];
+    base.dirs = vec![ScoutDir::Down, ScoutDir::Up];
+    base.frame_budget = VERTICAL_FRAMES;
+    base.stall_frames = 120;
+    let snapshot = v.snapshot.clone();
+    let mut scout = Scout::start(ctx.rom, snapshot, base.clone(), v.live, v.scene, ctx.size)
+        .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+    let floor = usize::from(ctx.size.0) * usize::from(ctx.size.1) * VERTICAL_FIFTHS / 5;
+    let mut best: Option<(YCandidate, bool, usize)> = None;
+    for y in obs.ys.iter().take(MAX_Y) {
+        for wide in [true, false] {
+            let addr = bus_address(true, y.offset);
+            let mut plan = base.clone();
+            plan.player_y = vec![addr];
+            plan.player_y_hi = if wide { vec![addr + 1] } else { Vec::new() };
+            let out = run(&mut scout, plan, ctx)?;
+            report.trials.push(format!(
+                "vertical {:#x} wide {wide}: extent {} died {} after {} frames",
+                y.offset, out.extent, out.died, out.frames
+            ));
+            if !out.died && out.extent >= floor && best.as_ref().is_none_or(|b| out.extent > b.2) {
+                best = Some((*y, wide, out.extent));
+            }
+            // A wide word that moved the screen makes the byte alone moot.
+            if wide && out.extent >= floor {
+                break;
+            }
+        }
+    }
+    // A mode byte holds its value in this room too: sampled while the scout
+    // that moves the Y word runs (else at the snapshot).
+    let gates_hold = match &best {
+        Some((y, wide, _)) => {
+            let addr = bus_address(true, y.offset);
+            let mut plan = base.clone();
+            plan.player_y = vec![addr];
+            plan.player_y_hi = if *wide { vec![addr + 1] } else { Vec::new() };
+            gate_survival(&mut scout, plan, &obs.gates, ctx)?
+                .into_iter()
+                .map(|f| f >= GATE_SURVIVAL)
+                .collect()
+        }
+        None => {
+            scout
+                .restart_with(base.clone())
+                .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+            obs.gates
+                .iter()
+                .map(|g| scout.peek_word(bus_address(true, g.offset)) & 0xFF == u16::from(g.value))
+                .collect()
+        }
+    };
+    Ok(VerticalOutcome {
+        y_word: best,
+        gates_hold: Some(gates_hold),
+    })
+}
+
+/// What the vertical room told.
+#[derive(Default)]
+struct VerticalOutcome {
+    /// The Y word the game obeys, whether it is the whole word, and how many
+    /// cells the canvases reached.
+    y_word: Option<(YCandidate, bool, usize)>,
+    /// Per finder gate candidate, whether its value holds in that room.
+    gates_hold: Option<Vec<bool>>,
 }
 
 /// Run the trials and build the table.
@@ -380,16 +526,53 @@ pub fn discover(
         }
     }
 
-    let skeleton = skeleton(&ctx, obs, player, &plan, champion.as_ref().map(|c| &c.0));
+    let vertical = confirm_y(&ctx, obs, &plan, &mut report)?;
+    // The gates the winning recipe leaves true (and, where a vertical room was
+    // seen, that hold there too).
+    let mut final_plan = plan.clone();
+    if let Some(h) = champion.as_ref() {
+        final_plan.hold = h.0.pokes.clone();
+    }
+    final_plan.frame_budget = TRIAL_FRAMES;
+    let survived = gate_survival(&mut scout, final_plan, &obs.gates, &ctx)?;
+    let gates: Vec<GateCandidate> = obs
+        .gates
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            survived.get(*i).is_some_and(|&f| f >= GATE_SURVIVAL)
+                && vertical
+                    .gates_hold
+                    .as_ref()
+                    .is_none_or(|h| h.get(*i).copied().unwrap_or(false))
+        })
+        .map(|(_, g)| *g)
+        .collect();
+    report.trials.push(format!(
+        "gates kept {:?} of {:?}",
+        gates.iter().map(|g| g.offset).collect::<Vec<_>>(),
+        obs.gates.iter().map(|g| g.offset).collect::<Vec<_>>()
+    ));
+    let skeleton = skeleton(
+        &ctx,
+        obs,
+        &gates,
+        player,
+        &plan,
+        champion.as_ref().map(|c| &c.0),
+        vertical.y_word.as_ref(),
+    );
     Ok((skeleton, report))
 }
 
 fn skeleton(
     ctx: &Context<'_>,
     obs: &Observed,
+    gates: &[GateCandidate],
     player: Option<PlayerCandidate>,
     plan: &ScoutPlan,
     hold: Option<&Hold>,
+    y_word: Option<&(YCandidate, bool, usize)>,
 ) -> Skeleton {
     let snes = ctx.snes;
     let mut rows: Vec<Row> = Vec::new();
@@ -462,7 +645,7 @@ fn skeleton(
         // itself. Only what was SEEN is claimed; a vertical trial has not
         // confirmed it (it can be a Y speed, not a position: Super Mario
         // World's candidate was `$7E007D`).
-        for (i, &(addr, _)) in h.pokes.iter().enumerate() {
+        for (i, &(addr, _)) in h.pokes.iter().enumerate().filter(|_| y_word.is_none()) {
             let seen = obs.ys.iter().find(|y| y.offset == h.offset);
             rows.push(Row {
                 role: if i == 0 { "player_y" } else { "player_y_hi" },
@@ -493,8 +676,29 @@ fn skeleton(
             });
         }
     }
-    for g in obs
-        .gates
+    if let Some((y, wide, extent)) = y_word {
+        let screen = usize::from(ctx.size.0) * usize::from(ctx.size.1);
+        for (i, role) in ["player_y", "player_y_hi"].into_iter().enumerate() {
+            if i == 1 && !wide {
+                break;
+            }
+            rows.push(Row {
+                role,
+                addr: bus_address(snes, y.offset) + i as u32,
+                value: None,
+                notes: format!(
+                    "{} of the player's Y word: it read {} standing and moved within 6 frames of a jump press in {} of {} presses; a Down pass that moved it from a room that scrolls vertically took the canvases to {:.1} screens.",
+                    if i == 0 { "Low byte" } else { "High byte" },
+                    y.standing,
+                    y.hits,
+                    y.windows,
+                    *extent as f32 / screen as f32
+                ),
+                confidence: 0.9,
+            });
+        }
+    }
+    for g in gates
         .iter()
         .take(2)
         .filter(|g: &&GateCandidate| g.confidence >= 0.9)

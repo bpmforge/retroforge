@@ -21,8 +21,8 @@ use rf_input::{NesButton, SnesButton};
 
 use crate::core_thread::ScoutFindProgress;
 use crate::scene_key::SceneKeySpec;
-use crate::scout_discovery::{discover, Context};
-use crate::stepper::EmuStepper;
+use crate::scout_discovery::{discover, Context, Vertical};
+use crate::stepper::{EmuStepper, MachineSnapshot};
 
 /// Work RAM the SNES finder looks through (as the camera finder does).
 const SEARCH_SNES: usize = 0x2000;
@@ -61,6 +61,10 @@ pub struct ScoutFind {
     idle: u32,
     trial: Option<Receiver<TrialResult>>,
     last: ScoutFindProgress,
+    /// Ticket W35-02: the machine, the live model and the scene of the first
+    /// moment the player stood still in a room that scrolls vertically (the Y
+    /// recipe can only be tried there).
+    vertical: Option<(MachineSnapshot, CanvasModel, SceneId)>,
 }
 
 fn no_scrolls(_: &EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]> {
@@ -79,6 +83,7 @@ impl ScoutFind {
             idle: 0,
             trial: None,
             last: ScoutFindProgress::default(),
+            vertical: None,
         }
     }
 
@@ -170,6 +175,17 @@ impl ScoutFind {
             .iter()
             .map(|(x, y)| (x.as_slice(), y.as_slice()))
             .collect();
+        if self.snes
+            && self.vertical.is_none()
+            && self.idle >= STAND_FRAMES
+            && scene.is_some()
+            && f.canvases.scene_scrolls_vertically() == Some(true)
+        {
+            // Read only; once per session.
+            if let Ok(snapshot) = f.stepper.snapshot() {
+                self.vertical = Some((snapshot, f.canvases.fork_for_scout(), f.scene));
+            }
+        }
         self.finder.observe(&Frame {
             ram,
             pad,
@@ -199,6 +215,7 @@ impl ScoutFind {
                     let seed = f.canvases.fork_for_scout();
                     let (scene, size, snes) = (f.scene, f.size, self.snes);
                     let scene_key = f.scene_key.cloned();
+                    let vertical = self.vertical.take();
                     std::thread::spawn(move || {
                         let ctx = Context {
                             rom: &rom,
@@ -212,6 +229,11 @@ impl ScoutFind {
                                 no_scrolls
                             },
                             scene_key,
+                            vertical: vertical.as_ref().map(|(snapshot, live, scene)| Vertical {
+                                snapshot: snapshot.clone(),
+                                live,
+                                scene: *scene,
+                            }),
                         };
                         let result = discover(snapshot, ctx, &obs)
                             .map(|(skeleton, _)| Box::new(skeleton))
