@@ -154,6 +154,13 @@ fn out_dir() -> PathBuf {
     d
 }
 
+/// W34's pictures (Diorama, HD-2D, the tour) live apart from W30/W31's.
+fn w34_dir() -> PathBuf {
+    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screens/w34");
+    std::fs::create_dir_all(&d).expect("create screens dir");
+    d
+}
+
 fn probe_dir() -> PathBuf {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/screens-probe");
     std::fs::create_dir_all(&d).expect("create probe dir");
@@ -2479,7 +2486,7 @@ fn diorama_pair_as(h: &mut H, prefix: &str, name: &str, what: &str, readme: &mut
     {
         probe_dir()
     } else {
-        out_dir()
+        w34_dir()
     };
     // OFF: the flat view of a stepped frame.
     h.state_mut().set_diorama_for_test(false);
@@ -2781,7 +2788,7 @@ fn shot_diorama_light_alttp(readme: &mut Vec<String>) {
         play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
     }
     release_all(&mut h);
-    let d = out_dir();
+    let d = w34_dir();
     for pct in [30u8, 50, 80] {
         set_time_of_day(&mut h, pct);
         let Some(shot) = grab_play_area(&mut h) else {
@@ -2837,7 +2844,7 @@ fn shot_diorama_light_smw(readme: &mut Vec<String>) {
     wait(&mut h, "smw", 150);
     play_script(&mut h, "R40 B+R20");
     release_all(&mut h);
-    let d = out_dir();
+    let d = w34_dir();
     for (pct, file) in [
         (30u8, "diorama-light-smw-on.png"),
         (50, "diorama-light-smw-t50.png"),
@@ -2945,7 +2952,7 @@ fn shot_hd2d_full(readme: &mut Vec<String>) {
         step_from(&mut h);
         step_from(&mut h);
         let no_lens = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
-        let d = out_dir();
+        let d = w34_dir();
         save(&d.join(format!("hd2d-full-{game}-off.png")), &off.opaque());
         save(&d.join(format!("hd2d-full-{game}-on.png")), &on.opaque());
         save(
@@ -2974,6 +2981,243 @@ fn shot_hd2d_full(readme: &mut Vec<String>) {
             ),
         );
     }
+}
+
+/// The flat picture, then the HD-2D preset (grade on by default) at morning,
+/// noon and dusk, for a game already learned and in play. Files
+/// `{game}-flat.png` and `{game}-hd2d-{morning,noon,dusk}.png` in
+/// `docs/screens/w34/`.
+fn tour_hd2d_set(
+    h: &mut H,
+    game: &str,
+    cam: Option<(u8, i8, u16, bool)>,
+    readme: &mut Vec<String>,
+) {
+    // Let the follow camera settle on the player after a fresh start.
+    run_n(h, 90);
+    h.state_mut().set_diorama_for_test(false);
+    h.state_mut().edit_lens_for_test(|s| s.lens_clear());
+    snapshot(h, game);
+    step_from(h);
+    let Some(off) = grab_play_area(h) else {
+        return skip(readme, game, "no play rect");
+    };
+    if let Some(why) = h.state().hd2d_unavailable_for_test() {
+        return skip(readme, game, &format!("preset unavailable: {why}"));
+    }
+    // The preset is a toggle: press again if the first press turned it off.
+    let mut grade = false;
+    for _ in 0..2 {
+        h.state_mut().toggle_hd2d_for_test();
+        h.state_mut().edit_lens_for_test(|s| grade = s.lens_grade);
+        if grade {
+            break;
+        }
+    }
+    if let Some((pitch, yaw, zoom, follow)) = cam {
+        h.state_mut()
+            .set_diorama_camera_for_test(pitch, yaw, zoom, follow);
+    }
+    let d = w34_dir();
+    save(&d.join(format!("{game}-flat.png")), &off.opaque());
+    for (pct, tag) in [(30u8, "morning"), (50, "noon"), (80, "dusk")] {
+        set_time_of_day(h, pct);
+        run_n(h, 20);
+        step_from(h);
+        step_from(h);
+        let on = grab_play_area(h).unwrap_or_else(|| off.clone());
+        save(&d.join(format!("{game}-hd2d-{tag}.png")), &on.opaque());
+    }
+    note(
+        readme,
+        format!(
+            "w34-tour|{game}: flat vs HD-2D preset at 0.3/0.5/0.8; grade on by default: {grade}; learner {:?}",
+            h.state().heights_numbers_for_test()
+        ),
+    );
+}
+
+/// W34-10: the screenshot tour. `RF_SCREENS_ONLY=w34-tour-alttp` (or
+/// `-smb3`, `-wide` which also takes the SMW 4:3 set, `-sheet`).
+fn shot_w34_tour(readme: &mut Vec<String>) {
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    if wanted("w34-tour-alttp") {
+        if let Some(path) = rom(
+            "snes",
+            "Legend of Zelda, The - A Link to the Past (USA).zip",
+        ) {
+            let mut h = new_harness();
+            open_and_run(&mut h, &path);
+            if h.state().gpu_available_for_test() {
+                alttp_take_control(&mut h);
+                h.state_mut().set_mode_for_test(Mode::Enhanced);
+                h.state_mut().set_diorama_for_test(true);
+                run_n(&mut h, 30);
+                let end = h.state().frame_count_for_test() + frames;
+                while h.state().frame_count_for_test() < end {
+                    play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+                }
+                release_all(&mut h);
+                tour_hd2d_set(&mut h, "alttp", None, readme);
+            }
+        }
+    }
+    if wanted("w34-tour-smb3") {
+        if let Some(path) = rom("nes", "Super Mario Bros. 3 (USA).zip") {
+            let mut h = new_harness();
+            open_and_run(&mut h, &path);
+            if h.state().gpu_available_for_test() {
+                smb3_enter_level(&mut h);
+                h.state_mut().set_mode_for_test(Mode::Enhanced);
+                h.state_mut().set_diorama_for_test(true);
+                run_n(&mut h, 30);
+                play_for(
+                    &mut h,
+                    frames,
+                    "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+                    &[],
+                    enter_smb3,
+                );
+                // Let the last lap end (a death shows the map), then start the
+                // level afresh so the picture has Mario alive in it.
+                release_all(&mut h);
+                for _ in 0..8 {
+                    wait(&mut h, "smb3", 120);
+                    if !smb3_in_level(&h) {
+                        break;
+                    }
+                }
+                enter_smb3(&mut h);
+                wait(&mut h, "smb3", 60);
+                play_script(&mut h, "R30");
+                release_all(&mut h);
+                tour_hd2d_set(&mut h, "smb3", None, readme);
+            }
+        }
+    }
+    if wanted("w34-tour-wide") {
+        // SAFETY: set before any harness of this shot is built.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("RF_SCREENS_WINDOW", "1900x800");
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let cold = std::env::temp_dir().join(format!("rf_tour_wide_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cold);
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: nothing else reads the environment between sessions.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
+        let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+            return skip(readme, "smw", "Super Mario World (USA).zip not found");
+        };
+        {
+            let Some(mut h) = smw_yi1_harness(&path) else {
+                return skip(readme, "smw", "never reached Yoshi's Island 1");
+            };
+            h.state_mut().set_mode_for_test(Mode::Enhanced);
+            h.state_mut().set_diorama_for_test(true);
+            run_n(&mut h, 30);
+            play_for(
+                &mut h,
+                frames,
+                "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+                &[(0x1490, 0xFF), (0x1497, 0xFF)],
+                enter_smw,
+            );
+            release_all(&mut h);
+            h.state().send_core_command_for_test(CoreCommand::Shutdown);
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        let Some(mut h) = smw_yi1_harness(&path) else {
+            return skip(readme, "smw", "never reached Yoshi's Island 1 again");
+        };
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut().set_diorama_for_test(true);
+        run_n(&mut h, 30);
+        // The tiles learned in session 1 come back from the cache. 32:9 with
+        // the scout first, then the 4:3 set.
+        h.state_mut()
+            .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+        h.state_mut().set_diorama_for_test(true);
+        run_n(&mut h, 30);
+        let telemetry = h.state().scout_telemetry_for_test();
+        h.state_mut().set_scout_enabled_for_test(true);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        let t1 = Instant::now();
+        h.state_mut().set_widescreen(true);
+        while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+        }
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        while t1.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(100));
+            run_n(&mut h, 1);
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+                break;
+            }
+        }
+        run_n(&mut h, 120);
+        tour_hd2d_set(&mut h, "smw-32x9", None, readme);
+        // Back to 4:3 at the start of the level, Mario alive and standing; the
+        // follow camera is left off for this set (the whole window in view).
+        h.state_mut().set_widescreen(false);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        h.state().send_core_command_for_test(CoreCommand::Resume);
+        run_n(&mut h, 20);
+        tour_hd2d_set(&mut h, "smw", Some((40, 0, 100, false)), readme);
+        h.state().send_core_command_for_test(CoreCommand::Shutdown);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    if wanted("w34-tour-sheet") {
+        tour_sheet(readme);
+    }
+}
+
+/// The tour's contact sheet: one row per game, flat | morning | noon | dusk.
+fn tour_sheet(readme: &mut Vec<String>) {
+    let d = w34_dir();
+    let load = |name: String| -> Option<Pic> {
+        let img = image::open(d.join(name)).ok()?.to_rgba8();
+        Some(Pic {
+            w: img.width() as usize,
+            h: img.height() as usize,
+            rgba: img.into_raw(),
+        })
+    };
+    let cell_w = 360usize;
+    let mut rows: Vec<Pic> = Vec::new();
+    for game in ["smw", "smw-32x9", "smb3", "alttp"] {
+        let mut row: Option<Pic> = None;
+        for tag in ["flat", "hd2d-morning", "hd2d-noon", "hd2d-dusk"] {
+            let Some(p) = load(format!("{game}-{tag}.png")) else {
+                continue;
+            };
+            let p = p.fit_width(cell_w);
+            row = Some(match row {
+                Some(r) => r.beside(&p, 4),
+                None => p,
+            });
+        }
+        rows.extend(row);
+    }
+    let Some(sheet) = stack_rows(&rows) else {
+        return;
+    };
+    save(&d.join("contact-sheet.png"), &sheet);
+    note(
+        readme,
+        "contact-sheet|-|rows: smw, smw 32:9, smb3, alttp; flat | morning | noon | dusk"
+            .to_string(),
+    );
 }
 
 /// SMW up to "MARIO START!", then sampled one core frame at a time for
@@ -3210,7 +3454,7 @@ fn shot_diorama_level_smw(readme: &mut Vec<String>) {
         // same moment (the window crop stretches a wide frame to 4:3).
         if let Some(flat) = grab(&h) {
             save(
-                &out_dir().join("diorama-level-smw-32x9-off.png"),
+                &w34_dir().join("diorama-level-smw-32x9-off.png"),
                 &flat.opaque(),
             );
         }
@@ -3223,7 +3467,7 @@ fn shot_diorama_level_smw(readme: &mut Vec<String>) {
         step_from(&mut h);
         if let Some(tilted) = grab_play_area(&mut h) {
             save(
-                &out_dir().join("diorama-level-smw-32x9-tilted.png"),
+                &w34_dir().join("diorama-level-smw-32x9-tilted.png"),
                 &tilted.opaque(),
             );
         }
@@ -3331,7 +3575,7 @@ fn shot_diorama_level_smw(readme: &mut Vec<String>) {
         step_from(&mut h);
         if let Some(on) = grab_play_area(&mut h) {
             save(
-                &out_dir().join("diorama-level-smw-32x9-second-visit.png"),
+                &w34_dir().join("diorama-level-smw-32x9-second-visit.png"),
                 &on.opaque(),
             );
         }
@@ -3434,7 +3678,7 @@ fn shot_diorama_level_smb3(readme: &mut Vec<String>) {
     step_from(&mut h);
     if let Some(on) = grab_play_area(&mut h) {
         save(
-            &out_dir().join("diorama-level-smb3-second-visit.png"),
+            &w34_dir().join("diorama-level-smb3-second-visit.png"),
             &on.opaque(),
         );
     }
@@ -3541,7 +3785,7 @@ fn shot_diorama_layers_smw(readme: &mut Vec<String>) {
     {
         probe_dir()
     } else {
-        out_dir()
+        w34_dir()
     };
     // The hills behind the ground: a yawed camera, planes on and off.
     for (tag, layers, pitch, yaw, zoom, follow) in [
@@ -3702,7 +3946,7 @@ fn shot_diorama_wide(readme: &mut Vec<String>) {
                     step_from(&mut h);
                     if let Some(p) = grab_play_area(&mut h) {
                         save(
-                            &out_dir().join(format!("diorama-wide-smw-{tag}-yaw.png")),
+                            &w34_dir().join(format!("diorama-wide-smw-{tag}-yaw.png")),
                             &p.opaque(),
                         );
                     }
@@ -3818,7 +4062,7 @@ fn shot_diorama_layers_smb3(readme: &mut Vec<String>) {
     {
         probe_dir()
     } else {
-        out_dir()
+        w34_dir()
     };
     for (tag, layers, pitch, yaw, zoom, follow) in [
         ("yaw15", true, 52u8, 15i8, 100u16, false),
@@ -3889,7 +4133,7 @@ fn shot_diorama_layers_alttp(readme: &mut Vec<String>) {
     {
         probe_dir()
     } else {
-        out_dir()
+        w34_dir()
     };
     // The same frame on one plane, for the comparison.
     h.state_mut().set_diorama_layers_for_test(false);
@@ -3947,6 +4191,7 @@ fn w30_w31_screens() {
     shot_diorama_level_smb3(&mut readme);
     shot_diorama_wide(&mut readme);
     shot_hd2d_full(&mut readme);
+    shot_w34_tour(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

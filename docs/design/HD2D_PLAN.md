@@ -656,7 +656,7 @@ lit path, `DioramaPass::set_lighting`, and the shell wiring in `lens_view.rs` /
   scene creates no GPU resource after the first frame; the double-buffered
   readback lags exactly one frame. `lighting.rs` has 17 unit tests and
   `lens_view.rs` 2 for the sun and the handoff.
-- **Shots** (`docs/screens/w30-w31/`, uncommitted): `diorama-light-alttp-t30`,
+- **Shots** (`docs/screens/w34/`): `diorama-light-alttp-t30`,
   `-t50`, `-t80` (Link's house; the bed is the one raised block, and its shadow
   falls down-left in the morning, nearly vanishes at noon and runs long and
   down-right at dusk, which is also dim), `diorama-light-smw-on` (time 0.3: the
@@ -694,7 +694,7 @@ The lens over the 3D image, and the readback poll fix everywhere.
 - **Proofs.** `retroforge/tests/lens_over_diorama.rs`: lens off shows the raw
   render; shadows-only is the identity over the 3D image; bloom + grade +
   tilt-shift change the uploaded pixels while the raw render does not.
-  Shots (`docs/screens/w30-w31/hd2d-full-{alttp,smw}-{off,on}.png`, plus
+  Shots (`docs/screens/w34/hd2d-full-{alttp,smw}-{off,on}.png`, plus
   `-3d-no-lens`), uncommitted.
 
 ## W34-07 as built (2026-10-19)
@@ -797,7 +797,7 @@ ALttP floor edge. Code: `retroforge::level_heights` (new), `live_learn`,
   32:9 in a 1700x760 window, pacing off, 10 x 30-frame chunks per state: 53.7 fps
   off, 53.0 on, the pass 2.04 ms p95 at 1371x672. Stored: scene chunk 68 KB,
   heights block 16.5 KB, table 8.5 KB (1.6 k keys), orientation 113 B.
-- **Shots** (`docs/screens/w30-w31/`, uncommitted): `diorama-level-smw-32x9-off`
+- **Shots** (`docs/screens/w34/`): `diorama-level-smw-32x9-off`
   (the flat 32:9 frame), `-on` (the 3D view: the ground row stands as blocks
   across the right margin the scout filled, out to the edge; the left is the
   level's start, so nothing is there; the diagonal slope and the hills stay flat
@@ -912,7 +912,7 @@ sprites), `kind::PLANE`, and the wiring in `live_learn` / `app.rs`.
   100 and 250 with follow (and differ with layering off), planes change the
   picture, a layer map of the wrong size is ignored. Units: `diorama_layers`
   (12), `hud_watch` (9), `layer_ids` (1), `layer_ratios` (1), side builder (3).
-- **Shots** (`docs/screens/w30-w31/`, uncommitted; sun fixed at 40 %).
+- **Shots** (`docs/screens/w34/`; sun fixed at 40 %).
   What is in them, as seen: **SMW** `-on`: status bar flat and sharp across the
   top, hills and clouds on their own plane behind the ground (the hills read
   as one slab behind the grass, lit and shadowed separately from the sky),
@@ -1039,7 +1039,7 @@ margins, and the 4x cost. Code: `retroforge::app` (`widen_margins_layered`,
   No GPU timestamps (the device is requested without the feature): "where it
   went" is pass by pass, with knobs toggled in `w34_09_cost` and CPU stage
   timers in the app, not a GPU profile.
-- **Shots** (`docs/screens/w30-w31/`, uncommitted; sun fixed at 40 %, a 1900 x
+- **Shots** (`docs/screens/w34/`; sun fixed at 40 %, a 1900 x
   800 window, so 16:9 is 1371 x 672 and 32:9 is 1829 x 448; SMW learned at 4:3
   in a first session, then a fresh start with the scout): `diorama-wide-smw-16x9-
   {off,on}`, `-32x9-{off,on}`, `-16x9-yaw` (yaw 15), `diorama-wide-alttp-16x9-

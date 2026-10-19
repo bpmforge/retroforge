@@ -280,3 +280,115 @@ only a decode's own tiles are extruded, never a guessed "whole level".
 
 **Later**: the first producers for `ExtractedBg` and `DecodedLevel` are
 Wave 16 work — see `docs/design/ENHANCEMENT_WAVE_16.md` §3/§9.
+
+## 8. Heights and light (W34)
+
+How the Diorama learns what is solid, stands the picture up, and lights it.
+Design and rationale: `docs/design/HD2D_PLAN.md`; the "as built" sections there
+hold the per-ticket numbers. Everything here is a presentation overlay: the
+core only gains read-only capture switches (`SetTileGridCapture`,
+`SetOrientationHint`, like `SetSnesDebugCapture`), and the Accuracy frame is
+byte-identical with heights, shadows and lens on or off
+(`diorama_camera_live.rs`). Accuracy Mode cannot turn any of it on (law 6).
+
+**Tile grids (W34-01).** While Diorama is on outside Accuracy Mode the core
+thread builds a `TileGrid` per background layer for NES and SNES: one cell per
+8x8 block with a key (FNV of the pattern bytes plus the palette), flip and
+priority bits, a blank flag and a HUD flag, per-line scroll honoured. At most
+61 KB per frame, gated, shipped on the frame message.
+
+**Player and orientation (W34-02).** `PlayerTracker` clusters OAM into
+entities and names the player by correlating motion with the pad; a gravity
+test (falls when unsupported, rises only after a button) separates
+`SideView` from `TopDown`; anything else is `Unknown` and renders flat, and
+the readout says so. A profile's `[camera].mode` is a hint taken first
+(`SetOrientationHint`, re-sent to each new core). Player recall on the real-game
+harness is >= 80 % of frames (W34-02b).
+
+**The learner and its guard (W34-03, 03b).** `rf_enhance::heights::HeightLearner`
+turns grids + player track + orientation into per-key evidence: S1 the player
+stands on it (floor), S2 it blocks horizontal motion (wall), S3 it hides the
+player (tall), S4 mass of a key that never overlaps the player, S6 slope
+(ramp), S7 the scroll ratio of a layer (backdrop). Evidence climbs a 0-3
+confidence ladder; below 2 a key draws flat. Votes count once per key per
+frame; blank cells and fills (a key over 25 % of its grid) never vote; only the
+playfield (the widest band among layers scrolling with the camera) is ever
+raised; HUD grids are never read. A global guard draws flat, forgets the keys
+and logs `GuardTrip` when a table would raise more than 40 % of the playfield.
+The learner is a pure function of the observation sequence (replay test).
+Oracle: RF-Scroller (NES) against its collision table, precision 1.00 / recall
+0.80 (misses are walk-through landmarks); a synthetic side view 1.00 / 1.00,
+with mutation checks (disable S1: recall drops; shuffle keys: precision drops).
+SMW YI1 peak raised cells fell from 183-267 to 79 (typical 16-63) with the
+guard, and the hills and status bar are never raised.
+
+**Persistence.** All through the canvas model's one `Cache`: the ROM's
+`TileHeightTable` (`tile-heights-v1`, deterministic bytes, zstd, crc32; corrupt
+is a miss; 8.5 KB for 1.6 k keys), a heights block per scene
+(`heights-canvas-v1`, 16.5 KB; the scene chunk is 68 KB) and the camera call
+(113 bytes, kept only when watched from play at confidence 2 or more, drawn
+from at once but never fed to the learner, dropped when the game's evidence is
+sure). Written when stats changed and 300 frames passed, on leaving a scene and
+on Shutdown. A painted `[heights]` table replaces the learned one whole.
+
+**Whole-level heights (W34-07).** `retroforge::level_heights` re-keys a stitched
+canvas cell back into the learner's key (colour numbers back into bit planes,
+hashed by the same function), after a per-scene alignment vote (shift of the
+capture's block grid against the canvas, 0.7 ms once per scene). A pass runs
+every 45 frames and at once after a scout delta, on unfinished blocks only.
+Limits: 16x16 layers, hires and Mode 7 are not handled, and the NES canvas stores a master colour, so
+whole-level heights are SNES-only for now; the NES gets the persisted table and the
+camera call.
+
+**Builders.** `rf-renderer::diorama_side::build_vertices_side` stands the
+picture upright, extrudes solid cells toward the camera, merges equal-depth
+cells, draws only exposed faces, wedges for ramps. The top-down builder is the
+floor plan with walls from the grid; the floor runs 16 cells past the room's
+edge. Camera: `window_placement` solves the distance so the game's window fits
+the frame (`Upright` for side view with the tilt scaled by 0.25, `Ground` for
+top-down), following the player's feet through a critically damped spring.
+Pass: `Depth32Float`, 4x MSAA, display-resolution render into the flat view's
+rect, resources kept between frames.
+
+**Layers, HUD, billboards (W34-08, 09).** The core records which layer drew each
+dot (`LayerInfo::ids`, 61 KB a frame; a sub-screen dot belongs to that layer,
+which is how SMW's hills are found). `diorama_layers::split` pulls the picture
+into planes in one stacked texture: the playfield, one plane per slower layer
+at `(1 - ratio) * 48 px` behind, the backdrop 24 px behind the furthest. `HudWatch`
+(two 240-frame windows) calls a layer or band HUD (a band at an edge whose
+scroll never moves); HUD dots come out of the scene and are composited flat over
+the finished 3D image after the lens. Touching sprites are one billboard at the
+height under their feet; behind-the-background sprites stand just behind the
+playfield plane. At 16:9 / 21:9 / 32:9 the layers extend over the canvas margins
+(`margin_pixel_layer`), the planes repeat their edge texels past the picture
+(`overscan_px`), and the HUD is only the game's own 256 dots, centred.
+
+**Sun and shadow map (W34-06).** `rf-renderer::lighting::Sun` from the lens's time
+of day (the day runs 0.23 to 0.82, elevation `70 sin(pi u)` floored at 10
+degrees, azimuth +60 to -60; a dim cool moon outside it; rain 0.6 and snow 0.8
+dim it). `lit = colour * (ambient + (1 - ambient) * intensity * max(n.l,0)^0.7 *
+shadow)`; noon on level ground is exactly the unlit picture. Normals come from
+screen-space derivatives (no vertex change). The shadow map is orthographic,
+depth only, 1024^2 below a 768 px target and 2048^2 above, fitted each frame
+and snapped to texels, with 3x3 PCF and a slope-scaled bias; billboards cast by
+their own silhouette (alpha test 0.5); back planes receive and cast nothing.
+`ShadowGate` drops the map after a p95 over 8 ms (120-frame window) and keeps
+Lambert and contact ellipses. `set_lighting(None)` is the original shader, so
+the pinned goldens did not move.
+
+**Lens over 3D (W34-06b).** `App::store_diorama_result` runs `LensPass` over the
+finished Diorama frame (no peek, no painter, Original camera): bloom,
+tilt-shift (by screen rows, not depth), grade and weather; 2D sprite shadows are
+forced off there. `DioramaRender::rgba` carries the HUD, composited after.
+
+**Costs** (M4 Max, release, machine shared). The pass at 1024x896, p50 / p95:
+unlit 0.67 / 1.44 ms, sun + shadow map 0.84 / 1.45. The large win was the
+readback: `device.poll(Wait)` returned on ~1.5 ms ticks; polling without
+sleeping (`gpu::wait_for_map`) took the pass from 3.0-3.9 ms p95 to about 1 ms
+and the lens at 1024x896 from 2.47 / 3.67 to 1.83 / 2.54 (the same fix serves
+fog, shader chain, scale and Super FX GPU). Whole-app gate (split + mesh + pass
++ readback + HUD) at the 4x window: SMW layers 1.6-1.9 p50, 2.1-2.9 p95; ALttP
+1.8-2.2 p50, 2.0-3.1 p95; 16:9 p50 2.1 / p95 3.0, 32:9 p50 2.5 / p95 3.2-3.4
+(the split alone 0.7 ms). Ten minutes of SMW at the 4x window: 110.7 fps off,
+104.9 on, gate p95 3.62 ms, RSS peak 509 MB. The app's own gate (16.67 ms p95)
+drops the Diorama to flat if it ever trips.
