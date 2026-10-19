@@ -2371,37 +2371,8 @@ fn read_straight_alpha(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    wait_for_map(device, &rx)?;
+    crate::gpu::wait_for_map(device, &rx)?;
     Ok(unpack_mapped(readback, w, h, padded_bytes_per_row))
-}
-
-/// Block until a `map_async` callback has fired, by polling the device
-/// without sleeping. `PollType::Wait` returns on the backend's own timer
-/// (measured on Metal at multiples of ~1.5 ms even when the GPU had finished
-/// long before), which was most of the readback cost; polling sees the
-/// completion as soon as the GPU has it.
-fn wait_for_map(
-    device: &wgpu::Device,
-    done: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + crate::gpu::GPU_WAIT;
-    loop {
-        device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| format!("device.poll failed waiting for buffer readback: {e}"))?;
-        match done.try_recv() {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(e)) => return Err(format!("buffer map_async failed: {e}")),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return Err("buffer map_async callback never fired".to_string())
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-        }
-        if std::time::Instant::now() > deadline {
-            return Err("device.poll timed out waiting for buffer readback".to_string());
-        }
-        std::hint::spin_loop();
-    }
 }
 
 /// Wait for a frame in flight (only for its own submission, which a frame's
@@ -2414,7 +2385,7 @@ fn finish_pending(
     h: u32,
     padded_bytes_per_row: u32,
 ) -> Result<Vec<u8>, String> {
-    wait_for_map(device, &pending.done)?;
+    crate::gpu::wait_for_map(device, &pending.done)?;
     Ok(unpack_mapped(readback, w, h, padded_bytes_per_row))
 }
 

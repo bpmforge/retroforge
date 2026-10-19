@@ -663,3 +663,36 @@ lit path, `DioramaPass::set_lighting`, and the shell wiring in `lens_view.rs` /
   shadows of Mario and the winged block fall on the backdrop plane behind them)
   and `-smw-t50` (noon: Mario's shadow falls on the face of the ground block,
   the block's on the hill behind).
+
+## W34-06b as built (2026-10-19)
+
+The lens over the 3D image, and the readback poll fix everywhere.
+
+- **Lens over the 3D view.** `App::store_diorama_result` runs `LensPass` over
+  the finished Diorama frame when the 3D view is the picture on screen
+  (`diorama_view_active`: no peek, no painter, Original camera) and the lens
+  is effective, and uploads that to the texture. `DioramaRender.rgba` stays the
+  raw pass output (accuracy checks and fingerprints read it). 2D lens shadows
+  are forced off there (`without_shadows_over_diorama`; no sprite layer is
+  passed), bloom, tilt-shift, grade and weather run as in the flat view. The
+  flat-frame lens no longer runs while the Diorama is shown (its output was
+  discarded). The lens shares `lens_budget` and `lens_failed` with the flat path.
+- **Tilt-shift uses screen rows, not depth.** The Diorama's pitched camera
+  maps depth onto rows, and getting the depth buffer to the lens would need a
+  second readback of a resolved, MSAA depth target; the band looks the same.
+  The grade stays the lens's own and the preset still leaves it off (the shots
+  tick it on).
+- **Poll stall, everywhere.** `gpu::read_buffer_sync` (used by lens, fog,
+  shader chain, scale, composite, original pipeline and the Super Fx GPU path)
+  now polls without sleeping for up to 30 ms (`gpu::wait_for_map`, shared with
+  the Diorama pass), then falls back to the bounded `Wait`; completion is
+  still verified through the map callback. `w34_06b_readback_cost`, M4 Max,
+  200 frames, ms p50 / p95 before -> after: lens 256x224 1.77/1.87 ->
+  0.67/1.00, lens 1024x896 2.47/3.67 -> 1.83/2.54, fog 1024x896 2.79/5.04 ->
+  1.87/2.45, shader chain 1024x896 2.37/2.57 -> 1.32/1.59, Super Fx GPU 4x
+  MSAA4 2.72/4.39 -> 1.75/2.13, 3x no MSAA 2.21/2.35 -> 1.01/1.57.
+- **Proofs.** `retroforge/tests/lens_over_diorama.rs`: lens off shows the raw
+  render; shadows-only is the identity over the 3D image; bloom + grade +
+  tilt-shift change the uploaded pixels while the raw render does not.
+  Shots (`docs/screens/w30-w31/hd2d-full-{alttp,smw}-{off,on}.png`, plus
+  `-3d-no-lens`), uncommitted.

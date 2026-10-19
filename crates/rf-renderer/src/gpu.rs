@@ -195,23 +195,64 @@ pub fn read_buffer_sync(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
+    wait_for_map(device, &rx)?;
+    let data = slice.get_mapped_range().to_vec();
+    buffer.unmap();
+    Ok(data)
+}
+
+/// How long [`wait_for_map`] polls without sleeping before it falls back to a
+/// blocking wait. A readback that the GPU finishes in a few milliseconds is
+/// seen at once; a long one (a software rasterizer under load) stops burning
+/// a core.
+const SPIN_FOR: Duration = Duration::from_millis(30);
+
+/// Block until a `map_async` callback has fired, bounded by [`GPU_WAIT`].
+///
+/// Polls the device without sleeping first: `PollType::Wait` returns on the
+/// backend's own timer (measured on Metal at multiples of ~1.5 ms even when
+/// the GPU finished long before), which was most of every readback's cost
+/// (ticket W34-06b; the Diorama pass found it in W34-06). Completion is
+/// verified through the map callback, never assumed from `poll` returning.
+///
+/// # Errors
+/// The map failed, its callback was dropped, or [`GPU_WAIT`] passed.
+pub(crate) fn wait_for_map(
+    device: &wgpu::Device,
+    done: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+) -> Result<(), String> {
+    use std::sync::mpsc::TryRecvError;
+    let started = std::time::Instant::now();
+    loop {
+        device
+            .poll(wgpu::PollType::Poll)
+            .map_err(|e| format!("device.poll failed waiting for buffer readback: {e}"))?;
+        match done.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => return Err(format!("buffer map_async failed: {e}")),
+            Err(TryRecvError::Disconnected) => {
+                return Err("buffer map_async callback never fired".to_string())
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        if started.elapsed() >= SPIN_FOR {
+            break;
+        }
+        std::hint::spin_loop();
+    }
+    // Slow GPU: stop spinning and block, still bounded.
     device
         .poll(wgpu::PollType::Wait {
             submission_index: None,
-            timeout: Some(GPU_WAIT),
+            timeout: Some(GPU_WAIT.saturating_sub(started.elapsed())),
         })
         .map_err(|e| format!("device.poll timed out waiting for buffer readback: {e}"))?;
-    match rx.try_recv() {
-        Ok(Ok(())) => {
-            let data = slice.get_mapped_range().to_vec();
-            buffer.unmap();
-            Ok(data)
-        }
+    match done.try_recv() {
+        Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(format!("buffer map_async failed: {e}")),
         Err(_) => Err(
             "buffer map_async callback never fired even though device.poll returned \
-                 (this would be the readback hanging the way attempts 1-2 did -- reported, \
-                 not retried)"
+             (the readback hanging the way W3-01 attempts 1-2 did -- reported, not retried)"
                 .to_string(),
         ),
     }
