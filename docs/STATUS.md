@@ -4601,3 +4601,33 @@ stories, 10 decisions).
   continuous live re-check and `Confidence.scout`; margins beyond what the
   game draws (doors, pipes, scroll locks) stay visited-only. Workspace at the
   last W33 merge: **3062 passing**.
+- **W34 — HD-2D: automatic heights, light, widescreen Diorama** (2026-10-19,
+  W34-00..10 done, incl. 02b / 03b / 06b). The Diorama now learns what is solid
+  from play (no painting): tile grids on the frame (61 KB max, W34-01), player
+  and orientation from OAM + pad (player named on >= 80 % of real-game frames,
+  W34-02b), `HeightLearner` with a 0-3 confidence ladder and a 40 % guard
+  (oracle on RF-Scroller: precision 1.00 / recall 0.80; SMW YI1 peak raised
+  cells 183-267 -> 79, W34-03/03b), a side-view builder, learned-heights wiring
+  and the "approximate, learned from play" badge (W34-04), depth + 4x MSAA +
+  display-resolution render with a window-fit follow camera (W34-05), a sun
+  from the time of day with a 1024^2/2048^2 PCF shadow map (W34-06), the lens
+  over the 3D image (W34-06b), whole-level heights from the scout's canvas
+  persisted per ROM and scene (SMW YI1: 662 solid blocks, 630 of them in
+  scouted cells; second visit restores them with no play; stored: table 8.5 KB,
+  scene heights 16.5 KB, camera call 113 B, W34-07), layer planes with
+  parallax, a flat HUD and billboards (W34-08), and the widescreen Diorama at
+  16:9 / 21:9 / 32:9 (W34-09, which also fixed the play rect at 21:9 / 32:9).
+  Costs (M4 Max, release, machine shared): the pass at 1024x896 p50 / p95
+  0.67 / 1.44 ms unlit, 0.84 / 1.45 ms with sun + shadow map; the readback
+  poll fix (`gpu::wait_for_map`) took the pass from 3.0-3.9 ms p95 to about 1 ms
+  and the lens at 1024x896 from 2.47 / 3.67 to 1.83 / 2.54 ms; whole-app gate at
+  the 4x window SMW 1.6-1.9 p50 / 2.1-2.9 p95, ALttP 1.8-2.2 / 2.0-3.1, 32:9
+  2.5 / 3.2-3.4 (D6's 3 ms met at p50, at p95 when the machine is not loaded);
+  ten minutes of SMW at the 4x window 110.7 fps off / 104.9 on, RSS peak 509 MB.
+  W34-10: `docs/screens/w34/` (flat vs HD-2D at morning / noon / dusk on SMW 4:3
+  and 32:9, SMB3 and ALttP, contact sheet, README), user chapter
+  `docs/site/src/hd2d.md`, `ENHANCEMENT_RUNTIME.md` section 8. Open: NES
+  whole-level heights, 16x16 / hires / Mode 7, top-down margins from the
+  canvas, atmosphere layers as fog, the HUD call is a heuristic, the follow
+  camera can lose the player at a fresh level start (the 4:3 SMW tour set turns
+  follow off). Workspace: **3266 passing**. Per-ticket numbers: `docs/design/HD2D_PLAN.md` "as built".
