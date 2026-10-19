@@ -95,7 +95,12 @@ const OFF_HASH: u64 = 0xa087_4faf_a6fe_a325; // synthetic_plane_rgba's own bytes
 /// `diorama_golden.rs`'s own `ON_HASH`).
 /// Re-pinned for W30-05b: the shared diorama camera now looks along -Z, so the
 /// playfield is no longer mirrored/turned half way round on screen.
-const ON_HASH: u64 = 0x1ed3_53db_8224_2735;
+/// Re-pinned for W34-05 (D5), once: the pass now has a depth attachment, 4x
+/// MSAA resolved into the image, and a straight-alpha readback, which move
+/// every silhouette-edge pixel. The default camera path (`view_proj_camera`,
+/// `fit_distance`) is untouched and `diorama_golden.rs` carries the same re-pin.
+/// This is the shared pass's output changing, not this ground's mapping.
+const ON_HASH: u64 = 0x2b04_2fcc_7eab_cbe0;
 const ON_HASH_PLACEHOLDER_NOTE: &str =
     "regenerate by running with --nocapture and pasting the printed on_hash";
 

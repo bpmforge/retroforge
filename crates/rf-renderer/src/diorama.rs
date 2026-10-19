@@ -13,7 +13,7 @@
 //! per-tile mesh ([`crate::diorama_mesh::build_vertices`]) rather than a
 //! fullscreen triangle.
 //!
-//! ## Camera and projection: a UBO, no depth buffer
+//! ## Camera and projection: a UBO, and (W34-05) a depth buffer
 //!
 //! [`camera_matrices::view_proj`] builds a fixed-pitch ([`PITCH_DEG`]),
 //! fixed-FOV ([`FOV_Y_DEG`]) perspective camera framing the whole tile
@@ -24,9 +24,12 @@
 //! space, which stays 2D in the shell entirely (this crate has no
 //! opinion on input at all). The resulting `view * proj` matrix is
 //! uploaded as a 64-byte UBO (`shaders/diorama.wgsl`'s `Camera`) that the
-//! vertex stage applies. There is **no** depth attachment —
-//! `crate::diorama_mesh`'s own module doc explains why (painter's
-//! algorithm, matching every other pass in this crate).
+//! vertex stage applies. Ticket W34-05 (D5) gave the pass a depth
+//! attachment and 4x MSAA, rendered at the size the shell asks for (the
+//! play rect), on textures and buffers it keeps between frames. The mesh is
+//! still emitted back-to-front (that fixes blending); depth settles what
+//! painter's order gets wrong. Fragments with nothing to show are discarded
+//! so they cannot hide what is behind them.
 //!
 //! ## Frame-budget gate reuse (§8)
 //!
@@ -37,9 +40,10 @@
 //! budget-gate-reuse test.
 
 use std::borrow::Cow;
+use std::sync::Mutex;
 
 use crate::diorama_mesh::Vertex;
-use crate::gpu::{align_up, read_buffer_sync, GpuContext};
+use crate::gpu::{align_up, GpuContext};
 
 const DIORAMA_SHADER_SRC: &str = include_str!("shaders/diorama.wgsl");
 
@@ -50,6 +54,13 @@ const DIORAMA_SHADER_SRC: &str = include_str!("shaders/diorama.wgsl");
 pub const PITCH_DEG: f32 = 52.0;
 /// Fixed vertical field of view, degrees.
 pub const FOV_Y_DEG: f32 = 50.0;
+
+/// Vertical field of view of the window-fit cameras (W34-05, D1). Narrower
+/// than [`FOV_Y_DEG`]: the game's own window is small next to the distance
+/// that frames it, and at 50 degrees the near edge of a tilted window is a
+/// third larger than the far one, so the window cannot fill the frame like
+/// the flat picture does. 30 degrees keeps the depth cue and the keystone mild.
+pub const WINDOW_FOV_Y_DEG: f32 = 30.0;
 
 /// Margin [`DioramaPass::render`] gives [`camera_matrices::fit_distance`].
 pub const DISTANCE_FACTOR: f32 = 1.3;
@@ -150,6 +161,107 @@ impl DioramaCamera {
             zoom: fin(self.zoom, 1.0).clamp(1.0, Self::ZOOM_MAX),
             follow: self.follow.filter(|(x, z)| x.is_finite() && z.is_finite()),
         }
+    }
+}
+
+/// Critically damped follow for the diorama camera's target (D1, W34-05).
+///
+/// The camera should glide to the player rather than jump, and never
+/// overshoot or swing: a critically damped spring has no overshoot from rest
+/// and none when a target that was moving stops (the follower is already
+/// lagging behind it). One step is one frame (60 per second), so the result
+/// depends on the number of frames, not on wall-clock time, and replays the
+/// same. A target farther away than `snap_distance` (a room change, a level
+/// load) is taken at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CameraSmoother {
+    state: Option<SmootherState>,
+    /// The last target that was actually known, and how many steps ago.
+    held: Option<([f32; 2], u32)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SmootherState {
+    pos: [f32; 2],
+    vel: [f32; 2],
+}
+
+impl CameraSmoother {
+    /// Natural frequency, radians per second: the camera settles in about
+    /// four time constants, a third of a second.
+    pub const OMEGA: f32 = 12.0;
+    /// Seconds per step.
+    pub const DT: f32 = 1.0 / 60.0;
+    /// Closer than this to the target (and slow) counts as arrived.
+    const REST: f32 = 0.01;
+    /// How many steps a lost target is held before the camera gives up on it
+    /// and goes to the fallback (two seconds).
+    pub const HOLD_STEPS: u32 = 120;
+
+    /// Forget where the camera was; the next step lands on its target.
+    pub fn reset(&mut self) {
+        self.state = None;
+        self.held = None;
+    }
+
+    /// [`Self::step_to`] for a target that may be missing this frame (the
+    /// player detector drops out now and then): the last known target is
+    /// held for [`Self::HOLD_STEPS`] steps, so a dropout does not swing the
+    /// camera to `fallback` and back; after that the camera goes to `fallback`.
+    pub fn step(
+        &mut self,
+        target: Option<(f32, f32)>,
+        fallback: (f32, f32),
+        snap_distance: f32,
+    ) -> (f32, f32) {
+        let aim = match (target, self.held) {
+            (Some(t), _) => {
+                self.held = Some(([t.0, t.1], 0));
+                t
+            }
+            (None, Some((t, n))) if n < Self::HOLD_STEPS => {
+                self.held = Some((t, n + 1));
+                (t[0], t[1])
+            }
+            (None, _) => {
+                self.held = None;
+                fallback
+            }
+        };
+        self.step_to(aim, snap_distance)
+    }
+
+    /// Advance one frame toward `target` and return where the camera is.
+    pub fn step_to(&mut self, target: (f32, f32), snap_distance: f32) -> (f32, f32) {
+        let t = [target.0, target.1];
+        let Some(s) = self.state.as_mut() else {
+            self.state = Some(SmootherState {
+                pos: t,
+                vel: [0.0; 2],
+            });
+            return target;
+        };
+        let far = (s.pos[0] - t[0]).hypot(s.pos[1] - t[1]);
+        if !far.is_finite() || far > snap_distance.max(0.0) {
+            *s = SmootherState {
+                pos: t,
+                vel: [0.0; 2],
+            };
+            return target;
+        }
+        let (w, dt) = (Self::OMEGA, Self::DT);
+        let e = (-w * dt).exp();
+        for ((pos, vel), goal) in s.pos.iter_mut().zip(s.vel.iter_mut()).zip(t) {
+            let d = *pos - goal;
+            let b = (*vel + w * d) * dt;
+            *pos = goal + (d + b) * e;
+            *vel = (*vel - w * b) * e;
+            if (*pos - goal).abs() < Self::REST && vel.abs() < Self::REST {
+                *pos = goal;
+                *vel = 0.0;
+            }
+        }
+        (s.pos[0], s.pos[1])
     }
 }
 
@@ -399,13 +511,15 @@ pub mod camera_matrices {
     }
 
     /// How much of the user's top-down tilt a side-view camera keeps: the
-    /// default 52 degrees becomes about 18, a gentle look down at an upright
-    /// picture (a steep one would flatten it).
-    pub const SIDE_PITCH_SCALE: f32 = 0.35;
+    /// default 52 degrees becomes 13, a gentle look down at an upright
+    /// picture. The tilt is what makes the near edge of the window larger than
+    /// the far one, so it is kept small (W34-05: at 18 the bottom of the
+    /// window came out a fifth narrower than the top).
+    pub const SIDE_PITCH_SCALE: f32 = 0.25;
     pub const SIDE_PITCH_MIN: f32 = 6.0;
     pub const SIDE_PITCH_MAX: f32 = 30.0;
-    /// Margin around the framed window.
-    pub const SIDE_MARGIN: f32 = 1.2;
+    /// How far inside the frame the window's corners sit (1.0 = touching; a hair more so rounding cannot push a corner out).
+    pub const WINDOW_MARGIN: f32 = 1.004;
 
     /// The tilt a side-view diorama uses for a user tilt of `pitch_deg`.
     #[must_use]
@@ -413,14 +527,156 @@ pub mod camera_matrices {
         (pitch_deg * SIDE_PITCH_SCALE).clamp(SIDE_PITCH_MIN, SIDE_PITCH_MAX)
     }
 
-    /// [`Placement`] for a side-view diorama (ticket W34-04): the picture
-    /// stands upright at `z = 0` (see `crate::diorama_side`), `target` is
-    /// the world `(x, y)` on it to centre, and the window `view_w x view_h`
-    /// (world pixels, the game's own screen) is what the camera frames --
-    /// the distance fits that window, not the whole level, so the game's
-    /// screen fills the image at zoom 1.0. The eye is on the `+Z` side;
-    /// tilt and turn come from `camera`, the tilt scaled by
-    /// [`side_pitch_deg`].
+    /// Which plane a window lies on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WindowPlane {
+        /// The floor, `y = 0`: the window spans world `x` and `z` (top-down).
+        Ground,
+        /// The upright picture, `z = 0`: the window spans world `x` and `y`
+        /// (side view, `crate::diorama_side`).
+        Upright,
+    }
+
+    /// The camera distance at which the four corners of a `half_w x half_h`
+    /// window (half extents, world pixels) centred on `target` all land
+    /// inside the frame, looking from direction `dir` (unit, target to eye).
+    /// Solved by bisection, because the answer depends on pitch and on the
+    /// window's own aspect: distance is monotone (a farther eye only shrinks
+    /// the window), so this converges in a few dozen steps. `aspect` is the
+    /// frame's width over height as the projection sees it.
+    fn fit_window_distance(
+        plane: WindowPlane,
+        half: (f32, f32),
+        target: [f32; 3],
+        dir: [f32; 3],
+        aspect: f32,
+        fovy_deg: f32,
+        margin: f32,
+    ) -> f32 {
+        let f = [-dir[0], -dir[1], -dir[2]];
+        let right = normalize(cross(f, [0.0, 1.0, 0.0]));
+        let up = cross(right, f);
+        let tan_half = (fovy_deg.to_radians() / 2.0).tan().max(1e-4);
+        let (sx, sy) = (1.0 / (tan_half * aspect.max(1e-3)), 1.0 / tan_half);
+        let limit = 1.0 / margin.max(1.0);
+        let corners: [[f32; 3]; 4] = {
+            let (hw, hh) = half;
+            let at = |dx: f32, dy: f32| match plane {
+                WindowPlane::Ground => [target[0] + dx, target[1], target[2] + dy],
+                WindowPlane::Upright => [target[0] + dx, target[1] + dy, target[2]],
+            };
+            [at(-hw, -hh), at(hw, -hh), at(-hw, hh), at(hw, hh)]
+        };
+        let fits = |d: f32| {
+            let eye = [
+                target[0] + dir[0] * d,
+                target[1] + dir[1] * d,
+                target[2] + dir[2] * d,
+            ];
+            corners.iter().all(|c| {
+                let rel = sub(*c, eye);
+                let z = dot(rel, f);
+                z > 1e-3
+                    && (dot(rel, right) * sx / z).abs() <= limit
+                    && (dot(rel, up) * sy / z).abs() <= limit
+            })
+        };
+        let mut hi = half.0.max(half.1).max(1.0);
+        for _ in 0..64 {
+            if fits(hi) {
+                break;
+            }
+            hi *= 2.0;
+        }
+        let mut lo = 0.0_f32;
+        for _ in 0..40 {
+            let mid = (lo + hi) * 0.5;
+            if fits(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    }
+
+    /// [`Placement`] that frames the game's own window (D1, W34-05) on
+    /// `plane`: the distance is solved so the `view_w x view_h` window
+    /// (world pixels), narrowed by the camera's zoom, fills the frame with
+    /// `target` (world `(x, z)` on the ground, `(x, y)` on the upright
+    /// picture) at its centre. Tilt and turn come from `camera`; an upright
+    /// picture takes the gentler [`side_pitch_deg`] tilt.
+    ///
+    /// `aspect` is the frame's width over height **divided by the display's
+    /// pixel aspect**, which is how the TV stretch (8:7 pixels) comes along:
+    /// the picture is framed as if pixels were square and the GPU stretches
+    /// it into the wider frame, so the window fills both axes at once and
+    /// toggling Diorama never changes the shape of the picture.
+    #[must_use]
+    pub fn window_placement(
+        plane: WindowPlane,
+        view_w: f32,
+        view_h: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        camera: &DioramaCamera,
+        target: (f32, f32),
+    ) -> Placement {
+        let camera = camera.matrix_safe();
+        let target = match plane {
+            WindowPlane::Ground => [target.0, 0.0, target.1],
+            WindowPlane::Upright => [target.0, target.1, 0.0],
+        };
+        let pitch_deg = match plane {
+            WindowPlane::Ground => camera.pitch_deg,
+            WindowPlane::Upright => side_pitch_deg(camera.pitch_deg),
+        };
+        let (pitch, yaw) = (pitch_deg.to_radians(), camera.yaw_deg.to_radians());
+        let dir = [
+            yaw.sin() * pitch.cos(),
+            pitch.sin(),
+            yaw.cos() * pitch.cos(),
+        ];
+        let half = (view_w / 2.0 / camera.zoom, view_h / 2.0 / camera.zoom);
+        let distance =
+            fit_window_distance(plane, half, target, dir, aspect, fovy_deg, WINDOW_MARGIN);
+        Placement {
+            eye: [
+                target[0] + dir[0] * distance,
+                target[1] + dir[1] * distance,
+                target[2] + dir[2] * distance,
+            ],
+            target,
+            distance,
+        }
+    }
+
+    /// `proj * view` for [`window_placement`]. The near plane scales with the
+    /// distance (a depth buffer needs a sensible near/far ratio; with a fixed
+    /// 1 px near, depth steps on a 5000 px level are half a pixel).
+    #[must_use]
+    pub fn view_proj_window(
+        plane: WindowPlane,
+        view_w: f32,
+        view_h: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        camera: &DioramaCamera,
+        target: (f32, f32),
+    ) -> Mat4 {
+        let p = window_placement(plane, view_w, view_h, aspect, fovy_deg, camera, target);
+        let near = (p.distance * 0.05).max(1.0);
+        let proj = perspective(
+            fovy_deg.to_radians(),
+            aspect.max(1e-3),
+            near,
+            (p.distance * 8.0).max(view_w.max(view_h) * 8.0),
+        );
+        mul(proj, look_at(p.eye, p.target, [0.0, 1.0, 0.0]))
+    }
+
+    /// [`window_placement`] for a side-view diorama (ticket W34-04; the
+    /// picture stands upright at `z = 0`, see `crate::diorama_side`).
     #[must_use]
     pub fn side_placement(
         view_w: f32,
@@ -430,23 +686,15 @@ pub mod camera_matrices {
         camera: &DioramaCamera,
         target: (f32, f32),
     ) -> Placement {
-        let camera = camera.matrix_safe();
-        let half = (fovy_deg.to_radians() / 2.0).max(1e-4);
-        let dist_v = (view_h / 2.0) / half.tan();
-        let dist_h = (view_w / 2.0) / (half.tan() * aspect.max(1e-3));
-        let distance = dist_v.max(dist_h) * SIDE_MARGIN / camera.zoom;
-        let pitch = side_pitch_deg(camera.pitch_deg).to_radians();
-        let yaw = camera.yaw_deg.to_radians();
-        let target = [target.0, target.1, 0.0];
-        Placement {
-            eye: [
-                target[0] + yaw.sin() * pitch.cos() * distance,
-                target[1] + pitch.sin() * distance,
-                yaw.cos() * pitch.cos() * distance,
-            ],
+        window_placement(
+            WindowPlane::Upright,
+            view_w,
+            view_h,
+            aspect,
+            fovy_deg,
+            camera,
             target,
-            distance,
-        }
+        )
     }
 
     /// `proj * view` for [`side_placement`].
@@ -459,14 +707,15 @@ pub mod camera_matrices {
         camera: &DioramaCamera,
         target: (f32, f32),
     ) -> Mat4 {
-        let p = side_placement(view_w, view_h, aspect, fovy_deg, camera, target);
-        let proj = perspective(
-            fovy_deg.to_radians(),
-            aspect.max(1e-3),
-            1.0,
-            (p.distance * 4.0).max(view_w.max(view_h) * 4.0),
-        );
-        mul(proj, look_at(p.eye, p.target, [0.0, 1.0, 0.0]))
+        view_proj_window(
+            WindowPlane::Upright,
+            view_w,
+            view_h,
+            aspect,
+            fovy_deg,
+            camera,
+            target,
+        )
     }
 
     #[cfg(test)]
@@ -496,8 +745,8 @@ pub mod camera_matrices {
 
         #[test]
         fn the_side_tilt_is_a_gentle_fraction_of_the_top_down_tilt() {
-            assert!((side_pitch_deg(52.0) - 18.2).abs() < 0.1);
-            assert!((side_pitch_deg(80.0) - 28.0).abs() < 1e-4);
+            assert!((side_pitch_deg(52.0) - 13.0).abs() < 0.1);
+            assert!((side_pitch_deg(80.0) - 20.0).abs() < 1e-4);
             assert_eq!(side_pitch_deg(10.0), SIDE_PITCH_MIN);
         }
 
@@ -522,6 +771,105 @@ pub mod camera_matrices {
             let far_row = mul_vec4(vp, [8.0, 0.0, 56.0, 1.0]); // row 3 centre
             assert!(near_row[3] > 0.0);
             assert!(far_row[3] > 0.0);
+        }
+
+        fn window_corner_ndc(
+            plane: WindowPlane,
+            vp: Mat4,
+            target: (f32, f32),
+            half: (f32, f32),
+            sx: f32,
+            sy: f32,
+        ) -> [f32; 2] {
+            let (x, y) = (target.0 + sx * half.0, target.1 + sy * half.1);
+            let p = match plane {
+                WindowPlane::Ground => [x, 0.0, y, 1.0],
+                WindowPlane::Upright => [x, y, 0.0, 1.0],
+            };
+            let c = mul_vec4(vp, p);
+            [c[0] / c[3], c[1] / c[3]]
+        }
+
+        /// D1: the target lands at screen centre (within 2 px of a 1024x896
+        /// frame) on a 5000 px level at every zoom, and the window's corners
+        /// are inside the frame, touching it on at least one axis.
+        #[test]
+        fn the_window_fit_centres_the_target_and_fills_the_frame_on_a_big_level() {
+            let out = (1024.0_f32, 896.0_f32);
+            let aspect = out.0 / out.1;
+            for plane in [WindowPlane::Ground, WindowPlane::Upright] {
+                for zoom in [1.0_f32, 1.6, 2.5, 4.0] {
+                    for pitch in [30.0_f32, 52.0, 70.0] {
+                        let cam = DioramaCamera {
+                            pitch_deg: pitch,
+                            zoom,
+                            ..DioramaCamera::default()
+                        };
+                        let target = (4321.0_f32, 345.0);
+                        let (w, h) = (256.0_f32, 224.0_f32);
+                        let vp = view_proj_window(plane, w, h, aspect, FOV_Y_DEG, &cam, target);
+                        let half = (w / 2.0 / zoom, h / 2.0 / zoom);
+                        let mid = match plane {
+                            WindowPlane::Ground => mul_vec4(vp, [target.0, 0.0, target.1, 1.0]),
+                            WindowPlane::Upright => mul_vec4(vp, [target.0, target.1, 0.0, 1.0]),
+                        };
+                        let (nx, ny) = (mid[0] / mid[3], mid[1] / mid[3]);
+                        assert!(
+                            (nx * out.0 / 2.0).abs() < 2.0 && (ny * out.1 / 2.0).abs() < 2.0,
+                            "{plane:?} zoom {zoom} pitch {pitch}: target at ({nx}, {ny})"
+                        );
+                        let mut worst = 0.0_f32;
+                        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                            let n = window_corner_ndc(plane, vp, target, half, sx, sy);
+                            assert!(
+                                n[0].abs() <= 1.001 && n[1].abs() <= 1.001,
+                                "{plane:?} zoom {zoom} pitch {pitch}: corner {n:?} outside"
+                            );
+                            worst = worst.max(n[0].abs()).max(n[1].abs());
+                        }
+                        assert!(
+                            worst > 0.99,
+                            "{plane:?} zoom {zoom} pitch {pitch}: the window leaves a gap ({worst})"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// The TV stretch: framing with `aspect / par` leaves the window as
+        /// wide as the frame once the GPU stretches it, at 8:7.
+        #[test]
+        fn the_pixel_aspect_stretch_keeps_the_window_filling_a_wider_frame() {
+            let par = 8.0_f32 / 7.0;
+            // The play rect for 256x224 at 8:7, four times over.
+            let frame = (256.0 * par * 4.0, 224.0 * 4.0);
+            let aspect = frame.0 / frame.1 / par;
+            let cam = DioramaCamera::default();
+            let vp = view_proj_window(
+                WindowPlane::Upright,
+                256.0,
+                224.0,
+                aspect,
+                FOV_Y_DEG,
+                &cam,
+                (128.0, 112.0),
+            );
+            let mut worst_x = 0.0_f32;
+            let mut worst_y = 0.0_f32;
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let n = window_corner_ndc(
+                    WindowPlane::Upright,
+                    vp,
+                    (128.0, 112.0),
+                    (128.0, 112.0),
+                    sx,
+                    sy,
+                );
+                worst_x = worst_x.max(n[0].abs());
+                worst_y = worst_y.max(n[1].abs());
+            }
+            assert!(worst_x <= 1.001 && worst_y <= 1.001, "{worst_x} {worst_y}");
+            assert!(worst_x.max(worst_y) > 0.99);
         }
 
         fn mul_vec4(m: Mat4, v: [f32; 4]) -> [f32; 4] {
@@ -787,9 +1135,11 @@ fn camera_ubo_bytes(view_proj: camera_matrices::Mat4) -> [u8; 64] {
 /// field-by-field rather than a `#[repr(C)]` transmute so this stays
 /// correct regardless of host endianness (this project only ever runs on
 /// little-endian hosts today, but `to_le_bytes` costs nothing and removes
-/// the assumption).
-fn vertex_bytes(verts: &[Vertex]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(std::mem::size_of_val(verts));
+/// the assumption). Fills `out` (cleared first) so the caller can keep one
+/// scratch buffer across frames.
+fn vertex_bytes_into(verts: &[Vertex], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(std::mem::size_of_val(verts));
     for v in verts {
         for f in v.pos {
             out.extend_from_slice(&f.to_le_bytes());
@@ -802,21 +1152,123 @@ fn vertex_bytes(verts: &[Vertex]) -> Vec<u8> {
         }
         out.extend_from_slice(&v.kind.to_le_bytes());
     }
-    out
 }
 
-/// The Diorama pass's own pipeline/bind-group-layout/sampler (module doc:
+/// Colour format of the resolved image the pass reads back.
+const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Depth format of the pass's depth attachment (W34-05, D5).
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Sample count the pass asks for when the device supports it (D5).
+pub const MSAA_SAMPLES: u32 = 4;
+
+/// Whether `format` can be rendered at `count` samples on this device.
+/// Probed with a validation error scope, as `superfx_gpu` does (the adapter
+/// is not kept in [`GpuContext`]).
+fn sample_count_ok(device: &wgpu::Device, format: wgpu::TextureFormat, count: u32) -> bool {
+    if count == 1 {
+        return true;
+    }
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _probe = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rf-renderer::diorama::sample_probe"),
+        size: wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: count,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    pollster::block_on(scope.pop()).is_none()
+}
+
+/// A texture the pass samples, kept between frames and recreated only when
+/// its size changes.
+struct SampledTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+/// The per-size render targets and readback buffer.
+struct Target {
+    size: (u32, u32),
+    /// The multisampled colour target (absent at one sample).
+    msaa_view: Option<wgpu::TextureView>,
+    resolved: wgpu::Texture,
+    resolved_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    readback: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+}
+
+/// Everything the pass keeps between frames (W34-05, D5/D6): textures,
+/// buffers and the bind group are created when a size or capacity changes,
+/// not on every call.
+#[derive(Default)]
+struct Cache {
+    ground: Option<SampledTexture>,
+    sprite: Option<SampledTexture>,
+    bind_group: Option<wgpu::BindGroup>,
+    vertex_buffer: Option<(wgpu::Buffer, u64)>,
+    /// The bytes last uploaded to `vertex_buffer`: an unchanged mesh is not
+    /// uploaded again.
+    uploaded: Vec<u8>,
+    scratch: Vec<u8>,
+    target: Option<Target>,
+}
+
+/// How many times the pass created or recreated a GPU resource, by kind
+/// (W34-05 tests: a steady scene creates none after the first frame).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceCounts {
+    pub textures: u32,
+    pub buffers: u32,
+    pub bind_groups: u32,
+    pub vertex_uploads: u32,
+}
+
+/// The Diorama pass's own pipelines/bind-group-layout/sampler (module doc:
 /// not a [`crate::shader_chain::ChainStage`] — two input textures, a real
-/// vertex buffer, no depth attachment).
+/// vertex buffer), plus the resources it reuses from frame to frame.
 pub struct DioramaPass {
     bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
+    /// Ground, box, side and sprite triangles: depth-tested and depth-written.
+    solid_pipeline: wgpu::RenderPipeline,
+    /// Contact shadows: depth-tested, never depth-written, nudged toward the
+    /// camera so they sit on the surface they are drawn on.
+    shadow_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
+    camera_buffer: wgpu::Buffer,
+    samples: u32,
+    cache: Mutex<Cache>,
+    counts: Mutex<ResourceCounts>,
 }
 
 impl DioramaPass {
+    /// A pass with [`MSAA_SAMPLES`] samples where the device supports them
+    /// (one sample otherwise).
     #[must_use]
     pub fn new(gpu: &GpuContext) -> Self {
+        Self::with_samples(gpu, MSAA_SAMPLES)
+    }
+
+    /// A pass asking for `samples` (1 or 4) multisamples; a count the device
+    /// cannot render falls back to 1.
+    #[must_use]
+    pub fn with_samples(gpu: &GpuContext, samples: u32) -> Self {
+        let samples = if samples > 1
+            && sample_count_ok(&gpu.device, COLOR_FORMAT, samples)
+            && sample_count_ok(&gpu.device, DEPTH_FORMAT, samples)
+        {
+            samples
+        } else {
+            1
+        };
         let bind_group_layout =
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -900,40 +1352,64 @@ impl DioramaPass {
             },
         ];
 
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("rf-renderer::diorama::pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: vertex_stride,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &attributes,
-                    }],
-                },
-                // No depth/stencil: `crate::diorama_mesh`'s own module doc
-                // explains why (painter's algorithm, matching every other
-                // pass in this crate).
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let make_pipeline = |label: &str, write_depth: bool, bias: wgpu::DepthBiasState| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: vertex_stride,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        }],
+                    },
+                    // No culling: the quads are one-sided in the mesh and the
+                    // oriented builders already drop faces the eye cannot see.
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(write_depth),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: wgpu::StencilState::default(),
+                        bias,
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: samples,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: COLOR_FORMAT,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let solid_pipeline = make_pipeline(
+            "rf-renderer::diorama::solid_pipeline",
+            true,
+            wgpu::DepthBiasState::default(),
+        );
+        let shadow_pipeline = make_pipeline(
+            "rf-renderer::diorama::shadow_pipeline",
+            false,
+            wgpu::DepthBiasState {
+                constant: -4,
+                slope_scale: -1.0,
+                clamp: 0.0,
+            },
+        );
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("rf-renderer::diorama::sampler"),
@@ -943,12 +1419,35 @@ impl DioramaPass {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rf-renderer::diorama::camera"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         DioramaPass {
             bind_group_layout,
-            pipeline,
+            solid_pipeline,
+            shadow_pipeline,
             sampler,
+            camera_buffer,
+            samples,
+            cache: Mutex::new(Cache::default()),
+            counts: Mutex::new(ResourceCounts::default()),
         }
+    }
+
+    /// The multisample count in use (4, or 1 where the device has no 4x).
+    #[must_use]
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
+
+    /// How many GPU resources this pass has created so far.
+    #[must_use]
+    pub fn resource_counts(&self) -> ResourceCounts {
+        *self.counts.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Render one diorama frame: `vertices` (already back-to-front,
@@ -1051,6 +1550,14 @@ impl DioramaPass {
         )
     }
 
+    /// Render `vertices` through the ready-made `vp` matrix (D5): MSAA and a
+    /// depth buffer, at exactly `out_width x out_height` (clamped to the
+    /// device's texture limit), on resources kept from the previous call
+    /// whenever the sizes match.
+    ///
+    /// # Errors
+    /// Returns `Err` if the GPU readback does not complete within
+    /// [`crate::gpu::GPU_WAIT`].
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_vp(
         &self,
@@ -1076,122 +1583,160 @@ impl DioramaPass {
             (sprite_w as usize) * (sprite_h as usize) * 4,
             "DioramaPass::render: sprite buffer size mismatch"
         );
+        let max_dim = gpu.adapter_limits.max_texture_dimension_2d.max(1);
+        let (out_w, out_h) = (out_width.clamp(1, max_dim), out_height.clamp(1, max_dim));
 
-        let make_tex = |label: &str, w: u32, h: u32, bytes: &[u8]| -> wgpu::TextureView {
-            let extent = wgpu::Extent3d {
-                width: w.max(1),
-                height: h.max(1),
-                depth_or_array_layers: 1,
-            };
-            let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            if w > 0 && h > 0 {
-                gpu.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = &mut *guard;
+        let mut made = ResourceCounts::default();
+
+        // Textures: recreated only when their size changes, rewritten each
+        // call (the live path's picture is new every frame).
+        let mut rebind = false;
+        for (slot, label, w, h, bytes) in [
+            (
+                &mut cache.ground,
+                "rf-renderer::diorama::ground",
+                ground_w,
+                ground_h,
+                ground_rgba,
+            ),
+            (
+                &mut cache.sprite,
+                "rf-renderer::diorama::sprite",
+                sprite_w,
+                sprite_h,
+                sprite_rgba,
+            ),
+        ] {
+            let size = (w.max(1), h.max(1));
+            if slot.as_ref().is_none_or(|t| t.size != size) {
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
                     },
-                    bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(w * 4),
-                        rows_per_image: Some(h),
-                    },
-                    extent,
-                );
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: COLOR_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                *slot = Some(SampledTexture {
+                    texture,
+                    view,
+                    size,
+                });
+                made.textures += 1;
+                rebind = true;
             }
-            tex.create_view(&wgpu::TextureViewDescriptor::default())
-        };
-
-        let ground_view = make_tex(
-            "rf-renderer::diorama::ground",
-            ground_w,
-            ground_h,
-            ground_rgba,
-        );
-        let sprite_view = make_tex(
-            "rf-renderer::diorama::sprite",
-            sprite_w,
-            sprite_h,
-            sprite_rgba,
-        );
-
-        let output_extent = wgpu::Extent3d {
-            width: out_width.max(1),
-            height: out_height.max(1),
-            depth_or_array_layers: 1,
-        };
-        let output_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("rf-renderer::diorama::output"),
-            size: output_extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let output_view = output_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rf-renderer::diorama::camera"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.queue
-            .write_buffer(&camera_buffer, 0, &camera_ubo_bytes(vp));
-
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rf-renderer::diorama::bind_group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&ground_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&sprite_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-
-        // An empty vertex list (e.g. a zero-sized grid) is a valid,
-        // fully-transparent frame -- use a Draw/DoDoNothing pattern (zero
-        // vertices) rather than special-casing it: `create_buffer` with
-        // `size: 0` is invalid on some backends, so a one-vertex
-        // placeholder buffer plus a `draw(0..0, ..)` sidesteps that
-        // without changing the render pass shape.
-        let vb_bytes = vertex_bytes(vertices);
-        let vb_size = vb_bytes.len().max(std::mem::size_of::<Vertex>()) as u64;
-        let vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rf-renderer::diorama::vertices"),
-            size: vb_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !vb_bytes.is_empty() {
-            gpu.queue.write_buffer(&vertex_buffer, 0, &vb_bytes);
+            if w > 0 && h > 0 {
+                if let Some(t) = slot {
+                    gpu.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &t.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(w * 4),
+                            rows_per_image: Some(h),
+                        },
+                        wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
         }
+        if rebind || cache.bind_group.is_none() {
+            let (Some(ground), Some(sprite)) = (&cache.ground, &cache.sprite) else {
+                return Err("diorama textures missing".to_string());
+            };
+            cache.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rf-renderer::diorama::bind_group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&ground.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&sprite.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            }));
+            made.bind_groups += 1;
+        }
+        gpu.queue
+            .write_buffer(&self.camera_buffer, 0, &camera_ubo_bytes(vp));
+
+        // Vertices: one buffer that only grows; a mesh identical to the last
+        // one (a still scene) is not uploaded again.
+        vertex_bytes_into(vertices, &mut cache.scratch);
+        let need = cache
+            .scratch
+            .len()
+            .max(std::mem::size_of::<Vertex>())
+            .next_power_of_two() as u64;
+        if cache
+            .vertex_buffer
+            .as_ref()
+            .is_none_or(|(_, cap)| *cap < need)
+        {
+            cache.vertex_buffer = Some((
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("rf-renderer::diorama::vertices"),
+                    size: need,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                need,
+            ));
+            cache.uploaded.clear();
+            made.buffers += 1;
+        }
+        if !cache.scratch.is_empty() && cache.scratch != cache.uploaded {
+            if let Some((buffer, _)) = &cache.vertex_buffer {
+                gpu.queue.write_buffer(buffer, 0, &cache.scratch);
+            }
+            std::mem::swap(&mut cache.scratch, &mut cache.uploaded);
+            made.vertex_uploads += 1;
+        }
+
+        // Targets and readback: rebuilt only when the output size changes.
+        if cache
+            .target
+            .as_ref()
+            .is_none_or(|t| t.size != (out_w, out_h))
+        {
+            cache.target = Some(self.make_target(gpu, out_w, out_h));
+            made.textures += 3;
+            made.buffers += 1;
+        }
+        let (Some(target), Some(bind_group), Some((vertex_buffer, _))) =
+            (&cache.target, &cache.bind_group, &cache.vertex_buffer)
+        else {
+            return Err("diorama resources missing".to_string());
+        };
 
         let mut encoder = gpu
             .device
@@ -1199,70 +1744,228 @@ impl DioramaPass {
                 label: Some("rf-renderer::diorama::encoder"),
             });
         {
+            let (view, resolve_target, store) = match &target.msaa_view {
+                Some(mv) => (mv, Some(&target.resolved_view), wgpu::StoreOp::Discard),
+                None => (&target.resolved_view, None, wgpu::StoreOp::Store),
+            };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rf-renderer::diorama::render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_view,
+                    view,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target,
                     ops: wgpu::Operations {
                         // Transparent clear: an area the mesh never
                         // covers (outside the framed grid, or a fully
                         // empty scene) composites as "nothing here",
                         // never an opaque colour standing in for one.
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &bind_group, &[]);
+            rpass.set_bind_group(0, bind_group, &[]);
             rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            rpass.draw(0..vertices.len() as u32, 0..1);
+            // Shadows draw with their own pipeline (no depth write), so the
+            // triangle list is cut into runs of one pipeline each. The mesh
+            // order (far to near) is kept: depth settles overlaps, the order
+            // settles blending.
+            let mut run_start = 0usize;
+            let mut run_shadow = false;
+            let flush = |rpass: &mut wgpu::RenderPass<'_>, from: usize, to: usize, shadow| {
+                if to > from {
+                    rpass.set_pipeline(if shadow {
+                        &self.shadow_pipeline
+                    } else {
+                        &self.solid_pipeline
+                    });
+                    rpass.draw(from as u32..to as u32, 0..1);
+                }
+            };
+            for (i, tri) in vertices.chunks(3).enumerate() {
+                let shadow = tri[0].kind == crate::diorama_mesh::kind::SHADOW;
+                if shadow != run_shadow {
+                    flush(&mut rpass, run_start, i * 3, run_shadow);
+                    run_start = i * 3;
+                    run_shadow = shadow;
+                }
+            }
+            flush(&mut rpass, run_start, vertices.len(), run_shadow);
         }
-
-        let bytes_per_row = out_width.max(1) * 4;
-        let padded_bytes_per_row = align_up(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback_size = u64::from(padded_bytes_per_row) * u64::from(out_height.max(1));
-        let readback_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rf-renderer::diorama::readback"),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &output_tex,
+                texture: &target.resolved,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
+                buffer: &target.readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(out_height.max(1)),
+                    bytes_per_row: Some(target.padded_bytes_per_row),
+                    rows_per_image: Some(out_h),
                 },
             },
-            output_extent,
+            wgpu::Extent3d {
+                width: out_w,
+                height: out_h,
+                depth_or_array_layers: 1,
+            },
         );
         gpu.queue.submit(std::iter::once(encoder.finish()));
-
-        let padded = read_buffer_sync(&gpu.device, &readback_buffer)?;
-        let mut rgba = Vec::with_capacity((bytes_per_row as usize) * (out_height.max(1) as usize));
-        for row in padded
-            .chunks(padded_bytes_per_row as usize)
-            .take(out_height.max(1) as usize)
+        let rgba = read_straight_alpha(
+            &gpu.device,
+            &target.readback,
+            out_w,
+            out_h,
+            target.padded_bytes_per_row,
+        )?;
         {
-            rgba.extend_from_slice(&row[..bytes_per_row as usize]);
+            let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+            counts.textures += made.textures;
+            counts.buffers += made.buffers;
+            counts.bind_groups += made.bind_groups;
+            counts.vertex_uploads += made.vertex_uploads;
         }
         Ok(rgba)
     }
+
+    fn make_target(&self, gpu: &GpuContext, w: u32, h: u32) -> Target {
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let make = |label, format, sample_count, usage| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let resolved = make(
+            "rf-renderer::diorama::resolved",
+            COLOR_FORMAT,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
+        let msaa_view = (self.samples > 1).then(|| {
+            make(
+                "rf-renderer::diorama::msaa",
+                COLOR_FORMAT,
+                self.samples,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            )
+            .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let depth_view = make(
+            "rf-renderer::diorama::depth",
+            DEPTH_FORMAT,
+            self.samples,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
+        let padded_bytes_per_row = align_up(w * 4, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rf-renderer::diorama::readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Target {
+            size: (w, h),
+            msaa_view,
+            resolved,
+            resolved_view,
+            depth_view,
+            readback,
+            padded_bytes_per_row,
+        }
+    }
+}
+
+/// Map `readback`, strip the row padding and turn the premultiplied
+/// coverage the blend and the MSAA resolve leave over the transparent clear
+/// back into straight alpha (`superfx_gpu` does the same). Opaque and empty
+/// pixels, nearly all of them, are copied untouched.
+fn read_straight_alpha(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    w: u32,
+    h: u32,
+    padded_bytes_per_row: u32,
+) -> Result<Vec<u8>, String> {
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(crate::gpu::GPU_WAIT),
+        })
+        .map_err(|e| format!("device.poll timed out waiting for buffer readback: {e}"))?;
+    match rx.try_recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(format!("buffer map_async failed: {e}")),
+        Err(_) => return Err("buffer map_async callback never fired".to_string()),
+    }
+    let row_bytes = w as usize * 4;
+    let mut rgba = Vec::with_capacity(row_bytes * h as usize);
+    {
+        let mapped = slice.get_mapped_range();
+        for row in mapped
+            .chunks(padded_bytes_per_row as usize)
+            .take(h as usize)
+        {
+            rgba.extend_from_slice(&row[..row_bytes]);
+        }
+    }
+    readback.unmap();
+    // Almost every pixel is opaque or empty, so test sixteen bytes (four
+    // pixels) with one comparison per pixel and only touch the rare edge.
+    let straighten = |px: &mut [u8]| {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+        }
+    };
+    let mut quads = rgba.chunks_exact_mut(16);
+    for quad in &mut quads {
+        let edge = |i: usize| quad[i * 4 + 3].wrapping_sub(1) < 254;
+        if edge(0) | edge(1) | edge(2) | edge(3) {
+            for px in quad.chunks_exact_mut(4) {
+                if px[3].wrapping_sub(1) < 254 {
+                    straighten(px);
+                }
+            }
+        }
+    }
+    for px in quads.into_remainder().chunks_exact_mut(4) {
+        if px[3].wrapping_sub(1) < 254 {
+            straighten(px);
+        }
+    }
+    Ok(rgba)
 }
 
 /// Probe helpers shared with `mode7_plane`'s tests (W30-05b).
@@ -1446,5 +2149,115 @@ mod tests {
                 .expect("diorama renders");
             assert_quadrants_upright(&out, 128, &format!("yaw {yaw}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod smoother_tests {
+    use super::CameraSmoother;
+
+    #[test]
+    fn the_first_step_lands_on_the_target() {
+        let mut s = CameraSmoother::default();
+        assert_eq!(s.step_to((10.0, 20.0), 100.0), (10.0, 20.0));
+    }
+
+    /// D1: a step of the target never overshoots, and the camera arrives.
+    #[test]
+    fn a_step_response_does_not_overshoot_and_settles() {
+        let mut s = CameraSmoother::default();
+        s.step_to((0.0, 0.0), 1000.0);
+        let mut peak = 0.0_f32;
+        let mut p = (0.0, 0.0);
+        for _ in 0..90 {
+            p = s.step_to((100.0, 50.0), 1000.0);
+            peak = peak.max(p.0 - 100.0).max(p.1 - 50.0);
+        }
+        assert!(peak <= 0.5, "overshoot {peak}");
+        assert!(
+            (p.0 - 100.0).abs() < 0.5 && (p.1 - 50.0).abs() < 0.5,
+            "{p:?}"
+        );
+    }
+
+    /// A target that walks at 2 px a frame and then stops: the camera lags,
+    /// then catches up without passing it.
+    #[test]
+    fn a_target_that_stops_is_not_overshot() {
+        let mut s = CameraSmoother::default();
+        let mut x = 0.0_f32;
+        s.step_to((x, 0.0), 1000.0);
+        for _ in 0..120 {
+            x += 2.0;
+            let p = s.step_to((x, 0.0), 1000.0);
+            assert!(p.0 <= x + 0.01, "ahead of a walking target: {} vs {x}", p.0);
+        }
+        let mut peak = 0.0_f32;
+        for _ in 0..120 {
+            let p = s.step_to((x, 0.0), 1000.0);
+            peak = peak.max(p.0 - x);
+        }
+        assert!(peak <= 0.5, "overshoot after stopping {peak}");
+    }
+
+    #[test]
+    fn a_jump_larger_than_the_snap_distance_is_taken_at_once() {
+        let mut s = CameraSmoother::default();
+        s.step_to((0.0, 0.0), 128.0);
+        assert_eq!(s.step_to((500.0, 0.0), 128.0), (500.0, 0.0));
+        s.reset();
+        assert_eq!(s.step_to((7.0, 7.0), 128.0), (7.0, 7.0));
+    }
+
+    #[test]
+    fn the_same_inputs_replay_the_same_path() {
+        let run = || {
+            let mut s = CameraSmoother::default();
+            (0..50)
+                .map(|i| s.step_to((i as f32 * 3.0, 10.0), 500.0))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run());
+    }
+
+    /// A player the detector loses for a few frames is not a jump to the
+    /// fallback and back.
+    #[test]
+    fn a_dropout_holds_the_last_target_instead_of_jumping_to_the_fallback() {
+        let mut s = CameraSmoother::default();
+        let fallback = (128.0, 112.0);
+        let mut last = (0.0, 0.0);
+        for _ in 0..30 {
+            last = s.step(Some((40.0, 180.0)), fallback, 1000.0);
+        }
+        for _ in 0..30 {
+            let p = s.step(None, fallback, 1000.0);
+            assert!(
+                (p.0 - last.0).abs() < 1.0 && (p.1 - last.1).abs() < 1.0,
+                "{p:?}"
+            );
+        }
+        let back = s.step(Some((40.0, 180.0)), fallback, 1000.0);
+        assert!(
+            (back.0 - 40.0).abs() < 1.0 && (back.1 - 180.0).abs() < 1.0,
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn a_target_lost_for_good_is_given_up_on_for_the_fallback() {
+        let mut s = CameraSmoother::default();
+        let fallback = (128.0, 112.0);
+        for _ in 0..10 {
+            s.step(Some((10.0, 10.0)), fallback, 1000.0);
+        }
+        let mut p = (0.0, 0.0);
+        for _ in 0..(CameraSmoother::HOLD_STEPS + 120) {
+            p = s.step(None, fallback, 1000.0);
+        }
+        assert!(
+            (p.0 - 128.0).abs() < 1.0 && (p.1 - 112.0).abs() < 1.0,
+            "{p:?}"
+        );
     }
 }

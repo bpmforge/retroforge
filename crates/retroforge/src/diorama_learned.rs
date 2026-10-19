@@ -345,7 +345,7 @@ pub fn render_side(
         back_px: f.back_px,
     };
     let camera = f.view.camera_at((f.centre.0, f.centre.1)).clamped();
-    let aspect = f.out.0.max(1) as f32 / f.out.1.max(1) as f32;
+    let aspect = f.view.projection_aspect(f.out);
     // Following with a zoom: the window narrows around the centre and may
     // not leave the picture; otherwise the whole window is framed.
     let zoom = camera.zoom;
@@ -357,7 +357,7 @@ pub fn render_side(
         f.window.0,
         f.window.1,
         aspect,
-        rf_renderer::diorama::FOV_Y_DEG,
+        rf_renderer::diorama::WINDOW_FOV_Y_DEG,
         &camera,
         target,
     );
@@ -366,7 +366,7 @@ pub fn render_side(
         f.window.0,
         f.window.1,
         aspect,
-        rf_renderer::diorama::FOV_Y_DEG,
+        rf_renderer::diorama::WINDOW_FOV_Y_DEG,
         &camera,
         target,
     );
@@ -397,8 +397,107 @@ pub struct TopFrame<'a> {
     pub screen: (u32, u32),
     pub sprites: &'a [SpriteBox],
     pub sprite_rgba: &'a [u8],
+    /// How many rows of `screen` the game shows (an SNES frame without
+    /// overscan draws 224 of the host's 240): the window the camera fits.
+    pub rows: u32,
+    /// The screen position to look at (screen pixels, y down): the player,
+    /// or the middle of the shown rows.
+    pub centre: (f32, f32),
     pub out: (u32, u32),
     pub view: DioramaView,
+}
+
+/// Where a `window`-sized view centred on `centre` may look: the centre,
+/// held so the window stays inside an `extent`-sized picture. A window
+/// larger than the picture (zoom 1.0 on a padded grid is smaller, never
+/// larger) is centred.
+#[must_use]
+pub fn clamp_window_centre(
+    centre: (f32, f32),
+    window: (f32, f32),
+    zoom: f32,
+    extent: (f32, f32),
+) -> (f32, f32) {
+    let (hw, hh) = (window.0 / 2.0 / zoom, window.1 / 2.0 / zoom);
+    (
+        centre
+            .0
+            .clamp(hw.min(extent.0 / 2.0), (extent.0 - hw).max(extent.0 / 2.0)),
+        centre
+            .1
+            .clamp(hh.min(extent.1 / 2.0), (extent.1 - hh).max(extent.1 / 2.0)),
+    )
+}
+
+/// Everything [`render_ground_window`] needs about a floor-plan scene.
+pub struct GroundWindow<'a> {
+    pub scene: &'a DioramaScene<'a>,
+    pub ground_rgba: &'a [u8],
+    pub ground: (u32, u32),
+    pub sprite_rgba: &'a [u8],
+    pub sprite_size: (u32, u32),
+    /// The game's own window on the floor (world pixels) and the point on
+    /// the floor to centre (already smoothed and clamped).
+    pub window: (f32, f32),
+    pub target: (f32, f32),
+    pub out: (u32, u32),
+    pub view: DioramaView,
+}
+
+/// Render a floor-plan scene with the camera fitted to the game's window
+/// (D1): the window fills the frame at zoom 1, `target` is at its centre.
+///
+/// # Errors
+/// Propagates the pass's `Err` (GPU readback timeout).
+pub fn render_ground_window(
+    gpu: &GpuContext,
+    pass: &rf_renderer::diorama::DioramaPass,
+    f: &GroundWindow<'_>,
+) -> Result<DioramaRender, String> {
+    use camera_matrices::WindowPlane;
+    let camera = f.view.camera_at(f.target).clamped();
+    let aspect = f.view.projection_aspect(f.out);
+    let p = camera_matrices::window_placement(
+        WindowPlane::Ground,
+        f.window.0,
+        f.window.1,
+        aspect,
+        rf_renderer::diorama::WINDOW_FOV_Y_DEG,
+        &camera,
+        f.target,
+    );
+    let vertices = rf_renderer::diorama_mesh::build_vertices_oriented(
+        f.scene,
+        camera.yaw_deg,
+        [p.eye[0], p.eye[2]],
+    );
+    let vp = camera_matrices::view_proj_window(
+        WindowPlane::Ground,
+        f.window.0,
+        f.window.1,
+        aspect,
+        rf_renderer::diorama::WINDOW_FOV_Y_DEG,
+        &camera,
+        f.target,
+    );
+    let rgba = pass.render_with_vp(
+        gpu,
+        &vertices,
+        f.ground_rgba,
+        f.ground.0,
+        f.ground.1,
+        f.sprite_rgba,
+        f.sprite_size.0,
+        f.sprite_size.1,
+        vp,
+        f.out.0,
+        f.out.1,
+    )?;
+    Ok(DioramaRender {
+        rgba,
+        width: f.out.0,
+        height: f.out.1,
+    })
 }
 
 /// Render one top-down frame on the existing builder.
@@ -414,8 +513,6 @@ pub fn render_top(
     let ground = crate::live_heights::padded_ground(f.frame_rgba, f.screen.0, f.screen.1, &grid);
     let (ground_w, ground_h) = grid.extent();
     let billboards = top_billboards(f.sprites, &grid, f.screen);
-    let (cx, cy) = grid.screen_to_grid(f.screen.0 as f32 / 2.0, f.screen.1 as f32 / 2.0);
-    let camera = f.view.camera_at((cx, cy));
     let scene = DioramaScene {
         tiles_w: grid.cols,
         tiles_h: grid.rows,
@@ -424,33 +521,55 @@ pub fn render_top(
         depth: &grid.depth,
         billboards: &billboards,
     };
-    let vertices = rf_renderer::diorama::vertices_for_camera(&scene, f.out.0, f.out.1, &camera);
-    let rgba = pass.render_camera(
+    let window = (f.screen.0 as f32, f.rows.clamp(1, f.screen.1.max(1)) as f32);
+    let zoom = f.view.camera.clamped().zoom;
+    let centre = if f.view.follow {
+        f.centre
+    } else {
+        (window.0 / 2.0, window.1 / 2.0)
+    };
+    let (gx, gy) = grid.screen_to_grid(centre.0, centre.1);
+    let target = clamp_window_centre((gx, gy), window, zoom, (ground_w as f32, ground_h as f32));
+    render_ground_window(
         gpu,
-        &vertices,
-        &ground,
-        ground_w,
-        ground_h,
-        f.sprite_rgba,
-        f.screen.0,
-        f.screen.1,
-        grid.cols,
-        grid.rows,
-        grid.tile_px,
-        f.out.0,
-        f.out.1,
-        &camera,
-    )?;
-    Ok(DioramaRender {
-        rgba,
-        width: f.out.0,
-        height: f.out.1,
-    })
+        pass,
+        &GroundWindow {
+            scene: &scene,
+            ground_rgba: &ground,
+            ground: (ground_w, ground_h),
+            sprite_rgba: f.sprite_rgba,
+            sprite_size: f.screen,
+            window,
+            target,
+            out: f.out,
+            view: f.view,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_centre_is_held_so_the_window_stays_on_the_picture() {
+        // A 256x224 window on a 1000x300 picture: at zoom 1 it can slide
+        // between x = 128 and 872; zoomed 2x the window is half as wide.
+        let w = (256.0, 224.0);
+        let ext = (1000.0, 300.0);
+        assert_eq!(clamp_window_centre((10.0, 150.0), w, 1.0, ext).0, 128.0);
+        assert_eq!(clamp_window_centre((990.0, 150.0), w, 1.0, ext).0, 872.0);
+        assert_eq!(
+            clamp_window_centre((500.0, 150.0), w, 1.0, ext),
+            (500.0, 150.0)
+        );
+        assert_eq!(clamp_window_centre((10.0, 150.0), w, 2.0, ext).0, 64.0);
+        // The window is taller than the picture: centred, not pushed out.
+        assert_eq!(
+            clamp_window_centre((500.0, 10.0), w, 1.0, (1000.0, 100.0)).1,
+            50.0
+        );
+    }
 
     fn grid(cols: u16, rows: u16, offset: (u8, u8), top: u16) -> TileGrid {
         TileGrid {

@@ -16,8 +16,11 @@
 //     the quad's own UV centre times color.a.
 //   3 SIDE   -- a box side face: flat-shaded, no texture.
 //
-// No depth buffer: crate::diorama_mesh's own module doc explains why
-// (painter's algorithm -- vertices already arrive back-to-front).
+// Depth (W34-05): the pass has a depth buffer and 4x MSAA. The vertices
+// still arrive back-to-front, which fixes blending order; depth fixes what
+// that order gets wrong (a sprite between two walls). Because a fragment
+// that is transparent would still write depth and hide whatever is behind
+// it, the fragments with nothing to show are discarded, not blended.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -64,14 +67,23 @@ const KIND_SPRITE: u32 = 1u;
 const KIND_SHADOW: u32 = 2u;
 const KIND_SIDE: u32 = 3u;
 
+// Below this a fragment is invisible: it is dropped so it cannot write depth.
+const MIN_ALPHA: f32 = 0.02;
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (in.kind == KIND_GROUND) {
         let tex = textureSample(ground_tex, samp, in.uv);
+        if (tex.a * in.color.a < MIN_ALPHA) {
+            discard;
+        }
         return vec4<f32>(tex.rgb * in.color.rgb, tex.a * in.color.a);
     }
     if (in.kind == KIND_SPRITE) {
         let tex = textureSample(sprite_tex, samp, in.uv);
+        if (tex.a * in.color.a < MIN_ALPHA) {
+            discard;
+        }
         return vec4<f32>(tex.rgb, tex.a * in.color.a);
     }
     if (in.kind == KIND_SHADOW) {
@@ -81,6 +93,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // real shadow map (no light source is modelled at all).
         let centered = (in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
         let falloff = clamp(1.0 - length(centered), 0.0, 1.0);
+        if (in.color.a * falloff < MIN_ALPHA) {
+            discard;
+        }
         return vec4<f32>(in.color.rgb, in.color.a * falloff);
     }
     // KIND_SIDE: flat-shaded, no texture.

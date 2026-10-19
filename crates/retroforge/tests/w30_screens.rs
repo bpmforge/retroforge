@@ -183,9 +183,22 @@ fn rom(console: &str, file: &str) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// The harness window in points. `RF_SCREENS_WINDOW=1300x1100` makes it big
+/// enough for the Diorama to render at about 4x (W34-05's cost rows).
+fn window_size() -> [f32; 2] {
+    std::env::var("RF_SCREENS_WINDOW")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some([w.parse().ok()?, h.parse().ok()?])
+        })
+        .unwrap_or(WINDOW_SIZE)
+}
+
 fn new_harness() -> H {
+    let size = window_size();
     let mut h = Harness::builder()
-        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .with_size(egui::vec2(size[0], size[1]))
         .renderer(egui_kittest::wgpu::WgpuTestRenderer::default())
         .build_eframe(|cc| RetroForgeApp::new(cc));
     h.run();
@@ -278,7 +291,7 @@ fn grab_play_area(h: &mut H) -> Option<Pic> {
     };
     save(&probe_dir().join("probe-window.png"), &full);
     let (rect, _) = h.state().play_rect_for_test()?;
-    let scale = iw as f32 / WINDOW_SIZE[0];
+    let scale = iw as f32 / window_size()[0];
     let x0 = (rect.min.x * scale).max(0.0) as usize;
     let y0 = (rect.min.y * scale).max(0.0) as usize;
     let cw = ((rect.width() * scale) as usize).min(iw - x0);
@@ -2455,7 +2468,17 @@ fn enter_smb3(h: &mut H) {
 
 /// One off/on pair of the side-view diorama, with what the learner knew.
 fn diorama_pair(h: &mut H, name: &str, what: &str, readme: &mut Vec<String>) {
-    let d = out_dir();
+    diorama_pair_as(h, "diorama-side", name, what, readme);
+}
+
+/// [`diorama_pair`] with the file prefix chosen (`diorama-top` for top-down).
+fn diorama_pair_as(h: &mut H, prefix: &str, name: &str, what: &str, readme: &mut Vec<String>) {
+    // A resized window is for the cost rows: its pictures stay out of the docs.
+    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok() {
+        probe_dir()
+    } else {
+        out_dir()
+    };
     // OFF: the flat view of a stepped frame.
     h.state_mut().set_diorama_for_test(false);
     snapshot(h, name);
@@ -2472,15 +2495,12 @@ fn diorama_pair(h: &mut H, name: &str, what: &str, readme: &mut Vec<String>) {
     let numbers = h.state().heights_numbers_for_test();
     let readout = h.state().heights_readout_for_test();
     println!("{name}: numbers {numbers:?}\n{name}: readout {readout:?}");
-    save(
-        &d.join(format!("diorama-side-{name}-off.png")),
-        &off.opaque(),
-    );
-    save(&d.join(format!("diorama-side-{name}-on.png")), &on.opaque());
+    save(&d.join(format!("{prefix}-{name}-off.png")), &off.opaque());
+    save(&d.join(format!("{prefix}-{name}-on.png")), &on.opaque());
     note(
         readme,
         format!(
-            "diorama-side-{name}|{what}|OFF flat / ON side-view diorama; learner {numbers:?}; readout {readout:?}"
+            "{prefix}-{name}|{what}|OFF flat / ON diorama; learner {numbers:?}; readout {readout:?}"
         ),
     );
 }
@@ -2507,6 +2527,7 @@ fn diorama_fps(h: &mut H, name: &str, readme: &mut Vec<String>) {
         fps[usize::from(on)].push(n as f64 / t0.elapsed().as_secs_f64());
     }
     let p95 = h.state().diorama_p95_ms_for_test();
+    let size = h.state().diorama_size_for_test();
     h.state()
         .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
     let med = |v: &mut Vec<f64>| {
@@ -2518,7 +2539,7 @@ fn diorama_fps(h: &mut H, name: &str, readme: &mut Vec<String>) {
         readme,
         format!(
             "DIORAMA-SIDE-FPS {name} (10 chunks x 30 frames per state, interleaved, pacing off): \
-             median fps off {:.1} | diorama on {:.1}; diorama pass p95 {:.2} ms",
+             median fps off {:.1} | diorama on {:.1}; diorama pass p95 {:.2} ms; diorama image {size:?}",
             med(&mut off),
             med(&mut on),
             p95
@@ -2646,6 +2667,66 @@ fn shot_diorama_side_smb3(readme: &mut Vec<String>) {
     diorama_fps(&mut h, name, readme);
 }
 
+/// W34-05 acceptance: A Link to the Past, the top-down camera on the player.
+/// `RF_SCREENS_ONLY=diorama-top-alttp`.
+fn shot_diorama_top_alttp(readme: &mut Vec<String>) {
+    let name = "alttp";
+    if !wanted("diorama-top-alttp") {
+        return;
+    }
+    let Some(path) = rom(
+        "snes",
+        "Legend of Zelda, The - A Link to the Past (USA).zip",
+    ) else {
+        return skip(readme, name, "A Link to the Past (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    // Boot, register a name (Start ends the name entry), click through the
+    // opening text until Link is in control (W34-02's script).
+    wait(&mut h, "alttp", 600);
+    for i in 0..30 {
+        tap(
+            &mut h,
+            if i % 2 == 0 {
+                egui::Key::Enter
+            } else {
+                egui::Key::X
+            },
+            6,
+        );
+        wait(&mut h, "alttp", 60);
+    }
+    for _ in 0..24 {
+        tap(&mut h, egui::Key::X, 4);
+        wait(&mut h, "alttp", 50);
+    }
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let laps: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    let end = h.state().frame_count_for_test() + laps;
+    while h.state().frame_count_for_test() < end {
+        play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+    }
+    release_all(&mut h);
+    probe(&h, "alttp-diorama-after-play");
+    diorama_pair_as(
+        &mut h,
+        "diorama-top",
+        name,
+        "A Link to the Past, Link's house and yard, top-down; the camera follows Link",
+        readme,
+    );
+    diorama_fps(&mut h, name, readme);
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -2677,6 +2758,7 @@ fn w30_w31_screens() {
     shot_diorama_side_rfscroller(&mut readme);
     shot_diorama_side_smw(&mut readme);
     shot_diorama_side_smb3(&mut readme);
+    shot_diorama_top_alttp(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

@@ -166,6 +166,13 @@ fn enabling_diorama_changes_the_live_view_texture_and_disabling_restores_the_fla
         "Accuracy mode must never produce a Diorama render (law 6)"
     );
 
+    harness.run_steps(2);
+    let flat_rect = harness
+        .state()
+        .play_rect_for_test()
+        .map(|(r, _)| r)
+        .expect("the flat view drew a picture");
+
     // Game-Aware AND Diorama on: the live view must now be composited.
     harness.state_mut().set_mode_for_test(Mode::GameAware);
     harness.state_mut().set_diorama_for_test(true);
@@ -176,6 +183,34 @@ fn enabling_diorama_changes_the_live_view_texture_and_disabling_restores_the_fla
         on_hash.is_some(),
         "Game-Aware + a matching collision profile + Diorama on must produce a live render \
          within a few frames of the core actually running"
+    );
+
+    // W34-05 (D2): the 3D picture fills the play rect the flat view had, at
+    // its own aspect (no letterbox jump on toggle), and is rendered at that
+    // rect's size rather than the console frame's.
+    run_frames(&mut harness, 14, std::time::Duration::from_secs(10));
+    harness.run_steps(2);
+    let (rect, _) = harness
+        .state()
+        .play_rect_for_test()
+        .expect("the diorama view drew a picture");
+    assert!(
+        (rect.min - flat_rect.min).length() < 1.0
+            && (rect.size() - flat_rect.size()).length() < 1.0,
+        "toggling Diorama moved the picture: flat {flat_rect:?}, diorama {rect:?}"
+    );
+    let (dw, dh) = harness
+        .state()
+        .diorama_size_for_test()
+        .expect("a diorama render");
+    let (kx, ky) = (dw as f32 / rect.width(), dh as f32 / rect.height());
+    assert!(
+        (kx - ky).abs() / kx < 0.01,
+        "render {dw}x{dh} is not the play rect's aspect ({rect:?})"
+    );
+    assert!(
+        dw > 256 && kx >= 0.99,
+        "the render is display resolution, not the console frame ({dw}x{dh} for {rect:?})"
     );
 
     // Turning it back off: acceptance criterion 1's "disabling returns to

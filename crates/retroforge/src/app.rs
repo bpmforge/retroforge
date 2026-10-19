@@ -85,6 +85,9 @@ const THUMB_GAMEPLAY_FRAMES: u64 = 600;
 /// picture on quit.
 const THUMB_MIN_FRAMES: u64 = 60;
 
+/// Ticket W34-05: the longest side, in pixels, the Diorama is rendered at.
+const DIORAMA_MAX_SIDE: f32 = 2048.0;
+
 /// Ticket W20-11: seconds without pointer movement before the bars hide
 /// in play, how long a honesty-badge change keeps them up, and how close
 /// to the top/bottom edge the pointer brings them back.
@@ -1429,6 +1432,9 @@ pub struct RetroForgeApp {
     /// synchronously there (see that method's own doc for why sync is the
     /// right call at the ~2 ms this pass measures).
     diorama_budget: rf_renderer::fog::BudgetGate,
+    /// Ticket W34-05 (D1): the Diorama camera's target, gliding to where the
+    /// player is (or the middle of the game's window) instead of jumping.
+    diorama_smoother: rf_renderer::diorama::CameraSmoother,
     /// Ticket W16-14: whether this session has ever seen a live
     /// `CoreEvent::Mode7` (BG mode 7 actually running) — the fact
     /// `enhance_ui::feature_rows`'s "mode7_ground" row is gated on
@@ -2001,6 +2007,7 @@ impl RetroForgeApp {
             diorama_wanted: false,
             diorama_ground_rgba: None,
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
+            diorama_smoother: rf_renderer::diorama::CameraSmoother::default(),
             mode7_seen: false,
             mode7_ground_wanted: false,
             live_heights: None,
@@ -5460,6 +5467,15 @@ impl RetroForgeApp {
             u32::try_from(msg.height).unwrap_or(0),
         );
 
+        let rows = Self::diorama_rows(msg, height);
+        let (out_width, out_height) = self.diorama_out_size(width, rows);
+        let view = self.diorama_view();
+        let player_on_screen = msg
+            .heights
+            .as_ref()
+            .and_then(|h| h.player)
+            .filter(|p| p.visible)
+            .map(|p| (p.centre.0 as f32, p.centre.1 as f32));
         let start = std::time::Instant::now();
         // An upright picture has no floor to hide the transparent parts of a
         // decoded level image, so they take the screen's own backdrop colour.
@@ -5490,14 +5506,16 @@ impl RetroForgeApp {
             width,
             height,
             msg.sprite_height_px,
-            width,
-            height,
-            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
+            out_width,
+            out_height,
+            view,
             msg.heights
                 .as_ref()
                 .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
                     h.orientation.orientation
                 }),
+            player_on_screen,
+            &mut self.diorama_smoother,
         );
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -5578,6 +5596,7 @@ impl RetroForgeApp {
         let (Some(lattice), true) = (lattice, usable) else {
             self.diorama_render = None;
             self.diorama_texture = None;
+            self.diorama_smoother.reset();
             return;
         };
         let Some(gpu) = &self.gpu else {
@@ -5600,19 +5619,32 @@ impl RetroForgeApp {
             }
             _ => &msg.sprites,
         };
-        let view = enhanced_view::DioramaView::from_settings(&self.current_game_settings);
+        let view = self.diorama_view();
+        // The rows the flat view shows (an SNES frame without overscan draws
+        // 224 of 240): the window the camera fits and the shape of the image.
+        let rows = Self::diorama_rows(msg, height);
+        let out = self.diorama_out_size(width, rows);
+        // D1: look at the player (else the middle of the screen) and glide
+        // there. A jump of more than a third of the screen is a room change.
+        let player = msg
+            .heights
+            .as_ref()
+            .and_then(|h| h.player)
+            .filter(|p| p.visible)
+            .map(|p| (p.centre.0 as f32, p.centre.1 as f32));
+        let screen_centre = (width as f32 / 2.0, rows as f32 / 2.0);
+        let centre = if view.follow {
+            self.diorama_smoother
+                .step(player, screen_centre, width as f32 / 3.0)
+        } else {
+            self.diorama_smoother.reset();
+            screen_centre
+        };
         let start = std::time::Instant::now();
         let result = match plan {
             dl::Plan::Side => {
                 let ground = dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
                 let billboards = dl::side_billboards(sprites, (width, height));
-                let player = msg
-                    .heights
-                    .as_ref()
-                    .and_then(|h| h.player)
-                    .filter(|p| p.visible)
-                    .map(|p| (p.centre.0 as f32, p.centre.1 as f32));
-                let screen_centre = (width as f32 / 2.0, height as f32 / 2.0);
                 dl::render_side(
                     gpu,
                     pass,
@@ -5627,13 +5659,9 @@ impl RetroForgeApp {
                             msg.heights.as_ref().and_then(|h| h.backdrop_ratio),
                             lattice.tile_px as f32,
                         ),
-                        window: (width as f32, height as f32),
-                        centre: if view.follow {
-                            player.unwrap_or(screen_centre)
-                        } else {
-                            screen_centre
-                        },
-                        out: (width, height),
+                        window: (width as f32, rows as f32),
+                        centre,
+                        out,
                         view,
                     },
                 )
@@ -5647,7 +5675,9 @@ impl RetroForgeApp {
                     screen: (width, height),
                     sprites,
                     sprite_rgba: &msg.sprite_rgba,
-                    out: (width, height),
+                    rows,
+                    centre,
+                    out,
                     view,
                 },
             ),
@@ -5668,6 +5698,56 @@ impl RetroForgeApp {
         Some(n.readout())
     }
 
+    /// Ticket W34-05: the rows of the frame the flat view shows (an SNES
+    /// frame without overscan draws 224 of the host's 240).
+    fn diorama_rows(msg: &core_thread::FrameMsg, height: u32) -> u32 {
+        u32::try_from(crate::play_view::visible_rows(
+            msg.height,
+            msg.last_scanline,
+        ))
+        .unwrap_or(height)
+    }
+
+    /// Ticket W34-05 (D2): the Diorama view for this frame -- the game's own
+    /// camera settings with the display's pixel shape, so the 3D picture has
+    /// the flat picture's proportions and toggling does not make it jump.
+    fn diorama_view(&self) -> enhanced_view::DioramaView {
+        enhanced_view::DioramaView::from_settings(&self.current_game_settings).with_pixel_aspect(
+            crate::play_view::pixel_aspect_ratio(self.video.pixel_aspect),
+        )
+    }
+
+    /// Ticket W34-05 (D5): how many pixels the Diorama is rendered with --
+    /// the rect the flat view would fill, in physical pixels, so the 3D
+    /// image is sharp rather than a 256-wide picture scaled up. Never below
+    /// the console frame, never above [`DIORAMA_MAX_SIDE`] on its long edge.
+    /// Before the first layout (no play area known yet, and headless tests)
+    /// it is the console frame's own size.
+    fn diorama_out_size(&self, frame_w: u32, frame_h: u32) -> (u32, u32) {
+        let Some(area) = self
+            .central_rect
+            .filter(|r| r.width() > 1.0 && r.height() > 1.0)
+        else {
+            return (frame_w, frame_h);
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let grid = crate::play_view::DisplayGrid::for_frame(frame_w as f32, frame_h as f32);
+        let par = crate::play_view::pixel_aspect_ratio(self.video.pixel_aspect);
+        let rect = crate::play_view::play_rect(area, grid, par, self.video.scale_mode);
+        let ppp = self.ctx.pixels_per_point();
+        let (mut w, mut h) = (rect.width() * ppp, rect.height() * ppp);
+        let long = w.max(h);
+        if long > DIORAMA_MAX_SIDE {
+            let k = DIORAMA_MAX_SIDE / long;
+            (w, h) = (w * k, h * k);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (
+            (w.round() as u32).max(frame_w),
+            (h.round() as u32).max(frame_h),
+        )
+    }
+
     /// Upload a finished diorama frame as [`Self::diorama_texture`], or fall
     /// back to the flat view silently (`enhanced_view::select_active_view`'s
     /// own doc) when it failed.
@@ -5679,12 +5759,12 @@ impl RetroForgeApp {
                     &render.rgba,
                 );
                 match &mut self.diorama_texture {
-                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                     None => {
                         self.diorama_texture = Some(self.ctx.load_texture(
                             "diorama-frame",
                             image,
-                            egui::TextureOptions::NEAREST,
+                            egui::TextureOptions::LINEAR,
                         ));
                     }
                 }
@@ -5778,6 +5858,8 @@ impl RetroForgeApp {
             u32::try_from(msg.width).unwrap_or(0),
             u32::try_from(msg.height).unwrap_or(0),
         );
+        let rows = Self::diorama_rows(msg, height);
+        let out = self.diorama_out_size(width, rows);
 
         let start = std::time::Instant::now();
         let result = enhanced_view::compose_mode7_ground(
@@ -5800,9 +5882,9 @@ impl RetroForgeApp {
             &msg.sprite_rgba,
             width,
             height,
-            width,
-            height,
-            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
+            out.0,
+            out.1,
+            self.diorama_view(),
         );
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -13764,6 +13846,14 @@ impl RetroForgeApp {
         Some(hash)
     }
 
+    /// Ticket W34-05: the pixel size of the current Diorama render, or
+    /// `None` when there is none.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_size_for_test(&self) -> Option<(u32, u32)> {
+        self.diorama_render.as_ref().map(|r| (r.width, r.height))
+    }
+
     /// Ticket W34-00: the rolling p95, in milliseconds, of the time the app
     /// spent building and rendering the Diorama (mesh, upload, draw,
     /// readback) -- the number the budget gate watches.
@@ -17054,12 +17144,17 @@ impl RetroForgeApp {
                 // events into the 3D scene at all.
                 enhanced_view::ActiveView::Diorama { .. } => {
                     if let Some(texture) = &self.diorama_texture {
-                        // A rendered 3D image: its pixels are already
-                        // display pixels, so no TV stretch.
+                        // Ticket W34-05 (D2): the rect is the flat view's own
+                        // (same grid, same TV stretch, same scale mode), and
+                        // the render was made at this rect's size, so toggling
+                        // Diorama neither jumps nor letterboxes.
                         let [tw, th] = texture.size();
+                        let (fw, fh) = self.core_frame_size.unwrap_or((tw, th));
                         #[allow(clippy::cast_precision_loss)]
-                        let grid = crate::play_view::DisplayGrid::exact(tw as f32, th as f32);
-                        crate::play_view::show_frame(ui, texture, grid, 1.0, scale_mode, glow);
+                        let grid = crate::play_view::DisplayGrid::for_frame(fw as f32, fh as f32);
+                        let response =
+                            crate::play_view::show_frame(ui, texture, grid, par, scale_mode, glow);
+                        self.last_play_rect = Some(response.rect);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("Diorama view: preparing texture\u{2026}");

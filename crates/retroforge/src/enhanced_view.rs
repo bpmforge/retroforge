@@ -756,6 +756,11 @@ fn sprite_billboard(
 pub struct DioramaView {
     pub camera: rf_renderer::diorama::DioramaCamera,
     pub follow: bool,
+    /// The display's pixel aspect (8:7 for the TV stretch, 1.0 for square
+    /// pixels): the picture is framed as if pixels were square and drawn
+    /// into the stretched frame, so the 3D view has the flat view's shape
+    /// (W34-05, D2).
+    pub pixel_aspect: f32,
 }
 
 impl DioramaView {
@@ -765,7 +770,28 @@ impl DioramaView {
         Self {
             camera: s.diorama_camera(),
             follow: s.diorama_follow,
+            pixel_aspect: 1.0,
         }
+    }
+
+    /// The same view for a display whose pixels are `pixel_aspect` wide.
+    #[must_use]
+    pub fn with_pixel_aspect(self, pixel_aspect: f32) -> Self {
+        Self {
+            pixel_aspect: if pixel_aspect.is_finite() && pixel_aspect > 0.0 {
+                pixel_aspect
+            } else {
+                1.0
+            },
+            ..self
+        }
+    }
+
+    /// The aspect the projection is built with for a frame of `out` pixels:
+    /// the frame's own aspect with the display's pixel shape taken out.
+    #[must_use]
+    pub fn projection_aspect(&self, out: (u32, u32)) -> f32 {
+        out.0.max(1) as f32 / out.1.max(1) as f32 / self.pixel_aspect
     }
 
     /// The camera for this frame: when following, centred on `live_centre`
@@ -835,6 +861,8 @@ pub fn compose_diorama(
     out_height: u32,
     view: DioramaView,
     orientation: rf_enhance::heights::Orientation,
+    player_on_screen: Option<(f32, f32)>,
+    smoother: &mut rf_renderer::diorama::CameraSmoother,
 ) -> Result<DioramaRender, String> {
     let geometry_layer = session
         .diorama_geometry()
@@ -854,7 +882,19 @@ pub fn compose_diorama(
     let camera = rf_enhance::level_view::live_camera(&session.profile, read);
     let sprites = rf_enhance::level_view::sprites_in_world(&session.profile, entity_table, camera);
     let viewport = rf_enhance::level_view::ORIGINAL_VIEWPORT;
-    let camera_view = view.camera_at(follow_point(camera.x, camera.y, viewport));
+    // D1: the camera looks at the player when the learner knows where it
+    // is (screen position plus the game camera), else at the middle of the
+    // game's window, and glides there.
+    let live_centre = follow_point(camera.x, camera.y, viewport);
+    let player_world =
+        player_on_screen.map(|(px, py)| (camera.x as f32 + px, camera.y as f32 + py));
+    let smoothed = if view.follow {
+        smoother.step(player_world, live_centre, f32::from(viewport.0))
+    } else {
+        smoother.reset();
+        live_centre
+    };
+    let camera_view = view.camera_at(smoothed);
     let billboards: Vec<rf_renderer::diorama_mesh::Billboard> = sprites
         .iter()
         .map(|s| sprite_billboard(s.x, s.y, camera.x, camera.y, viewport, sprite_height_px))
@@ -882,7 +922,7 @@ pub fn compose_diorama(
                 uv: b.uv,
             })
             .collect();
-        let (cx, cy) = follow_point(camera.x, camera.y, viewport);
+        let (cx, cy) = smoothed;
         return crate::diorama_learned::render_side(
             gpu,
             pass,
@@ -914,6 +954,32 @@ pub fn compose_diorama(
         depth: &depth,
         billboards: &billboards,
     };
+    // Following: the camera fits the game's window on the floor (D1).
+    // Not following: the whole level, the overview the setting asks for.
+    if view.follow {
+        let window = (f32::from(viewport.0), f32::from(viewport.1));
+        let target = crate::diorama_learned::clamp_window_centre(
+            smoothed,
+            window,
+            camera_view.clamped().zoom,
+            (ground_w as f32, ground_h as f32),
+        );
+        return crate::diorama_learned::render_ground_window(
+            gpu,
+            pass,
+            &crate::diorama_learned::GroundWindow {
+                scene: &scene,
+                ground_rgba,
+                ground: (ground_w, ground_h),
+                sprite_rgba,
+                sprite_size: (sprite_w, sprite_h),
+                window,
+                target,
+                out: (out_width, out_height),
+                view,
+            },
+        );
+    }
     let vertices =
         rf_renderer::diorama::vertices_for_camera(&scene, out_width, out_height, &camera_view);
 
@@ -1241,6 +1307,22 @@ mod tests {
             false,
         );
         assert!(matches!(view, ActiveView::Ultrawide { .. }));
+    }
+
+    // --- ticket W34-05: the pixel aspect in the projection ----------------
+
+    /// D2: a 4x 256x224 picture at 8:7 pixels is framed as 256:224, so the
+    /// stretched frame shows the flat picture's shape.
+    #[test]
+    fn the_projection_aspect_takes_the_tv_stretch_out_of_the_frame() {
+        let view = DioramaView::from_settings(&crate::game_settings::GameSettings::default())
+            .with_pixel_aspect(8.0 / 7.0);
+        let frame = (1170, 896);
+        let a = view.projection_aspect(frame);
+        assert!((a - 256.0 / 224.0).abs() < 0.01, "{a}");
+        let square = view.with_pixel_aspect(1.0);
+        assert!((square.projection_aspect(frame) - 1170.0 / 896.0).abs() < 1e-4);
+        assert_eq!(view.with_pixel_aspect(f32::NAN).pixel_aspect, 1.0);
     }
 
     // --- ticket W30-05: DioramaView ---------------------------------------
