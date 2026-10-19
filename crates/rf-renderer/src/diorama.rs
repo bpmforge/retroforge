@@ -44,6 +44,7 @@ use std::sync::Mutex;
 
 use crate::diorama_mesh::Vertex;
 use crate::gpu::{align_up, GpuContext};
+use crate::lighting::{self, Aabb, LightUbo, Lighting, ShadowFit, ShadowGate};
 
 const DIORAMA_SHADER_SRC: &str = include_str!("shaders/diorama.wgsl");
 
@@ -1122,6 +1123,39 @@ pub mod camera_matrices {
     }
 }
 
+/// The box around everything the mesh draws (the contact ellipses sit a hair
+/// above the floor and add nothing), or `None` for an empty mesh.
+fn scene_bounds(vertices: &[Vertex]) -> Option<Aabb> {
+    Aabb::around(
+        vertices
+            .iter()
+            .filter(|v| v.kind != crate::diorama_mesh::kind::SHADOW)
+            .map(|v| v.pos),
+    )
+}
+
+/// The vertex ranges that cast into the shadow map: everything except the
+/// contact ellipses and a triangle lying flat on the floor, which has
+/// nothing to cast onto but itself.
+fn caster_runs(vertices: &[Vertex]) -> Vec<std::ops::Range<u32>> {
+    use crate::diorama_mesh::kind;
+    let casts = |tri: &[Vertex]| {
+        tri[0].kind != kind::SHADOW
+            && !(tri[0].kind == kind::GROUND && tri.iter().all(|v| v.pos[1] < 0.01))
+    };
+    let mut runs: Vec<std::ops::Range<u32>> = Vec::new();
+    for (i, tri) in vertices.chunks_exact(3).enumerate() {
+        if casts(tri) {
+            let (from, to) = (i as u32 * 3, i as u32 * 3 + 3);
+            match runs.last_mut() {
+                Some(last) if last.end == from => last.end = to,
+                _ => runs.push(from..to),
+            }
+        }
+    }
+    runs
+}
+
 fn camera_ubo_bytes(view_proj: camera_matrices::Mat4) -> [u8; 64] {
     let mut bytes = [0u8; 64];
     for (i, f) in view_proj.iter().enumerate() {
@@ -1202,8 +1236,17 @@ struct Target {
     resolved: wgpu::Texture,
     resolved_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
-    readback: wgpu::Buffer,
+    /// Two readback buffers: the synchronous path uses the first; the
+    /// double-buffered path alternates (one frame in flight).
+    readbacks: [wgpu::Buffer; 2],
     padded_bytes_per_row: u32,
+}
+
+/// A readback that has been submitted and mapped but not yet collected
+/// (the double-buffered path, [`DioramaPass::set_async_readback`]).
+struct PendingReadback {
+    slot: usize,
+    done: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
 }
 
 /// Everything the pass keeps between frames (W34-05, D5/D6): textures,
@@ -1220,6 +1263,22 @@ struct Cache {
     uploaded: Vec<u8>,
     scratch: Vec<u8>,
     target: Option<Target>,
+    /// The sun's shadow map (W34-06); one texel while no map is wanted.
+    shadow: Option<ShadowMap>,
+    /// The caster pass's bind group (sprite texture, sampler, light).
+    caster_bind_group: Option<wgpu::BindGroup>,
+    pending: Option<PendingReadback>,
+    /// The first double-buffered frame, kept to answer the second call (which
+    /// has no earlier frame in flight either).
+    primed: Option<Vec<u8>>,
+    /// Which readback buffer the next async frame copies into.
+    cursor: usize,
+}
+
+/// The depth texture the caster pass fills and the main pass samples.
+struct ShadowMap {
+    view: wgpu::TextureView,
+    size: u32,
 }
 
 /// How many times the pass created or recreated a GPU resource, by kind
@@ -1247,6 +1306,17 @@ pub struct DioramaPass {
     samples: u32,
     cache: Mutex<Cache>,
     counts: Mutex<ResourceCounts>,
+    /// Depth-only pass into the shadow map (W34-06).
+    caster_layout: wgpu::BindGroupLayout,
+    caster_pipeline: wgpu::RenderPipeline,
+    shadow_sampler: wgpu::Sampler,
+    light_buffer: wgpu::Buffer,
+    /// The sun, or `None` for the original unlit look (set by the shell).
+    lighting: Mutex<Option<Lighting>>,
+    shadow_gate: Mutex<ShadowGate>,
+    /// Whether the last render drew with a shadow map.
+    shadow_map_used: std::sync::atomic::AtomicBool,
+    async_readback: std::sync::atomic::AtomicBool,
 }
 
 impl DioramaPass {
@@ -1310,8 +1380,69 @@ impl DioramaPass {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Depth,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 6,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
+        // The caster pass cannot share that layout: it writes the very map
+        // the main layout samples, and one resource cannot be both in a pass.
+        let caster_layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("rf-renderer::diorama::caster_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         let pipeline_layout = gpu
             .device
@@ -1411,6 +1542,66 @@ impl DioramaPass {
             },
         );
 
+        let caster_pipeline_layout =
+            gpu.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("rf-renderer::diorama::caster_pipeline_layout"),
+                    bind_group_layouts: &[Some(&caster_layout)],
+                    immediate_size: 0,
+                });
+        let caster_pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("rf-renderer::diorama::caster_pipeline"),
+                layout: Some(&caster_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: vertex_stride,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attributes,
+                    }],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                // A fragment stage with no target: it exists to alpha-test a
+                // billboard's silhouette.
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_shadow"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let shadow_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("rf-renderer::diorama::shadow_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let light_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rf-renderer::diorama::light"),
+            size: lighting::LIGHT_UBO_BYTES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue
+            .write_buffer(&light_buffer, 0, &LightUbo::off().to_bytes());
+
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("rf-renderer::diorama::sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1435,7 +1626,82 @@ impl DioramaPass {
             samples,
             cache: Mutex::new(Cache::default()),
             counts: Mutex::new(ResourceCounts::default()),
+            caster_layout,
+            caster_pipeline,
+            shadow_sampler,
+            light_buffer,
+            lighting: Mutex::new(None),
+            shadow_gate: Mutex::new(ShadowGate::default()),
+            shadow_map_used: std::sync::atomic::AtomicBool::new(false),
+            async_readback: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Light the next frames (W34-06). `None` is the original look, the one
+    /// every pinned golden renders; the shell sets a sun from the lens's time
+    /// of day before it asks for a frame.
+    pub fn set_lighting(&self, lighting: Option<Lighting>) {
+        *self.lighting.lock().unwrap_or_else(|e| e.into_inner()) = lighting;
+    }
+
+    /// Double-buffer the readback (W34-06): each call submits its frame and
+    /// returns the previous call's pixels, so the wait for the GPU overlaps
+    /// the caller's other work instead of blocking it. Costs one frame of
+    /// latency; the first call after a resize (or after switching this on)
+    /// has no earlier frame and waits for its own. Off by default, so goldens
+    /// and one-shot callers get the frame they asked for.
+    pub fn set_async_readback(&self, on: bool) {
+        self.async_readback
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the readback is double-buffered.
+    #[must_use]
+    pub fn async_readback(&self) -> bool {
+        self.async_readback
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The light in force.
+    #[must_use]
+    pub fn lighting(&self) -> Option<Lighting> {
+        *self.lighting.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the last frame was drawn with a shadow map (false: no sun, the
+    /// map switched off, the budget fallback, or nothing to shade).
+    #[must_use]
+    pub fn shadow_map_used(&self) -> bool {
+        self.shadow_map_used
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Feed the shadow budget gate one render time (ms); `true` on the call
+    /// that trips it. The pass feeds it itself after every frame that used the
+    /// map; this is for a shell that measures more than the pass does and for
+    /// tests.
+    pub fn record_shadow_sample_ms(&self, ms: f64) -> bool {
+        self.shadow_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_ms(ms)
+    }
+
+    /// Whether the budget gate still allows the shadow map.
+    #[must_use]
+    pub fn shadow_budget_allows_map(&self) -> bool {
+        self.shadow_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .allows_map()
+    }
+
+    /// Clear the shadow budget gate (the map comes back).
+    pub fn reset_shadow_budget(&self) {
+        self.shadow_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset();
     }
 
     /// The multisample count in use (4, or 1 where the device has no 4x).
@@ -1583,8 +1849,26 @@ impl DioramaPass {
             (sprite_w as usize) * (sprite_h as usize) * 4,
             "DioramaPass::render: sprite buffer size mismatch"
         );
+        let started = std::time::Instant::now();
         let max_dim = gpu.adapter_limits.max_texture_dimension_2d.max(1);
         let (out_w, out_h) = (out_width.clamp(1, max_dim), out_height.clamp(1, max_dim));
+
+        // The sun, and the shadow map fitted over what this camera sees of
+        // this mesh (W34-06). No map when there is no sun, the sun asks for
+        // none, the budget gate dropped it, or there is nothing to fit.
+        let lighting = self.lighting();
+        let fit: Option<ShadowFit> = match lighting {
+            Some(l) if l.shadow_map && self.shadow_budget_allows_map() => scene_bounds(vertices)
+                .and_then(|b| {
+                    lighting::fit_shadow_map(
+                        &vp,
+                        &b,
+                        &l.sun,
+                        lighting::map_size_for(out_w).min(max_dim),
+                    )
+                }),
+            _ => None,
+        };
 
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         let cache = &mut *guard;
@@ -1658,10 +1942,57 @@ impl DioramaPass {
                 }
             }
         }
+        // The shadow map: one texel while unused, `map_size` squared when a
+        // sun casts into it. Recreated only when that size changes.
+        let want_size = fit.as_ref().map_or(1, |f| f.map_size);
+        if cache.shadow.as_ref().is_none_or(|m| m.size != want_size) {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("rf-renderer::diorama::shadow_map"),
+                size: wgpu::Extent3d {
+                    width: want_size,
+                    height: want_size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            cache.shadow = Some(ShadowMap {
+                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                size: want_size,
+            });
+            made.textures += 1;
+            rebind = true;
+        }
         if rebind || cache.bind_group.is_none() {
-            let (Some(ground), Some(sprite)) = (&cache.ground, &cache.sprite) else {
+            let (Some(ground), Some(sprite), Some(shadow)) =
+                (&cache.ground, &cache.sprite, &cache.shadow)
+            else {
                 return Err("diorama textures missing".to_string());
             };
+            cache.caster_bind_group =
+                Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rf-renderer::diorama::caster_bind_group"),
+                    layout: &self.caster_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&sprite.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.light_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
             cache.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rf-renderer::diorama::bind_group"),
                 layout: &self.bind_group_layout,
@@ -1682,12 +2013,30 @@ impl DioramaPass {
                         binding: 3,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&shadow.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.light_buffer.as_entire_binding(),
+                    },
                 ],
             }));
             made.bind_groups += 1;
         }
         gpu.queue
             .write_buffer(&self.camera_buffer, 0, &camera_ubo_bytes(vp));
+        let light_ubo = match &lighting {
+            Some(l) => LightUbo::lit(&l.sun, fit.as_ref()),
+            None => LightUbo::off(),
+        };
+        gpu.queue
+            .write_buffer(&self.light_buffer, 0, &light_ubo.to_bytes());
 
         // Vertices: one buffer that only grows; a mesh identical to the last
         // one (a still scene) is not uploaded again.
@@ -1729,11 +2078,42 @@ impl DioramaPass {
             .is_none_or(|t| t.size != (out_w, out_h))
         {
             cache.target = Some(self.make_target(gpu, out_w, out_h));
+            cache.pending = None;
+            cache.primed = None;
+            cache.cursor = 0;
             made.textures += 3;
             made.buffers += 1;
         }
-        let (Some(target), Some(bind_group), Some((vertex_buffer, _))) =
-            (&cache.target, &cache.bind_group, &cache.vertex_buffer)
+        let async_mode = self.async_readback();
+        if !async_mode {
+            cache.primed = None;
+            // Switched back to synchronous with a frame in flight: collect
+            // and drop it so its buffer is not left mapped.
+            if let (Some(p), Some(t)) = (cache.pending.take(), &cache.target) {
+                let _ = finish_pending(
+                    &gpu.device,
+                    &t.readbacks[p.slot],
+                    p,
+                    out_w,
+                    out_h,
+                    t.padded_bytes_per_row,
+                );
+            }
+        }
+        let slot = if async_mode { cache.cursor } else { 0 };
+        let (
+            Some(target),
+            Some(bind_group),
+            Some((vertex_buffer, _)),
+            Some(caster_bind_group),
+            Some(shadow),
+        ) = (
+            &cache.target,
+            &cache.bind_group,
+            &cache.vertex_buffer,
+            &cache.caster_bind_group,
+            &cache.shadow,
+        )
         else {
             return Err("diorama resources missing".to_string());
         };
@@ -1743,6 +2123,32 @@ impl DioramaPass {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("rf-renderer::diorama::encoder"),
             });
+        // Pass 1 (W34-06): the sun's depth map. Boxes and wedges cast solid,
+        // billboards by their alpha; the contact ellipses and the flat floor
+        // (which only receives) are left out.
+        if fit.is_some() {
+            let mut sp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rf-renderer::diorama::shadow_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &shadow.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            sp.set_pipeline(&self.caster_pipeline);
+            sp.set_bind_group(0, caster_bind_group, &[]);
+            sp.set_vertex_buffer(0, vertex_buffer.slice(..));
+            for run in caster_runs(vertices) {
+                sp.draw(run, 0..1);
+            }
+        }
         {
             let (view, resolve_target, store) = match &target.msaa_view {
                 Some(mv) => (mv, Some(&target.resolved_view), wgpu::StoreOp::Discard),
@@ -1811,7 +2217,7 @@ impl DioramaPass {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &target.readback,
+                buffer: &target.readbacks[slot],
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(target.padded_bytes_per_row),
@@ -1825,13 +2231,57 @@ impl DioramaPass {
             },
         );
         gpu.queue.submit(std::iter::once(encoder.finish()));
-        let rgba = read_straight_alpha(
-            &gpu.device,
-            &target.readback,
-            out_w,
-            out_h,
-            target.padded_bytes_per_row,
-        )?;
+        let rgba = if async_mode {
+            let (tx, done) = std::sync::mpsc::channel();
+            target.readbacks[slot]
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+            let this_frame = PendingReadback { slot, done };
+            cache.cursor ^= 1;
+            // Collect the previous frame. With none in flight this is the
+            // first: answer with its own pixels (and keep a copy for the next
+            // call, so the lag is one frame from here on).
+            let finish = |p: PendingReadback| {
+                finish_pending(
+                    &gpu.device,
+                    &target.readbacks[p.slot],
+                    p,
+                    out_w,
+                    out_h,
+                    target.padded_bytes_per_row,
+                )
+            };
+            match cache.pending.replace(this_frame) {
+                Some(prev) => finish(prev)?,
+                None => match cache.primed.take() {
+                    Some(first) => first,
+                    None => {
+                        let own = cache
+                            .pending
+                            .take()
+                            .ok_or_else(|| "pending readback vanished".to_string())?;
+                        let first = finish(own)?;
+                        cache.primed = Some(first.clone());
+                        first
+                    }
+                },
+            }
+        } else {
+            read_straight_alpha(
+                &gpu.device,
+                &target.readbacks[0],
+                out_w,
+                out_h,
+                target.padded_bytes_per_row,
+            )?
+        };
+        self.shadow_map_used
+            .store(fit.is_some(), std::sync::atomic::Ordering::Relaxed);
+        if fit.is_some() {
+            self.record_shadow_sample_ms(started.elapsed().as_secs_f64() * 1000.0);
+        }
         {
             let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
             counts.textures += made.textures;
@@ -1884,19 +2334,22 @@ impl DioramaPass {
         )
         .create_view(&wgpu::TextureViewDescriptor::default());
         let padded_bytes_per_row = align_up(w * 4, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rf-renderer::diorama::readback"),
-            size: u64::from(padded_bytes_per_row) * u64::from(h),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let make_readback = || {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rf-renderer::diorama::readback"),
+                size: u64::from(padded_bytes_per_row) * u64::from(h),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        };
+        let readbacks = [make_readback(), make_readback()];
         Target {
             size: (w, h),
             msaa_view,
             resolved,
             resolved_view,
             depth_view,
-            readback,
+            readbacks,
             padded_bytes_per_row,
         }
     }
@@ -1918,17 +2371,57 @@ fn read_straight_alpha(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(crate::gpu::GPU_WAIT),
-        })
-        .map_err(|e| format!("device.poll timed out waiting for buffer readback: {e}"))?;
-    match rx.try_recv() {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(format!("buffer map_async failed: {e}")),
-        Err(_) => return Err("buffer map_async callback never fired".to_string()),
+    wait_for_map(device, &rx)?;
+    Ok(unpack_mapped(readback, w, h, padded_bytes_per_row))
+}
+
+/// Block until a `map_async` callback has fired, by polling the device
+/// without sleeping. `PollType::Wait` returns on the backend's own timer
+/// (measured on Metal at multiples of ~1.5 ms even when the GPU had finished
+/// long before), which was most of the readback cost; polling sees the
+/// completion as soon as the GPU has it.
+fn wait_for_map(
+    device: &wgpu::Device,
+    done: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + crate::gpu::GPU_WAIT;
+    loop {
+        device
+            .poll(wgpu::PollType::Poll)
+            .map_err(|e| format!("device.poll failed waiting for buffer readback: {e}"))?;
+        match done.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => return Err(format!("buffer map_async failed: {e}")),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err("buffer map_async callback never fired".to_string())
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("device.poll timed out waiting for buffer readback".to_string());
+        }
+        std::hint::spin_loop();
     }
+}
+
+/// Wait for a frame in flight (only for its own submission, which a frame's
+/// worth of other work has normally finished long ago) and unpack it.
+fn finish_pending(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    pending: PendingReadback,
+    w: u32,
+    h: u32,
+    padded_bytes_per_row: u32,
+) -> Result<Vec<u8>, String> {
+    wait_for_map(device, &pending.done)?;
+    Ok(unpack_mapped(readback, w, h, padded_bytes_per_row))
+}
+
+/// Copy a mapped readback out without its row padding, unmap it, and turn
+/// the premultiplied edge pixels back into straight alpha.
+fn unpack_mapped(readback: &wgpu::Buffer, w: u32, h: u32, padded_bytes_per_row: u32) -> Vec<u8> {
+    let slice = readback.slice(..);
     let row_bytes = w as usize * 4;
     let mut rgba = Vec::with_capacity(row_bytes * h as usize);
     {
@@ -1965,7 +2458,7 @@ fn read_straight_alpha(
             straighten(px);
         }
     }
-    Ok(rgba)
+    rgba
 }
 
 /// Probe helpers shared with `mode7_plane`'s tests (W30-05b).

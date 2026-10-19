@@ -2672,6 +2672,28 @@ fn shot_diorama_side_smb3(readme: &mut Vec<String>) {
     diorama_fps(&mut h, name, readme);
 }
 
+/// Boot A Link to the Past, register a name (Start ends the name entry) and
+/// click through the opening text until Link is in control (W34-02's script).
+fn alttp_take_control(h: &mut H) {
+    wait(h, "alttp", 600);
+    for i in 0..30 {
+        tap(
+            h,
+            if i % 2 == 0 {
+                egui::Key::Enter
+            } else {
+                egui::Key::X
+            },
+            6,
+        );
+        wait(h, "alttp", 60);
+    }
+    for _ in 0..24 {
+        tap(h, egui::Key::X, 4);
+        wait(h, "alttp", 50);
+    }
+}
+
 /// W34-05 acceptance: A Link to the Past, the top-down camera on the player.
 /// `RF_SCREENS_ONLY=diorama-top-alttp`.
 fn shot_diorama_top_alttp(readme: &mut Vec<String>) {
@@ -2690,25 +2712,7 @@ fn shot_diorama_top_alttp(readme: &mut Vec<String>) {
     if !h.state().gpu_available_for_test() {
         return skip(readme, name, "no wgpu adapter");
     }
-    // Boot, register a name (Start ends the name entry), click through the
-    // opening text until Link is in control (W34-02's script).
-    wait(&mut h, "alttp", 600);
-    for i in 0..30 {
-        tap(
-            &mut h,
-            if i % 2 == 0 {
-                egui::Key::Enter
-            } else {
-                egui::Key::X
-            },
-            6,
-        );
-        wait(&mut h, "alttp", 60);
-    }
-    for _ in 0..24 {
-        tap(&mut h, egui::Key::X, 4);
-        wait(&mut h, "alttp", 50);
-    }
+    alttp_take_control(&mut h);
     h.state_mut().set_mode_for_test(Mode::Enhanced);
     h.state_mut().set_diorama_for_test(true);
     run_n(&mut h, 30);
@@ -2730,6 +2734,122 @@ fn shot_diorama_top_alttp(readme: &mut Vec<String>) {
         readme,
     );
     diorama_fps(&mut h, name, readme);
+}
+
+/// Set the lens's time of day (percent of a day) the way its slider does, with
+/// the wall clock out of it, and let the next frames draw with it.
+fn set_time_of_day(h: &mut H, pct: u8) {
+    h.state_mut().edit_lens_for_test(|s| {
+        s.lens_follow_clock = false;
+        s.lens_time_of_day = pct;
+    });
+    run_n(h, 20);
+    step_from(h);
+    step_from(h);
+}
+
+/// W34-06 acceptance: A Link to the Past at time of day 0.3 / 0.5 / 0.8, the
+/// sun and its shadows moving. `RF_SCREENS_ONLY=diorama-light-alttp`.
+fn shot_diorama_light_alttp(readme: &mut Vec<String>) {
+    let name = "alttp";
+    if !wanted("diorama-light-alttp") {
+        return;
+    }
+    let Some(path) = rom(
+        "snes",
+        "Legend of Zelda, The - A Link to the Past (USA).zip",
+    ) else {
+        return skip(readme, name, "A Link to the Past (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    alttp_take_control(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let laps: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    let end = h.state().frame_count_for_test() + laps;
+    while h.state().frame_count_for_test() < end {
+        play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+    }
+    release_all(&mut h);
+    let d = out_dir();
+    for pct in [30u8, 50, 80] {
+        set_time_of_day(&mut h, pct);
+        let Some(shot) = grab_play_area(&mut h) else {
+            return skip(readme, name, "no play rect");
+        };
+        println!(
+            "light t={pct}: {:?} px, diorama px {:?}",
+            h.state().diorama_size_for_test(),
+            h.state().diorama_opaque_pixels_for_test()
+        );
+        save(
+            &d.join(format!("diorama-light-alttp-t{pct}.png")),
+            &shot.opaque(),
+        );
+    }
+    note(
+        readme,
+        "diorama-light-alttp|A Link to the Past, Link's house and yard, top-down; sun at time of day 0.3 / 0.5 / 0.8".to_string(),
+    );
+}
+
+/// W34-06 acceptance: Super Mario World side view with the sun's shadows.
+/// `RF_SCREENS_ONLY=diorama-light-smw`.
+fn shot_diorama_light_smw(readme: &mut Vec<String>) {
+    let name = "smw";
+    if !wanted("diorama-light-smw") {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smw_enter_yi1(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    play_for(
+        &mut h,
+        frames,
+        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+        &[(0x1490, 0xFF)],
+        enter_smw,
+    );
+    enter_smw(&mut h);
+    wait(&mut h, "smw", 150);
+    play_script(&mut h, "R40 B+R20");
+    release_all(&mut h);
+    let d = out_dir();
+    for (pct, file) in [
+        (30u8, "diorama-light-smw-on.png"),
+        (50, "diorama-light-smw-t50.png"),
+    ] {
+        set_time_of_day(&mut h, pct);
+        let Some(shot) = grab_play_area(&mut h) else {
+            return skip(readme, name, "no play rect");
+        };
+        save(&d.join(file), &shot.opaque());
+    }
+    note(
+        readme,
+        "diorama-light-smw|Super Mario World, Yoshi's Island 1; side view, sun at time of day 0.3 (on) and 0.5 (t50)".to_string(),
+    );
 }
 
 #[test]
@@ -2764,6 +2884,8 @@ fn w30_w31_screens() {
     shot_diorama_side_smw(&mut readme);
     shot_diorama_side_smb3(&mut readme);
     shot_diorama_top_alttp(&mut readme);
+    shot_diorama_light_alttp(&mut readme);
+    shot_diorama_light_smw(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

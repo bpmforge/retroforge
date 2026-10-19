@@ -54,6 +54,39 @@ pub fn lens_params(settings: &GameSettings, clock: Option<f32>, frame: u32) -> L
     }
 }
 
+/// The sun the Diorama is lit by (ticket W34-06): the same time of day, and
+/// the same weather, the lens grade uses, so the light and the grade agree.
+/// `side` mirrors it for an upright picture. `clock` is as for
+/// [`lens_params`].
+#[must_use]
+pub fn diorama_lighting(
+    settings: &GameSettings,
+    clock: Option<f32>,
+    side: bool,
+) -> rf_renderer::lighting::Lighting {
+    use rf_renderer::lighting::{LightView, Lighting, Sun};
+    let p = lens_params(settings, clock, 0);
+    let view = if side {
+        LightView::Side
+    } else {
+        LightView::TopDown
+    };
+    Lighting::new(Sun::for_time(p.time_of_day, p.weather, view))
+}
+
+/// The lens parameters for a frame, with its 2D soft shadows forced off while
+/// the 3D Diorama is the picture on screen (ticket W34-06): the shadow map
+/// casts the shadows there, and an offset blur of the flat frame's sprites
+/// would put a second, wrong one beside it. Bloom, tilt-shift, grade and
+/// weather are untouched.
+#[must_use]
+pub fn without_shadows_over_diorama(mut params: LensParams, diorama_shown: bool) -> LensParams {
+    if diorama_shown {
+        params.shadows = Effect::OFF;
+    }
+    params
+}
+
 /// The clock label for a stored time-of-day percent (`50` -> `12:00`).
 #[must_use]
 pub fn clock_label(pct: u8) -> String {
@@ -196,6 +229,50 @@ mod tests {
         s.lens_time_of_day = 75;
         assert_eq!(lens_params(&s, Some(0.1), 0).time_of_day, 0.1);
         assert_eq!(lens_params(&s, None, 0).time_of_day, 0.75);
+    }
+
+    #[test]
+    fn the_sun_follows_the_lens_time_of_day_and_mirrors_for_side_view() {
+        let mut s = GameSettings::default();
+        s.lens_time_of_day = 30;
+        let top = diorama_lighting(&s, None, false);
+        assert!(top.sun.to_sun[0] > 0.2, "morning, screen-right: {top:?}");
+        assert!(top.sun.to_sun[2] < 0.0);
+        let side = diorama_lighting(&s, None, true);
+        assert!(
+            side.sun.to_sun[2] > 0.0,
+            "side view: the sun is on the camera side"
+        );
+        s.lens_time_of_day = 80;
+        assert!(diorama_lighting(&s, None, false).sun.to_sun[0] < -0.1);
+        // Following the clock overrides the slider, as the grade does.
+        s.lens_grade = true;
+        s.lens_follow_clock = true;
+        assert_eq!(
+            diorama_lighting(&s, Some(0.5), false).sun,
+            diorama_lighting(&GameSettings::default(), None, false).sun,
+            "noon is noon"
+        );
+        s.lens_weather = Weather::Rain;
+        let rain = diorama_lighting(&s, Some(0.5), false).sun.intensity;
+        assert!((rain - 0.6).abs() < 0.01, "rain dims the sun: {rain}");
+    }
+
+    #[test]
+    fn the_lens_shadows_step_aside_for_the_3d_view_and_nothing_else_does() {
+        let mut s = GameSettings::default();
+        s.lens_shadows = true;
+        s.lens_bloom = true;
+        s.lens_grade = true;
+        s.lens_weather = Weather::Snow;
+        let flat = lens_params(&s, None, 0);
+        assert_eq!(without_shadows_over_diorama(flat, false), flat);
+        let over = without_shadows_over_diorama(flat, true);
+        assert!(over.shadows.level() == 0.0);
+        assert_eq!(
+            (over.bloom, over.grade, over.weather, over.time_of_day),
+            (flat.bloom, flat.grade, flat.weather, flat.time_of_day)
+        );
     }
 
     #[test]
