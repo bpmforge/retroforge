@@ -1462,6 +1462,9 @@ pub struct RetroForgeApp {
     /// Ticket W34-04: what the height learner reported on the latest frame,
     /// for the readout and the tests. `None` until a frame carries one.
     heights_note: Option<HeightsNote>,
+    /// Ticket W34-07: the latest whole-level heights the core thread sent
+    /// (the canvas of the scene being played), kept until the next ones.
+    level_heights: Option<std::sync::Arc<crate::level_heights::LevelHeights>>,
     /// Ticket W30-06 part B: the open height painter, if any.
     height_painter: Option<crate::profile_builder::PainterSession>,
     /// Ticket W30-06 part B: what the HD-2D preset replaced, so turning it
@@ -2015,6 +2018,7 @@ impl RetroForgeApp {
             mode7_ground_wanted: false,
             live_heights: None,
             heights_note: None,
+            level_heights: None,
             orientation_hint: None,
             height_painter: None,
             hd2d_remembered: None,
@@ -4191,6 +4195,7 @@ impl RetroForgeApp {
                 self.diorama_render = None;
                 self.diorama_texture = None;
                 self.diorama_ground_rgba = None;
+                self.level_heights = None;
                 self.diorama_wanted = false;
                 // Ticket W16-14: same reset, for Mode 7 -- a new ROM has
                 // shown nothing yet, so the "mode7_ground" row must not
@@ -5450,6 +5455,7 @@ impl RetroForgeApp {
             source: HeightsSource::Decoded,
             plan: crate::diorama_learned::plan_for(h.orientation.orientation, true),
             raised: 0,
+            level: None,
         });
         let Some(probe) = &msg.level_probe else {
             return;
@@ -5593,13 +5599,47 @@ impl RetroForgeApp {
                 h.grids.get(fg)?,
             ))
         };
-        let lattice = painted.or_else(learned);
+        // Ticket W34-07: the latest whole-level heights; used for the wide
+        // picture while they belong to the scene on screen.
+        if let Some(l) = msg.heights.as_ref().and_then(|h| h.level.clone()) {
+            self.level_heights = Some(l);
+        }
+        let level = self
+            .level_heights
+            .clone()
+            .filter(|_| self.widescreen_on && !is_painted)
+            .filter(|l| {
+                msg.layer_frames
+                    .as_ref()
+                    .is_some_and(|f| f.scene == l.scene)
+            });
         let orientation = msg
             .heights
             .as_ref()
             .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
                 h.orientation.orientation
             });
+        // The wide picture: the margin-filled ground, and the level's heights
+        // laid on it. Only a side view stands up from the canvas for now.
+        let wide = level
+            .filter(|_| orientation == rf_enhance::heights::Orientation::SideView)
+            .and_then(|l| {
+                let frames = msg.layer_frames.as_ref()?;
+                let origin = frames.origin_at(usize::from(l.layer), 0)?;
+                let g = self.wide_ground(msg, width, Self::diorama_rows(msg, height))?;
+                Some((l, origin, g))
+            });
+        let lattice = match &wide {
+            Some((l, origin, g)) => {
+                let pad = (i64::from(g.1 .0) - 256).div_euclid(2);
+                Some(dl::Lattice::from_level(
+                    &l.canvas,
+                    (origin.0 - pad, origin.1),
+                    g.1,
+                ))
+            }
+            None => painted.or_else(learned),
+        };
         let plan = dl::plan_for(orientation, is_painted);
         self.heights_note = msg.heights.as_deref().map(|h| HeightsNote {
             orientation: h.orientation,
@@ -5612,10 +5652,15 @@ impl RetroForgeApp {
             },
             plan,
             raised: lattice.as_ref().map_or(0, dl::Lattice::raised),
+            level: self.level_heights.as_ref().map(|l| LevelNote {
+                solid: l.report.solid,
+                solid_scout: l.report.solid_scout,
+                restored: l.restored,
+            }),
         });
         let usable = lattice.is_some()
             && plan != dl::Plan::Flat
-            && width == 256
+            && (width == 256 || wide.is_some())
             && !msg.sprite_rgba.is_empty()
             && self.diorama_budget.is_enabled()
             && self.gpu.is_some();
@@ -5655,7 +5700,16 @@ impl RetroForgeApp {
         // The rows the flat view shows (an SNES frame without overscan draws
         // 224 of 240): the window the camera fits and the shape of the image.
         let rows = Self::diorama_rows(msg, height);
-        let out = self.diorama_out_size(width, rows);
+        // Ticket W34-07: the picture the camera frames is the margin-filled
+        // one when the level's heights stand on it.
+        let plane = wide.as_ref().map_or((width, rows), |(_, _, g)| g.1);
+        let plane_pad = if wide.is_some() {
+            (plane.0 as i32 - 256).div_euclid(2)
+        } else {
+            0
+        };
+        let core_pad = (width as i32 - 256).div_euclid(2);
+        let out = self.diorama_out_size(plane.0, plane.1);
         // D1: look at the player (else the middle of the screen) and glide
         // there. A jump of more than a third of the screen is a room change.
         let player = msg
@@ -5663,11 +5717,11 @@ impl RetroForgeApp {
             .as_ref()
             .and_then(|h| h.player)
             .filter(|p| p.visible)
-            .map(|p| (p.centre.0 as f32, p.centre.1 as f32));
-        let screen_centre = (width as f32 / 2.0, rows as f32 / 2.0);
+            .map(|p| ((p.centre.0 + plane_pad) as f32, p.centre.1 as f32));
+        let screen_centre = (plane.0 as f32 / 2.0, rows as f32 / 2.0);
         let centre = if view.follow {
             self.diorama_smoother
-                .step(player, screen_centre, width as f32 / 3.0)
+                .step(player, screen_centre, plane.0 as f32 / 3.0)
         } else {
             self.diorama_smoother.reset();
             screen_centre
@@ -5675,15 +5729,29 @@ impl RetroForgeApp {
         let start = std::time::Instant::now();
         let result = match plan {
             dl::Plan::Side => {
-                let ground = dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
-                let billboards = dl::side_billboards(sprites, (width, height));
+                let own;
+                let (ground, ground_size, billboards) = match &wide {
+                    Some((_, _, g)) => (
+                        &g.0,
+                        g.1,
+                        dl::side_billboards_wide(sprites, (width, height), core_pad, plane_pad),
+                    ),
+                    None => {
+                        own = dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
+                        (
+                            &own,
+                            (width, height),
+                            dl::side_billboards(sprites, (width, height)),
+                        )
+                    }
+                };
                 dl::render_side(
                     gpu,
                     pass,
                     &dl::SideFrame {
                         lattice: &lattice,
-                        ground_rgba: &ground,
-                        ground: (width, height),
+                        ground_rgba: ground,
+                        ground: ground_size,
                         sprites: &billboards,
                         sprite_rgba: &msg.sprite_rgba,
                         sprite_size: (width, height),
@@ -5691,7 +5759,7 @@ impl RetroForgeApp {
                             msg.heights.as_ref().and_then(|h| h.backdrop_ratio),
                             lattice.tile_px as f32,
                         ),
-                        window: (width as f32, rows as f32),
+                        window: (plane.0 as f32, rows as f32),
                         centre,
                         out,
                         view,
@@ -5717,6 +5785,44 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
         self.store_diorama_result(result, msg.frame_count);
+    }
+
+    /// Ticket W34-07: the ground of a widescreen Diorama -- this frame's
+    /// picture without its sprites, with the margins filled from the canvas
+    /// exactly as the flat view fills them (`widen_margins`), cut to the rows
+    /// the game shows. `None` when the frame has no sprite layer to take the
+    /// sprites out with.
+    fn wide_ground(
+        &mut self,
+        msg: &core_thread::FrameMsg,
+        width: u32,
+        rows: u32,
+    ) -> Option<(Vec<u8>, (u32, u32))> {
+        if msg.sprite_rgba.len() != msg.rgba.len() || width == 0 {
+            return None;
+        }
+        let ground =
+            crate::diorama_learned::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
+        let rows_n = usize::try_from(rows).ok()?;
+        let cut = crate::play_view::crop_rows(&ground, msg.width, rows_n).to_vec();
+        // The flat view's own compose already ran for this frame (and set
+        // the margin state); this second one is only for the pixels, so the
+        // test hook that keeps the core frame must not see it. It leans on
+        // `widen_margins` being idempotent for one frame's inputs (it writes
+        // `widescreen_scene`, `margin_known`, `stitch_confidence` and
+        // `widescreen_source` from them, the same values the first call
+        // wrote): state added there that depends on the call count would
+        // break that.
+        let keep = std::mem::replace(&mut self.keep_core_frame, false);
+        let (rgba, (w, h)) = self.widen_margins(
+            cut,
+            (msg.width, rows_n),
+            msg.layer_frames.as_ref(),
+            (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
+            &msg.line_palettes,
+        );
+        self.keep_core_frame = keep;
+        Some((rgba, (u32::try_from(w).ok()?, u32::try_from(h).ok()?)))
     }
 
     /// Ticket W34-04: the readout line under the Diorama controls -- what has
@@ -12913,6 +13019,7 @@ impl RetroForgeApp {
         self.diorama_render = None;
         self.diorama_texture = None;
         self.diorama_ground_rgba = None;
+        self.level_heights = None;
         self.diorama_wanted = false;
         self.lens_shadows_wanted = false;
         self.running = false;
@@ -13810,6 +13917,32 @@ impl RetroForgeApp {
     #[must_use]
     pub fn heights_readout_for_test(&self) -> Option<String> {
         self.heights_readout()
+    }
+
+    /// Ticket W34-07: what layer `layer`'s canvas holds, from the UI's latest
+    /// snapshot (the proof shots).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn canvas_census_for_test(
+        &self,
+        layer: usize,
+        mode: u8,
+    ) -> Option<crate::level_heights::Census> {
+        let canvas = self.ultrawide_layers.canvases.get(layer)?.as_ref()?;
+        let fmt = crate::level_heights::LayerFormat::for_mode(mode, layer as u8, false)?;
+        Some(crate::level_heights::census(
+            canvas,
+            &self.ultrawide_layers.palettes,
+            fmt,
+        ))
+    }
+
+    /// Ticket W34-07: the whole-level heights the shell holds, for the proof
+    /// shots: `(restored from the cache, the pass's report)`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn level_heights_for_test(&self) -> Option<(bool, crate::level_heights::LevelReport)> {
+        self.level_heights.as_ref().map(|l| (l.restored, l.report))
     }
 
     /// Ticket W34-04: the learner's latest report as plain numbers for the
@@ -18026,12 +18159,24 @@ pub(crate) struct HeightsNote {
     pub plan: crate::diorama_learned::Plan,
     /// Cells raised in this frame.
     pub raised: usize,
+    /// Ticket W34-07: what the canvas adds beyond the screen, when it does.
+    pub level: Option<LevelNote>,
+}
+
+/// Ticket W34-07: the whole-level heights in the readout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LevelNote {
+    /// Blocks of the level raised, and how many of those the scout found.
+    pub solid: usize,
+    pub solid_scout: usize,
+    /// Restored from an earlier visit; nothing has been counted yet.
+    pub restored: bool,
 }
 
 /// Where the walls of the Diorama came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeightsSource {
-    /// Learned from play (approximate, visited areas only).
+    /// Learned from play (approximate, learned from play).
     Learned,
     /// The profile's painted `[heights]` table.
     Painted,
@@ -18065,12 +18210,22 @@ impl HeightsNote {
             "{} tiles learned ({} solid), {} raised on screen",
             s.drawn, s.solid, self.raised
         );
+        let level = match self.level {
+            Some(l) if l.restored => {
+                " \u{b7} level heights restored from the last visit".to_string()
+            }
+            Some(l) if l.solid > 0 => format!(
+                " \u{b7} {} solid blocks known across the level ({} found by the scout)",
+                l.solid, l.solid_scout
+            ),
+            _ => String::new(),
+        };
         match self.plan {
             Plan::Flat => format!(
                 "Heights: {learned} \u{b7} facing {facing}; flat until the camera angle is known, keep playing"
             ),
             _ => format!(
-                "Heights: {learned} \u{b7} {facing} ({sure}) \u{b7} {} of {} tile kinds seen firmly",
+                "Heights: {learned} \u{b7} {facing} ({sure}) \u{b7} {} of {} tile kinds seen firmly{level}",
                 s.by_level[3], s.keys
             ),
         }

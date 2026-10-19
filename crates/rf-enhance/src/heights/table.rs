@@ -201,6 +201,18 @@ impl TileHeightTable {
         self.map.iter()
     }
 
+    /// Store a whole row (a table built from outside the learner: a test, an
+    /// import). `false` when the table is full of other keys.
+    pub fn insert(&mut self, key: TileKey, entry: Entry) -> bool {
+        match self.entry_mut(key) {
+            Some(slot) => {
+                *slot = entry;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The entry for `key`, created if there is room.
     pub(crate) fn entry_mut(&mut self, key: TileKey) -> Option<&mut Entry> {
         if !self.map.contains_key(&key) && self.map.len() >= MAX_KEYS {

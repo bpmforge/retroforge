@@ -1061,14 +1061,26 @@ impl PlayerTracker {
     /// What the camera looks like, so far.
     #[must_use]
     pub fn orientation(&self) -> OrientationGuess {
+        if let Some(m) = self.mode_hint.filter(|m| *m != Orientation::Unknown) {
+            return OrientationGuess {
+                orientation: m,
+                confidence: 3,
+                source: OrientationSource::Hint,
+            };
+        }
+        self.observed_orientation()
+    }
+
+    /// The call the player's own movement and the scroll axis make, whatever
+    /// a hint says (ticket W34-07: a remembered call stands in only until
+    /// this one is sure).
+    #[must_use]
+    pub fn observed_orientation(&self) -> OrientationGuess {
         let guess = |orientation, confidence, source| OrientationGuess {
             orientation,
             confidence,
             source,
         };
-        if let Some(m) = self.mode_hint.filter(|m| *m != Orientation::Unknown) {
-            return guess(m, 3, OrientationSource::Hint);
-        }
         let (tx, ty) = self.travel;
         let x_scroll = tx >= SCROLL_AXIS_PX && ty <= SCROLL_OTHER_PX;
         let y_scroll = ty >= SCROLL_AXIS_PX && tx <= SCROLL_OTHER_PX;
@@ -1412,6 +1424,16 @@ mod tests {
         tr.set_mode_hint(Some(Orientation::SideView));
         let o = tr.orientation();
         assert_eq!((o.orientation, o.confidence), (Orientation::SideView, 3));
+    }
+
+    #[test]
+    fn the_observed_call_ignores_a_hint_the_plain_call_obeys() {
+        let mut tr = PlayerTracker::new();
+        tr.set_mode_hint(Some(Orientation::TopDown));
+        assert_eq!(tr.orientation().orientation, Orientation::TopDown);
+        assert_eq!(tr.orientation().source, OrientationSource::Hint);
+        // Nothing has been watched: the evidence says nothing yet.
+        assert_eq!(tr.observed_orientation(), OrientationGuess::default());
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub mod hd2d_preset;
 pub mod icons;
 pub mod input_map;
 pub mod lens_view;
+pub mod level_heights;
 pub mod level_view;
 pub mod library;
 pub mod library_cache;

@@ -696,3 +696,118 @@ The lens over the 3D image, and the readback poll fix everywhere.
   tilt-shift change the uploaded pixels while the raw render does not.
   Shots (`docs/screens/w30-w31/hd2d-full-{alttp,smw}-{off,on}.png`, plus
   `-3d-no-lens`), uncommitted.
+
+## W34-07 as built (2026-10-19)
+
+Whole-level heights from the canvas, persisted; the Diorama at 32:9; the
+ALttP floor edge. Code: `retroforge::level_heights` (new), `live_learn`,
+`diorama_learned`, `app.rs` (`wide_ground`), `rf-enhance` `canvas/mod.rs`
+(`queue_extra` / `fetch_extra` / `scene_merges`), `core_thread.rs`.
+
+- **The re-tile cannot be literal, so it is a bridge.** A learner key is an
+  FNV of VRAM bit planes plus the palette's CGRAM words
+  (`tile_capture::hash_rows` / `palette_hash`, now shared); a canvas cell is a
+  CGRAM index (`palette_base + palette * colours + colour`) plus the id of the
+  palette snapshot it was seen under. Both halves come back: the colour numbers
+  of an 8x8 block are written back into bit planes and hashed by the same
+  function. `level_heights::tests::a_stitched_frame_rekeys_to_the_keys_the_
+  capture_gave_it` captures a synthetic frame's grid, stitches the same frame
+  and asserts every whole block comes back with the capture's key (flips,
+  scroll phases, four palettes). Colour 0 is transparent (the layer's canvas has
+  no cell there), so a block with such dots is keyed as if they were 0 and is
+  "open": looked at again when more of it is seen. 16x16 character layers,
+  hires, Mode 7 and the whole NES are not handled (the NES canvas stores the
+  6-bit master colour, from which neither the pattern bytes nor the palette
+  number come back); the NES gets the persisted table and call only.
+- **Scout cells carry no palette id** (the scout stitches with no per-row
+  palettes on the SNES; `canvas/merge.rs` says so). They are read under the
+  layer's dominant snapshot. Palette cycling or an area with another palette
+  therefore reads as an unknown key (flat), never as a wrong raised one.
+- **The capture's block grid is one line off the picture, and the alignment is
+  measured, not assumed.** Geometry (`grid_phase`: the frame's canvas origin
+  minus the grid's offset) put every block of SMW one dot-row off the canvas's
+  own: of ~7,600 live cells compared, none matched. A 64-way vote over live
+  cells (`Calibration`: read the canvas at every shift of -4..3 dots both ways,
+  count the cells whose key equals the capture's) decides the shift per scene
+  and layer in about 0.7 ms; on SMW it is (0, -1) every time. After it, 5,713
+  of ~7,600 live cells match exactly (75 %), 909 match in palette only (a sprite
+  or the HUD covers part of the block, or the block has colour-0 dots), 936 are
+  unkeyed (off the stitched canvas). This also means the live lattice that
+  `Lattice::from_learned` builds sits one picture row off the drawn picture
+  (`tile_capture` takes `vofs + y0`); not changed here.
+- **Where it runs.** On the core thread beside the learner and the canvas model
+  (`LiveHeights::level_pass` -> `LevelTracker::observe`): a pass every 45
+  frames, and at once after a scout delta is merged (`scene_merges`; the game is
+  usually paused while the scout works, so frames alone would not come). It
+  looks at blocks that are not finished only, then turns keys into heights with
+  a table lookup per block, wholesale (a tile the guard forgot or demoted never
+  stays raised on the canvas). The result (`HeightCanvas` plus a `LevelReport`)
+  rides every `HeightsFrame` as an `Arc`, not only when it changes: the UI's
+  pending-frame cap drops frames, and an update carried by a dropped frame
+  would be lost for good.
+- **Persistence** (all through the canvas model's one `Cache`, written by its
+  `flush` and its drop; opening a second index over one root is not safe):
+  the ROM's `TileHeightTable` (`tile-heights-v1`, restored into
+  `HeightLearner::with_table` on the first captured frame), a heights block per
+  scene (`heights-canvas-v1`, a sibling entry as W34-03 made it; restored on
+  entering the scene and replaced by the first pass) and the camera call
+  (113 bytes with its entry header, only when watched from play: gravity or
+  constant speed at confidence 2 or more). A remembered call is drawn from at
+  once but never fed to the learner (so a menu is not learned from) and is
+  dropped the moment the game's own evidence is sure; a profile's hint wins.
+  Written when stats changed and 300 frames passed, on leaving a scene, and on
+  Shutdown.
+- **Widescreen Diorama.** `refresh_learned_diorama` no longer clears at a
+  frame wider than 256 when the level's heights belong to the scene on screen:
+  the ground is the flat view's own margin fill with the sprites taken out
+  (`App::wide_ground`, a second `widen_margins` for the pixels only), the
+  lattice is `Lattice::from_level` over the whole wide picture
+  (display column X is canvas `origin.x + X - (out_w - 256) / 2`, as
+  `fill_margins_keeping`), billboards shift with the plane
+  (`side_billboards_wide`), the camera frames the wide picture. Side view only.
+- **A bug found on the way:** `SetWidescreen` grew the frame buffer but not the
+  layer extraction, so Diorama on with widescreen on handed the UI layers 256
+  wide beside a 512-wide frame (epaint's size assertion took the app down; the
+  layers also held the left margin, not the picture). Fixed in `core_thread`;
+  `tests/w34_07_widescreen_layers.rs` fails without it.
+- **ALttP floor edge (D2).** The black beyond the room was the clear colour
+  around a plane that ended at the picture. The top-down floor now goes on
+  `EDGE_MARGIN_CELLS` = 16 cells past the picture on every side in the room's
+  own edge pixels (`LiveGrid::with_margin`, `padded_ground` already repeats
+  edges); the camera is still held to the room. The ground also stops at the
+  rows the game shows (224 of the host's 240; the 16 black ones were part of
+  the plane). 8 cells left a band at the far edge; 16 did not.
+- **Not done / limits.** NES whole-level (see above), 16x16 layers, top-down
+  from the canvas, 32:9 outside a side view; the Diorama does not raise HUD
+  layers (D7 is W34-08). Turning 32:9 on while the map is showing and then
+  entering a level leaves the level's canvas offset by the map's scroll (the
+  world axes carry on across the scene change), so a restored canvas lands
+  beside the live one; the shots turn 32:9 on inside the level, as
+  `shot_persist` does. Pre-existing, not changed here.
+- **Verified: a tile learned once is known level-wide.** SMW YI1, learned in
+  one session at 4:3 (2 solid kinds: the ground tiles; 121 kinds drawn), applied
+  in the next to the scouted canvas (624,164 cells merged by the scout, 11.7 s
+  wall, unchanged: the scout stitches only): 662 solid blocks over the level, 630
+  of them in cells the scout saw first. Visited area alone would be the ~32
+  on screen.
+- **Costs** (M4 Max, release): a pass over a 16,000-block canvas (5,120 x ~200
+  dots) 2.4 ms the first time, 0.1 to 1.7 ms after (it skips finished blocks); a
+  rebuild of the heights from the keys 0.1 ms; the alignment vote 0.7 ms once
+  per scene; the scout's wall time did not change (it takes no grids). Diorama at
+  32:9 in a 1700x760 window, pacing off, 10 x 30-frame chunks per state: 53.7 fps
+  off, 53.0 on, the pass 2.04 ms p95 at 1371x672. Stored: scene chunk 68 KB,
+  heights block 16.5 KB, table 8.5 KB (1.6 k keys), orientation 113 B.
+- **Shots** (`docs/screens/w30-w31/`, uncommitted): `diorama-level-smw-32x9-off`
+  (the flat 32:9 frame), `-on` (the 3D view: the ground row stands as blocks
+  across the right margin the scout filled, out to the edge; the left is the
+  level's start, so nothing is there; the diagonal slope and the hills stay flat
+  because only the ground tiles were learned), `-tilted` (the same frame from a
+  raised, turned camera, where the thickness of the scouted ground shows),
+  `-second-visit` (a fresh session, no play, no scout: the same picture), and
+  `diorama-level-smb3-second-visit` (NES: ground slab on the first frames, from
+  the restored table). `diorama-top-alttp-on` was re-shot for the floor edge.
+  Second visit, SMW: with 32:9 switched on when the level's sky first shows
+  (frame 70 from the X press), the level heights reach the UI 3 frames later with
+  662 solid blocks (630 scouted), 0 scouts started; 4:3 raised cells from the
+  restored table alone at frame 63. SMB3 1-1: blocks stand 2 frames after Diorama
+  goes on.
