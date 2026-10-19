@@ -416,3 +416,37 @@ look Brad asked for; 07-09 widen it.
   earlier than planned; W34-00 decides.
 - Policy (B11) can block W34-04's visibility in Enhanced mode; the ticket
   ships either way, the row placement is the only open decision.
+
+---------------------------------------------------------------------------
+
+## W34-04 as built (2026-10-18)
+
+- **Builder.** `rf-renderer::diorama_side` (re-exported by `diorama_mesh`):
+  `build_vertices_side` stands the picture upright (world Y = picture height
+  minus picture Y), extrudes solid cells toward the camera, merges equal-depth
+  cells into rectangles, draws exposed top / left / right faces only, and
+  stands billboards at the middle of the depth of the cell under their feet.
+  Ramps are wedges. The camera is `camera_matrices::side_placement`: it frames
+  the game's own window (not the level), with the user's tilt scaled by 0.35
+  (52 degrees becomes about 18). `build_vertices` and the pinned goldens are
+  untouched.
+- **Learner on the core thread.** `retroforge::live_learn::LiveHeights` owns
+  the scene tracker (NES camera), `PlayerTracker` and `HeightLearner` while
+  `SetTileGridCapture` is on (Diorama ticked outside Accuracy Mode) and ships
+  a `HeightsFrame` on `FrameMsg::heights`. A profile's `[camera].mode` reaches
+  it through `SetOrientationHint`, re-sent to every new core.
+- **Shell.** `retroforge::diorama_learned` turns the playfield grid plus its
+  `HeightGrid` into a lattice and picks the builder: SideView upright,
+  TopDown the old floor plan, Unknown flat (the readout says "flat until the
+  camera angle is known") unless a painted `[heights]` table is present, which
+  replaces the learned heights whole (it is SNES-only and keyed on character
+  numbers, so it is not merged cell by cell). The decoded-level path
+  (RF-Scroller) takes the same side builder when the orientation is SideView.
+- **D-023.** The Diorama row is generic (Enhanced or Game-Aware, no profile);
+  the badge line reads "approximate, visited areas only" unless the heights are
+  decoded or painted. The HD-2D card no longer points at the Profile Builder.
+- **Not done here.** The backdrop is one plane set back by `1 - ratio` of two
+  tiles from the measured scroll ratio; separate per-layer textures (so hills
+  and the sky sit at different depths) are W34-08 (D4). The learned table is
+  not persisted yet (rf-cache `tile-heights-v1` is written by nobody in the
+  shell), so every session starts cold.

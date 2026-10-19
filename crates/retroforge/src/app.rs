@@ -1448,6 +1448,12 @@ pub struct RetroForgeApp {
     /// level (`crate::live_heights`). `None` for any other game. Set by
     /// [`Self::apply_profile_match`].
     live_heights: Option<crate::live_heights::HeightTable>,
+    /// Ticket W34-04: the matched profile's `[camera].mode` as an
+    /// orientation, re-sent to every new core.
+    orientation_hint: Option<rf_enhance::heights::Orientation>,
+    /// Ticket W34-04: what the height learner reported on the latest frame,
+    /// for the readout and the tests. `None` until a frame carries one.
+    heights_note: Option<HeightsNote>,
     /// Ticket W30-06 part B: the open height painter, if any.
     height_painter: Option<crate::profile_builder::PainterSession>,
     /// Ticket W30-06 part B: what the HD-2D preset replaced, so turning it
@@ -1998,6 +2004,8 @@ impl RetroForgeApp {
             mode7_seen: false,
             mode7_ground_wanted: false,
             live_heights: None,
+            heights_note: None,
+            orientation_hint: None,
             height_painter: None,
             hd2d_remembered: None,
             mode7_plane_cache: None,
@@ -4050,6 +4058,9 @@ impl RetroForgeApp {
                 // the key) did: its first frame was a "key change" and every
                 // NES scout ended at frame 1.
                 self.send_command(CoreCommand::SetSceneKey(self.scene_key_spec.clone()));
+                // Ticket W34-04: and the `[camera].mode` hint, for the same
+                // reason (the match above ran before this core existed).
+                self.send_command(CoreCommand::SetOrientationHint(self.orientation_hint));
                 self.send_command(CoreCommand::WatchItems(self.item_rows()));
                 // A new ROM is a new debug session too — the previous
                 // ROM's OAM/events would otherwise linger onscreen against
@@ -5394,13 +5405,25 @@ impl RetroForgeApp {
             self.refresh_mode7_ground_render(msg);
             return;
         }
-        if self.live_diorama_active() {
-            self.refresh_live_diorama(msg);
+        // Ticket W34-04: without a decoded level the heights are painted or
+        // learned from play, on either console.
+        if self.diorama_wanted && !self.decoded_diorama_available() {
+            self.refresh_learned_diorama(msg);
             return;
         }
         if !self.diorama_wanted || msg.sprite_rgba.is_empty() {
             return;
         }
+        // The decoded level is exact, but which way the game faces still
+        // comes from the learner (or the profile's `[camera].mode`).
+        self.heights_note = msg.heights.as_deref().map(|h| HeightsNote {
+            orientation: h.orientation,
+            stats: h.stats,
+            frames: h.frames,
+            source: HeightsSource::Decoded,
+            plan: crate::diorama_learned::plan_for(h.orientation.orientation, true),
+            raised: 0,
+        });
         let Some(probe) = &msg.level_probe else {
             return;
         };
@@ -5438,11 +5461,27 @@ impl RetroForgeApp {
         );
 
         let start = std::time::Instant::now();
+        // An upright picture has no floor to hide the transparent parts of a
+        // decoded level image, so they take the screen's own backdrop colour.
+        let orientation = msg
+            .heights
+            .as_ref()
+            .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
+                h.orientation.orientation
+            });
+        let filled;
+        let ground: &[u8] = if orientation == rf_enhance::heights::Orientation::SideView {
+            let b = crate::diorama_learned::dominant_colour(&msg.rgba);
+            filled = crate::diorama_learned::fill_transparent(&ground_rgba, b);
+            &filled
+        } else {
+            &ground_rgba
+        };
         let result = enhanced_view::compose_diorama(
             gpu,
             pass,
             session,
-            &ground_rgba,
+            ground,
             ground_w,
             ground_h,
             &read,
@@ -5454,6 +5493,11 @@ impl RetroForgeApp {
             width,
             height,
             enhanced_view::DioramaView::from_settings(&self.current_game_settings),
+            msg.heights
+                .as_ref()
+                .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
+                    h.orientation.orientation
+                }),
         );
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
@@ -5461,36 +5505,77 @@ impl RetroForgeApp {
         self.store_diorama_result(result);
     }
 
-    /// Ticket W30-06: [`Self::refresh_diorama_render`] for a game with no
-    /// decoder — the walls come from the BG tilemap on screen right now and
-    /// the profile's `[heights]` table (`crate::live_heights`), the ground is
-    /// this frame's own picture, and the sprites are billboards from the live
-    /// OAM. Recomputed every frame, so the walls track scrolling.
+    /// Ticket W30-06, W34-04: [`Self::refresh_diorama_render`] for a game with
+    /// no decoder. The walls come from the playfield's tile grid on this
+    /// frame and the height each tile has learned from play
+    /// (`crate::live_learn`), or from the profile's painted `[heights]`
+    /// table, which replaces the learned ones whole. The ground is this
+    /// frame's own picture and the sprites are billboards. Recomputed every
+    /// frame, so the walls track scrolling.
     ///
-    /// Anything it cannot do (no snapshot yet, a hi-res or widescreen frame
-    /// whose width is not the SNES's 256, a BG mode with no plain tilemap, no
-    /// GPU, a blown budget) clears the render, so the player sees the flat
+    /// Side-view games stand the picture upright and extrude the solid
+    /// cells toward the camera; top-down games keep the floor plan. When
+    /// the orientation is not known yet (and nothing is painted) the flat
+    /// picture stays and the readout says so.
+    ///
+    /// Anything it cannot do (no learner frame yet, a widened frame, no GPU,
+    /// a blown budget) clears the render, so the player sees the flat
     /// picture rather than a stale diorama.
-    fn refresh_live_diorama(&mut self, msg: &core_thread::FrameMsg) {
+    fn refresh_learned_diorama(&mut self, msg: &core_thread::FrameMsg) {
+        use crate::diorama_learned as dl;
         let (width, height) = (
             u32::try_from(msg.width).unwrap_or(0),
             u32::try_from(msg.height).unwrap_or(0),
         );
-        let grid = match (&self.live_heights, &msg.snes) {
-            (Some(table), Some(snes)) if width == 256 => crate::live_heights::build_grid(
-                table,
-                &snes.vram,
-                &snes.ppu_regs,
-                snes.bg_scroll,
-                (width, height),
-            ),
+        let painted = match (&self.live_heights, &msg.snes) {
+            (Some(table), Some(snes)) if !table.is_empty() && width == 256 => {
+                crate::live_heights::build_grid(
+                    table,
+                    &snes.vram,
+                    &snes.ppu_regs,
+                    snes.bg_scroll,
+                    (width, height),
+                )
+                .map(|g| dl::Lattice::from_painted(&g))
+            }
             _ => None,
         };
-        let usable = grid.is_some()
+        let is_painted = painted.is_some();
+        let learned = || {
+            let h = msg.heights.as_deref()?;
+            let fg = h.foreground?;
+            Some(dl::Lattice::from_learned(
+                msg.tile_grids.get(fg)?,
+                h.grids.get(fg)?,
+            ))
+        };
+        let lattice = painted.or_else(learned);
+        let orientation = msg
+            .heights
+            .as_ref()
+            .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
+                h.orientation.orientation
+            });
+        let plan = dl::plan_for(orientation, is_painted);
+        self.heights_note = msg.heights.as_deref().map(|h| HeightsNote {
+            orientation: h.orientation,
+            stats: h.stats,
+            frames: h.frames,
+            source: if is_painted {
+                HeightsSource::Painted
+            } else {
+                HeightsSource::Learned
+            },
+            plan,
+            raised: lattice.as_ref().map_or(0, dl::Lattice::raised),
+        });
+        let usable = lattice.is_some()
+            && plan != dl::Plan::Flat
+            && width == 256
             && !msg.sprite_rgba.is_empty()
             && self.diorama_budget.is_enabled()
             && self.gpu.is_some();
-        let (Some(grid), Some(snes), true) = (grid, &msg.snes, usable) else {
+        let (Some(lattice), true) = (lattice, usable) else {
             self.diorama_render = None;
             self.diorama_texture = None;
             return;
@@ -5505,31 +5590,82 @@ impl RetroForgeApp {
             .diorama_pass
             .as_ref()
             .expect("just constructed above when absent");
-
-        let sprites = rf_snes::debug::decode_oam(&snes.oam);
-        // `$2101` bits 5-7 (`ppu_regs[n]` is `$21nn`).
-        let obj_size_select = snes.ppu_regs.get(0x01).copied().unwrap_or(0) >> 5;
-
+        // The painted path predates the sprite boxes: a synthetic or older
+        // frame without them reads the SNES OAM instead.
+        let oam_boxes;
+        let sprites: &[rf_enhance::heights::SpriteBox] = match (&msg.snes, msg.sprites.is_empty()) {
+            (Some(snes), true) if is_painted => {
+                oam_boxes = snes_oam_boxes(&snes.oam, &snes.ppu_regs);
+                &oam_boxes
+            }
+            _ => &msg.sprites,
+        };
+        let view = enhanced_view::DioramaView::from_settings(&self.current_game_settings);
         let start = std::time::Instant::now();
-        let result = enhanced_view::compose_live_diorama(
-            gpu,
-            pass,
-            &grid,
-            &msg.rgba,
-            width,
-            height,
-            &sprites,
-            obj_size_select,
-            &msg.sprite_rgba,
-            width,
-            height,
-            width,
-            height,
-            enhanced_view::DioramaView::from_settings(&self.current_game_settings),
-        );
+        let result = match plan {
+            dl::Plan::Side => {
+                let ground = dl::ground_without_sprites(&msg.sprite_rgba, &msg.rgba, width);
+                let billboards = dl::side_billboards(sprites, (width, height));
+                let player = msg
+                    .heights
+                    .as_ref()
+                    .and_then(|h| h.player)
+                    .filter(|p| p.visible)
+                    .map(|p| (p.centre.0 as f32, p.centre.1 as f32));
+                let screen_centre = (width as f32 / 2.0, height as f32 / 2.0);
+                dl::render_side(
+                    gpu,
+                    pass,
+                    &dl::SideFrame {
+                        lattice: &lattice,
+                        ground_rgba: &ground,
+                        ground: (width, height),
+                        sprites: &billboards,
+                        sprite_rgba: &msg.sprite_rgba,
+                        sprite_size: (width, height),
+                        back_px: dl::set_back_px(
+                            msg.heights.as_ref().and_then(|h| h.backdrop_ratio),
+                            lattice.tile_px as f32,
+                        ),
+                        window: (width as f32, height as f32),
+                        centre: if view.follow {
+                            player.unwrap_or(screen_centre)
+                        } else {
+                            screen_centre
+                        },
+                        out: (width, height),
+                        view,
+                    },
+                )
+            }
+            _ => dl::render_top(
+                gpu,
+                pass,
+                &dl::TopFrame {
+                    lattice: &lattice,
+                    frame_rgba: &msg.rgba,
+                    screen: (width, height),
+                    sprites,
+                    sprite_rgba: &msg.sprite_rgba,
+                    out: (width, height),
+                    view,
+                },
+            ),
+        };
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
         self.store_diorama_result(result);
+    }
+
+    /// Ticket W34-04: the readout line under the Diorama controls -- what has
+    /// been learned, which way the game faces and how sure that is. `None`
+    /// when Diorama is not running.
+    pub(crate) fn heights_readout(&self) -> Option<String> {
+        if !self.diorama_wanted {
+            return None;
+        }
+        let n = self.heights_note.as_ref()?;
+        Some(n.readout())
     }
 
     /// Upload a finished diorama frame as [`Self::diorama_texture`], or fall
@@ -8516,6 +8652,10 @@ impl RetroForgeApp {
         if let Some(verdict) = self.hud_verdict() {
             ui.label(egui::RichText::new(verdict).small().color(tokens.muted));
         }
+        // Ticket W34-04: what Diorama has learned of this game.
+        if let Some(readout) = self.heights_readout() {
+            ui.label(egui::RichText::new(readout).small().color(tokens.muted));
+        }
         self.apply_enhance_actions(&actions);
     }
 
@@ -10908,6 +11048,13 @@ impl RetroForgeApp {
             .filter(|(p, _)| p.meta.console == rf_profiles::Console::Snes)
             .and_then(|(p, _)| p.heights.as_ref())
             .map(crate::live_heights::HeightTable::from_profile);
+        // Ticket W34-04: the profile's `[camera].mode` tells the height
+        // learner which way the game faces before play shows it.
+        self.orientation_hint = matched
+            .as_ref()
+            .and_then(|(p, _)| p.camera.as_ref())
+            .and_then(|c| crate::live_learn::orientation_of_mode(&c.mode));
+        self.send_command(CoreCommand::SetOrientationHint(self.orientation_hint));
         // Ticket W31-02: where the matched profile says a Super FX game's
         // polygons can be observed (sent to the core only on request).
         self.superfx_polygons = matched
@@ -12064,7 +12211,7 @@ impl RetroForgeApp {
                             None => {
                                 ui.label(
                                     egui::RichText::new(
-                                        "Nothing to show yet. Diorama needs Game-Aware mode and a painted tile (the HD-2D preset turns it on).",
+                                        "Nothing to show yet. Diorama needs Enhanced mode and a painted tile (the HD-2D preset turns it on).",
                                     )
                                     .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
                                     .color(tokens.muted),
@@ -13459,6 +13606,33 @@ impl RetroForgeApp {
         self.diorama_wanted
     }
 
+    /// Ticket W34-04: the Diorama readout line (tests and the proof shots).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn heights_readout_for_test(&self) -> Option<String> {
+        self.heights_readout()
+    }
+
+    /// Ticket W34-04: the learner's latest report as plain numbers for the
+    /// proof shots: `(plan, raised cells, solid keys, drawn keys, keys,
+    /// orientation, orientation confidence)`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn heights_numbers_for_test(
+        &self,
+    ) -> Option<(String, usize, usize, usize, usize, String, u8)> {
+        let n = self.heights_note.as_ref()?;
+        Some((
+            format!("{:?}", n.plan),
+            n.raised,
+            n.stats.solid,
+            n.stats.drawn,
+            n.stats.keys,
+            format!("{:?}", n.orientation.orientation),
+            n.orientation.confidence,
+        ))
+    }
+
     /// Ticket W30-06: deliver one synthetic SNES frame — the picture, the
     /// sprite layer and the PPU snapshot — through the identical private
     /// path a real frame takes to the live-screen diorama.
@@ -13470,6 +13644,38 @@ impl RetroForgeApp {
         snes: core_thread::SnesDebugFrame,
     ) {
         let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// Ticket W34-04: deliver one synthetic console-free frame -- the
+    /// picture, the sprite layer, the tile grids, the sprite boxes and what
+    /// the learner reported -- through the path a real NES or SNES frame
+    /// takes to the learned diorama. No console memory is involved.
+    #[doc(hidden)]
+    pub fn inject_learned_frame_for_test(
+        &mut self,
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        tile_grids: Vec<rf_enhance::heights::TileGrid>,
+        sprites: Vec<rf_enhance::heights::SpriteBox>,
+        heights: crate::live_learn::HeightsFrame,
+    ) {
+        let snes = core_thread::SnesDebugFrame {
+            vram: Vec::new(),
+            cgram: Vec::new(),
+            oam: Vec::new(),
+            ppu_regs: Vec::new(),
+            aram: Vec::new(),
+            mode7: rf_snes::ppu::mode7::Mode7::default(),
+            hdma_lanes: Vec::new(),
+            voices: Vec::new(),
+            bg_scroll: [(0, 0); 4],
+        };
+        let mut msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
+        msg.snes = None;
+        msg.tile_grids = tile_grids;
+        msg.sprites = sprites;
+        msg.heights = Some(Box::new(heights));
         self.refresh_diorama_render(&msg);
     }
 
@@ -13520,6 +13726,7 @@ impl RetroForgeApp {
             line_regs: Vec::new(),
             tile_grids: Vec::new(),
             sprites: Vec::new(),
+            heights: None,
         }
     }
 
@@ -17570,4 +17777,89 @@ fn backend_label(backend: eframe::wgpu::Backend) -> &'static str {
         Backend::Gl => "OpenGL",
         _ => "Software",
     }
+}
+
+/// Ticket W34-04: what the height learner reported, kept for the readout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HeightsNote {
+    pub orientation: rf_enhance::heights::OrientationGuess,
+    pub stats: rf_enhance::heights::Stats,
+    pub frames: u32,
+    /// Where the heights came from.
+    pub source: HeightsSource,
+    pub plan: crate::diorama_learned::Plan,
+    /// Cells raised in this frame.
+    pub raised: usize,
+}
+
+/// Where the walls of the Diorama came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeightsSource {
+    /// Learned from play (approximate, visited areas only).
+    Learned,
+    /// The profile's painted `[heights]` table.
+    Painted,
+    /// The profile's decoded level with its collision table.
+    Decoded,
+}
+
+impl HeightsNote {
+    /// The readout line in a player's words.
+    pub(crate) fn readout(&self) -> String {
+        use crate::diorama_learned::Plan;
+        use rf_enhance::heights::Orientation;
+        let facing = match self.orientation.orientation {
+            Orientation::SideView => "side view",
+            Orientation::TopDown => "top down",
+            Orientation::Unknown => "not known yet",
+        };
+        let sure =
+            ["unsure", "low", "fair", "high"][usize::from(self.orientation.confidence.min(3))];
+        match self.source {
+            HeightsSource::Painted => {
+                return format!("Heights: painted in this game's profile \u{b7} {facing}");
+            }
+            HeightsSource::Decoded => {
+                return format!("Heights: decoded from this game's profile \u{b7} {facing}");
+            }
+            HeightsSource::Learned => {}
+        }
+        let s = &self.stats;
+        let learned = format!(
+            "{} tiles learned ({} solid), {} raised on screen",
+            s.drawn, s.solid, self.raised
+        );
+        match self.plan {
+            Plan::Flat => format!(
+                "Heights: {learned} \u{b7} facing {facing}; flat until the camera angle is known, keep playing"
+            ),
+            _ => format!(
+                "Heights: {learned} \u{b7} {facing} ({sure}) \u{b7} {} of {} tile kinds seen firmly",
+                s.by_level[3], s.keys
+            ),
+        }
+    }
+}
+
+/// Ticket W34-04: the SNES OAM as console-free sprite boxes, for a painted
+/// frame that carries no `FrameMsg::sprites`. `$2101` bits 5-7 pick the two
+/// sizes; the high-table bit picks which one each sprite is.
+fn snes_oam_boxes(oam: &[u8], ppu_regs: &[u8]) -> Vec<rf_enhance::heights::SpriteBox> {
+    let select = ppu_regs.get(0x01).copied().unwrap_or(0) >> 5;
+    let (small, big) = rf_snes::debug::obj_sizes(select);
+    rf_snes::debug::decode_oam(oam)
+        .iter()
+        .filter(|s| s.y < 224)
+        .map(|s| {
+            let (w, h) = if s.large { big } else { small };
+            rf_enhance::heights::SpriteBox {
+                x: s.x,
+                y: i16::from(s.y),
+                w: u8::try_from(w).unwrap_or(8),
+                h: u8::try_from(h).unwrap_or(8),
+                behind_bg: false,
+                tile: s.tile,
+            }
+        })
+        .collect()
 }

@@ -51,6 +51,8 @@
 //! ([`crate::diorama::vertices_for_camera`]), so the pinned goldens keep
 //! the original [`build_vertices`] bytes.
 
+pub use crate::diorama_side::{build_vertices_side, SideBillboard, SideScene};
+
 /// One vertex: position (world space), texture UV, an RGBA tint/alpha,
 /// and `kind` selecting which fragment behaviour `shaders/diorama.wgsl`
 /// applies (ground/top-face texture, sprite-billboard texture, procedural

@@ -2354,6 +2354,298 @@ fn shot_w34_baseline(readme: &mut Vec<String>) {
     );
 }
 
+// ------------------------------------------------ W34-04: side-view diorama
+
+/// Press the keys of one `+`-joined token (`R`, `B+R`) for `frames` core
+/// frames at real speed. `A` is the A button (key X), `B` the B button (key
+/// Z), `Y` the SNES Y (key A).
+fn pad_keys(buttons: &str) -> Vec<egui::Key> {
+    use egui::Key as K;
+    buttons
+        .split('+')
+        .filter_map(|b| match b {
+            "R" => Some(K::ArrowRight),
+            "L" => Some(K::ArrowLeft),
+            "U" => Some(K::ArrowUp),
+            "D" => Some(K::ArrowDown),
+            "A" => Some(K::X),
+            "B" => Some(K::Z),
+            "Y" => Some(K::A),
+            "S" => Some(K::Enter),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A play script in the W34-03 oracle's notation (`R90 B+R30 w20`): buttons
+/// then frames, `wN` idles. Real time.
+fn play_script(h: &mut H, script: &str) {
+    for tok in script.split_whitespace() {
+        if let Some(n) = tok.strip_prefix('w') {
+            let t = h.state().frame_count_for_test() + n.parse::<u64>().expect("wN");
+            run_frames(h, t, Duration::from_secs(60));
+            continue;
+        }
+        let at = tok.find(|c: char| c.is_ascii_digit()).expect("buttons+N");
+        let keys = pad_keys(&tok[..at]);
+        hold_for(h, &keys, tok[at..].parse().expect("N"));
+    }
+}
+
+/// Test-only help, never shipped: poke `value` into the console's work RAM
+/// at `addr` (a CPU-bus address) from the harness, the way a cheat device
+/// would. Used to keep the player alive; the learner and the renderer never
+/// see it any other way than as more play.
+fn poke(h: &H, addr: u16, value: u8) {
+    h.state()
+        .send_core_command_for_test(CoreCommand::PokeBus { addr, value });
+}
+
+/// Play for `frames` core frames with `lap` repeated, re-poking `pokes`
+/// every step. `enter` runs at the start of each lap and puts the player
+/// (back) in the level: a death sends the game back to its map.
+fn play_for(h: &mut H, frames: u64, lap: &str, pokes: &[(u16, u8)], enter: fn(&mut H)) {
+    let end = h.state().frame_count_for_test() + frames;
+    while h.state().frame_count_for_test() < end {
+        enter(h);
+        for tok in lap.split_whitespace() {
+            if h.state().frame_count_for_test() >= end {
+                break;
+            }
+            for &(a, v) in pokes {
+                poke(h, a, v);
+            }
+            play_script(h, tok);
+        }
+    }
+}
+
+/// SMW: a death or a finished level shows the map; A enters the level.
+fn enter_smw(h: &mut H) {
+    tap(h, egui::Key::X, 6);
+}
+
+/// SMB3 1-1's sky is (178, 240, 249); the map's top row is not.
+fn smb3_in_level(h: &H) -> bool {
+    grab(h).is_some_and(|p| {
+        let at = (12 * p.w + 128) * 4;
+        p.rgba[at..at + 3] == [178, 240, 249]
+    })
+}
+
+/// SMB3: after a death Mario stands at START on the map; right, up and A
+/// walk to world 1-1 and enter it.
+fn enter_smb3(h: &mut H) {
+    use egui::Key as K;
+    if smb3_in_level(h) {
+        return;
+    }
+    tap(h, K::X, 6);
+    wait(h, "smb3", 150);
+    if smb3_in_level(h) {
+        return;
+    }
+    tap(h, K::ArrowRight, 8);
+    wait(h, "smb3", 60);
+    tap(h, K::ArrowUp, 8);
+    wait(h, "smb3", 60);
+    tap(h, K::X, 8);
+    wait(h, "smb3", 150);
+}
+
+/// One off/on pair of the side-view diorama, with what the learner knew.
+fn diorama_pair(h: &mut H, name: &str, what: &str, readme: &mut Vec<String>) {
+    let d = out_dir();
+    // OFF: the flat view of a stepped frame.
+    h.state_mut().set_diorama_for_test(false);
+    snapshot(h, name);
+    step_from(h);
+    let Some(off) = grab_play_area(h) else {
+        return skip(readme, name, "no play rect");
+    };
+    // ON: the next frames, diorama ticked again (the learner kept its table).
+    h.state_mut().set_diorama_for_test(true);
+    run_n(h, 30);
+    step_from(h);
+    step_from(h);
+    let on = grab_play_area(h).unwrap_or_else(|| off.clone());
+    let numbers = h.state().heights_numbers_for_test();
+    let readout = h.state().heights_readout_for_test();
+    println!("{name}: numbers {numbers:?}\n{name}: readout {readout:?}");
+    save(
+        &d.join(format!("diorama-side-{name}-off.png")),
+        &off.opaque(),
+    );
+    save(&d.join(format!("diorama-side-{name}-on.png")), &on.opaque());
+    note(
+        readme,
+        format!(
+            "diorama-side-{name}|{what}|OFF flat / ON side-view diorama; learner {numbers:?}; readout {readout:?}"
+        ),
+    );
+}
+
+/// The cost of the side-view diorama in the whole app: median frames per
+/// second with Diorama off and on, the pace limiter off, alternating 30-frame
+/// chunks (10 per state) so drift and machine load hit both alike, plus the
+/// pass's own p95 (build + render + readback) from the app's budget gate.
+fn diorama_fps(h: &mut H, name: &str, readme: &mut Vec<String>) {
+    h.state_mut().resume_for_test();
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    run_n(h, 10);
+    let mut fps: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for chunk in 0..20 {
+        let on = chunk % 2 == 1;
+        h.state_mut().set_diorama_for_test(on);
+        let f0 = h.state().frame_count_for_test();
+        run_frames(h, f0 + 3, Duration::from_secs(60));
+        let f0 = h.state().frame_count_for_test();
+        let t0 = Instant::now();
+        run_frames(h, f0 + 30, Duration::from_secs(120));
+        let n = h.state().frame_count_for_test() - f0;
+        fps[usize::from(on)].push(n as f64 / t0.elapsed().as_secs_f64());
+    }
+    let p95 = h.state().diorama_p95_ms_for_test();
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let med = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
+    };
+    let [mut off, mut on] = fps;
+    note(
+        readme,
+        format!(
+            "DIORAMA-SIDE-FPS {name} (10 chunks x 30 frames per state, interleaved, pacing off): \
+             median fps off {:.1} | diorama on {:.1}; diorama pass p95 {:.2} ms",
+            med(&mut off),
+            med(&mut on),
+            p95
+        ),
+    );
+}
+
+/// W34-04 acceptance, shot 1: the in-repo RF-Scroller fixture, a vertical
+/// level with blocks (D8). `RF_SCREENS_ONLY=diorama-side-rfscroller`.
+fn shot_diorama_side_rfscroller(readme: &mut Vec<String>) {
+    let name = "rfscroller";
+    if !wanted("diorama-side-rfscroller") {
+        return;
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/nes/rf-scroller/build/rf-scroller.nes");
+    if !path.exists() {
+        return skip(readme, name, "RF-Scroller fixture not built");
+    }
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    wait(&mut h, "scroller", 300);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    play_script(&mut h, "R90 w10 R60 w20");
+    release_all(&mut h);
+    diorama_pair(
+        &mut h,
+        name,
+        "RF-Scroller (in-repo NES test game; decoded level + collision, profile says side-scroller)",
+        readme,
+    );
+}
+
+/// W34-04 acceptance, shot 2: Super Mario World, Yoshi's Island 1 after 30 s
+/// of play. `RF_SCREENS_ONLY=diorama-side-smw`.
+fn shot_diorama_side_smw(readme: &mut Vec<String>) {
+    let name = "smw";
+    if !wanted("diorama-side-smw") {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smw_enter_yi1(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    // $1490 is the star-power timer: invincible, kills what it touches. A
+    // test-only poke so the 30 s are spent in the level (documented in the
+    // README row; never shipped).
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    play_for(
+        &mut h,
+        frames,
+        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+        &[(0x1490, 0xFF)],
+        enter_smw,
+    );
+    release_all(&mut h);
+    probe(&h, "smw-diorama-after-play");
+    diorama_pair(
+        &mut h,
+        name,
+        "Super Mario World, Yoshi's Island 1, after 30 s of scripted play (star-power poke keeps Mario alive)",
+        readme,
+    );
+    diorama_fps(&mut h, name, readme);
+}
+
+/// W34-04 acceptance, shot 3: Super Mario Bros. 3, world 1-1 after 30 s of
+/// play. `RF_SCREENS_ONLY=diorama-side-smb3`.
+fn shot_diorama_side_smb3(readme: &mut Vec<String>) {
+    let name = "smb3";
+    if !wanted("diorama-side-smb3") {
+        return;
+    }
+    let Some(path) = rom("nes", "Super Mario Bros. 3 (USA).zip") else {
+        return skip(readme, name, "Super Mario Bros. 3 (USA).zip not found");
+    };
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    if !h.state().gpu_available_for_test() {
+        return skip(readme, name, "no wgpu adapter");
+    }
+    smb3_enter_level(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    run_n(&mut h, 30);
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800);
+    play_for(
+        &mut h,
+        frames,
+        "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+        &[],
+        enter_smb3,
+    );
+    // End in the level, alive: re-enter if the last lap ended in a death and
+    // walk a little so the picture is a moment of play, not a fade.
+    enter_smb3(&mut h);
+    play_script(&mut h, "R60 B+R20");
+    release_all(&mut h);
+    probe(&h, "smb3-diorama-after-play");
+    diorama_pair(
+        &mut h,
+        name,
+        "Super Mario Bros. 3, world 1-1, after 30 s of scripted play (laps restart the level after a death)",
+        readme,
+    );
+    diorama_fps(&mut h, name, readme);
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -2382,6 +2674,9 @@ fn w30_w31_screens() {
     shot_widesnes(&mut readme);
     shot_hd2d(&mut readme);
     shot_w34_baseline(&mut readme);
+    shot_diorama_side_rfscroller(&mut readme);
+    shot_diorama_side_smw(&mut readme);
+    shot_diorama_side_smb3(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

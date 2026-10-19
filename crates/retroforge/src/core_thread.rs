@@ -453,6 +453,10 @@ pub struct FrameMsg {
     /// (`rf_enhance::heights::PlayerTracker`); the pad it correlates with is
     /// the UI-readable input frame, and the camera the scene tracker's.
     pub sprites: Vec<rf_enhance::heights::SpriteBox>,
+    /// Ticket W34-04: what the height learner knew after this frame
+    /// (`crate::live_learn`), under the same switch as `tile_grids`; `None`
+    /// otherwise. Boxed to keep this message small.
+    pub heights: Option<Box<crate::live_learn::HeightsFrame>>,
 }
 
 /// Ticket W30-03: the scroll of the first background the widescreen policy
@@ -780,6 +784,10 @@ pub enum CoreCommand {
     /// writing the machine. Independent of `SetTileCapture` (an HD pack) and
     /// `SetStudioCapture`, which it shares the PPU's recording with.
     SetTileGridCapture(bool),
+    /// Ticket W34-04: the profile's `[camera].mode` as an orientation (or
+    /// `None`), which settles what the player detector would otherwise have
+    /// to work out from play. Sent once per ROM.
+    SetOrientationHint(Option<rf_enhance::heights::Orientation>),
     /// Ticket W11-02: which bytes the full-level view needs each frame.
     ///
     /// A BOUNDED probe, not "send the UI some RAM". The profile declares
@@ -1385,6 +1393,10 @@ fn core_thread_main(
     let mut studio_capture = false;
     // Ticket W34-01: independent of both, see `CoreCommand::SetTileGridCapture`.
     let mut tile_grid_capture = false;
+    // Ticket W34-04: the height learner, alive while the capture is on. It
+    // keeps what it learned if the capture is switched off and on again.
+    let mut live_heights: Option<crate::live_learn::LiveHeights> = None;
+    let mut orientation_hint: Option<rf_enhance::heights::Orientation> = None;
     // Ticket W13-02b: whether to snapshot the SNES debug memories each
     // frame. Off until a panel asks — 128 KiB per frame is not a cost to
     // pay while nobody is looking.
@@ -1624,6 +1636,12 @@ fn core_thread_main(
                     // The SNES grids follow per-line scroll, which the bundle
                     // keeps only while it captures the wide channels.
                     bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
+                }
+                CoreCommand::SetOrientationHint(hint) => {
+                    orientation_hint = hint;
+                    if let Some(l) = live_heights.as_mut() {
+                        l.set_hint(hint);
+                    }
                 }
                 CoreCommand::SetWidescreen(request) => {
                     // **The frame buffer has to grow with the picture.**
@@ -2245,6 +2263,22 @@ fn core_thread_main(
             if tile_grid_capture {
                 stepper.sprite_boxes((sink.width() as i32, sink.height() as i32), &mut sprites);
             }
+            // Ticket W34-04: the learner reads the same grids and sprites.
+            let heights = tile_grid_capture.then(|| {
+                let learner = live_heights.get_or_insert_with(|| {
+                    let mut l =
+                        crate::live_learn::LiveHeights::new(stepper.bg_layer_views().is_some());
+                    l.set_hint(orientation_hint);
+                    l
+                });
+                Box::new(learner.frame(
+                    &stepper,
+                    &bundle,
+                    input.load().ports[0],
+                    &tile_grids,
+                    &sprites,
+                ))
+            });
             bundle_writer.publish(bundle);
             let mut msg = FrameMsg {
                 governors: clocks.report(),
@@ -2350,6 +2384,7 @@ fn core_thread_main(
                 line_regs,
                 tile_grids,
                 sprites,
+                heights,
             };
             // Ticket W30-07: swap the picture for one from `run_ahead` frames
             // later. Last on purpose: every other field above was read from
@@ -2677,6 +2712,7 @@ mod tests {
             line_regs: Vec::new(),
             tile_grids: Vec::new(),
             sprites: Vec::new(),
+            heights: None,
         }
     }
 

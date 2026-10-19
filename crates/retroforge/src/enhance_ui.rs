@@ -203,7 +203,6 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     let mode = settings.mode;
     let enhancement = mode.enhancement_active();
     let profile_gated = mode.profile_gated_features_unlocked(profile_matched);
-    let diorama_gated = mode.profile_gated_features_unlocked(diorama_available);
 
     // Generic features need enhancement; profile features need
     // Game-Aware AND a match. Both reasons are distinguishable, because
@@ -218,16 +217,6 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     };
     let profiled = |enabled: bool| {
         if profile_gated {
-            (Availability::Available, enabled)
-        } else if !matches!(mode, Mode::GameAware) {
-            (Availability::NeedsMode("Game-Aware"), enabled)
-        } else {
-            (Availability::NeedsProfile, enabled)
-        }
-    };
-
-    let diorama_profiled = |enabled: bool| {
-        if diorama_gated {
             (Availability::Available, enabled)
         } else if !matches!(mode, Mode::GameAware) {
             (Availability::NeedsMode("Game-Aware"), enabled)
@@ -314,7 +303,9 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         loading_declared,
         "loading screens described in this game's profile",
     );
-    let (diorama_av, diorama_on) = diorama_profiled(settings.diorama);
+    // Ticket W34-04 (D-023): the Diorama needs no profile any more -- the
+    // heights are learned from play -- so it is an Enhanced-mode feature.
+    let (diorama_av, diorama_on) = generic(settings.diorama);
     // Ticket W16-04: unlike the toggles above, this row's "on" state IS
     // the trust ladder's own rung (D-004/ENHANCEMENT_RUNTIME.md §2a) — the
     // fog pass renders exactly when the heuristic is `Active`
@@ -455,7 +446,12 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         FeatureRow {
             id: "diorama",
             label: "Diorama: walls",
-            scope: "requires profile with collision",
+            // Painted or decoded heights are exact; learned ones are not.
+            scope: if diorama_available {
+                "from the profile's heights"
+            } else {
+                "approximate, visited areas only"
+            },
             enabled: diorama_on,
             availability: diorama_av,
             heuristic: None,
@@ -974,45 +970,51 @@ mod tests {
             .any(|l| l.contains("Atmosphere: fog")));
     }
 
-    /// Ticket W16-06: Diorama is gated on a THIRD fact narrower than
-    /// `profile_matched` — a matched Game-Aware profile with no collision
-    /// data must still read `NeedsProfile`, and only `diorama_available`
-    /// (Game-Aware + collision) makes it `Available` and names it on the
-    /// badge.
+    /// Ticket W34-04 (D-023): Diorama is an Enhanced-mode feature with no
+    /// profile needed. Whether the heights are exact (decoded collision or
+    /// painted `[heights]`) or learned from play only changes the badge
+    /// line: learned heights are labelled "approximate, visited areas only".
     #[test]
-    fn diorama_needs_game_aware_and_a_profile_with_collision_specifically() {
-        let mut s = settings(Mode::GameAware);
+    fn diorama_needs_enhanced_not_a_profile_and_says_when_it_is_approximate() {
+        let mut s = settings(Mode::Enhanced);
         s.sprite_overlay = false;
         s.deflicker = false;
         s.widescreen_decoded = false;
         s.full_level_view = false;
         s.diorama = true;
 
-        // Matched profile, but no collision -> NeedsProfile, not Available.
-        let rows = feature_rows(&s, &GameFacts::new(true, false, false));
-        let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
-        assert_eq!(diorama.availability, Availability::NeedsProfile);
-        assert!(!diorama.effective());
-        assert!(!badge_breakdown(&s, &GameFacts::new(true, false, false))
-            .iter()
-            .any(|l| l.contains("Diorama: walls")));
-
-        // Matched profile WITH collision -> Available, named on the badge.
-        let rows = feature_rows(&s, &GameFacts::new(true, true, false));
+        // No profile at all: available, and the badge carries the caveat.
+        let learned = GameFacts::new(false, false, false);
+        let rows = feature_rows(&s, &learned);
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
         assert_eq!(diorama.availability, Availability::Available);
         assert!(diorama.effective());
-        assert!(badge_breakdown(&s, &GameFacts::new(true, true, false))
-            .iter()
-            .any(|l| l.contains("Diorama: walls")));
+        assert!(
+            badge_breakdown(&s, &learned)
+                .iter()
+                .any(|l| l.contains("Diorama: walls")
+                    && l.contains("approximate, visited areas only"))
+        );
 
-        // Enhanced mode (not Game-Aware) says which thing is missing is
-        // the MODE, not the profile, even with diorama_available true —
-        // Enhanced simply cannot unlock a profile-gated feature.
-        let enhanced = settings(Mode::Enhanced);
-        let rows = feature_rows(&enhanced, &GameFacts::new(true, true, false));
+        // Painted or decoded heights: exact, so no caveat.
+        let exact = GameFacts::new(true, true, false);
+        let line = badge_breakdown(&s, &exact)
+            .into_iter()
+            .find(|l| l.contains("Diorama: walls"))
+            .expect("still named");
+        assert!(!line.contains("approximate"), "{line}");
+
+        // Game-Aware keeps it too; Accuracy never shows it (law 6).
+        let mut ga = settings(Mode::GameAware);
+        ga.diorama = true;
+        let rows = feature_rows(&ga, &learned);
+        assert!(rows.iter().find(|r| r.id == "diorama").unwrap().effective());
+        let mut acc = settings(Mode::Accuracy);
+        acc.diorama = true;
+        let rows = feature_rows(&acc, &learned);
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
-        assert_eq!(diorama.availability, Availability::NeedsMode("Game-Aware"));
+        assert_eq!(diorama.availability, Availability::NeedsMode("Enhanced"));
+        assert!(!diorama.effective());
     }
 
     /// Ticket W16-14: "Mode 7 as 3D" needs Enhanced/Game-Aware (law 6 —

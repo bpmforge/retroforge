@@ -2,7 +2,7 @@
 //!
 //! Settings only; there is no rendering here. The preset turns on, together,
 //! what already exists: the W30-04 lens (glow, miniature focus, soft shadows),
-//! Diorama walls (live from a painted height table, or decoded), and the
+//! Diorama walls (heights learned from play, painted, or decoded), and the
 //! W30-05 camera tilted down and zoomed in, following the player. Turning it
 //! off puts back what the player had, which [`apply`] hands back as a
 //! [`Remembered`].
@@ -74,8 +74,10 @@ pub fn unavailable_reason(settings: &GameSettings, facts: &GameFacts) -> Option<
     match row.availability {
         Availability::Available => None,
         Availability::NeedsMode(mode) => Some(format!("Needs {mode} mode.")),
+        // Diorama learns its heights from play (D-023), so it never waits for
+        // a profile; these arms are for a row that says otherwise.
         Availability::NeedsProfile | Availability::NeedsGameState(_) => {
-            Some("Needs a height table \u{2014} paint one in the Profile Builder.".to_owned())
+            Some("Diorama is not available for this game right now.".to_owned())
         }
     }
 }
@@ -152,31 +154,28 @@ mod tests {
         s
     }
 
-    /// Gating: the preset is exactly as available as Diorama, and says why
-    /// not in the words the Profile Builder points at.
+    /// Gating: the preset is exactly as available as Diorama, which needs
+    /// Enhanced (or Game-Aware) and no profile or painted table (D-023).
     #[test]
-    fn the_preset_is_available_only_where_diorama_is_and_explains_otherwise() {
-        let table = GameFacts::new(true, false, false);
-        let mut with_table = table;
-        with_table.diorama_available = true;
-
-        // Game-Aware with a table (or a decoded level): available.
-        assert_eq!(
-            unavailable_reason(&settings(Mode::GameAware), &with_table),
-            None
-        );
-        // Game-Aware, matched profile, nothing to raise: points at the painter.
-        let why = unavailable_reason(&settings(Mode::GameAware), &table).unwrap();
-        assert!(why.contains("height table") && why.contains("Profile Builder"));
-        // No profile at all: same pointer.
+    fn the_preset_is_available_wherever_diorama_is_and_names_the_mode_otherwise() {
+        let table = GameFacts::new(true, true, false);
         let none = GameFacts::new(false, false, false);
-        assert!(unavailable_reason(&settings(Mode::GameAware), &none).is_some());
-        // Wrong mode: names the mode, and Accuracy can never use it (law 6).
+        for mode in [Mode::Enhanced, Mode::GameAware] {
+            // With painted heights, a decoded level, or nothing at all.
+            assert_eq!(unavailable_reason(&settings(mode), &table), None);
+            assert_eq!(unavailable_reason(&settings(mode), &none), None);
+        }
+        // Accuracy can never use it (law 6), and says which mode does.
         assert_eq!(
-            unavailable_reason(&settings(Mode::Enhanced), &with_table).as_deref(),
-            Some("Needs Game-Aware mode.")
+            unavailable_reason(&settings(Mode::Accuracy), &none).as_deref(),
+            Some("Needs Enhanced mode.")
         );
-        assert!(unavailable_reason(&settings(Mode::Accuracy), &with_table).is_some());
+        // The old pointer at the Profile Builder is gone.
+        for mode in [Mode::Accuracy, Mode::Enhanced, Mode::GameAware] {
+            if let Some(why) = unavailable_reason(&settings(mode), &none) {
+                assert!(!why.contains("paint"), "{why}");
+            }
+        }
     }
 
     /// Settings: one click sets exactly the documented values and the rows

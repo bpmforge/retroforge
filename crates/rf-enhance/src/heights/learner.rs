@@ -169,6 +169,8 @@ pub struct HeightLearner {
     dynamics: Dynamics,
     dirty: Vec<TileKey>,
     hits: Vec<(TileKey, TileCell)>,
+    /// The layers the last frame called backdrop planes.
+    backdrop: [bool; 4],
 }
 
 impl Default for HeightLearner {
@@ -301,6 +303,7 @@ impl HeightLearner {
             dynamics: Dynamics::default(),
             dirty: Vec::new(),
             hits: Vec::new(),
+            backdrop: [false; 4],
         }
     }
 
@@ -379,11 +382,37 @@ impl HeightLearner {
         out
     }
 
+    /// Which of `grids` is the playfield the learner reads collision from
+    /// (the widest band of the fastest layers, as of the last frame), if any.
+    /// The renderer extrudes this grid and no other.
+    #[must_use]
+    pub fn foreground_index(&self, grids: &[TileGrid]) -> Option<usize> {
+        let fg = Self::foreground(grids, &self.backdrop)?;
+        grids.iter().position(|g| std::ptr::eq(g, fg))
+    }
+
+    /// How much slower than the playfield the slowest backdrop plane scrolls,
+    /// 0..1 (`None` when no layer is a backdrop yet). Measured travel, not a
+    /// guess: the renderer sets the plane back by `1 - ratio`.
+    #[must_use]
+    pub fn backdrop_ratio(&self) -> Option<f32> {
+        let fastest = (0..4)
+            .filter(|&l| self.motion[l].band.is_some())
+            .map(|l| self.motion[l].travel)
+            .max()
+            .filter(|f| *f > 0)?;
+        (0..4)
+            .filter(|&l| self.backdrop[l] && self.motion[l].band.is_some())
+            .map(|l| self.motion[l].travel as f32 / fastest as f32)
+            .min_by(f32::total_cmp)
+    }
+
     /// Fold one frame in.
     pub fn observe(&mut self, f: &FrameObs<'_>) {
         self.frames = self.frames.wrapping_add(1);
         self.dirty.clear();
         let backdrop = self.update_motion(f.grids);
+        self.backdrop = backdrop;
         self.count_sightings(f.grids, &backdrop);
         if f.orientation != Orientation::Unknown {
             self.watch_player(f, &backdrop);
