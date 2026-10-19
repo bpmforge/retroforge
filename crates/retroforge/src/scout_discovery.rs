@@ -47,9 +47,12 @@ pub const TUNE_FRAMES: u32 = 1100;
 pub const TRIAL_STEP_PX: u16 = 4;
 /// Y candidates tried.
 pub const MAX_Y: usize = 16;
-/// A trial that grew the canvases to less than this many screens did not
-/// follow the player anywhere.
-const MIN_SCREENS: usize = 2;
+/// A trial that grew the canvases to less than this many tenths of a screen
+/// did not follow the player anywhere. (W35-03: 2.0 screens became 1.4: a game
+/// whose player walks one pixel a frame, Castlevania, shows 1.5 screens after
+/// the 300 trial frames, with the first 80 of them spent before the camera
+/// starts; a trial that did not follow shows less than one.)
+const MIN_SCREEN_TENTHS: usize = 14;
 
 /// A vertical trial that grew the canvases to this many fifths of a screen
 /// (counting the first screen as five) moved the screen: the Y word is the
@@ -237,6 +240,11 @@ struct Hold {
     standing: u8,
 }
 
+/// The finder's confidence a gate needs to be written as a `start_when` row
+/// (W35-03: its confidence is the steady share times what it does at the cuts,
+/// not the old constancy times difference, so 0.9 became 0.7).
+const MIN_GATE_CONFIDENCE: f32 = 0.7;
+
 /// A gate that is false for a stretch of ordinary play keeps the scout from
 /// ever starting. The share of a scouting run's frames a gate's value must hold
 /// on (the run moves the player through every pose the level allows).
@@ -384,7 +392,7 @@ pub fn discover(
         .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
     let bands = scout.places_by_bands();
     let (w, h) = ctx.size;
-    let floor = MIN_SCREENS * usize::from(w) * usize::from(h);
+    let floor = MIN_SCREEN_TENTHS * usize::from(w) * usize::from(h) / 10;
 
     // Every recipe: a way to move (each player word the finder named, and
     // `walk` where the console is placed by bands) with no hold, and with each
@@ -469,6 +477,33 @@ pub fn discover(
             }
         }
         if out.extent >= floor {
+            // W35-03: a recipe that scrolls the screen when the scout does NOT
+            // move the player is not following anything: a hold that makes the
+            // game walk Simon by itself (Castlevania, Y poked to the top of
+            // the screen) passed every trial and never went left. The control
+            // is the same recipe with a step of 0.
+            if plan.strategy == ScoutStrategy::PlayerMove {
+                let mut control = plan.clone();
+                control.step_px = 0;
+                control.hold = hold.as_ref().map(|h| h.pokes.clone()).unwrap_or_default();
+                let c = run(&mut scout, control, &ctx)?;
+                report.trials.push(format!(
+                    "{:?} {:?} control (step 0, same hold): extent {} width {} died {} after {} frames",
+                    plan.strategy,
+                    player.map(|p| p.lo),
+                    c.extent,
+                    scout.width(),
+                    c.died,
+                    c.frames
+                ));
+                // Sideways only: a hold may move a vertical camera by itself.
+                if scout.width() * 10 >= usize::from(w) * MIN_SCREEN_TENTHS {
+                    report
+                        .trials
+                        .push("  scrolled with no poke at all: not following the player".into());
+                    continue;
+                }
+            }
             best = Some((player, plan, hold, out));
             break;
         }
@@ -701,7 +736,7 @@ fn skeleton(
     for g in gates
         .iter()
         .take(2)
-        .filter(|g: &&GateCandidate| g.confidence >= 0.9)
+        .filter(|g: &&GateCandidate| g.confidence >= MIN_GATE_CONFIDENCE)
     {
         rows.push(Row {
             role: "start_when",
@@ -725,7 +760,9 @@ fn skeleton(
         },
         step_px: if walk { 1 } else { TRIAL_STEP_PX },
         frame_budget: 3000,
-        stall_frames: 60,
+        // The trials' own patience (W35-03: 60 stalled Castlevania's scout at
+        // its first frame; the camera starts to follow a few dozen frames in).
+        stall_frames: plan.stall_frames,
         settle_frames: 60,
         dirs: if walk {
             vec!["right"]

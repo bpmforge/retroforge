@@ -130,7 +130,7 @@ const OTHER_PLAY: Option<u64> = Some(u64::MAX - 2);
 /// Camera-moving frames that make another scene a room the player played in.
 pub const MIN_SIBLING_FRAMES: u32 = 60;
 /// Most distinct values a mode byte takes while the player plays.
-pub const MAX_PLAYED_VALUES: usize = 3;
+pub const MAX_PLAYED_VALUES: usize = 8;
 /// Most distinct values a mode byte takes over the whole session.
 pub const MAX_MODE_VALUES: usize = 24;
 /// The share of a transition's frames a gate's value must be gone from, where
@@ -195,6 +195,28 @@ pub struct GateCandidate {
     /// Share of the other frames it read something else.
     pub differs: f32,
     pub confidence: f32,
+    /// W35-03: of the byte's changes, the share made at a scene cut (the
+    /// frames the tracker settled, the cut itself, a few frames either side).
+    /// A mode byte changes there; a value that merely sits still through play
+    /// also changes in menus and animations, away from any cut.
+    pub cut_sync: f32,
+    /// W35-03: of the scene cuts, the share the byte's value differs across
+    /// (compared 120 frames before and 60 after). A byte that was set once
+    /// when the game began is across none of them but the first.
+    pub cut_cover: f32,
+    /// W35-03: how many times the byte changed per cut it changed across,
+    /// less one, over two, capped at 1 (a state machine steps through several
+    /// states at a transition: load, fade, run; a datum a level sets
+    /// changes once).
+    pub cut_steps: f32,
+    /// W35-03: changes made away from any cut (a stack byte, a timer, a
+    /// pointer: thousands; a mode byte: a handful).
+    pub off_cut: u32,
+    /// W35-03: the evidence above, with `differs` and the doors, as one score
+    /// in 0..=1 (the ranking key).
+    pub contrast: f32,
+    /// How many cuts the cover is over.
+    pub cuts: u32,
 }
 
 /// Everything the session has shown so far.
@@ -247,6 +269,32 @@ struct SceneHist {
     bins: Vec<u16>,
 }
 
+/// Frames after a cut (and around the frames the tracker was still settling)
+/// in which a byte's change counts as made AT the cut (W35-03).
+const CUT_ZONE: u64 = 30;
+/// A change this many frames before the settling began belongs to the cut too
+/// (a mode byte is written a few frames before the picture goes).
+const CUT_PRE: u64 = 20;
+/// Most cuts kept (each holds the work RAM on both sides); the oldest go first.
+const MAX_CUTS: usize = 40;
+/// A mode byte moves before the picture does (Super Mario World writes the
+/// "leave the level" mode ~100 frames before the scene key changes) and after
+/// it (a fade-in): the RAM compared across a cut is the RAM this many frames
+/// before it was noticed and this many after.
+const CUT_LEAD: usize = 120;
+const CUT_LAG: u64 = 60;
+
+/// One cut between two scenes the tracker named, with the work RAM
+/// [`CUT_LEAD`] frames before it was noticed and [`CUT_LAG`] frames after.
+#[derive(Debug, Clone)]
+struct Cut {
+    from: u64,
+    to: u64,
+    due: u64,
+    pre: Vec<u8>,
+    post: Option<Vec<u8>>,
+}
+
 /// Most (low, high) pairs kept: a counter that wraps while a dozen others
 /// tick is a pair per tick, and a long session must not grow without bound.
 const MAX_PAIRS: usize = 200_000;
@@ -264,6 +312,8 @@ pub struct ScoutFinder {
     quiet_run: Vec<u8>,
     prev_scroll: Vec<Option<u8>>,
     prev_scroll_y: Vec<Option<u8>>,
+    /// Every x write of the previous frame, per layer.
+    prev_scroll_all: Vec<Vec<u8>>,
     prev_pad: Pad,
     prev_jump: u8,
     // player X
@@ -316,6 +366,23 @@ pub struct ScoutFinder {
     /// Per scene, the frames the camera moved after the player first pressed a
     /// direction (a title that scrolls by itself is not play).
     scene_play: HashMap<Option<u64>, u32>,
+    // gate contrast (W35-03)
+    /// The last scene the tracker named, the work RAM on that scene's last
+    /// frame, the frame the tracker began settling (if it is), and the last
+    /// frame of the zone around a cut.
+    /// Per scene, the frames inside a cut's zone (a mode byte is allowed to be
+    /// anything on them).
+    scene_zone: HashMap<Option<u64>, u32>,
+    cut_key: Option<u64>,
+    cut_ring: std::collections::VecDeque<Vec<u8>>,
+    settle_start: Option<u64>,
+    zone_until: u64,
+    cuts: Vec<Cut>,
+    /// Per byte: frames it changed on, those inside a cut's zone, and the
+    /// frame of its last change outside one (0: none yet).
+    g_changes: Vec<u32>,
+    g_cut_changes: Vec<u32>,
+    g_last_off: Vec<u64>,
 }
 
 impl ScoutFinder {
@@ -331,6 +398,7 @@ impl ScoutFinder {
             quiet_run: vec![0; len],
             prev_scroll: vec![None; layers.max(1)],
             prev_scroll_y: vec![None; layers.max(1)],
+            prev_scroll_all: Vec::new(),
             prev_pad: Pad::Idle,
             prev_jump: 0,
             moving: 0,
@@ -366,6 +434,15 @@ impl ScoutFinder {
             scenes: HashMap::new(),
             scene_moving: HashMap::new(),
             scene_play: HashMap::new(),
+            scene_zone: HashMap::new(),
+            cut_key: None,
+            cut_ring: std::collections::VecDeque::new(),
+            settle_start: None,
+            zone_until: 0,
+            cuts: Vec::new(),
+            g_changes: vec![0; len],
+            g_cut_changes: vec![0; len],
+            g_last_off: vec![0; len],
         }
     }
 
@@ -422,13 +499,37 @@ impl ScoutFinder {
     /// frame (0 when none did).
     fn camera_delta(&mut self, scroll: &[(&[u8], &[u8])]) -> i16 {
         let mut out = 0i16;
-        for (prev, (xs, _)) in self.prev_scroll.iter_mut().zip(scroll) {
+        if self.prev_scroll_all.len() < scroll.len() {
+            self.prev_scroll_all.resize(scroll.len(), Vec::new());
+        }
+        for ((prev, all), (xs, _)) in self
+            .prev_scroll
+            .iter_mut()
+            .zip(&mut self.prev_scroll_all)
+            .zip(scroll)
+        {
             let Some(&now) = xs.last() else { continue };
-            if let Some(before) = prev.replace(now) {
-                let d = i16::from(now.wrapping_sub(before) as i8);
-                if out == 0 && d != 0 {
-                    out = d;
-                }
+            let mut d = prev
+                .replace(now)
+                .map_or(0, |before| i16::from(now.wrapping_sub(before) as i8));
+            // W35-03: a game with a status bar writes the scroll register
+            // again after the game's own split (Castlevania: four writes of
+            // the camera, two of the bar's zero, every frame), and the last
+            // write is the bar's. The write in the same place in the sequence
+            // as last frame's, when the frame wrote as many, is the one that
+            // moved.
+            if d == 0 && all.len() == xs.len() {
+                d = xs
+                    .iter()
+                    .zip(all.iter())
+                    .map(|(&n, &b)| i16::from(n.wrapping_sub(b) as i8))
+                    .find(|&d| d != 0)
+                    .unwrap_or(0);
+            }
+            all.clear();
+            all.extend_from_slice(xs);
+            if out == 0 && d != 0 {
+                out = d;
             }
         }
         out
@@ -764,10 +865,83 @@ impl ScoutFinder {
         }
     }
 
+    /// Track the scene cuts and, per byte, whether its changes fall at them.
+    fn cut_frame(&mut self, f: &Frame<'_>, n: usize) -> bool {
+        let frame = self.frames;
+        match f.scene {
+            None => {
+                self.settle_start.get_or_insert(frame);
+                self.zone_until = frame + CUT_ZONE;
+            }
+            Some(k) => {
+                if let Some(from) = self.cut_key.filter(|&from| from != k) {
+                    self.record_cut(from, k, n);
+                }
+                self.cut_key = Some(k);
+                self.settle_start = None;
+            }
+        }
+        // The RAM of the last CUT_LEAD frames, and the "after" of the cuts
+        // whose lag has passed.
+        let mut snap = if self.cut_ring.len() > CUT_LEAD {
+            self.cut_ring.pop_front().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        snap.clear();
+        snap.extend_from_slice(&f.ram[..n]);
+        self.cut_ring.push_back(snap);
+        for c in self.cuts.iter_mut().filter(|c| c.post.is_none()) {
+            if frame >= c.due {
+                c.post = Some(f.ram[..n].to_vec());
+            }
+        }
+        let in_zone = f.scene.is_none() || frame <= self.zone_until;
+        let m = n.min(self.prev.len());
+        for b in 0..m {
+            if f.ram[b] != self.prev[b] {
+                self.g_changes[b] = self.g_changes[b].saturating_add(1);
+                if in_zone {
+                    self.g_cut_changes[b] = self.g_cut_changes[b].saturating_add(1);
+                } else {
+                    self.g_last_off[b] = frame;
+                }
+            }
+        }
+        in_zone
+    }
+
+    fn record_cut(&mut self, from: u64, to: u64, n: usize) {
+        let frame = self.frames;
+        self.zone_until = frame + CUT_ZONE;
+        // Changes a few frames before the settling began were the cut's.
+        let start = self.settle_start.unwrap_or(frame).saturating_sub(CUT_PRE);
+        for b in 0..n.min(self.g_last_off.len()) {
+            if self.g_last_off[b] != 0 && self.g_last_off[b] >= start {
+                self.g_cut_changes[b] = self.g_cut_changes[b].saturating_add(1);
+                self.g_last_off[b] = 0;
+            }
+        }
+        if self.cuts.len() >= MAX_CUTS {
+            self.cuts.remove(0);
+        }
+        self.cuts.push(Cut {
+            from,
+            to,
+            due: frame + CUT_LAG,
+            pre: self.cut_ring.front().cloned().unwrap_or_default(),
+            post: None,
+        });
+    }
+
     /// `played`: the player has the pad in hand and the screen moved (on
     /// either axis).
     fn gate_frame(&mut self, f: &Frame<'_>, n: usize, cd: i16, played: bool) {
+        let in_zone = self.cut_frame(f, n);
         let key = f.scene;
+        if in_zone {
+            *self.scene_zone.entry(key).or_insert(0) += 1;
+        }
         if cd != 0 && cd.abs() <= MAX_STEP {
             *self.scene_moving.entry(key).or_insert(0) += 1;
         }
@@ -968,6 +1142,13 @@ impl ScoutFinder {
     }
 
     fn gates(&self) -> Vec<GateCandidate> {
+        self.gates_ranked(4 * KEEP)
+    }
+
+    /// The gate candidates in rank order, `keep` of them (the discovery tests
+    /// print more than [`Observed`] keeps, to see where a known byte ranks).
+    #[must_use]
+    pub fn gates_ranked(&self, keep: usize) -> Vec<GateCandidate> {
         let Some((level_key, _)) = self
             .scene_moving
             .iter()
@@ -1016,6 +1197,27 @@ impl ScoutFinder {
         if level.frames < MIN_LEVEL_FRAMES || other_frames < MIN_OTHER_FRAMES {
             return Vec::new();
         }
+        // The cuts whose "after" has been seen (W35-03), and of them the ones
+        // between playing (the level, the rooms the player scrolled in) and
+        // not (menus, doors, fades): the transitions a start gate is about.
+        let playing = |k: u64| {
+            Some(k) == *level_key
+                || (self.scene_play.get(&Some(k)).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES
+                    && self
+                        .scenes
+                        .get(&Some(k))
+                        .is_none_or(|h| h.frames >= MIN_ROOM_FRAMES))
+        };
+        let judged_all: Vec<(&Vec<u8>, &Vec<u8>, bool)> = self
+            .cuts
+            .iter()
+            .filter_map(|c| {
+                c.post
+                    .as_ref()
+                    .map(|post| (&c.pre, post, playing(c.from) != playing(c.to)))
+            })
+            .collect();
+        let level_zone = self.scene_zone.get(level_key).copied().unwrap_or(0);
         let mut out = Vec::new();
         for b in 0..self.len {
             let bins = &level.bins[b * 256..b * 256 + 256];
@@ -1025,7 +1227,14 @@ impl ScoutFinder {
             };
             #[allow(clippy::cast_precision_loss)]
             let constancy = f32::from(count) / level.frames as f32;
-            if constancy < MIN_CONSTANCY {
+            // W35-03: the frames of a cut's zone (a fade-in, a loading mode
+            // that is still running when the scene key already says "level")
+            // are not held against the byte.
+            let off_mode = level.frames.saturating_sub(u32::from(count));
+            let unexplained = off_mode.saturating_sub(level_zone);
+            #[allow(clippy::cast_precision_loss)]
+            let steady = 1.0 - unexplained as f32 / level.frames as f32;
+            if steady < MIN_CONSTANCY {
                 continue;
             }
             #[allow(clippy::cast_precision_loss)]
@@ -1089,30 +1298,84 @@ impl ScoutFinder {
                 continue;
             }
             #[allow(clippy::cast_possible_truncation)]
+            let mode_u8 = mode as u8;
+            // The share of cuts the byte's value differs across: over all of
+            // them, and over those between playing and not playing, which
+            // count as much together as the rest do.
+            let cover = |only_boundary: bool| -> Option<f32> {
+                let (mut n, mut hit) = (0u32, 0u32);
+                for (pre, post, boundary) in &judged_all {
+                    if *boundary || !only_boundary {
+                        n += 1;
+                        hit += u32::from(pre.get(b) != post.get(b));
+                    }
+                }
+                #[allow(clippy::cast_precision_loss)]
+                (n > 0).then(|| hit as f32 / n as f32)
+            };
+            let all = cover(false).unwrap_or(0.0);
+            let cut_cover = cover(true).map_or(all, |bd| 0.5 * (all + bd));
+            #[allow(clippy::cast_possible_truncation)]
+            let cuts = judged_all.len() as u32;
+            #[allow(clippy::cast_precision_loss)]
+            let cut_sync = if self.g_changes[b] == 0 {
+                0.0
+            } else {
+                self.g_cut_changes[b].min(self.g_changes[b]) as f32 / self.g_changes[b] as f32
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let cut_steps = {
+                let covered = (all * cuts as f32).round().max(1.0);
+                ((self.g_cut_changes[b] as f32 / covered - 1.0) / 2.0).clamp(0.0, 1.0)
+            };
+            // Few changes away from the cuts: a stack byte, a timer or a
+            // pointer changes dozens of times, a mode byte a handful.
+            let off_cut = self.g_changes[b].saturating_sub(self.g_cut_changes[b]);
+            #[allow(clippy::cast_precision_loss)]
+            let calm = 1.0 / (1.0 + off_cut as f32 / 16.0);
+            let contrast = (0.35 * cut_cover
+                + 0.2 * cut_sync
+                + 0.25 * cut_steps
+                + 0.1 * differs
+                + 0.1 * transit_differs)
+                * (0.5 + 0.5 * calm);
             out.push((
                 GateCandidate {
                     offset: b,
-                    value: mode as u8,
+                    value: mode_u8,
                     constancy,
                     differs,
-                    confidence: constancy * differs,
+                    // Held through steady play, and told from the rest of the
+                    // session by what it does at the cuts.
+                    confidence: steady.min(1.0) * (0.5 + 0.5 * contrast),
+                    cut_sync,
+                    cut_cover,
+                    cut_steps,
+                    contrast,
+                    off_cut,
+                    cuts,
                 },
                 (reacts, distinct, transit_differs),
             ));
         }
-        // Equally good bytes (to a tenth) are told apart by which of them
-        // lets go in a door or a fade: a mode byte does, a flag set once at the
-        // start of the game does not.
+        // Contrast first (W35-03): a mode byte changes at the cuts between
+        // playing and not playing, and away from them it stays put. Bytes that
+        // merely sit still through play also change in menus and animations
+        // with no cut near. Equally good bytes (to a tenth) are told apart by
+        // which of them lets go in a door or a fade: a mode byte does, a flag
+        // set once at the start of the game does not.
         out.sort_by(|(a, (ar, ad, at)), (b, (br, bd, bt))| {
+            let (xa, xb) = ((a.contrast * 10.0).round(), (b.contrast * 10.0).round());
             let (ac, bc) = ((a.confidence * 10.0).round(), (b.confidence * 10.0).round());
-            bc.total_cmp(&ac)
+            xb.total_cmp(&xa)
                 .then(br.cmp(ar))
+                .then(bc.total_cmp(&ac))
                 .then(ad.cmp(bd))
                 .then(bt.total_cmp(at))
                 .then(a.offset.cmp(&b.offset))
         });
         let mut out: Vec<GateCandidate> = out.into_iter().map(|(g, _)| g).collect();
-        out.truncate(4 * KEEP);
+        out.truncate(keep);
         out
     }
 }
@@ -1208,6 +1471,10 @@ mod tests {
         eased: bool,
         /// The player's X on the last frames (the eased camera follows 2 late).
         hist: Vec<i32>,
+        /// Level frames so far, and how many of the first ones the mode byte
+        /// at 0x73 reads 3 on (a fade-in) before it reads 5.
+        lvl_t: u32,
+        fade: u32,
     }
 
     impl Game {
@@ -1223,6 +1490,8 @@ mod tests {
                 flag: 0,
                 eased: false,
                 hist: Vec::new(),
+                lvl_t: 0,
+                fade: 2,
             };
             g.store();
             g
@@ -1281,8 +1550,21 @@ mod tests {
                     }
                 }
                 self.ram[0x70] = 1;
+                // A byte a level sets once (0x72), and a mode that steps
+                // through states at the cut (0x73: 3, 4, then 5).
+                self.lvl_t += 1;
+                self.ram[0x72] = 5;
+                self.ram[0x73] = if self.lvl_t <= self.fade {
+                    3
+                } else if self.lvl_t <= self.fade + 2 {
+                    4
+                } else {
+                    5
+                };
             } else {
                 self.ram[0x70] = 0;
+                self.ram[0x72] = 0;
+                self.ram[0x73] = 0;
             }
             self.store();
         }
@@ -1336,13 +1618,24 @@ mod tests {
     }
 
     fn run_finder(split_hi: bool, mirror_only: bool) -> ScoutFinder {
+        run_finder_with(split_hi, mirror_only, false)
+    }
+
+    /// `hud`: the game writes the scroll register four times with the camera
+    /// and twice more with the status bar's zero, every frame (Castlevania).
+    fn run_finder_with(split_hi: bool, mirror_only: bool, hud: bool) -> ScoutFinder {
         let mut finder = ScoutFinder::new(0x100, 1);
         // Without a wall the player starts on the camera's follow line, so
         // the camera moves with his first step.
         let mut g = Game::new(split_hi, if mirror_only { 120 } else { 40 });
         let mut feed = |g: &Game, pad: Pad, jump: bool, scene: u64| {
             let jump = u8::from(jump);
-            let scroll = [g.ram[0x20]];
+            let scroll: Vec<u8> = if hud {
+                let c = g.ram[0x20];
+                vec![c, c, c, c, 0, 0]
+            } else {
+                vec![g.ram[0x20]]
+            };
             finder.observe(&Frame {
                 ram: &g.ram,
                 pad,
@@ -1390,10 +1683,13 @@ mod tests {
         assert_eq!((p.lo, p.hi), (0x10, Some(0x11)), "{o:?}");
         let y = o.ys.iter().find(|y| y.offset == 0x50).expect("y");
         assert_eq!((y.standing, y.up), (0x80, -1));
+        // The mode byte that steps at the cut (0x73) ranks first; the plain
+        // level flag (0x70) is still a candidate.
         assert_eq!(
             o.gates.first().map(|g| (g.offset, g.value)),
-            Some((0x70, 1))
+            Some((0x73, 5))
         );
+        assert!(o.gates.iter().any(|g| (g.offset, g.value) == (0x70, 1)));
         assert!(o.ready());
     }
 
@@ -1506,11 +1802,75 @@ mod tests {
     #[test]
     fn a_level_after_many_scenes_still_has_a_gate() {
         let o = run_scenario(10, false).observed();
-        assert_eq!(
-            o.gates.first().map(|g| (g.offset, g.value)),
-            Some((0x70, 1)),
+        assert!(
+            o.gates.iter().any(|g| (g.offset, g.value) == (0x70, 1)),
             "{:?}",
             o.gates
+        );
+    }
+
+    /// Ticket W35-03: a mode byte steps through several states at a cut; a
+    /// byte the level sets once changes once. Both sit still through play and
+    /// differ in the title, so the old score could not tell them apart.
+    #[test]
+    fn a_byte_that_steps_at_the_cut_outranks_one_set_once() {
+        let o = run_scenario(1, false).observed();
+        let rank = |off: usize| o.gates.iter().position(|g| g.offset == off);
+        let (stepping, once) = (rank(0x73), rank(0x72));
+        assert!(stepping.is_some() && once.is_some(), "{:?}", o.gates);
+        assert!(stepping < once, "{:?}", o.gates);
+        let g = o.gates.iter().find(|g| g.offset == 0x73).expect("0x73");
+        assert!(g.cut_steps > 0.9 && g.cut_cover > 0.9, "{g:?}");
+    }
+
+    /// Ticket W35-03: a mode byte still on its loading value for the first
+    /// frames after the scene key says "level" (a fade-in) is not held against
+    /// it: the frames of the cut's zone are excused.
+    #[test]
+    fn a_fade_in_after_the_cut_is_not_held_against_the_gate() {
+        let mut finder = ScoutFinder::new(0x100, 1);
+        let mut g = Game::new(false, 40);
+        g.fade = 28;
+        let mut feed = |g: &Game, pad: Pad, scene: u64| {
+            let scroll = [g.ram[0x20]];
+            finder.observe(&Frame {
+                ram: &g.ram,
+                pad,
+                jump: 0,
+                scroll: &[(&scroll, &[0])],
+                scene: Some(scene),
+            });
+        };
+        for _ in 0..100 {
+            g.frame(Pad::Idle, false, false);
+            feed(&g, Pad::Idle, 1);
+        }
+        for _ in 0..40 {
+            g.frame(Pad::Left, false, true);
+            feed(&g, Pad::Left, 2);
+        }
+        for _ in 0..300 {
+            g.frame(Pad::Right, false, true);
+            feed(&g, Pad::Right, 2);
+        }
+        let o = finder.observed();
+        let gate = o.gates.iter().find(|g| g.offset == 0x73).expect("0x73");
+        assert_eq!(gate.value, 5, "{gate:?}");
+        assert!(gate.constancy < MIN_CONSTANCY, "raw share {gate:?}");
+    }
+
+    /// Ticket W35-03: a game whose status bar writes the scroll register after
+    /// the camera's own split (the last write each frame is the bar's zero)
+    /// still has its camera step seen, so the player is named.
+    #[test]
+    fn a_status_bar_write_after_the_camera_does_not_hide_the_camera() {
+        let plain = run_finder_with(false, false, false).observed();
+        let hud = run_finder_with(false, false, true).observed();
+        let p = hud.players.first().expect("a player behind the status bar");
+        assert_eq!((p.lo, p.hi), (0x10, Some(0x11)), "{hud:?}");
+        assert_eq!(
+            hud.players.first().map(|p| p.lo),
+            plain.players.first().map(|p| p.lo)
         );
     }
 }

@@ -62,6 +62,8 @@ pub struct Rig {
     pub find: Option<retroforge::scout_find::ScoutFind>,
     /// What it reported.
     pub find_out: Vec<retroforge::scout_find::Out>,
+    /// The scroll writes of the last frame (NES), x then y low bytes.
+    pub last_scroll: Vec<(u8, u8)>,
 }
 
 pub fn roms_dir() -> String {
@@ -111,6 +113,7 @@ impl Rig {
             rom,
             find: None,
             find_out: Vec::new(),
+            last_scroll: Vec::new(),
         })
     }
 
@@ -154,10 +157,12 @@ impl Rig {
                 .live
                 .observe_frame(&bundle, &FrameFeed::bands().with_scene_hints(hints));
             let (mut xs, mut ys) = (Vec::new(), Vec::new());
+            self.last_scroll.clear();
             for e in &bundle.events {
                 if let CoreEvent::ScrollWrite { x, y, .. } = e {
                     xs.push((x & 0xFF) as u8);
                     ys.push((y & 0xFF) as u8);
+                    self.last_scroll.push(((x & 0xFF) as u8, (y & 0xFF) as u8));
                 }
             }
             scroll = vec![(xs, ys)];
@@ -400,6 +405,13 @@ pub fn observe(
         );
     }
     describe(&rig.finder.observed());
+    // W35-03: the gate ranking with its contrast evidence (more than the finder keeps).
+    for (i, g) in rig.finder.gates_ranked(200).iter().enumerate() {
+        println!(
+            "RANK {i:3} off {:#06x} = {:#04x} constancy {:.3} differs {:.2} sync {:.2} cover {:.2} steps {:.2} off {} cuts {}",
+            g.offset, g.value, g.constancy, g.differs, g.cut_sync, g.cut_cover, g.cut_steps, g.off_cut, g.cuts
+        );
+    }
     for off in probes {
         println!("{}", rig.finder.probe(*off));
     }
@@ -636,6 +648,57 @@ pub fn sm_find_table(
     rig.script(SM_SHAFT);
     after_shaft(rig);
     rig.script(SM_PLAY);
+    let t0 = std::time::Instant::now();
+    let mut found = None;
+    // Bounded: `secs` seconds of idle frames.
+    while t0.elapsed() < std::time::Duration::from_secs(secs) && found.is_none() {
+        rig.script("w30");
+        for out in rig.find_out.drain(..) {
+            if let Out::Done(r) = out {
+                found = Some(r);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    found.expect("an answer").expect("a table, not an error")
+}
+
+// ---- Castlevania (W35-03) ----------------------------------------------------------------------
+
+pub const CV: (&str, &str, &str) = (
+    "nes",
+    "Castlevania (USA).zip",
+    "../../profiles/nes/castlevania/profile.toml",
+);
+
+/// Boot, title (Start), the intro walk to the gate: Simon stands in the courtyard, stage 1.
+pub const CV_TO_STAGE: &str = "w400 S6 w600";
+/// Left to the wall, six standing jumps (A), then right toward the door with a jump every 60
+/// frames (Simon cannot turn in the air): the first half, up to the middle of the courtyard.
+pub const CV_PLAY_HEAD: &str =
+    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30";
+/// The second half: on to the door, through it into the entrance hall, a few steps in, stand.
+pub const CV_PLAY_TAIL: &str =
+    "R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R60 R60 R60 w60";
+pub const CV_PLAY: &str = concat!(
+    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30",
+    " ",
+    "R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R60 R60 R60 w60"
+);
+
+/// The finder as the core thread runs it ("Find scout settings for this game"), from the
+/// courtyard: the session, then standing still until the trials answer. `mid_block` runs between
+/// the two halves of the walk (a snapshot there starts a scout in the middle of block 1).
+pub fn cv_find_table(
+    rig: &mut Rig,
+    secs: u64,
+    mid_block: &mut dyn FnMut(&mut Rig),
+) -> Box<rf_enhance::scout_finder::Skeleton> {
+    use retroforge::scout_find::{Out, ScoutFind};
+    rig.find = Some(ScoutFind::new(false));
+    rig.script(CV_PLAY_HEAD);
+    mid_block(rig);
+    rig.script(CV_PLAY_TAIL);
     let t0 = std::time::Instant::now();
     let mut found = None;
     // Bounded: `secs` seconds of idle frames.
