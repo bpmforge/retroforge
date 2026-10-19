@@ -2852,6 +2852,128 @@ fn shot_diorama_light_smw(readme: &mut Vec<String>) {
     );
 }
 
+/// W34-06b acceptance: the HD-2D preset in full (lit 3D, shadow map, bloom,
+/// tilt-shift, and the grade ticked on top) against the flat picture, on A
+/// Link to the Past and Super Mario World. `RF_SCREENS_ONLY=hd2d-full`.
+fn shot_hd2d_full(readme: &mut Vec<String>) {
+    if !wanted("hd2d-full") {
+        return;
+    }
+    for game in ["alttp", "smw"] {
+        let mut h = new_harness();
+        if game == "alttp" {
+            let Some(path) = rom(
+                "snes",
+                "Legend of Zelda, The - A Link to the Past (USA).zip",
+            ) else {
+                skip(readme, game, "A Link to the Past (USA).zip not found");
+                continue;
+            };
+            open_and_run(&mut h, &path);
+            alttp_take_control(&mut h);
+        } else {
+            let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+                skip(readme, game, "Super Mario World (USA).zip not found");
+                continue;
+            };
+            open_and_run(&mut h, &path);
+            smw_enter_yi1(&mut h);
+        }
+        if !h.state().gpu_available_for_test() {
+            skip(readme, game, "no wgpu adapter");
+            continue;
+        }
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut().set_diorama_for_test(true);
+        run_n(&mut h, 30);
+        let laps: u64 = std::env::var("RF_DIORAMA_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1800);
+        if game == "alttp" {
+            let end = h.state().frame_count_for_test() + laps;
+            while h.state().frame_count_for_test() < end {
+                play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+            }
+        } else {
+            play_for(
+                &mut h,
+                laps,
+                "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+                &[(0x1490, 0xFF)],
+                enter_smw,
+            );
+            enter_smw(&mut h);
+            wait(&mut h, "smw", 150);
+            play_script(&mut h, "R40 B+R20");
+        }
+        release_all(&mut h);
+        // OFF: the flat picture, nothing from the preset.
+        h.state_mut().set_diorama_for_test(false);
+        h.state_mut().edit_lens_for_test(|s| s.lens_clear());
+        snapshot(&mut h, game);
+        step_from(&mut h);
+        let Some(off) = grab_play_area(&mut h) else {
+            skip(readme, game, "no play rect");
+            continue;
+        };
+        // ON: the preset, with the grade ticked and a morning sun.
+        if let Some(why) = h.state().hd2d_unavailable_for_test() {
+            skip(readme, game, &format!("preset unavailable: {why}"));
+            continue;
+        }
+        h.state_mut().toggle_hd2d_for_test();
+        h.state_mut().edit_lens_for_test(|s| {
+            s.lens_grade = true;
+            s.lens_grade_pct = 100;
+            s.lens_follow_clock = false;
+            s.lens_time_of_day = 30;
+        });
+        run_n(&mut h, 40);
+        step_from(&mut h);
+        step_from(&mut h);
+        let on = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
+        // Lens off over the same 3D frame, for the difference.
+        h.state_mut().edit_lens_for_test(|s| {
+            s.lens_bloom = false;
+            s.lens_tiltshift = false;
+            s.lens_grade = false;
+        });
+        run_n(&mut h, 20);
+        step_from(&mut h);
+        step_from(&mut h);
+        let no_lens = grab_play_area(&mut h).unwrap_or_else(|| off.clone());
+        let d = out_dir();
+        save(&d.join(format!("hd2d-full-{game}-off.png")), &off.opaque());
+        save(&d.join(format!("hd2d-full-{game}-on.png")), &on.opaque());
+        save(
+            &d.join(format!("hd2d-full-{game}-3d-no-lens.png")),
+            &no_lens.opaque(),
+        );
+        // Cost: unpaced, the lens on again, p95 from the app's own gates.
+        h.state_mut().edit_lens_for_test(|s| {
+            s.lens_bloom = true;
+            s.lens_tiltshift = true;
+            s.lens_grade = true;
+        });
+        h.state_mut().resume_for_test();
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        run_n(&mut h, 150);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        note(
+            readme,
+            format!(
+                "hd2d-full-{game}|OFF flat / ON preset + grade + 3D lens; diorama p95 {:.2} ms, lens p95 {:.2} ms, image {:?}",
+                h.state().diorama_p95_ms_for_test(),
+                h.state().lens_p95_ms_for_test(),
+                h.state().diorama_size_for_test()
+            ),
+        );
+    }
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -2886,6 +3008,7 @@ fn w30_w31_screens() {
     shot_diorama_top_alttp(&mut readme);
     shot_diorama_light_alttp(&mut readme);
     shot_diorama_light_smw(&mut readme);
+    shot_hd2d_full(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

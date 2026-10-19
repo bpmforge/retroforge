@@ -1404,6 +1404,8 @@ pub struct RetroForgeApp {
     /// "persistent `TextureHandle`, `.set()` on later frames" shape
     /// [`Self::ultrawide_texture`] already uses.
     diorama_texture: Option<egui::TextureHandle>,
+    /// W34-06b: the lens's output over [`Self::diorama_render`], when it ran.
+    diorama_lensed_rgba: Option<Vec<u8>>,
     /// Whether Diorama is currently EFFECTIVE (ticket W16-13:
     /// `crate::enhance_ui::feature_rows`'s "diorama" row, `FeatureRow::
     /// effective`) as of the last [`Self::sync_diorama_subscription`]
@@ -2004,6 +2006,7 @@ impl RetroForgeApp {
             diorama_pass: None,
             diorama_render: None,
             diorama_texture: None,
+            diorama_lensed_rgba: None,
             diorama_wanted: false,
             diorama_ground_rgba: None,
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
@@ -4741,8 +4744,14 @@ impl RetroForgeApp {
             // the compare pair. Presentation only: it reads this frame's
             // bytes and sends the core nothing. Its own budget gate and
             // error path mirror fog's.
+            // W34-06b: while the 3D Diorama is the picture on screen the lens
+            // runs over THAT image (`store_diorama_result`), not over this
+            // flat frame nobody would see.
+            let diorama_has_lens = self.diorama_render.is_some() && self.diorama_view_active();
             let lensed = match &self.gpu {
-                Some(gpu) if compare_rgba.is_none() && self.lens_effective() => {
+                Some(gpu)
+                    if compare_rgba.is_none() && !diorama_has_lens && self.lens_effective() =>
+                {
                     let (w32, h32) = (
                         u32::try_from(dw).unwrap_or(0),
                         u32::try_from(dh).unwrap_or(0),
@@ -4757,10 +4766,7 @@ impl RetroForgeApp {
                     );
                     // W34-06: the 3D view casts its own shadows; the lens's 2D
                     // ones step aside while it is the picture on screen.
-                    let diorama_shown = self.diorama_render.is_some()
-                        && !self.peeking_original
-                        && self.height_painter.is_none()
-                        && matches!(self.camera, CameraToggle::Original);
+                    let diorama_shown = self.diorama_render.is_some() && self.diorama_view_active();
                     let params =
                         crate::lens_view::without_shadows_over_diorama(params, diorama_shown);
                     let sprite = (settings.lens_shadows && !diorama_shown)
@@ -5540,7 +5546,7 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
-        self.store_diorama_result(result);
+        self.store_diorama_result(result, msg.frame_count);
     }
 
     /// Ticket W30-06, W34-04: [`Self::refresh_diorama_render`] for a game with
@@ -5710,7 +5716,7 @@ impl RetroForgeApp {
         };
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
-        self.store_diorama_result(result);
+        self.store_diorama_result(result, msg.frame_count);
     }
 
     /// Ticket W34-04: the readout line under the Diorama controls -- what has
@@ -5777,12 +5783,22 @@ impl RetroForgeApp {
     /// Upload a finished diorama frame as [`Self::diorama_texture`], or fall
     /// back to the flat view silently (`enhanced_view::select_active_view`'s
     /// own doc) when it failed.
-    fn store_diorama_result(&mut self, result: Result<enhanced_view::DioramaRender, String>) {
+    fn store_diorama_result(
+        &mut self,
+        result: Result<enhanced_view::DioramaRender, String>,
+        frame_count: u64,
+    ) {
         match result {
             Ok(render) => {
+                // W34-06b: the lens (bloom, tilt-shift, grade, weather) runs
+                // over the 3D image when it is the picture shown. `render`
+                // keeps the raw pass output (tests and the accuracy checks
+                // read it); the texture gets the lensed copy.
+                let lensed = self.lens_over_diorama(&render, frame_count);
+                let shown = lensed.as_deref().unwrap_or(&render.rgba);
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [render.width as usize, render.height as usize],
-                    &render.rgba,
+                    shown,
                 );
                 match &mut self.diorama_texture {
                     Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
@@ -5794,11 +5810,80 @@ impl RetroForgeApp {
                         ));
                     }
                 }
+                self.diorama_lensed_rgba = lensed;
                 self.diorama_render = Some(render);
             }
             Err(_) => {
                 self.diorama_render = None;
                 self.diorama_texture = None;
+                self.diorama_lensed_rgba = None;
+            }
+        }
+    }
+
+    /// Whether the 3D Diorama is, or would be, the picture on screen: not
+    /// peeking at the original, no height painter, the Original camera
+    /// (W34-06). The 2D lens shadows step aside exactly then.
+    fn diorama_view_active(&self) -> bool {
+        !self.peeking_original
+            && self.height_painter.is_none()
+            && matches!(self.camera, CameraToggle::Original)
+    }
+
+    /// Ticket W34-06b: the HD-2D lens over a finished Diorama frame, or
+    /// `None` when it is off, not on screen, over budget, or failed (the
+    /// plain 3D image is shown). HD2D_PLAN section 3: 2D shadows forced off
+    /// (the shadow map casts them); bloom, grade and weather as in the flat
+    /// view. Tilt-shift keeps the lens's screen-row band: the Diorama's pitch
+    /// camera maps depth onto rows, and reading the depth buffer back would
+    /// cost a second readback for no visible difference.
+    fn lens_over_diorama(
+        &mut self,
+        render: &enhanced_view::DioramaRender,
+        frame_count: u64,
+    ) -> Option<Vec<u8>> {
+        if !self.diorama_view_active() || !self.lens_effective() {
+            return None;
+        }
+        let settings = &self.current_game_settings;
+        let clock =
+            (settings.lens_grade && settings.lens_follow_clock).then(|| self.lens_clock.fraction());
+        let params = crate::lens_view::without_shadows_over_diorama(
+            crate::lens_view::lens_params(
+                &self.current_game_settings,
+                clock,
+                u32::try_from(frame_count % 65_536).unwrap_or(0),
+            ),
+            true,
+        );
+        let gpu = self.gpu.as_ref()?;
+        let pass = self
+            .lens_pass
+            .get_or_insert_with(|| rf_renderer::lens::LensPass::new(gpu));
+        let started = std::time::Instant::now();
+        match pass.render(
+            gpu,
+            &render.rgba,
+            render.width,
+            render.height,
+            None,
+            &params,
+        ) {
+            Ok(out) => {
+                if self
+                    .lens_budget
+                    .record_sample_ms(started.elapsed().as_secs_f64() * 1000.0)
+                {
+                    self.status =
+                        "Lens and lighting paused: this machine cannot draw it at full speed."
+                            .to_string();
+                }
+                Some(out)
+            }
+            Err(e) => {
+                self.lens_failed = true;
+                self.status = format!("Lens and lighting failed ({e}); showing the plain picture.");
+                None
             }
         }
     }
@@ -5921,7 +6006,7 @@ impl RetroForgeApp {
         self.diorama_budget
             .record_sample_ms(start.elapsed().as_secs_f64() * 1000.0);
 
-        self.store_diorama_result(result);
+        self.store_diorama_result(result, msg.frame_count);
     }
 
     /// Ticket W4-03e: keep the Ultrawide view live while it's the active
@@ -13886,6 +13971,14 @@ impl RetroForgeApp {
         self.diorama_render.as_ref().map(|r| (r.width, r.height))
     }
 
+    /// Ticket W34-06b: the rolling p95, in milliseconds, of the lens pass
+    /// (over the flat frame or the 3D image, whichever was shown).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lens_p95_ms_for_test(&self) -> f64 {
+        self.lens_budget.p95()
+    }
+
     /// Ticket W34-00: the rolling p95, in milliseconds, of the time the app
     /// spent building and rendering the Diorama (mesh, upload, draw,
     /// readback) -- the number the budget gate watches.
@@ -13902,6 +13995,22 @@ impl RetroForgeApp {
     pub fn diorama_opaque_pixels_for_test(&self) -> Option<usize> {
         let render = self.diorama_render.as_ref()?;
         Some(render.rgba.chunks_exact(4).filter(|px| px[3] != 0).count())
+    }
+
+    /// Ticket W34-06b: a fingerprint of the Diorama bytes actually uploaded
+    /// (the lens's output when it ran over them, else the raw render), and
+    /// whether the lens ran. `None` when there is no render.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diorama_shown_hash_for_test(&self) -> Option<(u64, bool)> {
+        let render = self.diorama_render.as_ref()?;
+        let bytes = self.diorama_lensed_rgba.as_deref().unwrap_or(&render.rgba);
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        Some((hash, self.diorama_lensed_rgba.is_some()))
     }
 
     /// The status-bar badge text exactly as the toolbar renders it
