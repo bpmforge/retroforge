@@ -450,3 +450,104 @@ look Brad asked for; 07-09 widen it.
   and the sky sit at different depths) are W34-08 (D4). The learned table is
   not persisted yet (rf-cache `tile-heights-v1` is written by nobody in the
   shell), so every session starts cold.
+
+---------------------------------------------------------------------------
+
+## W34-05 as built (2026-10-18)
+
+- **D5, the pass.** `DioramaPass` has a `Depth32Float` attachment and 4x MSAA
+  (`superfx_gpu.rs` pattern: probe, resolve, `StoreOp::Discard`) and renders at
+  whatever size the shell asks for (clamped to the device limit). Everything
+  it owns is kept between frames: the ground and sprite textures (recreated on
+  a size change only), the camera buffer, one vertex buffer that only grows (a
+  mesh identical to the last is not uploaded again), the MSAA/resolve/depth
+  targets, the readback buffer and the bind group. One encoder per frame. The
+  mesh is still emitted back-to-front (blending order); depth settles what
+  that order gets wrong. A fragment with nothing to show (`a < 0.02`) is
+  `discard`ed, so a transparent sprite texel cannot hide what is behind it, and
+  shadows draw with a second pipeline (tested, never written, nudged toward the
+  camera). The readback un-premultiplies silhouette pixels (the resolve averages
+  coverage over a transparent clear), so edges keep their colour.
+  `diorama_depth.rs` proves each of these (near quad wins when drawn first,
+  transparent texel, MSAA partial coverage vs 1 sample, sizes, no new GPU
+  resources after the first frame).
+- **Re-pins.** `diorama_golden` and `mode7_plane_golden` (it renders through
+  the same pass) moved once: the pass's output changed, the default camera path
+  (`view_proj_camera`, `fit_distance`) did not, and
+  `the_default_camera_renders_exactly_what_render_always_did` still holds.
+- **D1, the camera.** `camera_matrices::window_placement` solves the distance
+  by bisection so the game's own window (256 x the rows it shows, divided by
+  the zoom) fits the frame on the floor (`WindowPlane::Ground`, top-down) or on
+  the upright picture (`WindowPlane::Upright`, side view), the target at the
+  exact centre; the near plane scales with the distance so depth steps stay
+  small on a 5000 px level. Fit numbers (window corners in NDC, top / bottom):
+  side view at the old 18 degrees and 50 degree FOV, x 0.996 / 0.77, y 0.95 /
+  -0.73; at the shipped 13 degrees and `WINDOW_FOV_Y_DEG` 30, x 1.0 / 0.89, y
+  0.97 / -0.87. So `SIDE_PITCH_SCALE` went 0.35 -> 0.25 and the window cameras use
+  a 30 degree FOV. Top-down at the default 52 degrees: x 0.75 / 1.0, y 0.59 /
+  -0.78 -- the near edge fills the width, the far edge is three quarters of it,
+  the window is 68% of the frame height. That is the keystone of a tilted
+  floor under a *contain* fit; a *cover* fit (near edge touches, far edge
+  cropped) would remove the side wedges at the cost of the top few percent --
+  left for Brad. The target is the player's feet from the W34-02 track (held
+  for two seconds when the detector drops out), else the middle of the window,
+  through `CameraSmoother`, a critically damped spring (no overshoot from rest or
+  when a walking target stops; a jump over a third of the screen snaps).
+  At zoom 1 on the live path the window is the whole screen, so the follow is
+  visible from zoom > 1 (the HD-2D preset is 1.6).
+- **D2, framing (4:3 first).** The 3D image is drawn into the rect the flat
+  view uses (same `DisplayGrid::for_frame`, pixel aspect, scale mode) and
+  rendered at that rect's size in physical pixels (cap 2048 on the long edge),
+  from the previous frame's layout (one frame of lag on a resize, the console
+  frame size before the first layout). The 8:7 TV stretch comes from framing
+  with `aspect / pixel_aspect`: the picture is framed as if pixels were square
+  and the GPU stretches it into the wider frame, so toggling Diorama does not
+  move the picture (`diorama_live_view.rs` asserts the rect and the aspect).
+  The window is the rows the flat view shows (an SNES frame without overscan
+  draws 224 of 240; without this the diorama had a 16 row black band). 16:9 /
+  21:9 / 32:9 ground from the W33 margins is W34-09, not done here.
+- **Cost.** `cargo test --release -p rf-renderer --test w34_00_diorama_cost --
+  --ignored diorama_pass_cost_after_w34_05`, M4 Max, machine shared with other
+  jobs (load 3 to 20), window-fit camera, mesh build + camera solve + pass +
+  readback, ms p50 / p95. "Still" uploads the same mesh every frame, "moving"
+  a different one.
+
+  | Size (readback) | 4x MSAA still | 4x MSAA moving | 1 sample still | 1 sample moving |
+  |---|---|---|---|---|
+  | 256x224 (224 KB) | 2.31 / 2.74 | 2.31 / 2.82 | 1.84 / 2.54 | 2.30 / 2.93 |
+  | 512x448 (896 KB) | 2.44 / 3.04 | 2.01 / 3.10 | 1.94 / 2.77 | 2.49 / 3.11 |
+  | 1024x896 (3.5 MB) | 2.20 / 3.00 | 2.88 / 3.91 | 2.13 / 2.78 | 3.02 / 4.34 |
+  | 2048x1792 (14 MB) | 3.32 / 4.53 | 3.29 / 4.44 | 3.02 / 3.95 | 3.04 / 3.95 |
+
+  The 1024x896 4x row sits at D6's 3 ms bar *before* W34-06 adds a shadow pass;
+  W34-00 measured 1.9 to 2.5 ms p95 with no depth and one sample. W34-00 put
+  the ~1.6 ms floor down to creating resources; it did not move when they were
+  reused. Timed inside the pass at 1024x896: CPU prep 0.2 ms, submit 0.1 ms,
+  and 2.3 to 2.5 ms in the readback, of which the un-premultiply was 0.5 ms
+  (0.25 after testing four pixels at a time) and the row copy 0.1 to 0.3 ms.
+  The rest is the synchronous wait for the GPU. An async, double-buffered
+  readback (one frame of latency) or render-to-texture is the next lever and
+  is outside this ticket.
+
+  In the whole app (unpaced, 10 interleaved chunks of 30 frames per state,
+  Diorama off / on, and the app's own gate sample p95 for build + render +
+  readback): at the 4x window (`RF_SCREENS_WINDOW=1300x1100`, image 1170x896,
+  8:7): SMW 103.6 / 100.4 fps, p95 3.48 ms; ALttP 136.1 / 128.2 fps, p95
+  2.16 ms. At the default test window (image 585x448, *not* 4x): SMW 103.6 /
+  101.0, p95 1.85 ms; SMB3 (585x480) 373.2 / 320.6, p95 3.29 ms. The gate trips
+  at 16.67 ms p95 (`fog::DISABLE_P95_MS`). D6's ten-minute run: SMW at the 4x
+  window for 36 000 frames (630 s, 4x image 1170x896, RSS peak 509 MB):
+  fps off / on 110.7 / 104.9, gate p95 3.62 ms, Diorama still rendering at the
+  end (a trip would have dropped it to flat; the harness reads the end state,
+  not every frame).
+- **A finding for the learner (not fixed here).** The SMW shot's learned
+  table depends on the timeline of the scripted play: 1500 frames gave 16 to 32
+  raised cells, 1800 and 2100 gave about 790 (hills and the status bar
+  extruded into spikes) with 4 or 5 "solid" tiles. Same code, same ROM, only
+  the play length differs. W34-03/04's table needs a guard against a run that
+  calls most of the screen solid; the shots use `RF_DIORAMA_FRAMES=1500`.
+- **Not done here.** Per-call ground upload is still a `write_texture` of the
+  whole picture (the live path's picture changes every frame; the decoded
+  path's level image does not and could be keyed); the decoded-level window is
+  still a fixed 256x240; the diorama image is uploaded to egui as straight
+  alpha every frame (a premultiplied path would skip a conversion).

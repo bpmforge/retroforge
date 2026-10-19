@@ -105,7 +105,13 @@ const OFF_HASH: u64 = 0xab77_bdfa_091c_7125; // ground_rgba's own bytes, no dior
 /// Re-pinned for W30-05b: the camera now looks along -Z so the level is no
 /// longer mirrored/turned half way round (row 0 far, +X screen-right), which
 /// moves every pixel of the rendered room.
-const ON_HASH: u64 = 0x9a41_172d_48ac_d3ad;
+/// Re-pinned for W34-05 (D5), once: the pass now has a depth attachment, 4x
+/// MSAA resolved into the image, and a straight-alpha readback, which move
+/// every silhouette-edge pixel. The default camera path (`view_proj_camera`,
+/// `fit_distance`) is untouched and `diorama_camera.rs`'s
+/// `the_default_camera_renders_exactly_what_render_always_did` still holds;
+/// this is the pass's output changing, not the camera.
+const ON_HASH: u64 = 0xe31b_6c92_ffe1_d34c;
 const ON_HASH_PLACEHOLDER_NOTE: &str =
     "regenerate by running with --nocapture and pasting the printed on_hash";
 
