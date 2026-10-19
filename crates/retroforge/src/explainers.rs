@@ -41,7 +41,10 @@ pub fn long_text(id: &str) -> &'static str {
         }
         "diorama" => {
             "Raises the level's walls and floors into a tilted 3D scene you look across. \
-             Your controls and the game stay exactly 2D."
+             Your controls and the game stay exactly 2D. It works out what is solid by \
+             watching you play, so it is approximate and only covers the parts of the \
+             level you have visited; a game profile with painted or decoded heights \
+             makes it exact."
         }
         "mode7_ground" => {
             "SNES games use Mode 7 for flat rotating floors such as race tracks and world \

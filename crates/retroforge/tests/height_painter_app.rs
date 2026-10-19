@@ -1,5 +1,8 @@
 //! Ticket W30-06 part B: the HD-2D preset's gating and settings, and the
 //! guarantee that painting a height table never reaches Accuracy mode.
+//! Ticket W34-04 (D-023): the preset needs Enhanced (or Game-Aware) and
+//! nothing else -- no profile, no painted table -- because the heights are
+//! learned from play; it no longer tells the player to paint one.
 //!
 //! Same shape as `diorama_live_heights.rs`: the app is driven through its
 //! test hooks (`set_live_heights_for_test` gives it a table the way a matched
@@ -32,14 +35,14 @@ fn the_hd2d_preset_is_gated_on_a_height_table_sets_the_look_and_restores_it() {
     assert!(!harness.state_mut().toggle_hd2d_for_test());
     assert_eq!(harness.state().game_settings_for_test(), &before);
 
-    // Game-Aware with no table and no decoded level: explains what to do.
-    harness.state_mut().set_mode_for_test(Mode::GameAware);
-    harness.run_steps(1);
+    // Accuracy says which mode to use, and no longer asks for a painted table.
     let why = harness.state().hd2d_unavailable_for_test().unwrap();
-    assert!(
-        why.contains("height table") && why.contains("Profile Builder"),
-        "{why}"
-    );
+    assert_eq!(why, "Needs Enhanced mode.");
+
+    // Enhanced with no table and no decoded level: available (D-023).
+    harness.state_mut().set_mode_for_test(Mode::Enhanced);
+    harness.run_steps(1);
+    assert_eq!(harness.state().hd2d_unavailable_for_test(), None);
 
     // Painting even Accuracy mode's table must not make anything render.
     harness

@@ -398,10 +398,108 @@ pub mod camera_matrices {
         mul(proj, view)
     }
 
+    /// How much of the user's top-down tilt a side-view camera keeps: the
+    /// default 52 degrees becomes about 18, a gentle look down at an upright
+    /// picture (a steep one would flatten it).
+    pub const SIDE_PITCH_SCALE: f32 = 0.35;
+    pub const SIDE_PITCH_MIN: f32 = 6.0;
+    pub const SIDE_PITCH_MAX: f32 = 30.0;
+    /// Margin around the framed window.
+    pub const SIDE_MARGIN: f32 = 1.2;
+
+    /// The tilt a side-view diorama uses for a user tilt of `pitch_deg`.
+    #[must_use]
+    pub fn side_pitch_deg(pitch_deg: f32) -> f32 {
+        (pitch_deg * SIDE_PITCH_SCALE).clamp(SIDE_PITCH_MIN, SIDE_PITCH_MAX)
+    }
+
+    /// [`Placement`] for a side-view diorama (ticket W34-04): the picture
+    /// stands upright at `z = 0` (see `crate::diorama_side`), `target` is
+    /// the world `(x, y)` on it to centre, and the window `view_w x view_h`
+    /// (world pixels, the game's own screen) is what the camera frames --
+    /// the distance fits that window, not the whole level, so the game's
+    /// screen fills the image at zoom 1.0. The eye is on the `+Z` side;
+    /// tilt and turn come from `camera`, the tilt scaled by
+    /// [`side_pitch_deg`].
+    #[must_use]
+    pub fn side_placement(
+        view_w: f32,
+        view_h: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        camera: &DioramaCamera,
+        target: (f32, f32),
+    ) -> Placement {
+        let camera = camera.matrix_safe();
+        let half = (fovy_deg.to_radians() / 2.0).max(1e-4);
+        let dist_v = (view_h / 2.0) / half.tan();
+        let dist_h = (view_w / 2.0) / (half.tan() * aspect.max(1e-3));
+        let distance = dist_v.max(dist_h) * SIDE_MARGIN / camera.zoom;
+        let pitch = side_pitch_deg(camera.pitch_deg).to_radians();
+        let yaw = camera.yaw_deg.to_radians();
+        let target = [target.0, target.1, 0.0];
+        Placement {
+            eye: [
+                target[0] + yaw.sin() * pitch.cos() * distance,
+                target[1] + pitch.sin() * distance,
+                yaw.cos() * pitch.cos() * distance,
+            ],
+            target,
+            distance,
+        }
+    }
+
+    /// `proj * view` for [`side_placement`].
+    #[must_use]
+    pub fn view_proj_side(
+        view_w: f32,
+        view_h: f32,
+        aspect: f32,
+        fovy_deg: f32,
+        camera: &DioramaCamera,
+        target: (f32, f32),
+    ) -> Mat4 {
+        let p = side_placement(view_w, view_h, aspect, fovy_deg, camera, target);
+        let proj = perspective(
+            fovy_deg.to_radians(),
+            aspect.max(1e-3),
+            1.0,
+            (p.distance * 4.0).max(view_w.max(view_h) * 4.0),
+        );
+        mul(proj, look_at(p.eye, p.target, [0.0, 1.0, 0.0]))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use crate::diorama::{DioramaCamera, FOV_Y_DEG, PITCH_DEG};
+
+        #[test]
+        fn the_side_camera_centres_its_target_and_fits_the_window() {
+            let cam = DioramaCamera::default();
+            let (w, h) = (256.0_f32, 224.0_f32);
+            let aspect = w / h;
+            let target = (100.0, 60.0);
+            let vp = view_proj_side(w, h, aspect, FOV_Y_DEG, &cam, target);
+            let ndc = |x: f32, y: f32| {
+                let c = mul_vec4(vp, [x, y, 0.0, 1.0]);
+                [c[0] / c[3], c[1] / c[3]]
+            };
+            let mid = ndc(target.0, target.1);
+            assert!(mid[0].abs() < 1e-3 && mid[1].abs() < 1e-3, "{mid:?}");
+            // The window's corners are inside the frame at zoom 1.
+            for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let n = ndc(target.0 + dx * w / 2.0, target.1 + dy * h / 2.0);
+                assert!(n[0].abs() <= 1.0 && n[1].abs() <= 1.0, "{n:?}");
+            }
+        }
+
+        #[test]
+        fn the_side_tilt_is_a_gentle_fraction_of_the_top_down_tilt() {
+            assert!((side_pitch_deg(52.0) - 18.2).abs() < 0.1);
+            assert!((side_pitch_deg(80.0) - 28.0).abs() < 1e-4);
+            assert_eq!(side_pitch_deg(10.0), SIDE_PITCH_MIN);
+        }
 
         #[test]
         fn the_grids_own_centre_projects_inside_the_view_frustum() {
