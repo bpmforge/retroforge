@@ -266,3 +266,150 @@ fn diorama_pass_cost_after_w34_05() {
         }
     }
 }
+
+/// Ticket W34-06: the W34-05 scene (window-fit camera, 4x MSAA, moving
+/// mesh) with no sun, with the sun but no shadow map (Lambert and contact
+/// ellipses), and with the sun and the 3x3 PCF shadow map. Interleaved in
+/// chunks so machine load hits all three alike. Prints the whole call
+/// (mesh + pass + readback) and, for the pass alone, a second run with the
+/// vertex build hoisted out of the timing.
+#[test]
+#[ignore = "timing; needs a GPU; run deliberately in release"]
+fn diorama_pass_cost_with_shadows_w34_06() {
+    use rf_renderer::diorama::camera_matrices::{self, WindowPlane};
+    use rf_renderer::lens::Weather;
+    use rf_renderer::lighting::{LightView, Lighting, Sun};
+    let gpu = match GpuContext::request_headless() {
+        Ok(g) => g,
+        Err(e) => {
+            println!("SKIP: no wgpu adapter ({e})");
+            return;
+        }
+    };
+    println!(
+        "adapter: {} ({:?})",
+        gpu.adapter_info.name, gpu.adapter_info.backend
+    );
+    let (gw, gh) = (COLS * TILE_PX, ROWS * TILE_PX);
+    let ground = frame(gw, gh);
+    let sprite = frame(16, 16);
+    let n = (COLS * ROWS) as usize;
+    let mut solid = vec![0u8; n];
+    let mut depth = vec![0u8; n];
+    for row in ROWS - 9..ROWS {
+        for col in 0..COLS {
+            if (col * 7 + row * 3) % 5 != 0 {
+                solid[(row * COLS + col) as usize] = 1;
+                depth[(row * COLS + col) as usize] = 8;
+            }
+        }
+    }
+    let billboards = |shift: f32| -> Vec<Billboard> {
+        (0..24)
+            .map(|i| Billboard {
+                center_x_px: 20.0 + i as f32 * 10.0 + shift,
+                center_z_px: 90.0 + (i % 5) as f32 * 14.0,
+                width_px: 16.0,
+                height_px: 16.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+            })
+            .collect()
+    };
+    let camera = DioramaCamera {
+        pitch_deg: 40.0,
+        zoom: 1.6,
+        ..DioramaCamera::default()
+    };
+    let sun = Sun::for_time(0.3, Weather::None, LightView::TopDown);
+    // (name, light, double-buffered readback, ms of other CPU work per frame)
+    let modes: [(&str, Option<Lighting>, bool, u64); 7] = [
+        ("unlit", None, false, 0),
+        (
+            "sun, no map",
+            Some(Lighting {
+                sun,
+                shadow_map: false,
+            }),
+            false,
+            0,
+        ),
+        ("sun + shadow map", Some(Lighting::new(sun)), false, 0),
+        ("sun+map async", Some(Lighting::new(sun)), true, 0),
+        ("unlit +8ms work", None, false, 8),
+        ("sun+map +8ms work", Some(Lighting::new(sun)), false, 8),
+        ("sun+map async +8ms", Some(Lighting::new(sun)), true, 8),
+    ];
+    for &(w, h) in &[(512u32, 448u32), (1024, 896)] {
+        let pass = DioramaPass::new(&gpu);
+        let mut total: Vec<Vec<f64>> = vec![Vec::new(); modes.len()];
+        let mut pass_only: Vec<Vec<f64>> = vec![Vec::new(); modes.len()];
+        let aspect = w as f32 / h as f32 / (8.0 / 7.0);
+        let target = (gw as f32 / 2.0, gh as f32 * 0.6);
+        let vp = camera_matrices::view_proj_window(
+            WindowPlane::Ground,
+            256.0,
+            224.0,
+            aspect,
+            rf_renderer::diorama::WINDOW_FOV_Y_DEG,
+            &camera,
+            target,
+        );
+        let p = camera_matrices::window_placement(
+            WindowPlane::Ground,
+            256.0,
+            224.0,
+            aspect,
+            rf_renderer::diorama::WINDOW_FOV_Y_DEG,
+            &camera,
+            target,
+        );
+        for chunk in 0..10 {
+            for (m, (_, lighting, asynchronous, other_ms)) in modes.iter().enumerate() {
+                pass.set_lighting(*lighting);
+                pass.set_async_readback(*asynchronous);
+                for i in 0..30 {
+                    // Stands in for the rest of a 60 Hz frame (UI, lens, egui):
+                    // busy, not asleep, so the core and the GPU clocks stay up
+                    // as they do in the app.
+                    let until = Instant::now() + std::time::Duration::from_millis(*other_ms);
+                    while Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                    let bb = billboards(((chunk * 30 + i) % 7) as f32);
+                    let scene = DioramaScene {
+                        tiles_w: COLS,
+                        tiles_h: ROWS,
+                        tile_px: TILE_PX as f32,
+                        solid: &solid,
+                        depth: &depth,
+                        billboards: &bb,
+                    };
+                    let t = Instant::now();
+                    let v = rf_renderer::diorama_mesh::build_vertices_oriented(
+                        &scene,
+                        0.0,
+                        [p.eye[0], p.eye[2]],
+                    );
+                    let t2 = Instant::now();
+                    let out = pass
+                        .render_with_vp(&gpu, &v, &ground, gw, gh, &sprite, 16, 16, vp, w, h)
+                        .expect("render");
+                    std::hint::black_box(&out);
+                    if chunk > 0 || i >= 5 {
+                        total[m].push(t.elapsed().as_secs_f64() * 1e3);
+                        pass_only[m].push(t2.elapsed().as_secs_f64() * 1e3);
+                    }
+                }
+            }
+        }
+        for (m, (name, ..)) in modes.iter().enumerate() {
+            println!(
+                "DIORAMA W34-06 {w}x{h} {name:>19}: mesh+pass+readback p50 {:.2} p95 {:.2} ms | pass+readback p50 {:.2} p95 {:.2} ms",
+                pct(&mut total[m], 0.5),
+                pct(&mut total[m], 0.95),
+                pct(&mut pass_only[m], 0.5),
+                pct(&mut pass_only[m], 0.95),
+            );
+        }
+    }
+}

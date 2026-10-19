@@ -53,6 +53,7 @@ pub mod gsu_poly;
 pub mod hd_layer;
 pub mod layers;
 pub mod lens;
+pub mod lighting;
 pub mod metalfx;
 pub mod mode7_plane;
 pub mod original_pipeline;

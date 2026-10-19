@@ -563,3 +563,103 @@ look Brad asked for; 07-09 widen it.
   path's level image does not and could be keyed); the decoded-level window is
   still a fixed 256x240; the diorama image is uploaded to egui as straight
   alpha every frame (a premultiplied path would skip a conversion).
+
+## W34-06 as built (2026-10-19)
+
+Lighting and the shadow map: `rf-renderer/src/lighting.rs` (pure), the shader's
+lit path, `DioramaPass::set_lighting`, and the shell wiring in `lens_view.rs` /
+`app.rs`.
+
+- **The sun.** One `Sun` from the lens's time of day (the slider, or the wall
+  clock when "follow the clock" is on), mirrored for side view. The day runs
+  0.23 to 0.82 so it follows the grade's dawn and dusk keys: elevation
+  `70 sin(pi u)` floored at 10 degrees, azimuth +60 to -60 (rises screen-right,
+  sets screen-left); outside it a dim cool moon at 20 degrees. The plan's
+  `10 + 60 sin(pi t)` over the whole 0..1 day would put a 45 degree sun at 0.8,
+  which the grade already paints as night, so it was not used. Colour is the
+  grade tint pulled halfway to white (the lens grade multiplies the picture by
+  the same tint; a full tint here would grade twice). Weather dims it (rain 0.6,
+  snow 0.8). `lit = colour * (ambient + (1 - ambient) * intensity * max(n.l,0)^0.7
+  * shadow)`; noon on level ground is exactly 1, so noon is as bright as the
+  unlit picture. The 0.7 exponent is a deliberate softening of Lambert so a low
+  sun still shows.
+- **Normals without a vertex change.** The vertex layout and every builder are
+  untouched; the fragment shader takes the face normal from the screen-space
+  derivatives of world position (`NORMAL_SIGN` is pinned by a test: level
+  ground must come out +Y). Box sides take a flat 0.8 albedo; ground, box tops
+  and side-view fronts take their texture; sprites are lit like the ground
+  under them and only look up the shadow.
+- **Shadow map.** Orthographic, depth-only, from the sun: 1024^2 below a 768 px
+  wide target, 2048^2 from there (the 1024x896 case). Fitted each frame by
+  casting the frame's four corner rays into the mesh's box, so it covers what the
+  camera sees and snaps to whole texels (no shimmer as the camera glides); only
+  the depth range needs the whole mesh. Occluders: boxes, wedges and
+  billboards, the last alpha-tested at 0.5 (a sprite casts by its own
+  silhouette). The flat floor and the contact ellipses do not cast. The main
+  pass does a 3x3 PCF over a comparison sampler with a slope-scaled bias that
+  grows with the texel. The contact ellipse stays at 0.25/0.45 of its alpha as
+  ambient occlusion; with the map off it is back at full strength.
+- **Off is off.** `set_lighting(None)` (the default, and what every golden and
+  `mode7_plane` uses) is the original shader path: the pinned goldens did not
+  change.
+- **Budget fallback.** `ShadowGate`: the pass's own render time over a 120
+  frame window; a p95 above 8 ms drops the map (Lambert and full contact
+  ellipses stay) until `reset_shadow_budget`. The app's 16.67 ms gate for the
+  whole Diorama is unchanged and remains the last resort.
+- **Lens handoff.** While the Diorama is the picture on screen (no peek, no
+  painter, camera Original) `lens_view::without_shadows_over_diorama` forces the
+  lens's 2D shadows off and skips cutting the sprite layer for them; the flat
+  view keeps them. Finding: in this tree the lens output is only ever the flat
+  picture (`diorama_texture` is uploaded straight from the pass), so bloom,
+  tilt-shift, grade and weather do not run over the 3D image at all; HD2D_PLAN
+  section 3's "keep running over the 3D image" is not wired, and was not part of
+  this ticket.
+- **Cost, and where the time was.** The W34-05 note put "2.3 to 2.5 ms in the
+  readback" down to the synchronous GPU wait. Timing the stages shows it was
+  not the GPU: `device.poll(PollType::Wait)` returned on a timer, in multiples
+  of ~1.5 ms (1.53 / 3.07 ms), even when the previous frame's work had finished
+  long before. Polling without sleeping (`PollType::Poll` in a short spin until
+  the map callback fires) removes it; this alone took the pass from 3.0-3.9 ms
+  p95 to about 1 ms and applies to the unlit pass too. The same fix probably
+  applies to `superfx_gpu.rs`'s readback (not touched here). An opt-in
+  double-buffered readback (`set_async_readback`, one frame of latency, off by
+  default; the app does not use it) was built as well and measured.
+  `cargo test --release -p rf-renderer --test w34_00_diorama_cost --
+  --ignored diorama_pass_cost_with_shadows_w34_06`, M4 Max, machine shared
+  (load 30 to 50), W34-05 scene (window-fit camera, 4x MSAA, moving mesh), 300
+  frames per row, ms p50 / p95 of mesh + pass + readback:
+
+  | 1024x896 | p50 / p95 |
+  |---|---|
+  | unlit | 0.67 / 1.44 |
+  | sun, no shadow map | 0.68 / 0.93 |
+  | sun + shadow map | 0.84 / 1.45 |
+  | sun + map, double-buffered readback | 0.37 / 0.72 |
+  | unlit, plus 8 ms of other CPU work between frames | 0.89 / 1.17 |
+  | sun + map, plus 8 ms of other work | 1.39 / 2.38 |
+  | sun + map, double-buffered, plus 8 ms | 0.32 / 0.38 |
+
+  512x448, sun + map: 0.62 / 0.84. The shadow pass costs about 0.15 to 0.5 ms
+  at p50 and fits the 3 ms bar with room. Before the poll fix the same
+  harness read 2.77 / 3.51 unlit and 2.78 / 4.39 with the map at 1024x896.
+  A paced loop that *sleeps* between frames reads slower (about 3 ms) because
+  the GPU and core clock down while idle; that is a property of the harness, not
+  of the pass.
+- **Proofs.** `rf-renderer/tests/diorama_light.rs` (8): a 32 px box on level
+  ground at time 0.3 / 0.5 / 0.8 casts a shadow whose darkened-pixel centroid
+  (map on versus map off, same sun) lands left of the box foot in the morning,
+  right of it in the evening, shortest at noon and longest at dusk; a
+  half-transparent billboard casts a smaller shadow than an opaque one; level
+  ground at noon is as bright as the unlit picture (pins the normal sign);
+  removing the sun returns the original pixels exactly; the budget fallback
+  drops the map and keeps Lambert; lit frames are deterministic; a steady lit
+  scene creates no GPU resource after the first frame; the double-buffered
+  readback lags exactly one frame. `lighting.rs` has 17 unit tests and
+  `lens_view.rs` 2 for the sun and the handoff.
+- **Shots** (`docs/screens/w30-w31/`, uncommitted): `diorama-light-alttp-t30`,
+  `-t50`, `-t80` (Link's house; the bed is the one raised block, and its shadow
+  falls down-left in the morning, nearly vanishes at noon and runs long and
+  down-right at dusk, which is also dim), `diorama-light-smw-on` (time 0.3: the
+  shadows of Mario and the winged block fall on the backdrop plane behind them)
+  and `-smw-t50` (noon: Mario's shadow falls on the face of the ground block,
+  the block's on the hill behind).

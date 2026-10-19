@@ -4755,8 +4755,15 @@ impl RetroForgeApp {
                         clock,
                         u32::try_from(msg.frame_count % 65_536).unwrap_or(0),
                     );
-                    let sprite = settings
-                        .lens_shadows
+                    // W34-06: the 3D view casts its own shadows; the lens's 2D
+                    // ones step aside while it is the picture on screen.
+                    let diorama_shown = self.diorama_render.is_some()
+                        && !self.peeking_original
+                        && self.height_painter.is_none()
+                        && matches!(self.camera, CameraToggle::Original);
+                    let params =
+                        crate::lens_view::without_shadows_over_diorama(params, diorama_shown);
+                    let sprite = (settings.lens_shadows && !diorama_shown)
                         .then(|| {
                             let rows =
                                 crate::play_view::visible_rows(msg.height, msg.last_scanline);
@@ -5332,6 +5339,13 @@ impl RetroForgeApp {
 
     /// Ticket W30-04: whether the HD-2D lens row is effective right now
     /// (Enhanced, a GPU within budget, at least one effect on).
+    /// The wall-clock time of day for the Diorama's sun, when the player asked
+    /// the lens to follow the clock (the grade's own rule; W34-06).
+    fn diorama_clock(&mut self) -> Option<f32> {
+        let s = &self.current_game_settings;
+        (s.lens_grade && s.lens_follow_clock).then(|| self.lens_clock.fraction())
+    }
+
     fn lens_effective(&self) -> bool {
         crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
             .iter()
@@ -5442,6 +5456,7 @@ impl RetroForgeApp {
         let Some((ground_rgba, ground_w, ground_h)) = self.diorama_ground_rgba() else {
             return;
         };
+        let clock = self.diorama_clock();
         let (Some(gpu), Some(session)) = (&self.gpu, &self.level_session) else {
             return;
         };
@@ -5485,6 +5500,11 @@ impl RetroForgeApp {
             .map_or(rf_enhance::heights::Orientation::Unknown, |h| {
                 h.orientation.orientation
             });
+        pass.set_lighting(Some(crate::lens_view::diorama_lighting(
+            &self.current_game_settings,
+            clock,
+            orientation == rf_enhance::heights::Orientation::SideView,
+        )));
         let filled;
         let ground: &[u8] = if orientation == rf_enhance::heights::Orientation::SideView {
             let b = crate::diorama_learned::dominant_colour(&msg.rgba);
@@ -5599,6 +5619,7 @@ impl RetroForgeApp {
             self.diorama_smoother.reset();
             return;
         };
+        let clock = self.diorama_clock();
         let Some(gpu) = &self.gpu else {
             return;
         };
@@ -5609,6 +5630,11 @@ impl RetroForgeApp {
             .diorama_pass
             .as_ref()
             .expect("just constructed above when absent");
+        pass.set_lighting(Some(crate::lens_view::diorama_lighting(
+            &self.current_game_settings,
+            clock,
+            plan == dl::Plan::Side,
+        )));
         // The painted path predates the sprite boxes: a synthetic or older
         // frame without them reads the SNES OAM instead.
         let oam_boxes;
@@ -5815,6 +5841,7 @@ impl RetroForgeApp {
         let Some(snes) = &msg.snes else {
             return;
         };
+        let clock = self.diorama_clock();
         let Some(gpu) = &self.gpu else {
             return;
         };
@@ -5825,6 +5852,11 @@ impl RetroForgeApp {
             .diorama_pass
             .as_ref()
             .expect("just constructed above when absent");
+        pass.set_lighting(Some(crate::lens_view::diorama_lighting(
+            &self.current_game_settings,
+            clock,
+            false,
+        )));
 
         const MODE7_PLANE_DENSITY: u32 = 2;
         const MODE7_PLANE_TILES: u16 = 128;
