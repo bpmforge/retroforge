@@ -2474,7 +2474,9 @@ fn diorama_pair(h: &mut H, name: &str, what: &str, readme: &mut Vec<String>) {
 /// [`diorama_pair`] with the file prefix chosen (`diorama-top` for top-down).
 fn diorama_pair_as(h: &mut H, prefix: &str, name: &str, what: &str, readme: &mut Vec<String>) {
     // A resized window is for the cost rows: its pictures stay out of the docs.
-    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok() {
+    let d = if std::env::var("RF_SCREENS_WINDOW").is_ok()
+        && std::env::var("RF_SCREENS_KEEP").is_err()
+    {
         probe_dir()
     } else {
         out_dir()
@@ -2974,6 +2976,470 @@ fn shot_hd2d_full(readme: &mut Vec<String>) {
     }
 }
 
+/// SMW up to "MARIO START!", then sampled one core frame at a time for
+/// `frames` frames: `watch` runs after each (ticket W34-07's first-frame
+/// proof). The same taps as [`smw_enter_yi1`].
+fn smw_enter_yi1_watched(
+    h: &mut H,
+    frames: u64,
+    before_level: &mut dyn FnMut(&mut H),
+    watch: &mut dyn FnMut(&mut H, u64),
+) {
+    use egui::Key as K;
+    wait(h, "smw", 200);
+    for i in 0..10 {
+        tap(h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait(h, "smw", 100);
+    }
+    wait(h, "smw", 300);
+    tap(h, K::X, 8);
+    wait(h, "smw", 400);
+    tap(h, K::ArrowLeft, 8);
+    wait(h, "smw", 150);
+    before_level(h);
+    tap(h, K::X, 8);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    for n in 0..frames {
+        let t = h.state().frame_count_for_test() + 1;
+        run_frames(h, t, Duration::from_secs(10));
+        watch(h, n);
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+}
+
+/// Yoshi's Island 1 has a blue sky; Yoshi's House (where a missed map tap
+/// lands) a pale one.
+fn smw_sky_is_blue(h: &H) -> bool {
+    grab(h).is_some_and(|p| {
+        // A widened frame has the 256 dots in its middle.
+        let pad = p.w.saturating_sub(256) / 2;
+        [(20usize, 40usize), (60, 40), (100, 40)]
+            .iter()
+            .all(|&(x, y)| {
+                let at = (y * p.w + pad + x) * 4;
+                p.rgba[at + 2] > p.rgba[at] + 40
+            })
+    })
+}
+
+/// Open SMW and enter YI1, trying again from a fresh harness when the map
+/// taps (paced in real time) landed on Yoshi's House instead.
+fn smw_yi1_harness(path: &Path) -> Option<H> {
+    for attempt in 0..4 {
+        let mut h = new_harness();
+        open_and_run(&mut h, path);
+        if !h.state().gpu_available_for_test() {
+            return None;
+        }
+        smw_enter_yi1(&mut h);
+        if smw_sky_is_blue(&h) {
+            return Some(h);
+        }
+        println!("LEVEL attempt {attempt}: not in Yoshi's Island 1, again");
+        probe(&h, &format!("smw-wrong-level-{attempt}"));
+    }
+    None
+}
+
+fn level_numbers(h: &H) -> String {
+    let lh = h.state().level_heights_for_test();
+    let hn = h.state().heights_numbers_for_test();
+    format!("level {lh:?}; learner {hn:?}")
+}
+
+/// W34-07 acceptance: Super Mario World, Yoshi's Island 1, at 32:9 with the
+/// scout: the Diorama raises the scouted right margin from the tiles learned
+/// in play; a second visit shows heights on the first frame. Cold cache for
+/// the first visit. `RF_SCREENS_ONLY=diorama-level-smw`.
+fn shot_diorama_level_smw(readme: &mut Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "smw-32x9";
+    if !wanted("diorama-level-smw") {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA).zip not found");
+    };
+    let cold = std::env::temp_dir().join(format!("rf_level_smw_{}", std::process::id()));
+    let reuse = std::env::var_os("RF_LEVEL_REUSE").map(PathBuf::from);
+    let cold = reuse.clone().unwrap_or(cold);
+    if reuse.is_none() {
+        let _ = std::fs::remove_dir_all(&cold);
+    }
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: nothing else in this process reads the environment while the
+    // harness is between sessions.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    println!("LEVEL cache dir {}", cold.display());
+    // A window wide enough for the play rect to be 32:9 (and the pictures
+    // are wanted in the docs all the same).
+    // SAFETY: set before any harness of this shot is built.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RF_SCREENS_WINDOW", "1700x760");
+        std::env::set_var("RF_SCREENS_KEEP", "1");
+    }
+    let tel = retroforge::level_heights::telemetry();
+    if reuse.is_none() {
+        // ---- session 1: learn at 4:3 (the learner needs no canvas), then
+        // quit: the table is what the next session starts from.
+        {
+            let Some(mut h) = smw_yi1_harness(&path) else {
+                return skip(
+                    readme,
+                    name,
+                    "no wgpu adapter, or never reached Yoshi's Island 1",
+                );
+            };
+            h.state_mut().set_mode_for_test(Mode::Enhanced);
+            h.state_mut().set_diorama_for_test(true);
+            run_n(&mut h, 30);
+            let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800);
+            play_for(
+                &mut h,
+                frames,
+                "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+                // $1490 star power, $1497 the hurt-flash timer.
+                &[(0x1490, 0xFF), (0x1497, 0xFF)],
+                enter_smw,
+            );
+            release_all(&mut h);
+            let learned = h.state().heights_numbers_for_test();
+            println!("LEVEL session 1, learned in play at 4:3: {learned:?}");
+            h.state().send_core_command_for_test(CoreCommand::Shutdown);
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        // ---- session 2: a fresh start of the level, the scout, 32:9.
+        let Some(mut h) = smw_yi1_harness(&path) else {
+            return skip(readme, name, "never reached Yoshi's Island 1 again");
+        };
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut().set_diorama_for_test(true);
+        // The scout, then 32:9, as `shot_scout`: unpaced until the worker
+        // runs, the live game paused while it works.
+        let telemetry = h.state().scout_telemetry_for_test();
+        h.state_mut().set_scout_enabled_for_test(true);
+        h.state_mut()
+            .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        let t1 = Instant::now();
+        let f1 = h.state().frame_count_for_test();
+        h.state_mut().set_widescreen(true);
+        while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+        }
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        let mut finished = false;
+        while t1.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(100));
+            run_n(&mut h, 1);
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+                finished = true;
+                break;
+            }
+        }
+        let scout_wall = t1.elapsed();
+        println!(
+            "LEVEL scout telemetry: frames {} cells {} started {} finished {} aborted {} gave_up {}",
+            telemetry.frames.load(Relaxed),
+            telemetry.cells.load(Relaxed),
+            telemetry.started.load(Relaxed),
+            telemetry.finished.load(Relaxed),
+            telemetry.aborted.load(Relaxed),
+            telemetry.gave_up.load(Relaxed),
+        );
+        if !finished {
+            return skip(readme, name, "the scout never finished");
+        }
+        let live_frames = h.state().frame_count_for_test() - f1;
+        // The merged canvas reaches the margins within a few repaints; the
+        // game stays paused (nothing more is played, so nothing dies).
+        run_n(&mut h, 120);
+        probe(&h, "level-2-after-scout");
+        println!(
+            "LEVEL scout: {:.1} s wall, {live_frames} live frames; {}",
+            scout_wall.as_secs_f64(),
+            level_numbers(&h)
+        );
+        for layer in 0..3 {
+            println!(
+                "LEVEL canvas census layer {layer}: {:?}",
+                h.state().canvas_census_for_test(layer, 1)
+            );
+        }
+        diorama_pair_as(
+            &mut h,
+            "diorama-level",
+            name,
+            "Super Mario World, Yoshi's Island 1, 32:9 with the level scout; heights learned in play, applied to the canvas (Live and Scout cells)",
+            readme,
+        );
+        let line = format!(
+            "LEVEL-HEIGHTS {name}: tracker frames {} scene changes {} restored {} no-format frames {}; \
+             audit of live cells against canvas keys: equal {} pattern-only {} palette-only {} different {} unkeyed {}; {}; passes {} (total {:.1} ms, longest {:.2} ms, blocks {}), rebuilds {} (total {:.1} ms, longest {:.2} ms)",
+            tel.frames.load(Relaxed),
+            tel.scene_changes.load(Relaxed),
+            tel.restored.load(Relaxed),
+            tel.no_format.load(Relaxed),
+            tel.audit_equal.load(Relaxed),
+            tel.audit_pattern_only.load(Relaxed),
+            tel.audit_palette_only.load(Relaxed),
+            tel.audit_different.load(Relaxed),
+            tel.audit_unkeyed.load(Relaxed),
+            level_numbers(&h),
+            tel.passes.load(Relaxed),
+            tel.total_us.load(Relaxed) as f64 / 1000.0,
+            tel.max_us.load(Relaxed) as f64 / 1000.0,
+            tel.blocks.load(Relaxed),
+            tel.rebuilds.load(Relaxed),
+            tel.rebuild_us.load(Relaxed) as f64 / 1000.0,
+            tel.max_rebuild_us.load(Relaxed) as f64 / 1000.0,
+        );
+        note(readme, line);
+        // The flat 32:9 frame as the core and the margin fill make it, at the
+        // same moment (the window crop stretches a wide frame to 4:3).
+        if let Some(flat) = grab(&h) {
+            save(
+                &out_dir().join("diorama-level-smw-32x9-off.png"),
+                &flat.opaque(),
+            );
+        }
+        // And the same frame from a raised, turned camera, where the depth of
+        // the scouted ground can be seen.
+        h.state_mut()
+            .set_diorama_camera_for_test(85, -25, 100, false);
+        run_n(&mut h, 30);
+        step_from(&mut h);
+        step_from(&mut h);
+        if let Some(tilted) = grab_play_area(&mut h) {
+            save(
+                &out_dir().join("diorama-level-smw-32x9-tilted.png"),
+                &tilted.opaque(),
+            );
+        }
+        println!(
+            "LEVEL alignment vote: {} decisions, last shift ({}, {}) dots, {:.2} ms spent voting",
+            tel.calibrations.load(Relaxed),
+            tel.shift_dx.load(Relaxed),
+            tel.shift_dy.load(Relaxed),
+            tel.calibration_us.load(Relaxed) as f64 / 1000.0
+        );
+        if std::env::var("RF_LEVEL_FPS").is_ok() {
+            diorama_fps(&mut h, "smw-32x9", readme);
+        }
+        // The core thread writes the heights as it stops.
+        h.state().send_core_command_for_test(CoreCommand::Shutdown);
+        std::thread::sleep(Duration::from_secs(3));
+        drop(h);
+    }
+    let cache_dir = cold.join("retroforge-canvas-cache").join("entries");
+    let sizes: Vec<u64> = std::fs::read_dir(&cache_dir)
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .collect()
+        })
+        .unwrap_or_default();
+    note(
+        readme,
+        format!("LEVEL-HEIGHTS {name}: cache entries {sizes:?} bytes"),
+    );
+
+    // ---- second visit: no play, no scout, heights on the first frame.
+    for attempt in 0..4 {
+        let mut h = new_harness();
+        open_and_run(&mut h, &path);
+        let telemetry = h.state().scout_telemetry_for_test();
+        let mut first_level: Option<u64> = None;
+        let mut first_raised: Option<(u64, usize)> = None;
+        let mut first_lit: Option<u64> = None;
+        let mut wide_on_at: Option<u64> = None;
+        let mut first_scene_cells: Option<u64> = None;
+        let base_started = telemetry.started.load(Relaxed);
+        smw_enter_yi1_watched(
+            &mut h,
+            240,
+            &mut |h| {
+                // Enhanced and Diorama on for the whole visit; 32:9 goes on
+                // in the level itself, as the persistence shot does (the
+                // canvas axes start from the level's own scroll).
+                h.state_mut().set_mode_for_test(Mode::Enhanced);
+                h.state_mut().set_diorama_for_test(true);
+                h.state_mut()
+                    .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+                h.state_mut().set_scout_enabled_for_test(true);
+                h.state_mut().set_measure_margins_for_test(true);
+            },
+            &mut |h, n| {
+                if wide_on_at.is_none() && smw_sky_is_blue(h) {
+                    h.state_mut().set_widescreen(true);
+                    wide_on_at = Some(n);
+                }
+                if first_level.is_none() && h.state().level_heights_for_test().is_some() {
+                    first_level = Some(n);
+                }
+                if first_raised.is_none() {
+                    if let Some((_, raised, ..)) = h.state().heights_numbers_for_test() {
+                        if raised > 0 {
+                            first_raised = Some((n, raised));
+                        }
+                    }
+                }
+                if first_lit.is_none() && smw_sky_is_blue(h) {
+                    first_lit = Some(n);
+                }
+                if first_scene_cells.is_none() && h.state().margin_known_for_test().is_some() {
+                    first_scene_cells = Some(n);
+                }
+            },
+        );
+        run_n(&mut h, 30);
+        probe(&h, "level-3-second-visit");
+        println!(
+            "LEVEL second visit margins known {:?}",
+            h.state().margin_known_for_test()
+        );
+        if !smw_sky_is_blue(&h) {
+            println!("LEVEL second visit attempt {attempt}: not in Yoshi's Island 1, again");
+            drop(h);
+            continue;
+        }
+        let numbers = level_numbers(&h);
+        let line = format!(
+            "LEVEL-HEIGHTS {name} second visit (frames counted from the X press that starts the level; 32:9 went on at frame {wide_on_at:?}, when the level's sky first showed): \
+             the level's sky first on screen at frame {first_lit:?}, level heights held from \
+             {first_level:?}, first raised cells {first_raised:?}, canvas margins known from \
+             {first_scene_cells:?}; scouts started {} (must be 0); {numbers}",
+            telemetry.started.load(Relaxed) - base_started
+        );
+        note(readme, line);
+        // The shot: the game pauses, one frame steps, Diorama on.
+        h.state_mut().pause_for_test();
+        run_n(&mut h, 30);
+        step_from(&mut h);
+        step_from(&mut h);
+        if let Some(on) = grab_play_area(&mut h) {
+            save(
+                &out_dir().join("diorama-level-smw-32x9-second-visit.png"),
+                &on.opaque(),
+            );
+        }
+        if first_raised.is_none() {
+            println!("LEVEL second visit: no raised cell in 240 frames");
+        }
+        drop(h);
+        break;
+    }
+}
+
+/// W34-07: what a second visit gets on the NES. The canvas cannot be re-tiled
+/// there (its cells hold master colours, not tile bytes), so there is no
+/// whole-level view; what persists is the learned table and the call on the
+/// camera. Cold cache; learn, quit, come back, count the frames until blocks
+/// stand. `RF_SCREENS_ONLY=diorama-level-smb3`.
+fn shot_diorama_level_smb3(readme: &mut Vec<String>) {
+    let name = "smb3";
+    if !wanted("diorama-level-smb3") {
+        return;
+    }
+    let Some(path) = rom("nes", "Super Mario Bros. 3 (USA).zip") else {
+        return skip(readme, name, "Super Mario Bros. 3 (USA).zip not found");
+    };
+    let cold = std::env::temp_dir().join(format!("rf_level_smb3_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: nothing else in this process reads the environment between sessions.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+        std::env::remove_var("RF_SCREENS_WINDOW");
+        std::env::remove_var("RF_SCREENS_KEEP");
+    }
+    {
+        let mut h = new_harness();
+        open_and_run(&mut h, &path);
+        if !h.state().gpu_available_for_test() {
+            return skip(readme, name, "no wgpu adapter");
+        }
+        smb3_enter_level(&mut h);
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut().set_diorama_for_test(true);
+        run_n(&mut h, 30);
+        let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1800);
+        play_for(
+            &mut h,
+            frames,
+            "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+            &[],
+            enter_smb3,
+        );
+        release_all(&mut h);
+        println!(
+            "LEVEL smb3 session 1, learned in play: {:?}",
+            h.state().heights_numbers_for_test()
+        );
+        h.state().send_core_command_for_test(CoreCommand::Shutdown);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    // Session 2: into the level with Diorama off, then on, one frame at a time.
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    smb3_enter_level(&mut h);
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state_mut().set_diorama_for_test(true);
+    let mut first: Option<(u64, usize, String)> = None;
+    let mut at_one = None;
+    for n in 0..120u64 {
+        let t = h.state().frame_count_for_test() + 1;
+        run_frames(&mut h, t, Duration::from_secs(10));
+        let nums = h.state().heights_numbers_for_test();
+        if n == 1 {
+            at_one = nums.clone();
+        }
+        if let (None, Some((plan, raised, ..))) = (&first, &nums) {
+            if *raised > 0 {
+                first = Some((n, *raised, plan.clone()));
+            }
+        }
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    note(
+        readme,
+        format!(
+            "LEVEL-HEIGHTS {name} second visit (NES: table and camera call restored, no canvas re-tile): \
+             frames after Diorama went on until blocks stood: {first:?}; learner at frame 1: {at_one:?}; now {:?}",
+            h.state().heights_numbers_for_test()
+        ),
+    );
+    h.state_mut().pause_for_test();
+    run_n(&mut h, 30);
+    step_from(&mut h);
+    step_from(&mut h);
+    if let Some(on) = grab_play_area(&mut h) {
+        save(
+            &out_dir().join("diorama-level-smb3-second-visit.png"),
+            &on.opaque(),
+        );
+    }
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -3008,6 +3474,8 @@ fn w30_w31_screens() {
     shot_diorama_top_alttp(&mut readme);
     shot_diorama_light_alttp(&mut readme);
     shot_diorama_light_smw(&mut readme);
+    shot_diorama_level_smw(&mut readme);
+    shot_diorama_level_smb3(&mut readme);
     shot_hd2d_full(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);

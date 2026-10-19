@@ -91,17 +91,17 @@ pub struct SnesSource<'a> {
 const FLIPS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
 
 #[derive(Clone, Copy)]
-struct TileHash {
+pub(crate) struct TileHash {
     /// As stored in VRAM.
-    raw: u64,
+    pub(crate) raw: u64,
     /// The smallest of the four flipped hashes.
-    canon: u64,
+    pub(crate) canon: u64,
     /// Flips (bit 0 horizontal, bit 1 vertical) that turn the stored tile
     /// into the canonical one.
-    to_canon: u8,
+    pub(crate) to_canon: u8,
     /// Every pixel is colour 0 (transparent): nothing to see, so nothing to
     /// hide behind or stand on.
-    blank: bool,
+    pub(crate) blank: bool,
 }
 
 /// Hash one character's pattern in each of its four orientations. The bytes
@@ -123,6 +123,15 @@ fn hash_tile(vram: &[u8], char_base: u16, character: u16, depth: u8) -> TileHash
             rows[usize::from(r) * depth + pair * 2 + 1] = (w >> 8) as u8;
         }
     }
+    hash_rows(&rows, depth as u8)
+}
+
+/// [`hash_tile`] from the plane bytes themselves (8 rows x `depth` bytes,
+/// row-major). Ticket W34-07 shares it with the canvas re-tiler
+/// (`crate::level_heights`), which rebuilds the bytes from the pixels a canvas
+/// remembers, so a key made from either side is the same key.
+pub(crate) fn hash_rows(rows: &[u8; 64], depth: u8) -> TileHash {
+    let depth = usize::from(depth);
     let hash = |fx: bool, fy: bool| -> u64 {
         let mut h = Fnv64::new();
         h.bytes(&[depth as u8]);
@@ -152,7 +161,7 @@ fn hash_tile(vram: &[u8], char_base: u16, character: u16, depth: u8) -> TileHash
 
 /// Hash of the colours a palette selection shows (colour 0 is transparent
 /// and never shown, so it is left out), folded to 16 bits.
-fn palette_hash(cgram: &[u16], first: usize, count: usize) -> u16 {
+pub(crate) fn palette_hash(cgram: &[u16], first: usize, count: usize) -> u16 {
     let mut h = Fnv64::new();
     for k in 1..count {
         let c = cgram.get((first + k) & 0xFF).copied().unwrap_or(0);

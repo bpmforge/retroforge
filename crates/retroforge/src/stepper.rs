@@ -879,6 +879,16 @@ impl EmuStepper {
         }
     }
 
+    /// Ticket W34-07: the SNES background mode (`$2105` bits 0-2), `None` on
+    /// the NES.
+    #[must_use]
+    pub fn snes_bg_mode(&self) -> Option<u8> {
+        match &self.machine {
+            Machine::Snes(core) => Some(core.system().bus.ppu.bg_mode),
+            Machine::Nes(_) => None,
+        }
+    }
+
     /// Ticket W34-02: the sprites on screen as console-free boxes
     /// (`crate::sprite_capture`), for the player detector. Reads OAM only.
     pub fn sprite_boxes(&self, screen: (i32, i32), out: &mut Vec<rf_enhance::heights::SpriteBox>) {

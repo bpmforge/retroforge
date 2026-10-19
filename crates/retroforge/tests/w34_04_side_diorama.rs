@@ -108,6 +108,7 @@ fn learned(orientation: Orientation, grid: HeightGrid) -> HeightsFrame {
         backdrop_ratio: None,
         player: None,
         frames: 1200,
+        level: None,
     }
 }
 

@@ -13,12 +13,16 @@
 //! first background's scroll registers unwrapped across their 10-bit wrap,
 //! exactly as the W34-03 oracle harness feeds the tracker.
 
+use std::sync::Arc;
+
+use rf_enhance::canvas::CanvasModel;
 use rf_enhance::heights::{
     cluster, Dirs, Entity, FrameInput, FrameObs, HeightGrid, HeightLearner, Orientation,
-    OrientationGuess, PlayerTracker, SpriteBox, Stats, TileGrid,
+    OrientationGuess, OrientationSource, PlayerTracker, SpriteBox, Stats, TileGrid,
 };
 use rf_enhance::scene_tracker::SceneTracker;
 
+use crate::level_heights::{grid_phase, LayerFormat, LevelHeights, LevelTracker};
 use crate::stepper::EmuStepper;
 
 /// Which way the camera looks, from a profile's `[camera].mode`.
@@ -54,6 +58,9 @@ pub struct HeightsFrame {
     pub player: Option<PlayerView>,
     /// Frames the learner has watched.
     pub frames: u32,
+    /// Ticket W34-07: the scene's heights over its whole canvas as they stand
+    /// (shared, a pointer per frame; the shell keeps the latest).
+    pub level: Option<Arc<LevelHeights>>,
 }
 
 /// The learner and everything that feeds it, for one session.
@@ -66,11 +73,20 @@ pub struct LiveHeights {
     snes: bool,
     /// Guard refusals already logged.
     guard_logged: u32,
+    /// Ticket W34-07: what the canvases add (whole-level heights) and what
+    /// is kept between sessions.
+    level: LevelTracker,
+    restored: bool,
+    /// The profile's `[camera].mode`.
+    hint: Option<Orientation>,
+    /// The call an earlier session settled on, used until this one's own
+    /// evidence is sure (a profile's hint wins over it).
+    prior: Option<Orientation>,
 }
 
 impl LiveHeights {
     #[must_use]
-    pub fn new(snes: bool) -> Self {
+    pub fn new(snes: bool, rom_sha256: &str) -> Self {
         Self {
             scene: SceneTracker::new(),
             tracker: PlayerTracker::new(),
@@ -79,12 +95,57 @@ impl LiveHeights {
             snes_cam: (0, 0, None),
             snes,
             guard_logged: 0,
+            level: LevelTracker::new(rom_sha256.to_string()),
+            restored: false,
+            hint: None,
+            prior: None,
         }
     }
 
     /// The profile's `[camera].mode`, when it says (settles the orientation).
     pub fn set_hint(&mut self, hint: Option<Orientation>) {
+        self.hint = hint;
         self.tracker.set_mode_hint(hint);
+    }
+
+    /// Ticket W34-07: start from what an earlier session left for this ROM
+    /// (its tile table and its call on the camera). Once, before the first
+    /// frame.
+    fn restore(&mut self, canvases: &mut CanvasModel) {
+        self.restored = true;
+        if let Some(t) = self.level.persist().load_table(canvases) {
+            log::info!("height learner: restored {} tiles from the cache", t.len());
+            self.learner = HeightLearner::with_table(t);
+        }
+        self.prior = self.level.persist().load_orientation(canvases);
+    }
+
+    /// Ticket W34-07: queue what is worth keeping; the canvas model writes it
+    /// with the scenes. Called as the core thread stops.
+    pub fn finish(&mut self, canvases: &mut CanvasModel) {
+        let o = self.tracker.observed_orientation();
+        let kept = if Self::worth_keeping(o) {
+            o.orientation
+        } else {
+            Orientation::Unknown
+        };
+        self.level.finish(canvases);
+        self.level.persist().save_session(
+            canvases,
+            &self.learner,
+            kept,
+            self.learner.frames(),
+            true,
+        );
+    }
+
+    /// A call on the camera that came from watching the game, and is sure.
+    fn worth_keeping(o: OrientationGuess) -> bool {
+        o.confidence >= 2
+            && matches!(
+                o.source,
+                OrientationSource::Gravity | OrientationSource::ConstantSpeed
+            )
     }
 
     /// The camera's world position (any origin), when known.
@@ -133,7 +194,11 @@ impl LiveHeights {
         pad_mask: u16,
         grids: &[TileGrid],
         sprites: &[SpriteBox],
+        canvases: &mut CanvasModel,
     ) -> HeightsFrame {
+        if !self.restored {
+            self.restore(canvases);
+        }
         if !self.snes {
             self.scene.observe_frame(
                 &bundle.video,
@@ -153,14 +218,29 @@ impl LiveHeights {
             hint_x: None,
             hint_y: None,
         });
-        let orientation = self.tracker.orientation();
+        // A remembered call stands in for the picture's orientation until the
+        // game's own evidence is sure. It only decides how the heights are
+        // DRAWN: the learner is fed what was observed (or the profile's
+        // hint), so a menu is never learned from as if it were the level.
+        let own = self.tracker.orientation();
+        if self.tracker.observed_orientation().confidence >= 2 {
+            self.prior = None;
+        }
+        let orientation = match (self.hint, self.prior) {
+            (None, Some(p)) => OrientationGuess {
+                orientation: p,
+                confidence: 3,
+                source: OrientationSource::Hint,
+            },
+            _ => own,
+        };
         self.learner.observe(&FrameObs {
             grids,
             sprites,
             entities: &self.entities,
             player: self.tracker.player(),
             pad,
-            orientation: orientation.orientation,
+            orientation: own.orientation,
             hidden: None,
         });
         match (self.learner.guard_trip(), self.guard_logged) {
@@ -177,8 +257,22 @@ impl LiveHeights {
             }
             _ => {}
         }
+        let level = self.level_pass(stepper, grids, canvases);
+        let observed = self.tracker.observed_orientation();
+        self.level.persist().save_session(
+            canvases,
+            &self.learner,
+            if Self::worth_keeping(observed) {
+                observed.orientation
+            } else {
+                Orientation::Unknown
+            },
+            self.learner.frames(),
+            false,
+        );
         let shown = self.tracker.player().or_else(|| self.tracker.tracked());
         HeightsFrame {
+            level,
             grids: self.learner.grids_for(grids),
             foreground: self.learner.foreground_index(grids),
             orientation,
@@ -193,6 +287,49 @@ impl LiveHeights {
             }),
             frames: self.learner.frames(),
         }
+    }
+}
+
+impl LiveHeights {
+    /// Ticket W34-07: keep the scene's whole-level heights current. The
+    /// playfield's block grid is placed on the layer's canvas by where the
+    /// frame sits there; a console or layer that cannot be re-tiled
+    /// (`LayerFormat::for_mode`) gets only the scene bookkeeping.
+    fn level_pass(
+        &mut self,
+        stepper: &EmuStepper,
+        grids: &[TileGrid],
+        canvases: &mut CanvasModel,
+    ) -> Option<Arc<LevelHeights>> {
+        let frames = canvases.frames()?;
+        let fg = self.learner.foreground_index(grids);
+        let fmt = fg.and_then(|i| {
+            let g = grids.get(i).filter(|g| g.exact && !g.hud)?;
+            let mode = stepper.snes_bg_mode()?;
+            let fmt = LayerFormat::for_mode(mode, g.layer, g.cell_px != 8)?;
+            let (ox, oy) = frames.origin_at(usize::from(g.layer), usize::from(g.rows_px.0))?;
+            Some((fmt, grid_phase((ox, oy), g.offset, g.rows_px.0)))
+        });
+        let g = fg.and_then(|i| grids.get(i));
+        let origin =
+            g.and_then(|g| frames.origin_at(usize::from(g.layer), usize::from(g.rows_px.0)));
+        self.level.observe(
+            self.learner.frames(),
+            frames.scene,
+            fmt,
+            g.zip(origin),
+            canvases,
+            &self.learner,
+        );
+        let level = self.level.current();
+        // Proof that the canvas and the capture name tiles alike (counted in
+        // `level_heights::telemetry`), a few times a second.
+        if fmt.is_some() && self.learner.frames().is_multiple_of(15) {
+            if let (Some(g), Some(o)) = (g, origin) {
+                self.level.audit(g, o);
+            }
+        }
+        level
     }
 }
 
@@ -214,10 +351,93 @@ mod tests {
     }
 
     #[test]
+    fn a_session_starts_from_the_table_and_call_the_last_one_kept() {
+        use rf_enhance::heights::{Class, Entry, Learned, TileHeightTable, TileKey};
+        let root =
+            std::env::temp_dir().join(format!("rf_live_learn_restore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let open = || {
+            CanvasModel::with_cache(
+                "rom-w34-07".to_string(),
+                Some(rf_cache::Cache::open(&root, 1 << 20).unwrap()),
+            )
+        };
+        let key = TileKey {
+            pattern: 7,
+            palette: 9,
+            layer: 0,
+            cell_px: 8,
+        };
+        let mut table = TileHeightTable::new();
+        table.insert(
+            key,
+            Entry {
+                learned: Learned {
+                    class: Class::Wall,
+                    height_eighths: 8,
+                    confidence: 3,
+                },
+                ..Entry::default()
+            },
+        );
+        // Session one: a learner with a firm call and a table, finished.
+        let mut canvases = open();
+        let mut first = LiveHeights::new(true, "rom-w34-07");
+        first.learner = HeightLearner::with_table(table.clone());
+        first.level.persist().save_session(
+            &mut canvases,
+            &first.learner,
+            Orientation::SideView,
+            1,
+            true,
+        );
+        canvases.flush();
+        drop(canvases);
+        // Session two restores both, once.
+        let mut canvases = open();
+        let mut second = LiveHeights::new(true, "rom-w34-07");
+        assert!(second.prior.is_none() && second.learner.table().is_empty());
+        second.restore(&mut canvases);
+        assert_eq!(second.learner.table(), &table);
+        assert_eq!(second.prior, Some(Orientation::SideView));
+        // A profile's own word is kept apart from the remembered one.
+        second.set_hint(Some(Orientation::TopDown));
+        assert_eq!(second.hint, Some(Orientation::TopDown));
+        assert_eq!(second.prior, Some(Orientation::SideView));
+        // Only a call watched from play and sure of itself is worth keeping.
+        let call = |orientation, confidence, source| OrientationGuess {
+            orientation,
+            confidence,
+            source,
+        };
+        assert!(LiveHeights::worth_keeping(call(
+            Orientation::SideView,
+            2,
+            OrientationSource::Gravity
+        )));
+        assert!(!LiveHeights::worth_keeping(call(
+            Orientation::SideView,
+            1,
+            OrientationSource::Gravity
+        )));
+        assert!(!LiveHeights::worth_keeping(call(
+            Orientation::SideView,
+            3,
+            OrientationSource::Hint
+        )));
+        assert!(!LiveHeights::worth_keeping(call(
+            Orientation::SideView,
+            3,
+            OrientationSource::ScrollAxis
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_pad_mask_reads_the_right_bits_for_each_console() {
         use rf_input::{NesButton, SnesButton};
-        let snes = LiveHeights::new(true);
-        let nes = LiveHeights::new(false);
+        let snes = LiveHeights::new(true, "");
+        let nes = LiveHeights::new(false, "");
         let s = 1u16 << SnesButton::Right.bit();
         let n = 1u16 << NesButton::Right.bit();
         assert!(snes.dirs(s).right && !snes.dirs(s).left);

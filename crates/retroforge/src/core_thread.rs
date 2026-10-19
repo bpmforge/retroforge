@@ -1432,6 +1432,7 @@ fn core_thread_main(
     let cache = rf_cache::Cache::open(canvas_cache_root(), CANVAS_CACHE_CAP_BYTES).ok();
     // Ticket W33-03: ONE canvas model for both consoles (NES = layer 0, SNES
     // = a canvas per background layer).
+    let heights_rom = rom_sha256.clone();
     let mut canvases = rf_enhance::canvas::CanvasModel::with_cache(rom_sha256, cache);
     // Ticket W32-07: the level scout (a second machine; see `crate::scout`).
     let mut scout_driver = crate::scout::ScoutDriver::default();
@@ -1656,6 +1657,13 @@ fn core_thread_main(
                     });
                     if width != sink.width() {
                         sink = rf_renderer::FrameBuffer::with_size(width, height);
+                        // Ticket W34-07: the layer extraction grows with it.
+                        // Left at the old width it kept the first 256 dots of
+                        // each widened line (the left margin, not the
+                        // picture) and handed the UI layers narrower than the
+                        // frame they came with, which the layer textures
+                        // asserted on (Diorama on while widescreen is on).
+                        layers = rf_renderer::LayeredFrame::with_size(width, height);
                         // The new buffer starts with mask capture off.
                         sink.set_mode7_mask_capture(stepper.hd_mode7_on());
                     }
@@ -1808,7 +1816,15 @@ fn core_thread_main(
                     loading_unpaced = None;
                     pacer.set_enabled(user_pacing);
                 }
-                CoreCommand::Shutdown => return LoopControl::Stop,
+                CoreCommand::Shutdown => {
+                    // Ticket W34-07: what the height learner knows goes to the
+                    // cache with the scenes (the canvas model writes it as it
+                    // drops).
+                    if let Some(l) = live_heights.as_mut() {
+                        l.finish(&mut canvases);
+                    }
+                    return LoopControl::Stop;
+                }
             }
         }
 
@@ -2266,8 +2282,10 @@ fn core_thread_main(
             // Ticket W34-04: the learner reads the same grids and sprites.
             let heights = tile_grid_capture.then(|| {
                 let learner = live_heights.get_or_insert_with(|| {
-                    let mut l =
-                        crate::live_learn::LiveHeights::new(stepper.bg_layer_views().is_some());
+                    let mut l = crate::live_learn::LiveHeights::new(
+                        stepper.bg_layer_views().is_some(),
+                        &heights_rom,
+                    );
                     l.set_hint(orientation_hint);
                     l
                 });
@@ -2277,6 +2295,7 @@ fn core_thread_main(
                     input.load().ports[0],
                     &tile_grids,
                     &sprites,
+                    &mut canvases,
                 ))
             });
             bundle_writer.publish(bundle);

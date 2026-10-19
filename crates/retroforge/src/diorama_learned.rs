@@ -26,7 +26,7 @@
 //! SNES-only and a different cell size from the learned keys, so the two are
 //! not merged cell by cell.
 
-use rf_enhance::heights::{Class, HeightGrid, Orientation, SpriteBox, TileGrid};
+use rf_enhance::heights::{Class, HeightCanvas, HeightGrid, Orientation, SpriteBox, TileGrid};
 use rf_renderer::diorama::camera_matrices;
 use rf_renderer::diorama_mesh::{Billboard, DioramaScene, SideBillboard, SideScene};
 use rf_renderer::gpu::GpuContext;
@@ -102,6 +102,46 @@ impl Lattice {
                 -i32::from(grid.offset.0),
                 i32::from(grid.rows_px.0) - i32::from(grid.offset.1),
             ),
+            depth,
+            slope,
+        }
+    }
+
+    /// Ticket W34-07: the cells of a whole-level height canvas that fall on a
+    /// `view`-sized picture whose top-left pixel sits at `picture_origin` on
+    /// the canvas (canvas pixels). The picture may be wider than the game's
+    /// own screen: this is what raises the scouted margins.
+    #[must_use]
+    pub fn from_level(hc: &HeightCanvas, picture_origin: (i64, i64), view: (u32, u32)) -> Self {
+        let p = i64::from(hc.cell_px.max(1));
+        let c0 = (picture_origin.0 - hc.origin.0).div_euclid(p);
+        let r0 = (picture_origin.1 - hc.origin.1).div_euclid(p);
+        let left = hc.origin.0 + c0 * p - picture_origin.0;
+        let top = hc.origin.1 + r0 * p - picture_origin.1;
+        let cols = ((i64::from(view.0) - left + p - 1) / p).max(1) as u32;
+        let rows = ((i64::from(view.1) - top + p - 1) / p).max(1) as u32;
+        let n = cols as usize * rows as usize;
+        let mut depth = vec![0u8; n];
+        let mut slope = vec![0i8; n];
+        for r in 0..rows {
+            for c in 0..cols {
+                let (cc, rr) = (c0 + i64::from(c), r0 + i64::from(r));
+                let (Ok(cc), Ok(rr)) = (u32::try_from(cc), u32::try_from(rr)) else {
+                    continue;
+                };
+                if let Some(l) = hc.get(cc, rr) {
+                    let (class, eighths) = l.drawn();
+                    let (d, s) = raise(class, eighths);
+                    depth[r as usize * cols as usize + c as usize] = d;
+                    slope[r as usize * cols as usize + c as usize] = s;
+                }
+            }
+        }
+        Self {
+            cols,
+            rows,
+            tile_px: p as u32,
+            origin: (left as i32, top as i32),
             depth,
             slope,
         }
@@ -260,6 +300,34 @@ pub fn side_billboards(sprites: &[SpriteBox], screen: (u32, u32)) -> Vec<SideBil
                 height_px: h,
                 uv: [x / sw, y / sh, (x + w) / sw, (y + h) / sh],
             })
+        })
+        .collect()
+}
+
+/// [`side_billboards`] for a picture wider than the frame the sprite layer
+/// was cut from (ticket W34-07): the boxes are in the 256 hardware dots;
+/// `core_pad` is where those sit in the core's own (widened) frame, which the
+/// sprite texture is, and `plane_pad` where they sit on the ground plane.
+#[must_use]
+pub fn side_billboards_wide(
+    sprites: &[SpriteBox],
+    core: (u32, u32),
+    core_pad: i32,
+    plane_pad: i32,
+) -> Vec<SideBillboard> {
+    let in_core: Vec<SpriteBox> = sprites
+        .iter()
+        .map(|s| SpriteBox {
+            x: s.x.saturating_add(core_pad as i16),
+            ..*s
+        })
+        .collect();
+    let shift = (plane_pad - core_pad) as f32;
+    side_billboards(&in_core, core)
+        .into_iter()
+        .map(|mut b| {
+            b.center_x_px += shift;
+            b
         })
         .collect()
 }
@@ -509,8 +577,15 @@ pub fn render_top(
     pass: &rf_renderer::diorama::DioramaPass,
     f: &TopFrame<'_>,
 ) -> Result<DioramaRender, String> {
-    let grid = f.lattice.to_live_grid(f.screen);
-    let ground = crate::live_heights::padded_ground(f.frame_rgba, f.screen.0, f.screen.1, &grid);
+    // The rows the game shows: the rest of the host's frame is not picture.
+    let shown = f.rows.clamp(1, f.screen.1.max(1));
+    let base = f.lattice.to_live_grid((f.screen.0, shown));
+    let (base_w, base_h) = base.extent();
+    // D2: the floor goes on past the room by `EDGE_MARGIN_CELLS`, in the
+    // room's own edge colours, so a pitched camera never looks off the plane
+    // into the clear colour. The camera itself is still held to the room.
+    let grid = base.with_margin(EDGE_MARGIN_CELLS);
+    let ground = crate::live_heights::padded_ground(f.frame_rgba, f.screen.0, shown, &grid);
     let (ground_w, ground_h) = grid.extent();
     let billboards = top_billboards(f.sprites, &grid, f.screen);
     let scene = DioramaScene {
@@ -521,7 +596,7 @@ pub fn render_top(
         depth: &grid.depth,
         billboards: &billboards,
     };
-    let window = (f.screen.0 as f32, f.rows.clamp(1, f.screen.1.max(1)) as f32);
+    let window = (f.screen.0 as f32, shown as f32);
     let zoom = f.view.camera.clamped().zoom;
     let centre = if f.view.follow {
         f.centre
@@ -529,7 +604,14 @@ pub fn render_top(
         (window.0 / 2.0, window.1 / 2.0)
     };
     let (gx, gy) = grid.screen_to_grid(centre.0, centre.1);
-    let target = clamp_window_centre((gx, gy), window, zoom, (ground_w as f32, ground_h as f32));
+    let margin = (EDGE_MARGIN_CELLS * grid.tile_px) as f32;
+    let held = clamp_window_centre(
+        (gx - margin, gy - margin),
+        window,
+        zoom,
+        (base_w as f32, base_h as f32),
+    );
+    let target = (held.0 + margin, held.1 + margin);
     render_ground_window(
         gpu,
         pass,
@@ -546,6 +628,9 @@ pub fn render_top(
         },
     )
 }
+
+/// Cells of floor the top-down Diorama lays beyond the picture on every side.
+pub const EDGE_MARGIN_CELLS: u32 = 16;
 
 #[cfg(test)]
 mod tests {
@@ -630,6 +715,108 @@ mod tests {
         assert_eq!(l.depth, vec![8, 0, 0, 8, 0, 8]);
         assert_eq!(l.slope, vec![0, 0, 0, 0, 0, -3]);
         assert_eq!(l.raised(), 3);
+    }
+
+    fn level_canvas() -> HeightCanvas {
+        // 6 x 4 cells of 8 px at canvas (100, 52): a wall column at col 3 and
+        // a ramp at (5, 3).
+        let mut hc = HeightCanvas::new((100, 52), 6, 4, 8).unwrap();
+        for r in 0..4 {
+            hc.set(
+                3,
+                r,
+                rf_enhance::heights::Learned {
+                    class: Class::Wall,
+                    height_eighths: 8,
+                    confidence: 3,
+                },
+            );
+        }
+        hc.set(
+            5,
+            3,
+            rf_enhance::heights::Learned {
+                class: Class::Ramp(2),
+                height_eighths: 8,
+                confidence: 2,
+            },
+        );
+        // Below the draw level: flat.
+        hc.set(
+            0,
+            0,
+            rf_enhance::heights::Learned {
+                class: Class::Wall,
+                height_eighths: 8,
+                confidence: 1,
+            },
+        );
+        hc
+    }
+
+    #[test]
+    fn a_level_canvas_lays_its_cells_on_a_wider_picture_than_the_screen() {
+        let hc = level_canvas();
+        // A 40 x 24 picture whose corner is canvas (97, 50): cell (0,0) of the
+        // canvas starts 3 px right and 2 px down of it.
+        let l = Lattice::from_level(&hc, (97, 50), (40, 24));
+        assert_eq!(
+            l.origin,
+            (-5, -6),
+            "the first cell on the canvas grid, left of the corner"
+        );
+        // Picture x 0..40 over cells starting at -5: ceil(45/8) = 6 columns;
+        // y: ceil(30/8) = 4 rows.
+        assert_eq!((l.cols, l.rows, l.tile_px), (6, 4, 8));
+        // Canvas col 3 sits at picture x = 100 + 24 - 97 = 27, i.e. lattice
+        // column (27 + 5) / 8 = 4; the canvas starts at lattice column 1 (-5 + 8 = 3).
+        let at = |c: usize, r: usize| l.depth[r * 6 + c];
+        for r in 0..4 {
+            assert_eq!(at(4, r), if r >= 1 { 8 } else { 0 }, "row {r}");
+        }
+        assert_eq!(
+            l.raised(),
+            3,
+            "rows 1..4 of the wall; the weak cell and the ramp are off the view or flat"
+        );
+    }
+
+    #[test]
+    fn a_level_picture_that_starts_left_of_the_canvas_keeps_the_grid() {
+        let hc = level_canvas();
+        let l = Lattice::from_level(&hc, (60, 44), (48, 32));
+        // Nothing of the canvas at columns before it; the wall is at canvas
+        // x 124..132 = picture x 64..72 -> beyond a 48 px view.
+        assert_eq!(l.raised(), 0);
+        let l = Lattice::from_level(&hc, (100, 52), (48, 32));
+        assert_eq!(l.origin, (0, 0));
+        assert_eq!(l.raised(), 4 + 1, "the wall column and the ramp");
+        assert_eq!(l.slope[3 * 6 + 5], 2);
+    }
+
+    #[test]
+    fn billboards_on_a_wide_plane_shift_with_the_plane_not_with_the_texture() {
+        let s = SpriteBox {
+            x: 100,
+            y: 50,
+            w: 16,
+            h: 16,
+            behind_bg: false,
+            tile: 1,
+        };
+        // The core frame is 352 wide (pad 48); the plane is 800 wide (pad 272).
+        let b = side_billboards_wide(&[s], (352, 240), 48, 272);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].center_x_px, 100.0 + 8.0 + 272.0);
+        assert_eq!(b[0].feet_y_px, 66.0);
+        // The sprite texture is the core's: u from the core x (100 + 48).
+        assert!((b[0].uv[0] - 148.0 / 352.0).abs() < 1e-6);
+        assert!((b[0].uv[2] - 164.0 / 352.0).abs() < 1e-6);
+        // Without widening it is the plain builder.
+        let plain = side_billboards(&[s], (256, 240));
+        let same = side_billboards_wide(&[s], (256, 240), 0, 0);
+        assert_eq!(plain.len(), same.len());
+        assert_eq!(plain[0].center_x_px, same[0].center_x_px);
     }
 
     #[test]

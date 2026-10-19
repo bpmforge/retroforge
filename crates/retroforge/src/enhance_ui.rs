@@ -450,7 +450,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: if diorama_available {
                 "from the profile's heights"
             } else {
-                "approximate, visited areas only"
+                "approximate, learned from play"
             },
             enabled: diorama_on,
             availability: diorama_av,
@@ -973,7 +973,7 @@ mod tests {
     /// Ticket W34-04 (D-023): Diorama is an Enhanced-mode feature with no
     /// profile needed. Whether the heights are exact (decoded collision or
     /// painted `[heights]`) or learned from play only changes the badge
-    /// line: learned heights are labelled "approximate, visited areas only".
+    /// line: learned heights are labelled "approximate, learned from play".
     #[test]
     fn diorama_needs_enhanced_not_a_profile_and_says_when_it_is_approximate() {
         let mut s = settings(Mode::Enhanced);
@@ -989,12 +989,9 @@ mod tests {
         let diorama = rows.iter().find(|r| r.id == "diorama").unwrap();
         assert_eq!(diorama.availability, Availability::Available);
         assert!(diorama.effective());
-        assert!(
-            badge_breakdown(&s, &learned)
-                .iter()
-                .any(|l| l.contains("Diorama: walls")
-                    && l.contains("approximate, visited areas only"))
-        );
+        assert!(badge_breakdown(&s, &learned)
+            .iter()
+            .any(|l| l.contains("Diorama: walls") && l.contains("approximate, learned from play")));
 
         // Painted or decoded heights: exact, so no caveat.
         let exact = GameFacts::new(true, true, false);

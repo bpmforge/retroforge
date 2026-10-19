@@ -126,6 +126,39 @@ impl LiveGrid {
         (self.cols * self.tile_px, self.rows * self.tile_px)
     }
 
+    /// Ticket W34-07 (D2): the same grid with `m` more cells on every side,
+    /// all flat. The ground texture of a padded grid repeats the picture's
+    /// edge pixels into the new cells ([`padded_ground`]), so a pitched camera
+    /// looking past the room sees the room's own edge colours instead of the
+    /// clear colour. `screen_to_grid` follows the shift.
+    #[must_use]
+    pub fn with_margin(&self, m: u32) -> Self {
+        let (cols, rows) = (self.cols + 2 * m, self.rows + 2 * m);
+        let mut solid = vec![0u8; (cols * rows) as usize];
+        let mut depth = vec![0u8; (cols * rows) as usize];
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                let (from, to) = (
+                    (r * self.cols + c) as usize,
+                    ((r + m) * cols + c + m) as usize,
+                );
+                solid[to] = self.solid[from];
+                depth[to] = self.depth[from];
+            }
+        }
+        Self {
+            cols,
+            rows,
+            tile_px: self.tile_px,
+            offset: (
+                self.offset.0 + m * self.tile_px,
+                self.offset.1 + m * self.tile_px,
+            ),
+            solid,
+            depth,
+        }
+    }
+
     /// A screen pixel position in grid (world) space.
     #[must_use]
     pub fn screen_to_grid(&self, x: f32, y: f32) -> (f32, f32) {
@@ -340,6 +373,47 @@ mod tests {
 
     fn grid(t: &HeightTable, vram: &[u8], r: &[u8], scroll: (u16, u16)) -> LiveGrid {
         build_grid(t, vram, r, [scroll, (0, 0), (0, 0), (0, 0)], (256, 224)).unwrap()
+    }
+
+    #[test]
+    fn a_grid_with_a_margin_keeps_its_cells_and_repeats_the_edge_pixels_outside_them() {
+        let g = LiveGrid {
+            cols: 2,
+            rows: 2,
+            tile_px: 8,
+            offset: (3, 5),
+            solid: vec![1, 0, 0, 1],
+            depth: vec![8, 0, 0, 4],
+        };
+        let m = g.with_margin(2);
+        assert_eq!((m.cols, m.rows), (6, 6));
+        assert_eq!(m.offset, (3 + 16, 5 + 16));
+        assert_eq!(m.extent(), (48, 48));
+        // The old cells sit two cells in; the margin is flat.
+        let at = |c: u32, r: u32| m.depth[(r * m.cols + c) as usize];
+        assert_eq!((at(2, 2), at(3, 2), at(2, 3), at(3, 3)), (8, 0, 0, 4));
+        assert_eq!(m.depth.iter().filter(|d| **d > 0).count(), 2);
+        assert_eq!(m.solid.iter().map(|s| usize::from(*s)).sum::<usize>(), 2);
+        // A screen point maps to the same cell of the new grid, two cells over.
+        assert_eq!(
+            m.screen_to_grid(1.0, 1.0),
+            (
+                g.screen_to_grid(1.0, 1.0).0 + 16.0,
+                g.screen_to_grid(1.0, 1.0).1 + 16.0
+            )
+        );
+        // The ground texture of the padded grid repeats the picture's edge
+        // pixels into the margin: nothing in it is the transparent fill.
+        let frame: Vec<u8> = (0..16 * 16)
+            .flat_map(|i| [(i % 251) as u8, 7, 9, 255])
+            .collect();
+        let tex = padded_ground(&frame, 16, 16, &m);
+        let (w, h) = m.extent();
+        assert_eq!(tex.len(), (w * h * 4) as usize);
+        assert!(tex.chunks_exact(4).all(|p| p[3] == 255));
+        // The far corner is the picture's last pixel.
+        let last = &frame[(16 * 16 - 1) * 4..16 * 16 * 4 - 1];
+        assert_eq!(&tex[tex.len() - 4..tex.len() - 1], last);
     }
 
     #[test]

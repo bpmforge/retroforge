@@ -211,6 +211,9 @@ pub struct SceneCanvases {
     scout_memo: Option<ScoutMemo>,
     /// Stitched or merged since the last write.
     unsaved: bool,
+    /// Ticket W34-07: scout deltas merged into this scene so far (consumers
+    /// that derive from the canvas look again when it changes).
+    merges: u64,
     /// Restored from the cache when first stitched.
     restored: bool,
     /// CRC32 of the body on disk, so an unchanged scene is not rewritten.
@@ -352,6 +355,10 @@ pub struct CanvasModel {
     /// scored against the live canvas where they meet it (W33-06), and a
     /// fork starts with no canvas to check against.
     guard: bool,
+    /// Ticket W34-07: blobs other producers (the height learner) asked to be
+    /// stored beside the scenes, written by the next [`Self::flush`] (and by
+    /// the drop that follows the model's last one). Newest wins per key.
+    extras: Vec<(rf_cache::CacheKey, Vec<u8>)>,
 }
 
 impl Default for CanvasModel {
@@ -381,6 +388,7 @@ impl CanvasModel {
             resident: None,
             edges_seen: 0,
             guard: true,
+            extras: Vec::new(),
         }
     }
 
@@ -612,6 +620,33 @@ impl CanvasModel {
         })
     }
 
+    /// Put a scene's canvases and palettes in as if stitched (tests of the
+    /// consumers of a scene, which cannot build a whole play session).
+    #[doc(hidden)]
+    pub fn seed_scene_for_test(
+        &mut self,
+        scene: u64,
+        layers: [Canvas; LAYERS],
+        palettes: PaletteTable,
+    ) {
+        let set = self.scenes.entry(scene).or_default();
+        set.layers = layers;
+        set.palettes = palettes;
+        set.unsaved = true;
+    }
+
+    /// How many scout deltas have been merged into `scene` (W34-07).
+    #[must_use]
+    pub fn scene_merges(&self, scene: u64) -> u64 {
+        self.scenes.get(&scene).map_or(0, |s| s.merges)
+    }
+
+    /// The palettes `scene`'s cells were seen under (W33-02), borrowed.
+    #[must_use]
+    pub fn scene_palettes(&self, scene: u64) -> Option<&PaletteTable> {
+        self.scenes.get(&scene).map(|s| &s.palettes)
+    }
+
     /// The per-layer canvases stitched for `scene`, borrowed.
     #[must_use]
     pub fn scene_canvases(&self, scene: u64) -> Option<&[Canvas; LAYERS]> {
@@ -663,6 +698,24 @@ impl CanvasModel {
         set
     }
 
+    /// Ticket W34-07: the stored blob for `key`, read through this model's
+    /// cache (`None` for a miss, no cache, or a cache fault). The model owns
+    /// the one `Cache` of the session, so other producers go through it
+    /// rather than opening a second index over the same root.
+    pub fn fetch_extra(&mut self, key: &rf_cache::CacheKey) -> Option<Vec<u8>> {
+        self.cache.as_mut()?.get(key).ok().flatten()
+    }
+
+    /// Ticket W34-07: have `bytes` stored under `key` by the next
+    /// [`Self::flush`]. A later call for the same key replaces this one.
+    pub fn queue_extra(&mut self, key: rf_cache::CacheKey, bytes: Vec<u8>) {
+        if let Some(slot) = self.extras.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = bytes;
+        } else {
+            self.extras.push((key, bytes));
+        }
+    }
+
     /// Persist every scene stitched or merged into since it was last written
     /// (the current one, and one just left): the whole scene through
     /// `rf-cache`, atomically. A scene whose body is unchanged writes
@@ -670,8 +723,14 @@ impl CanvasModel {
     /// this time", never a crash. Returns the bytes stored by this call.
     pub fn flush(&mut self) -> usize {
         let Some(cache) = self.cache.as_mut() else {
+            self.extras.clear();
             return 0;
         };
+        for (key, bytes) in std::mem::take(&mut self.extras) {
+            if let Err(e) = cache.put(&key, &bytes) {
+                eprintln!("rf-enhance: cache: extra entry not saved: {e}");
+            }
+        }
         // Ascending ids: the same order every run.
         let mut ids: Vec<u64> = self
             .scenes
@@ -788,6 +847,7 @@ impl CanvasModel {
             resident: None,
             edges_seen: 0,
             guard: false,
+            extras: Vec::new(),
         }
     }
 
@@ -851,6 +911,7 @@ impl CanvasModel {
             return 0;
         };
         live.unsaved = true;
+        live.merges += 1;
         let SceneCanvases {
             layers, confidence, ..
         } = live;
@@ -878,6 +939,7 @@ impl CanvasModel {
             return 0;
         };
         live.unsaved = true;
+        live.merges += 1;
         let SceneCanvases {
             layers, confidence, ..
         } = live;

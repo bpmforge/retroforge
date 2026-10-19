@@ -547,7 +547,10 @@ fn a_scout_only_fills_the_scene_it_was_started_for() {
         "no canvas for scene 2"
     );
     assert_eq!(live.scene_canvases(1).unwrap()[0].get(300, 0), None);
+    assert_eq!(live.scene_merges(1), 0);
     assert_eq!(live.merge_unknown_from(1, &scout), 1);
+    assert_eq!(live.scene_merges(1), 1, "a merge is counted (W34-07)");
+    assert_eq!(live.scene_merges(2), 0);
     let got = live.scene_canvases(1).unwrap()[0].get(300, 0);
     assert_eq!(got.map(|p| p.palette_index), Some(5));
 }
@@ -1437,6 +1440,47 @@ mod nes_layer0 {
         let restored_id = observe(&mut fresh, &frame_bundle(0, 0, 9));
         assert_eq!(restored_id, id, "same content, same scene id");
         assert_eq!(layer0(&fresh).unwrap(), saved);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket W34-07: other producers keep blobs beside the scenes through the
+    /// model's one cache: queued, written by the flush, read by a fresh model
+    /// over the same root; the newest bytes win; a miss and a model with no
+    /// cache read as nothing.
+    #[test]
+    fn extra_blobs_ride_the_models_cache() {
+        let key = |what: &str| rf_cache::CacheKey {
+            rom_sha256: "rom-extra".to_string(),
+            asset_hash: what.to_string(),
+            producer: "test".to_string(),
+            settings_hash: "v1".to_string(),
+        };
+        let root = unique_cache_dir("extra");
+        let mut m = CanvasModel::with_cache(
+            "rom-extra".to_string(),
+            Some(Cache::open(&root, 10_000_000).unwrap()),
+        );
+        assert!(m.fetch_extra(&key("a")).is_none(), "nothing before a write");
+        m.queue_extra(key("a"), vec![1, 2, 3]);
+        m.queue_extra(key("a"), vec![4, 5]);
+        m.queue_extra(key("b"), vec![9]);
+        assert!(
+            m.fetch_extra(&key("a")).is_none(),
+            "queued is not written until the flush"
+        );
+        m.flush();
+        drop(m);
+        let mut fresh = CanvasModel::with_cache(
+            "rom-extra".to_string(),
+            Some(Cache::open(&root, 10_000_000).unwrap()),
+        );
+        assert_eq!(fresh.fetch_extra(&key("a")), Some(vec![4, 5]));
+        assert_eq!(fresh.fetch_extra(&key("b")), Some(vec![9]));
+        assert!(fresh.fetch_extra(&key("c")).is_none());
+        let mut none = CanvasModel::with_cache(String::new(), None);
+        none.queue_extra(key("a"), vec![1]);
+        none.flush();
+        assert!(none.fetch_extra(&key("a")).is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 
