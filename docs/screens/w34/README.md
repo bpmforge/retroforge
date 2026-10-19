@@ -55,3 +55,13 @@ preset is the one-click card (grade on by default). Each file under 1.5 MB.
 - `smw-hd2d-dusk.png` - Super Mario World, Yoshi's Island 1 at 4:3, camera not following, whole window in view: HD-2D preset, dusk (0.8, dark: the grade paints night from about 0.8) (after).
 - `smw-hd2d-morning.png` - Super Mario World, Yoshi's Island 1 at 4:3, camera not following, whole window in view: HD-2D preset, morning sun (0.3) (after).
 - `smw-hd2d-noon.png` - Super Mario World, Yoshi's Island 1 at 4:3, camera not following, whole window in view: HD-2D preset, noon (0.5) (after).
+
+W35-01 (`RF_SCREENS_ONLY=w35-smw` / `w35-alttp`; `RF_SCREENS_ONLY=w35-soak` for D6's soak, no picture):
+
+- `w35-smw-follow-start-4x3.png` - SMW, Yoshi's Island 1, cold cache, 6 frames into the level: HD-2D camera (40 degrees, zoom 160 %, follow on), the player not named yet: the whole window is framed, Mario in view.
+- `w35-smw-follow-playing-4x3.png` - the same camera 80 frames of walking later: the detector named Mario, the zoom closed in on him.
+- `w35-smw-follow-start-32x9.png` - SMW at 32:9 (level learned, scout canvas), fresh start, follow on: Mario in view, left margin is the level start (empty).
+- `w35-smw-steep-yaw-4x3.png` - SMW 4:3 at pitch 75, yaw 40 (held to 30): the planes go on past the picture, mirrored sideways.
+- `w35-smw-steep-yaw-32x9.png` - the same at 32:9: no void; the far edge shows the mirrored picture.
+- `w35-alttp-follow-start.png`, `w35-alttp-follow-playing.png` - ALttP, Link's house, top-down, zoom 160 % following: whole room at the start, close on Link after walking.
+- `w35-alttp-steep-yaw.png` - ALttP at pitch 75, yaw 40: the floor goes on past the room on every side.

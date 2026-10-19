@@ -4631,3 +4631,15 @@ stories, 10 decisions).
   canvas, atmosphere layers as fog, the HUD call is a heuristic, the follow
   camera can lose the player at a fresh level start (the 4:3 SMW tour set turns
   follow off). Workspace: **3266 passing**. Per-ticket numbers: `docs/design/HD2D_PLAN.md` "as built".
+- **W35-01 — Diorama fixes** (2026-10-19, in progress, uncommitted). Audit of D1-D8
+  (`HD2D_PLAN.md` "W35-01 as built"): D1 was not met at a level start (the
+  follow zoom cropped Mario out until the detector named him); fixed with a zoom
+  ramp (whole window until the player is tracked, then 24 frames to the chosen
+  zoom). Plane edges past the picture: mirrored sideways, edge row repeated up
+  and down, yaw capped where a very wide picture runs out of extension. D4
+  atmosphere: a profile-pinned layer is never a plane and the fog pass runs over
+  the 3D image (unit-tested; no game has an active pin). D6 measured: mesh 0.01 ms,
+  so a vertex-buffer reuse has a small ceiling (upload not isolated, not built); 32:9 layered p50 2.3 / p95 2.7-3.0 ms; the
+  36,330-frame SMW soak at 4x never tripped the gate (p95 2.2-3.9 ms). The canvas
+  world axes restart at a non-continuous scene cut (the 32:9-on-at-the-map offset).
+  Workspace: **3272 passing**.

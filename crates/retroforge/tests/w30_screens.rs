@@ -3182,6 +3182,243 @@ fn shot_w34_tour(readme: &mut Vec<String>) {
     }
 }
 
+/// W35-01: the Diorama's follow camera at a fresh level start, a steep yaw,
+/// and ALttP. `RF_SCREENS_ONLY=w35-smw` or `w35-alttp`. Files in
+/// `docs/screens/w34/` named `w35-*`.
+fn shot_w35_diorama(readme: &mut Vec<String>) {
+    let d = w34_dir();
+    let frames: u64 = std::env::var("RF_DIORAMA_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    // The HD-2D preset's camera: 40 degrees, zoom 160 %, following.
+    let preset = |h: &mut H| h.state_mut().set_diorama_camera_for_test(40, 0, 160, true);
+    // A stepped frame leaves the core paused: resume it for what follows.
+    let shoot = |h: &mut H, name: &str| {
+        step_from(h);
+        if let Some(p) = grab_play_area(h) {
+            save(&d.join(name), &p.opaque());
+        }
+        h.state().send_core_command_for_test(CoreCommand::Resume);
+        run_n(h, 2);
+    };
+    if wanted("w35-smw") {
+        // SAFETY: set before any harness of this shot is built.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("RF_SCREENS_WINDOW", "1900x800");
+        }
+        let cold = std::env::temp_dir().join(format!("rf_w35_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cold);
+        std::fs::create_dir_all(&cold).expect("cold cache dir");
+        // SAFETY: nothing else reads the environment between sessions.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMPDIR", &cold);
+        }
+        let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+            return skip(readme, "w35-smw", "Super Mario World (USA).zip not found");
+        };
+        {
+            let Some(mut h) = smw_yi1_harness(&path) else {
+                return skip(readme, "w35-smw", "never reached Yoshi's Island 1");
+            };
+            h.state_mut().set_mode_for_test(Mode::Enhanced);
+            h.state_mut().set_diorama_for_test(true);
+            preset(&mut h);
+            // The first frames of the level, cold cache: follow on, the
+            // player not named yet.
+            let first: usize = std::env::var("RF_W35_FRAMES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6);
+            run_n(&mut h, first);
+            shoot(&mut h, "w35-smw-follow-start-4x3.png");
+            // Steep yaw and pitch, no follow, so the plane's edges are in view.
+            h.state_mut()
+                .set_diorama_camera_for_test(75, 40, 100, false);
+            run_n(&mut h, 10);
+            shoot(&mut h, "w35-smw-steep-yaw-4x3.png");
+            preset(&mut h);
+            h.state_mut().set_diorama_for_test(true);
+            run_n(&mut h, 30);
+            // Play: the detector names Mario, the camera closes in on him.
+            let lap = "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20";
+            let pokes = [(0x1490, 0xFF), (0x1497, 0xFF)];
+            for _ in 0..4 {
+                play_for(&mut h, 20, "R20", &pokes, enter_smw);
+                println!("w35 follow {:?}", h.state().diorama_follow_for_test());
+            }
+            shoot(&mut h, "w35-smw-follow-playing-4x3.png");
+            println!("w35 follow {:?}", h.state().diorama_follow_for_test());
+            play_for(&mut h, frames, lap, &pokes, enter_smw);
+            release_all(&mut h);
+            println!("w35 smw learned {:?}", h.state().heights_numbers_for_test());
+            h.state().send_core_command_for_test(CoreCommand::Shutdown);
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        // Session 2: 32:9 with the level learned, the scout's canvas, a fresh
+        // start of the level (as the tour does), follow on.
+        let Some(mut h) = smw_yi1_harness(&path) else {
+            return skip(readme, "w35-smw", "never reached Yoshi's Island 1 again");
+        };
+        use std::sync::atomic::Ordering::Relaxed;
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut()
+            .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+        h.state_mut().set_diorama_for_test(true);
+        run_n(&mut h, 30);
+        let telemetry = h.state().scout_telemetry_for_test();
+        h.state_mut().set_scout_enabled_for_test(true);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+        let t1 = Instant::now();
+        h.state_mut().set_widescreen(true);
+        while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+            let t = h.state().frame_count_for_test() + 2;
+            run_frames(&mut h, t, Duration::from_secs(10));
+        }
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        while t1.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(100));
+            run_n(&mut h, 1);
+            if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+                break;
+            }
+        }
+        run_n(&mut h, 120);
+        h.state()
+            .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+        h.state().send_core_command_for_test(CoreCommand::Resume);
+        preset(&mut h);
+        run_n(&mut h, 10);
+        shoot(&mut h, "w35-smw-follow-start-32x9.png");
+        h.state_mut()
+            .set_diorama_camera_for_test(75, 40, 100, false);
+        run_n(&mut h, 10);
+        shoot(&mut h, "w35-smw-steep-yaw-32x9.png");
+        note(
+            readme,
+            format!(
+                "w35-smw|follow at start 4:3 / playing / 32:9, steep yaw; {:?}",
+                h.state().heights_numbers_for_test()
+            ),
+        );
+        h.state().send_core_command_for_test(CoreCommand::Shutdown);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    if wanted("w35-alttp") {
+        let Some(path) = rom(
+            "snes",
+            "Legend of Zelda, The - A Link to the Past (USA).zip",
+        ) else {
+            return skip(readme, "w35-alttp", "ALttP not found");
+        };
+        let mut h = new_harness();
+        open_and_run(&mut h, &path);
+        if !h.state().gpu_available_for_test() {
+            return skip(readme, "w35-alttp", "no wgpu adapter");
+        }
+        alttp_take_control(&mut h);
+        h.state_mut().set_mode_for_test(Mode::Enhanced);
+        h.state_mut().set_diorama_for_test(true);
+        h.state_mut().set_diorama_camera_for_test(52, 0, 160, true);
+        run_n(&mut h, 30);
+        shoot(&mut h, "w35-alttp-follow-start.png");
+        let end = h.state().frame_count_for_test() + 600;
+        while h.state().frame_count_for_test() < end {
+            play_script(&mut h, "w4 D30 w15 R40 w15 U20 w15 L40 w15 D20 w20");
+        }
+        release_all(&mut h);
+        run_n(&mut h, 40);
+        shoot(&mut h, "w35-alttp-follow-playing.png");
+        h.state_mut()
+            .set_diorama_camera_for_test(75, 40, 100, false);
+        run_n(&mut h, 10);
+        shoot(&mut h, "w35-alttp-steep-yaw.png");
+        note(
+            readme,
+            format!(
+                "w35-alttp|follow, steep yaw; {:?}",
+                h.state().heights_numbers_for_test()
+            ),
+        );
+        h.state().send_core_command_for_test(CoreCommand::Shutdown);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+}
+
+/// W35-01: D6's soak. SMW at the 4x window with the Diorama (layers, shadows)
+/// for `RF_W35_SOAK_FRAMES` frames (default 36 000: ten game minutes at 60 Hz),
+/// pacing off, in 600-frame chunks: the budget gate must never trip and the
+/// Diorama must still be drawing at the end. `RF_SCREENS_ONLY=w35-soak`.
+fn shot_w35_soak(readme: &mut Vec<String>) {
+    if !wanted("w35-soak") {
+        return;
+    }
+    // SAFETY: set before any harness of this shot is built.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RF_SCREENS_WINDOW", "1300x1100");
+    }
+    let total: u64 = std::env::var("RF_W35_SOAK_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(36_000);
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, "w35-soak", "Super Mario World (USA).zip not found");
+    };
+    let Some(mut h) = smw_yi1_harness(&path) else {
+        return skip(readme, "w35-soak", "never reached Yoshi's Island 1");
+    };
+    h.state_mut().set_mode_for_test(Mode::Enhanced);
+    h.state_mut().set_diorama_for_test(true);
+    h.state_mut().set_diorama_camera_for_test(40, 0, 160, true);
+    run_n(&mut h, 30);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    let (mut worst_p95, mut worst_trips) = (0.0_f64, 0u32);
+    let t0 = Instant::now();
+    let f0 = h.state().frame_count_for_test();
+    let mut chunks = 0u32;
+    while h.state().frame_count_for_test() < f0 + total {
+        play_for(
+            &mut h,
+            600,
+            "w4 R90 B+R30 R60 A+R24 R50 L30 R+B40 w20",
+            &[(0x1490, 0xFF), (0x1497, 0xFF)],
+            enter_smw,
+        );
+        chunks += 1;
+        worst_p95 = worst_p95.max(h.state().diorama_p95_ms_for_test());
+        worst_trips = worst_trips.max(h.state().diorama_gate_trips_for_test());
+        if chunks.is_multiple_of(10) {
+            println!(
+                "w35 soak {} frames {:.0} s: p95 {:.2} ms trips {} image {:?}",
+                h.state().frame_count_for_test() - f0,
+                t0.elapsed().as_secs_f64(),
+                h.state().diorama_p95_ms_for_test(),
+                h.state().diorama_gate_trips_for_test(),
+                h.state().diorama_size_for_test(),
+            );
+        }
+    }
+    let frames = h.state().frame_count_for_test() - f0;
+    note(
+        readme,
+        format!(
+            "w35-soak|{frames} frames in {:.0} s ({:.1} fps, pacing off), worst window p95 {worst_p95:.2} ms, gate trips {worst_trips}, Diorama still drawing: {}",
+            t0.elapsed().as_secs_f64(),
+            frames as f64 / t0.elapsed().as_secs_f64(),
+            h.state().diorama_size_for_test().is_some()
+        ),
+    );
+    assert_eq!(worst_trips, 0, "the budget gate tripped");
+    assert!(h.state().diorama_size_for_test().is_some());
+    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+    std::thread::sleep(Duration::from_secs(3));
+}
+
 /// The tour's contact sheet: one row per game, flat | morning | noon | dusk.
 fn tour_sheet(readme: &mut Vec<String>) {
     let d = w34_dir();
@@ -4192,6 +4429,8 @@ fn w30_w31_screens() {
     shot_diorama_wide(&mut readme);
     shot_hd2d_full(&mut readme);
     shot_w34_tour(&mut readme);
+    shot_w35_diorama(&mut readme);
+    shot_w35_soak(&mut readme);
     shot_lens(&mut readme);
     shot_superfx_hd(&mut readme);
     shot_stunt(&mut readme);

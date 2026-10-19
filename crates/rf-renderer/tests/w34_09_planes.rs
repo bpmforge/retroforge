@@ -157,7 +157,7 @@ fn back_planes_are_their_own_kind_and_the_playfield_plane_is_not() {
 }
 
 #[test]
-fn an_overscan_plane_is_nine_quads_whose_outer_ones_repeat_the_slot_edge() {
+fn an_overscan_plane_is_nine_quads_whose_outer_ones_mirror_the_picture() {
     let mut s = scene(2);
     s.back = vec![BackPlane {
         slot: 1,
@@ -188,8 +188,8 @@ fn a_swung_camera_sees_no_void_past_the_pictures_edge_with_overscan() {
     };
     let mut s = scene(1);
     rect(&mut s.atlas, 0, 0, 0, PIC, PIC, GREEN);
-    // The right-most column is red: what the plane repeats past its edge.
-    rect(&mut s.atlas, 0, PIC - 1, 0, PIC, PIC, RED);
+    // The right-most 16 columns are red: what the plane mirrors past its edge.
+    rect(&mut s.atlas, 0, PIC - 16, 0, PIC, PIC, RED);
     let camera = cam(50.0, 35.0);
     let pass = DioramaPass::new(&gpu);
     let void = |overscan: f32| {
@@ -199,18 +199,22 @@ fn a_swung_camera_sees_no_void_past_the_pictures_edge_with_overscan() {
         (n, img)
     };
     let (void_flat, _) = void(0.0);
-    let (void_over, img) = void(160.0);
+    let (void_over, img) = void(PIC as f32);
     assert!(
         void_flat > 2000,
         "the picture alone leaves clear colour at the edges of this view: {void_flat}"
     );
     assert_eq!(void_over, 0, "overscan fills the whole view");
-    // The part past the right edge is the picture's own last column (red).
+    // The part past the right edge is the picture's own edge, mirrored: red
+    // first (the last columns), then green. Streaks of one repeated column
+    // would be red all the way out.
     let red = img.chunks_exact(4).filter(|p| near(p, RED, 12)).count();
     assert!(
         red > 500,
-        "the edge column goes on past the picture: {red} red pixels"
+        "the edge goes on past the picture: {red} red pixels"
     );
+    let green = img.chunks_exact(4).filter(|p| near(p, GREEN, 12)).count();
+    assert!(green > 500, "and the green beyond it: {green} green pixels");
 }
 
 #[test]

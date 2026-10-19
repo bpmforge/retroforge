@@ -339,6 +339,9 @@ pub struct CanvasModel {
     scenes: HashMap<u64, SceneCanvases>,
     last: Option<LayerFrames>,
     last_scene: Option<SceneId>,
+    /// The last scene that was not [`SETTLING`] (W35-01: a change of it is a
+    /// cut).
+    last_settled: Option<SceneId>,
     /// Per layer, the bounding box of the cells written since
     /// [`Self::take_dirty`] (world coordinates).
     dirty: [Option<Rect>; LAYERS],
@@ -383,6 +386,7 @@ impl CanvasModel {
             scenes: HashMap::new(),
             last: None,
             last_scene: None,
+            last_settled: None,
             dirty: [None; LAYERS],
             cache,
             rom_sha256,
@@ -397,11 +401,6 @@ impl CanvasModel {
     /// attributed to.
     pub fn observe_frame(&mut self, bundle: &FrameBundle, feed: &FrameFeed<'_>) -> SceneId {
         let events = scene_events(bundle, feed.scene_scroll());
-        let bands = if feed.is_bands() {
-            self.scroll.observe_frame(&events)
-        } else {
-            Vec::new()
-        };
         let scene = self.scene_tracker.observe(
             &bundle.video,
             bundle.width,
@@ -411,6 +410,31 @@ impl CanvasModel {
             feed.scene,
         );
         self.note_new_edges();
+        // W35-01: a cut that is not a continuation (a map to a level, a
+        // door, a fade) starts the world axes over before this frame is
+        // placed, so a scene's canvas is in the same coordinates in every
+        // visit and every session (the raw scroll it starts at), not offset
+        // by what the scene before it scrolled. A continuous edge keeps
+        // them: its neighbour is placed by the world carrying on.
+        if scene != SETTLING {
+            let prev = self.last_settled.replace(scene);
+            let cut = prev.filter(|p| *p != scene).is_some_and(|p| {
+                self.scene_tracker
+                    .edges()
+                    .iter()
+                    .rev()
+                    .find(|e| e.from == p.0 && e.to == scene.0)
+                    .is_some_and(|e| !e.continuous)
+            });
+            if cut {
+                self.scroll.rebase_world();
+            }
+        }
+        let bands = if feed.is_bands() {
+            self.scroll.observe_frame(&events)
+        } else {
+            Vec::new()
+        };
         self.stitch(bundle, scene, feed, &bands);
         scene
     }
@@ -842,6 +866,7 @@ impl CanvasModel {
             scenes: HashMap::new(),
             last: None,
             last_scene: self.last_scene,
+            last_settled: self.last_settled,
             dirty: [None; LAYERS],
             cache: None,
             rom_sha256: String::new(),
@@ -861,6 +886,7 @@ impl CanvasModel {
         self.scene_tracker = seed.scene_tracker.clone();
         self.axes = seed.axes.clone();
         self.last_scene = seed.last_scene;
+        self.last_settled = seed.last_settled;
         self.last = None;
     }
 

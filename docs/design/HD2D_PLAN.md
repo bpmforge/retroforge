@@ -1058,3 +1058,77 @@ margins, and the 4x cost. Code: `retroforge::app` (`widen_margins_layered`,
   shows tall streaks of the picture's edge colours); the cost at 32:9 is the
   split (0.7 ms) plus the pass, both over D6's 3 ms line at p95 on a loaded
   machine.
+
+---------------------------------------------------------------------------
+
+## W35-01 as built (2026-10-19)
+
+An audit of D1-D8 against section 4 and the fixes for what was left. Code:
+`rf-renderer` (`diorama::CameraSmoother::tracking`, `diorama_side::push_plane`),
+`retroforge` (`enhanced_view` zoom ramp and `crop_density_to_window`,
+`diorama_learned::yaw_cap_deg`, `diorama_layers::LayerSplit::atmosphere`,
+`app::fog_over_diorama`), `rf-enhance` (`ScrollTracker::rebase_world`, canvas).
+
+**Audit (what the acceptance says, what shows it).**
+
+| | Verdict | Evidence |
+|---|---|---|
+| D1 follow | met after this ticket | window-fit distance, target = player else the middle of the window, critically damped (`a_step_response_does_not_overshoot_and_settles`, `the_side_camera_centres_its_target_and_fits_the_window`, `follow_centres_the_given_world_point_on_screen`). It was NOT met at a level start: with no player named the camera zoomed on the middle of the screen and Mario (at the left) was cropped out (reproduced: `w35-smw-follow-start-4x3`, before). |
+| D2 framing | met | `w34_09_wide_diorama` (rect = picture aspect at 16:9 / 21:9 / 32:9, image = rect); shots `diorama-wide-*`. A very wide picture at a steep yaw looked off the plane (fixed here). |
+| D3 billboards | met | `a_two_by_two_cluster_of_oam_entries_is_one_billboard`, `w34_08_layers` (behind-BG sprite hidden by a Tall box). |
+| D4 layers | partly met before, met now | hills on their own plane and flat HUD (`w34_08_layers`, `w34_08_layers_app`); "atmosphere layers stay fog" was not addressed, see below. |
+| D5 depth / MSAA | met | `diorama_depth.rs`, goldens re-pinned in W34-05. |
+| D6 perf | partly | p95 at 1024x896 with shadows 2.0-3.1 ms depending on the machine's load (p50 2.0-2.4); see Cost. |
+| D7 HUD | met | `a_hud_grid_is_never_raised`, status-bar rows identical at every pitch (`w34_08_layers_app`). |
+| D8 orientation | met | `w34_04_side_diorama`, RF-Scroller shots `diorama-side-rfscroller-*`. |
+
+- **D1, the fix.** Cause (verified by logging the follow state each frame): the
+  player detector names the player only after the pad has moved him (about 40
+  frames), and until then the camera looked at the middle of the screen at the
+  chosen zoom. The zoom now ramps: `next_zoom_ramp` holds it at 1.0 (the whole
+  window, so the player is in view wherever he is) while `CameraSmoother::tracking`
+  is false, and closes in over 24 frames once it is true (and opens out again
+  when the target has been lost for two seconds). Not following: the zoom as
+  chosen. The target is the player's feet (the bottom of his box; it was its centre).
+- **Plane edges.** The planes go on past the picture by a picture's width (up
+  to its height) on every side: sideways the picture MIRRORED about the edge (the
+  repeated edge column was long horizontal streaks), up and down the edge row
+  repeated (a mirrored floor would show its grass upside down). A very wide
+  picture swung far enough still looks past that (32:9 at yaw 30 showed the clear
+  colour), so the yaw is also capped where the extension stops covering the
+  view (`yaw_cap_deg`; a unit test puts it between 20 and 30 degrees at 32:9 centred, and it is 30 at 4:3). Both:
+  extended edges, and a cap only where they run out. ALttP's floor keeps its
+  16-cell edge margin (top-down).
+- **D4 atmosphere.** A layer a profile pins as atmosphere (`[atmosphere]`) is
+  never given a plane (`LayerSplit::atmosphere`), and the fog pass now runs over
+  the 3D image (it ran over the flat frame nobody sees, so fog vanished with
+  Diorama on): its density map is cut to the window the camera shows
+  (`crop_density_to_window`, exact at yaw 0) before the lens. The flat frame's own fog pass skips while the 3D image is shown (it fogged
+  a picture nobody sees, and shared the budget gate). Proven by unit
+  tests only: no shipped game has an active pin (RF-Scroller-S pins plane 0 at
+  the `shadow` rung, which draws nothing), so there is no shot.
+- **D6, measured, not changed.** The mesh build is 0.01 ms per frame; the
+  vertex upload was not isolated (it is inside the 1.7-1.9 ms the pass takes,
+  nearly all of it the synchronous readback wait), so reusing the buffer with a
+  scroll as a translate was not built: the ceiling on its saving is small. The ground texture is a new picture every frame, so its upload
+  is needed. `wide_cache`'s clone (3.3 MB at 32:9) is about 0.1 ms outside the
+  gate. The only lever left is the async double-buffered readback W34-05 named
+  (one frame of latency): not done. 32:9 layered, this run (load average 7):
+  p50 2.3-2.4 / p95 2.7-3.0 ms (split 0.69, pass 1.85); 16:9 p50 2.0 / p95 2.5-3.1.
+- **Pre-existing: 32:9 on at the map, then a level.** Cause: `WorldAxis` carries
+  the map's scroll across the scene cut (a map at 87 then a level at 400 reads as
+  a step back of 199, a world 512 away from its scroll), so the level's canvas
+  was in different coordinates than when it is the first scene, and a canvas
+  restored from an earlier session landed beside the live one. A cut that is
+  not a continuous edge now starts the axes over (`ScrollTracker::rebase_world`
+  in `CanvasModel::observe_frame`); a continuous edge keeps them (its neighbour is
+  placed by the world carrying on). `a_scene_after_a_scrolled_one_starts_at_its_own_scroll`
+  fails (x -76) without it. Caches written by earlier builds for a scene that
+  followed a scrolled one keep their old offset: `canvas-chunk-v2` was not bumped
+  (that would drop every scene, most of which began at offset 0 and are right),
+  and the stale-canvas path only fires on a disagreement, which an offset canvas
+  never gives (live frames land on unknown cells), so such a scene shows a doubled
+  strip until its cache entry is cleared or the tag is bumped to v3 (Brad's call).
+- **Soak.** `RF_SCREENS_ONLY=w35-soak` (SMW at the 4x window, image 1170 x 896, layers and shadows, follow on, pacing off): 36,330 frames in 313 s (116 fps), RSS peak 494 MB, the gate's window p95 between 2.2 and 3.9 ms (limit 16.67), 0 trips, the Diorama still drawing at the end. Unpaced, so it covers ten game minutes in five wall minutes.
+- **Shots** (`docs/screens/w34/w35-*`, README lines there): follow at the first
+  frames of SMW at 4:3 and 32:9, walking, a steep yaw at both, ALttP.

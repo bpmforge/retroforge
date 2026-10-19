@@ -63,7 +63,10 @@ const PRODUCER: &str = "rf-enhance-stitcher";
 
 /// Cache-key version tag: a different tag is a different key, so an entry of
 /// another format is a clean miss, never misread bytes.
-pub const SETTINGS_HASH: &str = "canvas-chunk-v2";
+/// v3 (W35-01): scenes cached before the scene-cut world-axis rebase
+/// could sit 512 px off their own scroll, so v2 entries are dropped (the
+/// scout rebuilds them).
+pub const SETTINGS_HASH: &str = "canvas-chunk-v3";
 
 /// The tag of the retired single-canvas entries (W4-03b), for tests.
 pub const LEGACY_SETTINGS_HASH: &str = "canvas-chunk-v1";
