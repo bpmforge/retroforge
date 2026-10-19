@@ -68,6 +68,26 @@ const WALL_EIGHTHS: u8 = 8;
 /// Extrusion of a tile that hides the player.
 const TALL_EIGHTHS: u8 = 16;
 
+/// Most of a grid's complete cells a learned table may raise. A table that
+/// calls more of the picture solid than this is a table gone wrong (a wipe, a
+/// menu, a fill called a wall), not a level: the grid is drawn flat, the
+/// offending keys are forgotten and a [`GuardTrip`] is recorded.
+pub const MAX_RAISED_PCT: usize = 40;
+/// A key covering at least this share of its grid's complete cells is a
+/// fill (a fade mask, a letterbox, a menu backdrop), not an object: it
+/// cannot "hide the player" (S3).
+pub const FILL_PCT: usize = 25;
+
+/// A sanity guard that refused a table (S-guard; the shell logs it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardTrip {
+    /// The grid's layer.
+    pub layer: u8,
+    /// Cells the table would have raised, and the grid's complete cells.
+    pub raised: usize,
+    pub cells: usize,
+}
+
 /// Which signals are on (the mutation checks switch them off one by one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signals(pub u8);
@@ -171,6 +191,9 @@ pub struct HeightLearner {
     hits: Vec<(TileKey, TileCell)>,
     /// The layers the last frame called backdrop planes.
     backdrop: [bool; 4],
+    /// The playfield grid the last frame's table was refused for, if any.
+    trip: Option<GuardTrip>,
+    trips: u32,
 }
 
 impl Default for HeightLearner {
@@ -304,6 +327,8 @@ impl HeightLearner {
             dirty: Vec::new(),
             hits: Vec::new(),
             backdrop: [false; 4],
+            trip: None,
+            trips: 0,
         }
     }
 
@@ -346,9 +371,79 @@ impl HeightLearner {
     }
 
     /// Read the table back for one grid: flat for HUD grids and for anything
-    /// below [`Learned::DRAW_LEVEL`].
+    /// below [`Learned::DRAW_LEVEL`], and flat for the whole grid when the
+    /// table would raise more than [`MAX_RAISED_PCT`] of it.
     #[must_use]
     pub fn grid_for(&self, g: &TileGrid) -> HeightGrid {
+        let out = self.read_grid(g);
+        let (raised, cells) = Self::raised_in(&out, g);
+        if raised * 100 > cells * MAX_RAISED_PCT {
+            return Self::flat_like(g);
+        }
+        out
+    }
+
+    /// [`Self::grid_for`] for every grid of a frame, with only the playfield
+    /// (the grid the renderer extrudes) allowed to rise: a backdrop plane, a
+    /// status bar or any other layer is flat by construction.
+    #[must_use]
+    pub fn grids_for(&self, grids: &[TileGrid]) -> Vec<HeightGrid> {
+        let fg = self.foreground_index(grids);
+        grids
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                if Some(i) == fg {
+                    self.grid_for(g)
+                } else {
+                    Self::flat_like(g)
+                }
+            })
+            .collect()
+    }
+
+    /// The refusal the last [`Self::observe`] made, if it made one.
+    #[must_use]
+    pub const fn guard_trip(&self) -> Option<GuardTrip> {
+        self.trip
+    }
+
+    /// Refusals made so far.
+    #[must_use]
+    pub const fn guard_trips(&self) -> u32 {
+        self.trips
+    }
+
+    fn flat_like(g: &TileGrid) -> HeightGrid {
+        let n = g.cells.len();
+        HeightGrid {
+            cols: g.cols,
+            rows: g.rows,
+            cell_px: g.cell_px,
+            offset: g.offset,
+            class: vec![Class::Unknown; n],
+            depth: vec![0; n],
+            confidence: vec![0; n],
+        }
+    }
+
+    /// `(raised, complete cells)` of a read-back grid.
+    fn raised_in(out: &HeightGrid, g: &TileGrid) -> (usize, usize) {
+        let mut raised = 0;
+        let mut cells = 0;
+        for (i, c) in g.cells.iter().enumerate() {
+            if c.partial() {
+                continue;
+            }
+            cells += 1;
+            if out.depth.get(i).copied().unwrap_or(0) > 0 {
+                raised += 1;
+            }
+        }
+        (raised, cells)
+    }
+
+    fn read_grid(&self, g: &TileGrid) -> HeightGrid {
         let n = g.cells.len();
         let mut out = HeightGrid {
             cols: g.cols,
@@ -387,7 +482,7 @@ impl HeightLearner {
     /// The renderer extrudes this grid and no other.
     #[must_use]
     pub fn foreground_index(&self, grids: &[TileGrid]) -> Option<usize> {
-        let fg = Self::foreground(grids, &self.backdrop)?;
+        let fg = self.foreground(grids, &self.backdrop)?;
         grids.iter().position(|g| std::ptr::eq(g, fg))
     }
 
@@ -418,7 +513,7 @@ impl HeightLearner {
             self.watch_player(f, &backdrop);
             if let (true, Some(fg)) = (
                 self.signals.has(Signals::S4_MASS),
-                Self::foreground(f.grids, &backdrop),
+                self.foreground(f.grids, &backdrop),
             ) {
                 self.vote_mass(f.grids, fg.layer, &backdrop, f.orientation);
             }
@@ -426,6 +521,7 @@ impl HeightLearner {
             self.dynamics.valid = false;
         }
         self.run_ladder(&backdrop);
+        self.sanity(f.grids, &backdrop);
     }
 
     /// S5: per layer travel; returns the layers that are backdrop planes.
@@ -474,13 +570,88 @@ impl HeightLearner {
         out
     }
 
-    fn foreground<'a>(grids: &'a [TileGrid], backdrop: &[bool; 4]) -> Option<&'a TileGrid> {
-        // One collision layer: the widest band of the fastest layers; on a tie
-        // the lowest layer number (deterministic).
+    /// One collision layer: among the layers that move with the camera (at
+    /// least 90 % of the fastest one's travel, so every layer until anything
+    /// has scrolled), the widest band; on a tie the lowest layer number
+    /// (deterministic). Travel comes first so that a screen where only a
+    /// fill, a wipe or a status bar is full height cannot become the
+    /// playfield over the layer that scrolls.
+    fn foreground<'a>(&self, grids: &'a [TileGrid], backdrop: &[bool; 4]) -> Option<&'a TileGrid> {
+        let fastest = (0..4)
+            .filter(|&l| self.motion[l].band.is_some())
+            .map(|l| self.motion[l].travel)
+            .max()
+            .unwrap_or(0);
+        let moves = |g: &TileGrid| self.motion[layer_ix(g)].travel * 10 >= fastest * 9;
         grids
             .iter()
             .filter(|g| !g.hud && !backdrop[layer_ix(g)])
-            .min_by_key(|g| (std::cmp::Reverse(span(g)), g.layer))
+            .min_by_key(|g| (!moves(g), std::cmp::Reverse(span(g)), g.layer))
+    }
+
+    /// The global guard: when the table would raise more than
+    /// [`MAX_RAISED_PCT`] of the playfield, record a [`GuardTrip`] and forget
+    /// the keys that account for most of it (their votes are zeroed, so they
+    /// have to be earned again).
+    fn sanity(&mut self, grids: &[TileGrid], backdrop: &[bool; 4]) {
+        let Some(fg) = self.foreground(grids, backdrop) else {
+            self.trip = None;
+            return;
+        };
+        let out = self.read_grid(fg);
+        let (raised, cells) = Self::raised_in(&out, fg);
+        if raised * 100 <= cells * MAX_RAISED_PCT {
+            self.trip = None;
+            return;
+        }
+        if self.trip.is_none() {
+            self.trips += 1;
+        }
+        self.trip = Some(GuardTrip {
+            layer: fg.layer,
+            raised,
+            cells,
+        });
+        let mut seen: Vec<TileKey> = Vec::new();
+        for (i, c) in fg.cells.iter().enumerate() {
+            if c.partial() || out.depth[i] == 0 {
+                continue;
+            }
+            let key = TileKey {
+                pattern: c.pattern,
+                palette: c.palette,
+                layer: fg.layer,
+                cell_px: fg.cell_px,
+            };
+            if !seen.contains(&key) {
+                seen.push(key);
+            }
+        }
+        for key in seen {
+            if let Some(e) = self.table.map.get_mut(&key) {
+                e.evidence.mass = 0;
+                e.evidence.hides_player = 0;
+                e.learned = Learned::default();
+                e.agree = 0;
+                e.contra = 0;
+            }
+        }
+    }
+
+    /// Whether `key` covers [`FILL_PCT`] or more of the complete cells of a
+    /// grid of its layer this frame.
+    fn is_fill(grids: &[TileGrid], key: &TileKey) -> bool {
+        grids
+            .iter()
+            .filter(|g| g.layer == key.layer && !g.hud)
+            .any(|g| {
+                let (mut n, mut of) = (0usize, 0usize);
+                for c in g.cells.iter().filter(|c| !c.partial()) {
+                    of += 1;
+                    n += usize::from(c.pattern == key.pattern && c.palette == key.palette);
+                }
+                n * 100 >= of * FILL_PCT && of > 0
+            })
     }
 
     /// `seen`, the backdrop calls, and S7 for every non-HUD cell.
@@ -597,7 +768,7 @@ impl HeightLearner {
 
     /// S1, S2, S3, S6 and the walkable-air count, from the tracked player.
     fn watch_player(&mut self, f: &FrameObs<'_>, backdrop: &[bool; 4]) {
-        let (Some(p), Some(fg)) = (f.player, Self::foreground(f.grids, backdrop)) else {
+        let (Some(p), Some(fg)) = (f.player, self.foreground(f.grids, backdrop)) else {
             self.dynamics.valid = false;
             return;
         };
@@ -666,10 +837,18 @@ impl HeightLearner {
                 let need_priority = f.hidden.is_none();
                 let hits = std::mem::take(&mut self.hits);
                 for (k, c) in &hits {
-                    if !need_priority || c.priority() {
-                        hidden_keys.push(*k);
-                        self.vote(*k, |ev| ev.hides_player = ev.hides_player.saturating_add(1));
+                    // One vote per key per frame (a wall of one tile is one
+                    // witness, not five); a blank cell shows what is behind
+                    // it and a fill is a wipe, neither hides anybody.
+                    if (need_priority && !c.priority())
+                        || c.blank()
+                        || hidden_keys.contains(k)
+                        || Self::is_fill(f.grids, k)
+                    {
+                        continue;
                     }
+                    hidden_keys.push(*k);
+                    self.vote(*k, |ev| ev.hides_player = ev.hides_player.saturating_add(1));
                 }
                 self.hits = hits;
             }

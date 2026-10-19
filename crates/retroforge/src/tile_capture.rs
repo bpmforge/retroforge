@@ -99,6 +99,9 @@ struct TileHash {
     /// Flips (bit 0 horizontal, bit 1 vertical) that turn the stored tile
     /// into the canonical one.
     to_canon: u8,
+    /// Every pixel is colour 0 (transparent): nothing to see, so nothing to
+    /// hide behind or stand on.
+    blank: bool,
 }
 
 /// Hash one character's pattern in each of its four orientations. The bytes
@@ -143,6 +146,7 @@ fn hash_tile(vram: &[u8], char_base: u16, character: u16, depth: u8) -> TileHash
         raw,
         canon: best.0,
         to_canon: best.1,
+        blank: rows[..8 * depth].iter().all(|&b| b == 0),
     }
 }
 
@@ -269,10 +273,13 @@ pub fn snes_grids(src: &SnesSource<'_>) -> Vec<TileGrid> {
                         // The unflipped arrangement; the flips stay the
                         // tilemap's own (module doc of tile_grid).
                         let mut h = Fnv64::new();
+                        let mut blank = true;
                         for sub in [0u16, 1, 16, 17] {
-                            h.u64(tile(e.character + sub).raw);
+                            let t = tile(e.character + sub);
+                            h.u64(t.raw);
+                            blank &= t.blank;
                         }
-                        (h.finish(), flip_bits(e.flip_x, e.flip_y))
+                        (h.finish(), flip_bits(e.flip_x, e.flip_y) | blank_bit(blank))
                     } else {
                         let t = tile(e.character);
                         (
@@ -280,7 +287,7 @@ pub fn snes_grids(src: &SnesSource<'_>) -> Vec<TileGrid> {
                             flip_bits(
                                 e.flip_x ^ (t.to_canon & 1 != 0),
                                 e.flip_y ^ (t.to_canon & 2 != 0),
-                            ),
+                            ) | blank_bit(t.blank),
                         )
                     };
                     let palette = all_colours.unwrap_or_else(|| {
@@ -311,6 +318,14 @@ pub fn snes_grids(src: &SnesSource<'_>) -> Vec<TileGrid> {
         }
     }
     out
+}
+
+fn blank_bit(blank: bool) -> u8 {
+    if blank {
+        TileCell::BLANK
+    } else {
+        0
+    }
 }
 
 fn flip_bits(x: bool, y: bool) -> u8 {
@@ -400,14 +415,15 @@ pub fn nes_grids(
     height: u32,
 ) -> Vec<TileGrid> {
     let rows = nes_rows(tiles);
-    let mut chr_hash: Vec<Option<u64>> = vec![None; 512];
-    let mut chr_of = |t: &rf_nes::ppu::DrawnTile| -> u64 {
+    let mut chr_hash: Vec<Option<(u64, bool)>> = vec![None; 512];
+    let mut chr_of = |t: &rf_nes::ppu::DrawnTile| -> (u64, bool) {
         let index = usize::from(t.base / 16) + usize::from(t.tile);
         *chr_hash[index & 0x1FF].get_or_insert_with(|| {
             let at = usize::from(t.base) + usize::from(t.tile) * 16;
+            let bytes = chr.get(at..at + 16).unwrap_or(&[0; 16]);
             let mut h = Fnv64::new();
-            h.bytes(chr.get(at..at + 16).unwrap_or(&[0; 16]));
-            h.finish()
+            h.bytes(bytes);
+            (h.finish(), bytes.iter().all(|&b| b == 0))
         })
     };
     let mut out = Vec::new();
@@ -441,11 +457,14 @@ pub fn nes_grids(
                 );
                 let mut h = Fnv64::new();
                 let mut missing = false;
+                let mut blank = true;
                 let mut pal = None;
                 for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                     match tile_at(r0 + dr, c0 + dc) {
                         Some(t) => {
-                            h.u64(chr_of(t));
+                            let (hash, tile_blank) = chr_of(t);
+                            h.u64(hash);
+                            blank &= tile_blank;
                             pal.get_or_insert(t.palette & 3);
                         }
                         None => {
@@ -464,7 +483,7 @@ pub fn nes_grids(
                 cells.push(TileCell {
                     pattern: h.finish(),
                     palette: ph.finish16(),
-                    flags: if missing { TileCell::PARTIAL } else { 0 },
+                    flags: if missing { TileCell::PARTIAL } else { 0 } | blank_bit(blank),
                 });
             }
         }

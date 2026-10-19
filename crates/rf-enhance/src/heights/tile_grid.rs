@@ -45,7 +45,8 @@ pub struct TileKey {
 pub struct TileCell {
     pub pattern: u64,
     pub palette: u16,
-    /// [`Self::PRIORITY`] | [`Self::FLIP_X`] | [`Self::FLIP_Y`] | [`Self::PARTIAL`].
+    /// [`Self::PRIORITY`] | [`Self::FLIP_X`] | [`Self::FLIP_Y`] | [`Self::PARTIAL`]
+    /// | [`Self::BLANK`].
     pub flags: u8,
 }
 
@@ -58,6 +59,9 @@ impl TileCell {
     /// Some of the cell's tiles were off screen, so the pattern hash covers
     /// only part of a cell and will not match the same cell seen whole.
     pub const PARTIAL: u8 = 8;
+    /// Every pixel of the cell is colour 0 (transparent): it shows whatever
+    /// is behind it, so it can neither hide the player nor be stood on.
+    pub const BLANK: u8 = 16;
 
     #[must_use]
     pub fn priority(&self) -> bool {
@@ -75,6 +79,11 @@ impl TileCell {
     #[must_use]
     pub fn partial(&self) -> bool {
         self.flags & Self::PARTIAL != 0
+    }
+
+    #[must_use]
+    pub fn blank(&self) -> bool {
+        self.flags & Self::BLANK != 0
     }
 }
 

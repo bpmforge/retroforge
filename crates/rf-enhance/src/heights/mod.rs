@@ -16,7 +16,7 @@ pub mod table;
 pub mod tile_grid;
 
 pub use canvas::{canvas_cache_key, load_canvas, save_canvas, HeightCanvas};
-pub use learner::{FrameObs, HeightGrid, HeightLearner, Signals, Stats};
+pub use learner::{FrameObs, GuardTrip, HeightGrid, HeightLearner, Signals, Stats};
 pub use player::{
     cluster, Dirs, Entity, FrameInput, Orientation, OrientationGuess, OrientationSource, Player,
     PlayerSource, PlayerTracker, SpriteBox, TrackEvidence,
