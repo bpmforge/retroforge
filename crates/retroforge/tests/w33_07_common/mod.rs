@@ -10,7 +10,7 @@ use retroforge::stepper::EmuStepper;
 use rf_core_api::{CoreEvent, CoreSink, FrameBundleBuilder, InputFrame, PpuPixel};
 use rf_enhance::canvas::{scrolls_for, CanvasModel, FrameFeed, FrameScrolls, ScrollLag};
 use rf_enhance::scene_tracker::{SceneHints, SETTLING};
-use rf_enhance::scout_finder::{Frame, Observed, Pad, ScoutFinder};
+use rf_enhance::scout_finder::{Frame, Observed, Pad, ScoutFinder, Vert};
 use rf_input::{NesButton, SnesButton};
 
 pub struct Sink {
@@ -21,8 +21,11 @@ pub struct Sink {
 
 impl Sink {
     pub fn new(w: u16, h: u16) -> Self {
+        // As the app has it with widescreen on: the sub screen and the per-line registers are kept.
+        let mut bundle = FrameBundleBuilder::new(w, h);
+        bundle.set_capture_wide(true);
         Self {
-            bundle: FrameBundleBuilder::new(w, h),
+            bundle,
             fb: rf_renderer::FrameBuffer::with_size(usize::from(w), usize::from(h)),
         }
     }
@@ -34,7 +37,14 @@ impl CoreSink for Sink {
         self.fb.video_scanline(y, pixels);
     }
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
+        self.bundle.sub_scanline(y, pixels, fixed_color);
         self.fb.sub_scanline(y, pixels, fixed_color);
+    }
+    fn wants_line_registers(&self) -> bool {
+        self.bundle.wants_line_registers()
+    }
+    fn line_registers(&mut self, y: u16, regs: &rf_core_api::LineRegisters) {
+        self.bundle.line_registers(y, regs);
     }
     fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
         self.fb.palette_scanline(y, palette, brightness);
@@ -135,8 +145,10 @@ impl Rig {
         let (scene, scroll): (_, Vec<(Vec<u8>, Vec<u8>)>);
         if self.snes {
             let views = self.st.bg_layer_views().expect("snes");
+            // The app scrolls the first layer the widescreen policy widens: the first one that is on.
+            let main = views.iter().find(|v| v.enabled).unwrap_or(&views[0]);
             let read = FrameScrolls {
-                scene: Some((views[0].hofs, views[0].vofs)),
+                scene: Some((main.hofs, main.vofs)),
                 layers: retroforge::core_thread::snes_layer_scrolls(&self.st),
             };
             let drawn = self.lag.drawn_with(self.st.frame_count(), read);
@@ -144,14 +156,7 @@ impl Rig {
                 .with_scene_scroll(drawn.scene)
                 .with_scene_hints(hints);
             scene = self.live.observe_frame(&bundle, &feed);
-            scroll = (0..2)
-                .map(|i| {
-                    (
-                        vec![(views[i].hofs & 0xFF) as u8],
-                        vec![(views[i].vofs & 0xFF) as u8],
-                    )
-                })
-                .collect();
+            scroll = retroforge::scout_find::finder_snes_scroll(&self.st).expect("snes");
         } else {
             scene = self
                 .live
@@ -188,10 +193,12 @@ impl Rig {
             }
             self.find_out.extend(outs);
         }
-        let (left, right, face_bits) = if self.snes {
+        let (left, right, up, down, face_bits) = if self.snes {
             (
                 1u16 << SnesButton::Left.bit(),
                 1 << SnesButton::Right.bit(),
+                1 << SnesButton::Up.bit(),
+                1 << SnesButton::Down.bit(),
                 [
                     Some(SnesButton::B.bit()),
                     Some(SnesButton::A.bit()),
@@ -203,6 +210,8 @@ impl Rig {
             (
                 1 << NesButton::Left.bit(),
                 1 << NesButton::Right.bit(),
+                1 << NesButton::Up.bit(),
+                1 << NesButton::Down.bit(),
                 [
                     Some(NesButton::A.bit()),
                     Some(NesButton::B.bit()),
@@ -223,6 +232,13 @@ impl Rig {
         } else {
             Pad::Idle
         };
+        let vert = if mask & down != 0 {
+            Vert::Down
+        } else if mask & up != 0 {
+            Vert::Up
+        } else {
+            Vert::Idle
+        };
         let nes_ram: Vec<u8>;
         let ram: &[u8] = match self.st.snes_work_ram_head(0x2000) {
             Some(r) => r,
@@ -238,6 +254,7 @@ impl Rig {
         self.finder.observe(&Frame {
             ram,
             pad,
+            vert,
             jump: face,
             scroll: &layers,
             scene,
@@ -713,3 +730,102 @@ pub fn cv_find_table(
     }
     found.expect("an answer").expect("a table, not an error")
 }
+
+// ---- A Link to the Past (W35-04) ---------------------------------------------------------------
+
+pub const ALTTP: (&str, &str, &str) = (
+    "snes",
+    "Legend of Zelda, The - A Link to the Past (USA).zip",
+    "../../profiles/snes/the-legend-of-zelda-a-link-to-the-past/profile.toml",
+);
+
+/// Boot, file select, a name, the first telepathy speech (A advances each page, slowly), up from
+/// bed into Link's house, to the door, outside in the rain: free play on the first overworld area.
+pub fn alttp_to_free_play() -> String {
+    let mut s = String::from("w600 w300 S6 w300 S6 w300 S6 w300 A6 w60 S6 w300 A6 w300 w600");
+    for _ in 0..16 {
+        s += " A3 w150";
+    }
+    s + " w300 R32 w10 D60 w10 D60 w10 D40 L14 w5 D40 w100 D40 w100 D40 w100 w300"
+}
+
+/// One game-world session on the first overworld area, from the spot outside Link's house: back
+/// in through the door and out again (two scenes), down the ledge onto the road, west along it to
+/// the trees (a long vertical corridor there), north and south in it, east again nearly to the
+/// soldiers (never into them), west and east once more across the page boundaries, with a press
+/// of the action buttons now and again (they move nothing). Pure directions: no diagonals.
+/// Zelda's telepathy ("Help me...", mode `$10 = 0x0e`) breaks into free play some 1,500 frames after
+/// the house, wherever Link is, and holds him until A has paged through it; so does a soldier's
+/// scolding. Five presses, a long wait after each (the text types itself out first), cost nothing
+/// when there is no box.
+pub fn alttp_dismiss() -> String {
+    " A3 w150".repeat(5)
+}
+
+/// The first half of the session: back into the house and out again, down onto the road and a
+/// little west: Link stands in the middle of the road.
+pub fn alttp_play_head() -> String {
+    format!("w60 U60 w200 D60 w200 D80 w30 L120 w30{}", alttp_dismiss())
+}
+
+/// The rest of the session: on west to the trees, the vertical corridor there, east and west
+/// across the page boundaries (a dismissal after the long legs), and back east onto the road.
+pub fn alttp_play_tail() -> String {
+    let d = alttp_dismiss();
+    format!(
+        "L210 w30 U200 w30 D200 w30 U100 w20 D100 w20 A6 w30 B6 w30 {d} \
+         R330 w30{d} L330 w30{d} R330 w30{d} U200 w30 D200 w30 L330 w30{d} R200 w30 U120 w30 D120 w30 R100 w60"
+    )
+}
+
+/// The whole session.
+pub fn alttp_play() -> String {
+    format!("{} {}", alttp_play_head(), alttp_play_tail())
+}
+
+/// The same session from the road (no trip through the house door): for the headless discovery,
+/// which snapshots where the session starts and needs a player who can walk from there.
+pub fn alttp_play_road() -> String {
+    alttp_play_tail()
+}
+
+/// The finder as the core thread runs it ("Find scout settings for this game"), from the spot
+/// outside Link's house: the session, then standing still until the trials answer. `mid_road`
+/// runs between the two halves (a snapshot there starts a scout in the middle of the road).
+pub fn alttp_find_table(
+    rig: &mut Rig,
+    secs: u64,
+    mid_road: &mut dyn FnMut(&mut Rig),
+) -> Box<rf_enhance::scout_finder::Skeleton> {
+    use retroforge::scout_find::{Out, ScoutFind};
+    rig.find = Some(ScoutFind::new(true));
+    rig.script(&alttp_play_head());
+    mid_road(rig);
+    rig.script(&alttp_play_tail());
+    let t0 = std::time::Instant::now();
+    let mut found = None;
+    // Bounded: `secs` seconds of idle frames.
+    while t0.elapsed() < std::time::Duration::from_secs(secs) && found.is_none() {
+        rig.script("w30");
+        for out in rig.find_out.drain(..) {
+            if let Out::Done(r) = out {
+                found.get_or_insert(r);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    found.expect("an answer").expect("a table, not an error")
+}
+
+// ---- The Legend of Zelda, NES (W35-04) ---------------------------------------------------------
+
+pub const ZELDA1: (&str, &str, &str) = (
+    "nes",
+    "Legend of Zelda, The (USA).zip",
+    "../../profiles/nes/legend-of-zelda/profile.toml",
+);
+
+/// Boot, title, "REGISTER YOUR NAME", an `A`, back to the select screen with the name in slot 1,
+/// start it: Link stands on the first overworld screen.
+pub const Z1_TO_PLAY: &str =
+    "w300 S6 w300 S6 w300 A6 w30 E6 w20 E6 w20 E6 w20 S6 w200 E6 w20 E6 w20 E6 w20 S6 w400";

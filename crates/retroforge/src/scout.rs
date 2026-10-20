@@ -810,6 +810,28 @@ impl Scout {
             .map_or(0, |set| set.iter().map(|c| c.width() * c.height()).sum())
     }
 
+    /// W35-04: cells inside the bounding box of the scout's biggest single layer. A layer that is
+    /// not the level (a rain overlay, a status bar) adds to [`Self::extent`] without the camera
+    /// having followed anyone; the biggest layer is the level's.
+    #[must_use]
+    pub fn main_extent(&self) -> usize {
+        self.layer_dims()
+            .iter()
+            .map(|&(w, h)| w * h)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// W35-04: each layer's canvas `(width, height)` in the scout's scene (a probe for the tests).
+    #[must_use]
+    pub fn layer_dims(&self) -> Vec<(usize, usize)> {
+        self.acc
+            .scene_canvases(self.scene.0)
+            .map_or_else(Vec::new, |set| {
+                set.iter().map(|c| (c.width(), c.height())).collect()
+            })
+    }
+
     /// Width of the widest canvas of the scout's scene (how far it has seen
     /// sideways; [`Self::extent`] also counts height).
     #[must_use]
@@ -1881,9 +1903,9 @@ fn scene_axis(plan: &ScoutPlan, live: &LiveView<'_>) -> ScoutAxis {
     }
 }
 
-/// Whether the game's camera word on `axis` agrees with the first stitched
-/// layer's live scroll (the game is in a level and the recipe's address is
-/// right).
+/// Whether the game's camera word on `axis` agrees with a stitched layer's live scroll (the game
+/// is in a level and the recipe's address is right). W35-04: ANY layer: A Link to the Past's first
+/// stitched layer is a rain overlay that scrolls at its own pace, and its camera is the second.
 fn camera_matches(
     plan: &ScoutPlan,
     axis: ScoutAxis,
@@ -1893,17 +1915,19 @@ fn camera_matches(
     let Some(&addr) = plan.camera_words(axis).first() else {
         return true;
     };
-    let Some(layer) = scrolls(stepper).and_then(|s| s.into_iter().flatten().next()) else {
+    let Some(layers) = scrolls(stepper) else {
         return false;
     };
-    let (wrap, live) = match axis {
-        ScoutAxis::X => (layer.tilemap_width, layer.hofs),
-        ScoutAxis::Y => (layer.tilemap_height, layer.vofs),
-    };
-    let wrap = i64::from(wrap.max(1));
-    let cam = i64::from(word(stepper, addr)).rem_euclid(wrap);
-    let d = (cam - i64::from(live)).rem_euclid(wrap);
-    d.min(wrap - d) <= CAMERA_TOLERANCE_PX
+    layers.into_iter().flatten().any(|layer| {
+        let (wrap, live) = match axis {
+            ScoutAxis::X => (layer.tilemap_width, layer.hofs),
+            ScoutAxis::Y => (layer.tilemap_height, layer.vofs),
+        };
+        let wrap = i64::from(wrap.max(1));
+        let cam = i64::from(word(stepper, addr)).rem_euclid(wrap);
+        let d = (cam - i64::from(live)).rem_euclid(wrap);
+        d.min(wrap - d) <= CAMERA_TOLERANCE_PX
+    })
 }
 
 #[cfg(test)]

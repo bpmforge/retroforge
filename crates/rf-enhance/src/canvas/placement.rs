@@ -150,6 +150,36 @@ impl LayerFrames {
 pub(crate) struct LayerAxes {
     pub(crate) frame: (WorldAxis, WorldAxis),
     pub(crate) rows: Vec<WorldAxis>,
+    /// W35-04: where the layer was last frame, and how wildly it has been jumping lately.
+    last_world: Option<(i64, i64)>,
+    wild: u16,
+}
+
+/// A layer that moves more than this many pixels in one frame has jumped, not scrolled.
+const WILD_STEP: i64 = 24;
+/// What a jump adds to a layer's wildness score, which decays by one a frame...
+const WILD_BUMP: u16 = 16;
+/// ...is capped at...
+const WILD_MAX: u16 = 96;
+/// ...and keeps the layer out of the canvases from here up (four jumps within a few frames).
+const WILD_LIMIT: u16 = 48;
+
+impl LayerAxes {
+    /// W35-04: feed the layer's world position for the frame; whether it is a wild layer that
+    /// must not be stitched. A layer that is only on the sub screen as a colour-math overlay (A
+    /// Link to the Past's rain) scrolls on its own at a pace the camera has nothing to do with: its
+    /// world position moves 30 to 90 pixels a frame in both axes, and stitched it grew a canvas of
+    /// 5000 x 4500 cells (gigabytes) in under 150 frames. One jump (a door, a cut) is not wild;
+    /// jump after jump is.
+    pub(crate) fn is_wild(&mut self, x: i64, y: i64) -> bool {
+        self.wild = self.wild.saturating_sub(1);
+        if let Some((px, py)) = self.last_world.replace((x, y)) {
+            if (x - px).abs().max((y - py).abs()) > WILD_STEP {
+                self.wild = (self.wild + WILD_BUMP).min(WILD_MAX);
+            }
+        }
+        self.wild >= WILD_LIMIT
+    }
 }
 
 /// Where column 0 of one picture row sits in a layer's world.
@@ -304,4 +334,37 @@ pub fn place_rows(
         written = Some(written.map_or((sy, sy), |(lo, _)| (lo, sy)));
     }
     written
+}
+
+#[cfg(test)]
+mod wild_tests {
+    use super::*;
+
+    /// W35-04: a layer that scrolls 30 pixels a frame (a rain overlay) is wild within a few
+    /// frames and stays so; a layer that jumps once (a door) or scrolls at a walk's pace is not.
+    #[test]
+    fn a_layer_that_jumps_every_frame_is_wild_one_that_jumped_once_is_not() {
+        let mut rain = LayerAxes::default();
+        let verdicts: Vec<bool> = (0..20).map(|f| rain.is_wild(f * 30, f * 40)).collect();
+        assert!(
+            !verdicts[0] && !verdicts[1] && !verdicts[2],
+            "not at once: {verdicts:?}"
+        );
+        assert!(
+            verdicts[5..].iter().all(|&w| w),
+            "then for good: {verdicts:?}"
+        );
+
+        let mut door = LayerAxes::default();
+        let verdicts: Vec<bool> = (0..200)
+            .map(|f| door.is_wild(if f < 100 { f * 2 } else { 3000 + f * 2 }, 0))
+            .collect();
+        assert!(verdicts.iter().all(|&w| !w), "one cut is not wild");
+
+        let mut walk = LayerAxes::default();
+        assert!(
+            (0..500).all(|f| !walk.is_wild(f * 4, 0)),
+            "a walk is not wild"
+        );
+    }
 }
