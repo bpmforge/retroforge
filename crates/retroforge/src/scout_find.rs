@@ -16,7 +16,7 @@ use rf_core_api::{CoreEvent, FrameBundle};
 use rf_enhance::canvas::{CanvasModel, LayerScroll, LAYERS};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scene_tracker::SETTLING;
-use rf_enhance::scout_finder::{Frame, Pad, ScoutFinder, Skeleton, Vert};
+use rf_enhance::scout_finder::{picture_hash, Frame, Pad, ScoutFinder, Skeleton, Vert};
 use rf_input::{NesButton, SnesButton};
 
 use crate::core_thread::ScoutFindProgress;
@@ -132,6 +132,11 @@ impl ScoutFind {
                 }
             };
         }
+        let start_bit = if self.snes {
+            SnesButton::Start.bit()
+        } else {
+            NesButton::Start.bit()
+        };
         let (left, right, up, down, faces): (u8, u8, u8, u8, &[u8]) = if self.snes {
             (
                 SnesButton::Left.bit(),
@@ -225,6 +230,8 @@ impl ScoutFind {
             jump,
             scroll: &layers,
             scene,
+            start: f.pad & (1 << start_bit) != 0,
+            shown: picture_hash(&f.bundle.video),
         });
         if !self.finder.frames().is_multiple_of(LOOK_EVERY) {
             return Vec::new();

@@ -74,6 +74,8 @@ pub struct Rig {
     pub find_out: Vec<retroforge::scout_find::Out>,
     /// The scroll writes of the last frame (NES), x then y low bytes.
     pub last_scroll: Vec<(u8, u8)>,
+    /// W35-05: the hash of the last frame's indexed picture.
+    pub shown: u64,
 }
 
 pub fn roms_dir() -> String {
@@ -124,6 +126,7 @@ impl Rig {
             find: None,
             find_out: Vec::new(),
             last_scroll: Vec::new(),
+            shown: 0,
         })
     }
 
@@ -134,6 +137,7 @@ impl Rig {
         input.ports[0] = mask;
         self.st.latch_and_advance_frame(input, &mut self.sink);
         let bundle = self.sink.bundle.take(self.st.frame_count());
+        self.shown = rf_enhance::scout_finder::picture_hash(&bundle.video);
         let level = self
             .scene_key
             .as_ref()
@@ -258,6 +262,14 @@ impl Rig {
             jump: face,
             scroll: &layers,
             scene,
+            start: mask
+                & (1 << if self.snes {
+                    SnesButton::Start.bit()
+                } else {
+                    NesButton::Start.bit()
+                })
+                != 0,
+            shown: self.shown,
         });
     }
 
@@ -356,20 +368,21 @@ pub const MMX: (&str, &str, &str) = (
     "../../profiles/snes/mega-man-x/profile.toml",
 );
 
-/// Boot, menus, the map at Yoshi's House, left to Yoshi's Island 1, enter, and
+/// Boot, menus, the map at Yoshi's House, (W35-05: into the house again, which Mario can walk in,
+/// and out of its right end: a second room played in), left to Yoshi's Island 1, enter, and
 /// wait for the fade-in (`w32_07_scout_smw::reach_yi1` as tokens).
-pub const SMW_TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 L8 w158 A8 w158";
+pub const SMW_TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 pub const MMX_TO_LEVEL: &str = "w300 S6 w114 S6 w114 S6 w114 S6 w114 S6 w400";
 pub const SMB3_TO_LEVEL: &str = "w300 S6 w120 S6 w400 R8 w60 U8 w60 A8 w300";
 pub const MM2_TO_LEVEL: &str = "w400 S6 w120 S6 w300 S6 w300 U8 w20 S6 w800";
 
 /// What the player does once in the level: stand, jump four times (standing),
 /// walk into the left wall, then right a long way (jumping now and again).
-pub const SMW_PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
-pub const SMB3_PLAY: &str = "L30 w20 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 w20 A8 w60 A8 w60 A8 w60 A8 w60 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24";
+pub const SMW_PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
+pub const SMB3_PLAY: &str = "L30 w20 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 w20 S6 w80 S6 w40 A8 w60 A8 w60 A8 w60 A8 w60 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24 R+B14 R+B+A24";
 /// Mega Man X: the same, with B to jump.
-pub const MMX_PLAY: &str = "L30 w5 R40 R+B20 R40 R+B20 R40 R+B20 R40 R+B20 w20 B8 w60 B8 w60 B8 w60 B8 w60 R40 R+B20 R40 R+B20 R40 R+B20 R40 R+B20";
-pub const MM2_PLAY: &str = "L30 w5 A8 w60 A8 w60 A8 w60 A8 w60 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 w400 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15";
+pub const MMX_PLAY: &str = "L30 w5 R40 R+B20 R40 R+B20 R40 R+B20 R40 R+B20 w20 S6 w80 S6 w40 B8 w60 B8 w60 B8 w60 B8 w60 R40 R+B20 R40 R+B20 R40 R+B20 R40 R+B20";
+pub const MM2_PLAY: &str = "L30 w5 A8 w60 A8 w60 A8 w60 A8 w60 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 S6 w80 S6 w40 w400 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15 R25 R+A15";
 
 pub fn describe(o: &Observed) {
     println!("camera: {:?}", o.camera);
@@ -423,11 +436,22 @@ pub fn observe(
     }
     describe(&rig.finder.observed());
     // W35-03: the gate ranking with its contrast evidence (more than the finder keeps).
-    for (i, g) in rig.finder.gates_ranked(200).iter().enumerate() {
+    for (i, g) in rig.finder.gates_ranked(20000).iter().enumerate() {
         println!(
-            "RANK {i:3} off {:#06x} = {:#04x} constancy {:.3} differs {:.2} sync {:.2} cover {:.2} steps {:.2} off {} cuts {}",
-            g.offset, g.value, g.constancy, g.differs, g.cut_sync, g.cut_cover, g.cut_steps, g.off_cut, g.cuts
+            "RANK {i:3} off {:#06x} = {:#04x} constancy {:.3} differs {:.2} sync {:.2} cover {:.2} steps {:.2} off {} cuts {} mode {:.3} apart {:.2}/{}",
+            g.offset, g.value, g.constancy, g.differs, g.cut_sync, g.cut_cover, g.cut_steps, g.off_cut, g.cuts, g.mode_score, g.freeze_apart, g.frozen_frames
         );
+    }
+    // W35-05: the values the top-ranked bytes (and the probes) take in each state.
+    let top: Vec<usize> = rig
+        .finder
+        .gates_ranked(4)
+        .iter()
+        .map(|g| g.offset)
+        .chain(probes.iter().copied())
+        .collect();
+    for off in top {
+        println!("{}", rig.finder.state_probe(off));
     }
     for off in probes {
         println!("{}", rig.finder.probe(*off));
@@ -649,7 +673,7 @@ pub const SM_SHAFT: &str = "R40 w60 R40 w60 L40 w60 R40 w60 D10 w60 L40 w60 L40 
 
 /// In the corridor (its entry door is on the left: never walk left from the entry): right over
 /// the step, left a little, six standing jumps, right and left again, right to the far end, stand.
-pub const SM_PLAY: &str = "R+A30 R60 L45 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R+A30 R60 L50 R50 L50 R+A30 R60 R+A30 w60";
+pub const SM_PLAY: &str = "R+A30 R60 L45 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 S6 w100 S6 w80 R+A30 R60 L50 R50 L50 R+A30 R60 R+A30 w60";
 
 /// The finder as the core thread runs it ("Find scout settings for this game"): one session from
 /// free play (the shaft, the door, the corridor), then standing still until the trials answer.
@@ -693,12 +717,12 @@ pub const CV_TO_STAGE: &str = "w400 S6 w600";
 /// Left to the wall, six standing jumps (A), then right toward the door with a jump every 60
 /// frames (Simon cannot turn in the air): the first half, up to the middle of the courtyard.
 pub const CV_PLAY_HEAD: &str =
-    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30";
+    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 S6 w90 S6 w60 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30";
 /// The second half: on to the door, through it into the entrance hall, a few steps in, stand.
 pub const CV_PLAY_TAIL: &str =
     "R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R60 R60 R60 w60";
 pub const CV_PLAY: &str = concat!(
-    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30",
+    "L50 w20 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 A8 w50 S6 w90 S6 w60 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30",
     " ",
     "R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R+A30 R60 R60 R60 R60 w60"
 );
@@ -765,7 +789,10 @@ pub fn alttp_dismiss() -> String {
 /// The first half of the session: back into the house and out again, down onto the road and a
 /// little west: Link stands in the middle of the road.
 pub fn alttp_play_head() -> String {
-    format!("w60 U60 w200 D60 w200 D80 w30 L120 w30{}", alttp_dismiss())
+    format!(
+        "w60 U60 w200 D60 w200 D80 w30 L120 w30 S6 w100 S6 w100{}",
+        alttp_dismiss()
+    )
 }
 
 /// The rest of the session: on west to the trees, the vertical corridor there, east and west

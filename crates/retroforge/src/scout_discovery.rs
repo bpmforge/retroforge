@@ -807,12 +807,24 @@ fn skeleton(
             role: "start_when",
             addr: bus_address(snes, g.offset),
             value: Some(g.value),
-            notes: format!(
-                "Read {} on {:.0}% of the level's frames and something else on {:.0}% of the frames outside it (title, menus, cuts). Seen in one level of this session.",
-                g.value,
-                g.constancy * 100.0,
-                g.differs * 100.0
-            ),
+            notes: if g.differs < 0.6 {
+                // A guard (W35-05): the game's mode byte does not change in a pause, this does.
+                format!(
+                    "Read {} on {:.0}% of the level's frames and something else on {:.0}% of the {} frames of a pause (Start pressed, the picture frozen). Seen in one level of this session.",
+                    g.value,
+                    g.constancy * 100.0,
+                    g.freeze_apart * 100.0,
+                    g.frozen_frames
+                )
+            } else {
+                format!(
+                    "Read {} on {:.0}% of the level's frames and something else on {:.0}% of the frames outside it (title, menus, cuts); tells the session's states apart at {:.2}. Seen in one level of this session.",
+                    g.value,
+                    g.constancy * 100.0,
+                    g.differs * 100.0,
+                    g.mode_score
+                )
+            },
             confidence: g.confidence,
         });
     }
