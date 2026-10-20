@@ -35,15 +35,22 @@
 //!   two of five control windows opened at random while the pad is idle
 //!   (timers, animation counters; a player who walks off a ledge falls in
 //!   some).
-//! * **Start gate.** A byte that holds one value on at least 95 % of the
-//!   frames of the level (the scene with the most scrolling frames) and holds
-//!   a different value on the frames of every other scene (title, map, fades).
-//!   Since W35-02: the other rooms the player scrolled through must hold it
-//!   too, where doors were seen it must be gone in them, it takes at most
-//!   three values while the player plays and 24 over the session, and a byte
-//!   that lets go in a door ranks first. (`retroforge::scout_discovery` then
-//!   keeps only the gates that stay true through a scouting run and, where a
-//!   vertical room was met, through one there.)
+//! * **Start gate.** A byte whose value tells the game's states apart (W35-05): the level and
+//!   the rooms the player played in (one state: a value that changes from room to room while
+//!   play goes on is the room's own data), each other scene that held still for a while (title,
+//!   map, menus), the frames in the cuts' zones (doors, fades, loads), a **pause** (Start pressed,
+//!   the picture frozen and the game's memory quiet, up to the next press) and a **speech** (a
+//!   direction held while the picture stands still). The score is `I(value; state) / H(state)`
+//!   with the states weighed equally, held against a byte whose values mostly belong to no state
+//!   (a counter), a value that covers less than 60 % of the frames of play, and a byte that
+//!   changes all the time away from the cuts. The byte must hold one value on at least 95 % of
+//!   the level's frames (not counting the cut zones, the pauses, the speeches and the values it
+//!   reads on a quarter of those: a door, a text box). Equal scores (to a fiftieth) are told
+//!   apart by what the byte does at the cuts (W35-03: cover, sync, steps, calm). Where a pause
+//!   was seen and the best byte does not leave its value in it (Super Mario World's mode stays
+//!   `0x14`), the best byte that does (a flag that reads `0` through play) is the second.
+//!   (`retroforge::scout_discovery` then keeps only the gates that stay true through a scouting
+//!   run and, where a vertical room was met, through one there.)
 //!
 //! The hold value for Y and the choice between the candidates are NOT made
 //! here: they need a machine to try them on (`retroforge::scout_discovery`).
@@ -57,6 +64,7 @@
 use std::collections::HashMap;
 
 use crate::camera_finder::{CameraFinder, Found};
+use rf_core_api::PpuPixel;
 
 /// The horizontal direction the pad held on a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,6 +103,23 @@ pub struct Frame<'a> {
     pub scroll: &'a [(&'a [u8], &'a [u8])],
     /// The canvas model's scene for the frame; `None` while a cut settles.
     pub scene: Option<u64>,
+    /// W35-05: Start is held this frame.
+    pub start: bool,
+    /// W35-05: a hash of the picture ([`picture_hash`]); `0` = not known. A pause is Start pressed
+    /// and the picture frozen; a speech box is a pad held and the picture frozen.
+    pub shown: u64,
+}
+
+/// A hash of the indexed picture of a frame (never `0`): two frames with the same picture have
+/// the same hash.
+#[must_use]
+pub fn picture_hash(video: &[PpuPixel]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in video {
+        h = (h ^ u64::from(p.palette_index) ^ (u64::from(p.sprite_id.unwrap_or(0xFF)) << 8))
+            .wrapping_mul(0x0100_0000_01b3);
+    }
+    h | 1
 }
 
 /// A camera step bigger than this is a cut, not scrolling.
@@ -161,9 +186,9 @@ pub const MIN_TRANSIT_FRAMES: u32 = 20;
 /// The share of the level's frames a mode byte must hold its value on (the
 /// rest: a door's frames inside the scene).
 pub const MIN_CONSTANCY: f32 = 0.95;
-/// The share of such a room's frames a mode byte must hold its value on (the
-/// rest: a door's frames).
-pub const SIBLING_SHARE: f32 = 0.6;
+/// W35-05: the share of all the frames of play (the level and the rooms beside it) a mode byte's
+/// value must hold on.
+pub const MIN_PLAY_COVER: f32 = 0.6;
 /// Scenes whose frames the gate keeps a histogram of.
 pub const MAX_SCENES: usize = 6;
 /// Frames of the level the gate wants.
@@ -172,6 +197,38 @@ pub const MIN_LEVEL_FRAMES: u32 = 300;
 pub const MIN_OTHER_FRAMES: u32 = 60;
 /// How many candidates of each kind are kept.
 pub const KEEP: usize = 4;
+/// W35-05: the least `mode_score` a candidate needs (a byte that is the same in every state
+/// scores 0).
+pub const MIN_MODE_SCORE: f32 = 0.15;
+/// W35-05: frames a state needs before the mode score counts it as a label.
+pub const MIN_LABEL_FRAMES: u32 = 20;
+/// W35-05: frames of a pause or a speech box needed before the guard test counts.
+pub const MIN_FROZEN_FRAMES: u32 = 12;
+/// W35-05: frames a direction is held in a scene before it is one the player has played in, with
+/// or without the screen moving (a pause comes before the camera has started).
+const MIN_WALK_FRAMES: u32 = 30;
+/// W35-05: frames walked in a scene that make it a room played in, though the screen never
+/// scrolled.
+const MIN_ROOM_WALK: u32 = 100;
+/// W35-05: a direction held counts as walking while the picture changed within this many frames.
+const WALK_LIVE: u32 = 8;
+/// W35-05: the busiest the game's memory has to be (bytes changing per frame, on average) for a
+/// drop to be a pause (a game that ticks no counter at all tells nothing).
+const MIN_ACTIVITY: f32 = 6.0;
+/// W35-05: frames the picture must have stood still for a Start press to have paused the game.
+const PAUSE_FROZEN: u32 = 4;
+/// W35-05: frames after a Start press the picture has to freeze within.
+const PAUSE_WITHIN: u64 = 14;
+/// W35-05: frames the picture changes on every one of that end a pause window (a game that
+/// runs on, whatever Start did).
+const PAUSE_LIVE: u32 = 8;
+/// W35-05: a pause the player never leaves (the cap on a window).
+const PAUSE_MAX: u64 = 900;
+/// W35-05: frames a direction is held and the picture is frozen before the game is "ignoring the
+/// pad" (a speech box, a lock).
+const IGNORED_AFTER: u32 = 24;
+/// W35-05: the share of a pause's or speech's frames a guard's value must be gone from.
+pub const MIN_FREEZE_APART: f32 = 0.9;
 
 /// A player X word.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,6 +292,19 @@ pub struct GateCandidate {
     pub contrast: f32,
     /// How many cuts the cover is over.
     pub cuts: u32,
+    /// W35-05: symmetric uncertainty between the byte's value and the states the session
+    /// showed (play, each menu or map, the cut zones, a pause, a speech box), 0..=1: 1 when
+    /// the value tells every state apart. 0 when the session showed fewer than two.
+    pub mode_score: f32,
+    /// W35-05: the share of the frames of a pause (a Start press, the picture frozen, a second
+    /// press) the play value is gone from (`1.0` when none were seen).
+    pub freeze_apart: f32,
+    /// W35-05: the pause frames behind `freeze_apart`.
+    pub frozen_frames: u32,
+    /// W35-05: the same for the frames a direction was held on a frozen picture (a speech box, a
+    /// lock; also a wall in a game whose player stands still against it).
+    pub speech_apart: f32,
+    pub speech_frames: u32,
 }
 
 /// Everything the session has shown so far.
@@ -289,6 +359,72 @@ struct SceneHist {
     frames: u32,
     /// `len * 256` counters.
     bins: Vec<u16>,
+    /// W35-05: the frames of `frames` that were inside a cut's zone, and their counters (empty
+    /// until the first one): the states a session labels by the cuts.
+    zone_frames: u32,
+    zone: Vec<u16>,
+}
+
+impl SceneHist {
+    fn new(len: usize) -> Self {
+        Self {
+            frames: 0,
+            bins: vec![0; len * 256],
+            zone_frames: 0,
+            zone: Vec::new(),
+        }
+    }
+
+    fn add(bins: &mut [u16], ram: &[u8]) {
+        for (b, &v) in ram.iter().enumerate() {
+            let slot = &mut bins[b * 256 + usize::from(v)];
+            *slot = slot.saturating_add(1);
+        }
+    }
+
+    /// Count one frame; `zone`: it was inside a cut's zone.
+    fn count(&mut self, ram: &[u8], zone: bool) {
+        self.frames += 1;
+        Self::add(&mut self.bins, ram);
+        if zone {
+            self.zone_frames += 1;
+            if self.zone.is_empty() {
+                self.zone = vec![0; self.bins.len()];
+            }
+            Self::add(&mut self.zone, ram);
+        }
+    }
+
+    /// Fold `gone` into this histogram.
+    fn absorb(&mut self, gone: &Self) {
+        self.frames += gone.frames;
+        for (o, g) in self.bins.iter_mut().zip(&gone.bins) {
+            *o = o.saturating_add(*g);
+        }
+        if !gone.zone.is_empty() {
+            self.zone_frames += gone.zone_frames;
+            if self.zone.is_empty() {
+                self.zone = vec![0; self.bins.len()];
+            }
+            for (o, g) in self.zone.iter_mut().zip(&gone.zone) {
+                *o = o.saturating_add(*g);
+            }
+        }
+    }
+
+    /// The frames outside the cut zones.
+    const fn clean_frames(&self) -> u32 {
+        self.frames - self.zone_frames
+    }
+
+    /// Add the counts of byte `b` outside the zones (`zone: false`) or inside them to `out`.
+    fn tally(&self, b: usize, zone: bool, out: &mut [u32; 256]) {
+        for (v, o) in out.iter_mut().enumerate() {
+            let all = self.bins[b * 256 + v];
+            let z = self.zone.get(b * 256 + v).copied().unwrap_or(0);
+            *o += u32::from(if zone { z } else { all.saturating_sub(z) });
+        }
+    }
 }
 
 /// Frames after a cut (and around the frames the tracker was still settling)
@@ -404,6 +540,8 @@ pub struct ScoutFinder {
     /// Per scene, the frames the camera moved after the player first pressed a
     /// direction (a title that scrolls by itself is not play).
     scene_play: HashMap<Option<u64>, u32>,
+    /// W35-05: per scene, the frames a direction was held in it.
+    scene_walk: HashMap<Option<u64>, u32>,
     // gate contrast (W35-03)
     /// The last scene the tracker named, the work RAM on that scene's last
     /// frame, the frame the tracker began settling (if it is), and the last
@@ -421,6 +559,29 @@ pub struct ScoutFinder {
     g_changes: Vec<u32>,
     g_cut_changes: Vec<u32>,
     g_last_off: Vec<u64>,
+    // frozen states (W35-05)
+    prev_shown: u64,
+    prev_start: bool,
+    /// Frames the picture has stood still, and a direction has been held.
+    still_run: u32,
+    /// Frames the picture has changed on every one of.
+    live_run: u32,
+    /// W35-05: a moving average of the bytes of work RAM that change in a frame, and the frames in
+    /// a row far below it.
+    activity: f32,
+    hush_run: u32,
+    /// Frames since the picture last changed.
+    since_change: u32,
+    dir_run: u32,
+    /// The frame of a Start press the picture has not yet frozen after.
+    press: Option<u64>,
+    /// The scene and frame a pause began in.
+    pause: Option<(Option<u64>, u64)>,
+    /// The work RAM on the frames of a pause that ended with a second press in its own scene,
+    /// of the pause now running, and of the frames a speech held the pad.
+    paused: Option<SceneHist>,
+    staging: Option<SceneHist>,
+    ignored: Option<SceneHist>,
 }
 
 impl ScoutFinder {
@@ -485,6 +646,7 @@ impl ScoutFinder {
             scenes: HashMap::new(),
             scene_moving: HashMap::new(),
             scene_play: HashMap::new(),
+            scene_walk: HashMap::new(),
             scene_zone: HashMap::new(),
             cut_key: None,
             cut_ring: std::collections::VecDeque::new(),
@@ -494,6 +656,19 @@ impl ScoutFinder {
             g_changes: vec![0; len],
             g_cut_changes: vec![0; len],
             g_last_off: vec![0; len],
+            prev_shown: 0,
+            prev_start: false,
+            still_run: 0,
+            live_run: 0,
+            activity: 0.0,
+            hush_run: 0,
+            since_change: 0,
+            dir_run: 0,
+            press: None,
+            pause: None,
+            paused: None,
+            staging: None,
+            ignored: None,
         }
     }
 
@@ -527,7 +702,7 @@ impl ScoutFinder {
             self.prev_jump = f.jump;
             return;
         }
-        self.gate_frame(f, n, cd, armed && (cd != 0 || cdy != 0));
+        self.gate_frame(f, n, (cd, cdy), armed && (cd != 0 || cdy != 0));
         if armed {
             self.player_frame(f, n, cd);
             self.vert_frame(f, n, cdy);
@@ -1096,18 +1271,37 @@ impl ScoutFinder {
     }
 
     /// `played`: the player has the pad in hand and the screen moved (on
-    /// either axis).
-    fn gate_frame(&mut self, f: &Frame<'_>, n: usize, cd: i16, played: bool) {
+    /// either axis). `camera`: the signed change of the camera on each axis.
+    fn gate_frame(&mut self, f: &Frame<'_>, n: usize, camera: (i16, i16), played: bool) {
         let in_zone = self.cut_frame(f, n);
         let key = f.scene;
-        if in_zone {
-            *self.scene_zone.entry(key).or_insert(0) += 1;
-        }
+        let cd = camera.0;
         if cd != 0 && cd.abs() <= MAX_STEP {
             *self.scene_moving.entry(key).or_insert(0) += 1;
         }
         if played {
             *self.scene_play.entry(key).or_insert(0) += 1;
+        }
+        let len = self.len;
+        // W35-05: a pause and a speech are states of their own: their frames go to their own
+        // histograms, and the level's histogram stays the level's play.
+        let changed = f.ram[..n]
+            .iter()
+            .zip(&self.prev)
+            .filter(|(a, b)| a != b)
+            .count();
+        if let Some(frozen) = self.frozen_frame(f, key, camera == (0, 0), changed) {
+            let slot = if frozen {
+                &mut self.staging
+            } else {
+                &mut self.ignored
+            };
+            slot.get_or_insert_with(|| SceneHist::new(len))
+                .count(&f.ram[..n], false);
+            return;
+        }
+        if in_zone {
+            *self.scene_zone.entry(key).or_insert(0) += 1;
         }
         // A scene beyond the cap takes the place of the one that scrolled
         // least, whose frames fold into the shared "other" histogram: a
@@ -1116,15 +1310,147 @@ impl ScoutFinder {
         if !self.scenes.contains_key(&key) && self.scenes.len() >= MAX_SCENES {
             self.evict_quietest_scene();
         }
+        self.scenes
+            .entry(key)
+            .or_insert_with(|| SceneHist::new(len))
+            .count(&f.ram[..n], in_zone);
+    }
+
+    /// Whether this frame is part of a pause (`Some(true)`) or of a speech that holds the pad
+    /// (`Some(false)`). A pause is a Start press after which the picture freezes, up to the next
+    /// press in the same scene (a press after which the scene goes, or the screen moves, was not
+    /// one: its frames go back to their scene); a speech is a direction held while the picture
+    /// stands still, inside a scene the player has played in.
+    fn frozen_frame(
+        &mut self,
+        f: &Frame<'_>,
+        key: Option<u64>,
+        camera_still: bool,
+        changed: usize,
+    ) -> Option<bool> {
+        let frame = self.frames;
+        let (known, same) = (f.shown != 0, f.shown == self.prev_shown);
+        self.still_run = if known && same {
+            self.still_run.saturating_add(1)
+        } else {
+            0
+        };
+        // How busy the game's memory is: a paused game stops counting its frames.
+        #[allow(clippy::cast_precision_loss)]
+        let ch = changed as f32;
+        let quiet = self.activity >= MIN_ACTIVITY && ch * 4.0 <= self.activity;
+        self.hush_run = if quiet {
+            self.hush_run.saturating_add(1)
+        } else {
+            0
+        };
+        if !quiet && self.pause.is_none() {
+            self.activity += (ch - self.activity) / 16.0;
+        }
+        self.live_run = if known && !same {
+            self.live_run.saturating_add(1)
+        } else {
+            0
+        };
+        self.prev_shown = f.shown;
+        let dir = f.pad != Pad::Idle || f.vert != Vert::Idle;
+        self.dir_run = if dir {
+            self.dir_run.saturating_add(1)
+        } else {
+            0
+        };
+        let edge = f.start && !self.prev_start;
+        self.prev_start = f.start;
+        if let Some((scene, since)) = self.pause {
+            if edge && scene == key {
+                // The press that ends it: a pause. The frame is the game's again.
+                self.close_pause(true);
+                self.press = None;
+                return None;
+            }
+            if !camera_still
+                || scene != key
+                || frame - since > PAUSE_MAX
+                || self.live_run >= PAUSE_LIVE
+            {
+                self.close_pause(false);
+            } else {
+                return Some(true);
+            }
+        }
+        // Only in a scene the player has played in (a menu has Start pressed on a static
+        // screen all the time).
+        self.since_change = if known && !same {
+            0
+        } else {
+            self.since_change.saturating_add(1)
+        };
+        // Walking counts when the picture is alive (a black screen, a fade or a text box holds
+        // the pad too).
+        if dir && known && self.since_change < WALK_LIVE {
+            *self.scene_walk.entry(key).or_insert(0) += 1;
+        }
+        let played_in = key.is_some()
+            && (self.scene_play.get(&key).copied().unwrap_or(0) >= MIN_TRANSIT_FRAMES
+                || self.scene_walk.get(&key).copied().unwrap_or(0) >= MIN_WALK_FRAMES);
+        if played_in {
+            if edge {
+                self.press = Some(frame);
+            }
+            if let Some(at) = self.press {
+                if self.still_run >= PAUSE_FROZEN && self.hush_run >= PAUSE_FROZEN && camera_still {
+                    self.press = None;
+                    self.pause = Some((key, frame));
+                    return Some(true);
+                }
+                if frame - at > PAUSE_WITHIN {
+                    self.press = None;
+                }
+            }
+        } else {
+            self.press = None;
+        }
+        if played_in
+            && dir
+            && self.dir_run >= IGNORED_AFTER
+            && self.still_run >= IGNORED_AFTER
+            && camera_still
+        {
+            return Some(false);
+        }
+        None
+    }
+
+    /// End the pause being staged: keep its frames as a pause, or give them back to their scene.
+    fn close_pause(&mut self, kept: bool) {
+        let Some((scene, _)) = self.pause.take() else {
+            return;
+        };
+        let Some(staged) = self.staging.take() else {
+            return;
+        };
         let len = self.len;
-        let hist = self.scenes.entry(key).or_insert_with(|| SceneHist {
-            frames: 0,
-            bins: vec![0; len * 256],
-        });
-        hist.frames += 1;
-        for (b, &v) in f.ram[..n].iter().enumerate() {
-            let slot = &mut hist.bins[b * 256 + usize::from(v)];
-            *slot = slot.saturating_add(1);
+        let into = if kept {
+            Some(self.paused.get_or_insert_with(|| SceneHist::new(len)))
+        } else {
+            self.scenes.get_mut(&scene)
+        };
+        if let Some(into) = into {
+            into.absorb(&staged);
+        }
+    }
+
+    /// Frames of a scene the player had the pad in hand and the screen answered: by moving, or
+    /// (W35-05, a room of one screen) by a picture that lived while a direction was held, for
+    /// at least a third of the scene.
+    fn played_frames(&self, k: &Option<u64>) -> u32 {
+        let scrolled = self.scene_play.get(k).copied().unwrap_or(0);
+        let walked = self.scene_walk.get(k).copied().unwrap_or(0);
+        let frames = self.scenes.get(k).map_or(0, |h| h.frames);
+        if walked >= MIN_ROOM_WALK && walked.saturating_mul(3) >= frames {
+            scrolled.max(walked)
+        } else {
+            scrolled
         }
     }
 
@@ -1136,12 +1462,12 @@ impl ScoutFinder {
             .keys()
             .copied()
             .filter(|k| k.is_some() && *k != OTHER_SCENE && *k != OTHER_PLAY)
-            .min_by_key(|k| (self.scene_play.get(k).copied().unwrap_or(0), *k));
+            .min_by_key(|k| (self.played_frames(k), *k));
         let Some(victim) = victim else { return };
         let Some(gone) = self.scenes.remove(&victim) else {
             return;
         };
-        let into = if self.scene_play.get(&victim).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES
+        let into = if self.played_frames(&victim) >= MIN_SIBLING_FRAMES
             && gone.frames >= MIN_ROOM_FRAMES
         {
             OTHER_PLAY
@@ -1149,14 +1475,65 @@ impl ScoutFinder {
             OTHER_SCENE
         };
         let len = self.len;
-        let other = self.scenes.entry(into).or_insert_with(|| SceneHist {
-            frames: 0,
-            bins: vec![0; len * 256],
-        });
-        other.frames += gone.frames;
-        for (o, g) in other.bins.iter_mut().zip(&gone.bins) {
-            *o = o.saturating_add(*g);
+        self.scenes
+            .entry(into)
+            .or_insert_with(|| SceneHist::new(len))
+            .absorb(&gone);
+    }
+
+    /// The values of byte `b` in each state the session showed, as text (diagnostics for the
+    /// discovery tests): per scene its frames, the frames inside cut zones and the commonest
+    /// values with their counts; then the pause and the speech.
+    #[must_use]
+    pub fn state_probe(&self, b: usize) -> String {
+        let top = |bins: &[u16]| -> String {
+            let mut v: Vec<(u16, usize)> = bins[b * 256..b * 256 + 256]
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c > 0)
+                .map(|(i, c)| (*c, i))
+                .collect();
+            v.sort_by(|a, b| b.cmp(a));
+            let more = v.len().saturating_sub(4);
+            let shown: Vec<String> = v
+                .iter()
+                .take(4)
+                .map(|(c, i)| format!("{i:02x}x{c}"))
+                .collect();
+            format!(
+                "{}{}",
+                shown.join(" "),
+                if more > 0 {
+                    format!(" +{more}")
+                } else {
+                    String::new()
+                }
+            )
+        };
+        let mut keys: Vec<_> = self.scenes.keys().copied().collect();
+        keys.sort_by_key(|k| k.map_or(0, |k| k % 100_000));
+        let mut out = format!("state {b:#06x}:");
+        for k in keys {
+            let h = &self.scenes[&k];
+            let z = if h.zone.is_empty() {
+                String::new()
+            } else {
+                format!(" zone[{}]", top(&h.zone))
+            };
+            out += &format!(
+                "\n   scene {:?} frames {} zone {}: {}{z}",
+                k.map(|k| k % 100_000),
+                h.frames,
+                h.zone_frames,
+                top(&h.bins)
+            );
         }
+        for (name, h) in [("pause", &self.paused), ("speech", &self.ignored)] {
+            if let Some(h) = h {
+                out += &format!("\n   {name} frames {}: {}", h.frames, top(&h.bins));
+            }
+        }
+        out
     }
 
     /// The wrap counts of an offset as text (diagnostics for the discovery
@@ -1380,9 +1757,7 @@ impl ScoutFinder {
         // difference is measured against the rest (title, menus, cuts).
         let scrolled = |k: &Option<u64>| {
             *k == OTHER_PLAY
-                || (k.is_some()
-                    && *k != OTHER_SCENE
-                    && self.scene_play.get(k).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES)
+                || (k.is_some() && *k != OTHER_SCENE && self.played_frames(k) >= MIN_SIBLING_FRAMES)
         };
         let mut siblings: Vec<&SceneHist> = Vec::new();
         let mut rest: Vec<&SceneHist> = Vec::new();
@@ -1401,6 +1776,9 @@ impl ScoutFinder {
             }
         }
         let transit_frames: u32 = transit.iter().map(|h| h.frames).sum();
+        // W35-05: the states the session showed, before the fallback below folds the rooms
+        // into the rest.
+        let states = States::new(self, level, &siblings, &rest, &transit);
         let mut other_frames: u32 = rest.iter().map(|h| h.frames).sum();
         if other_frames < MIN_OTHER_FRAMES {
             // Nothing but play was seen: the old rule, against every scene.
@@ -1415,7 +1793,7 @@ impl ScoutFinder {
         // not (menus, doors, fades): the transitions a start gate is about.
         let playing = |k: u64| {
             Some(k) == *level_key
-                || (self.scene_play.get(&Some(k)).copied().unwrap_or(0) >= MIN_SIBLING_FRAMES
+                || (self.played_frames(&Some(k)) >= MIN_SIBLING_FRAMES
                     && self
                         .scenes
                         .get(&Some(k))
@@ -1444,23 +1822,49 @@ impl ScoutFinder {
             // that is still running when the scene key already says "level")
             // are not held against the byte.
             let off_mode = level.frames.saturating_sub(u32::from(count));
-            let unexplained = off_mode.saturating_sub(level_zone);
+            let excused: u32 = states
+                .frozen_values(b, mode)
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| **f)
+                .map(|(v, _)| u32::from(bins[v]))
+                .sum();
+            // (A fifth of the level at most: a byte that reads the paused value for half of the
+            // level is not in control then, it is something else.)
+            let excused = excused.min(level.frames / 5);
+            let unexplained = off_mode.saturating_sub(level_zone).saturating_sub(excused);
             #[allow(clippy::cast_precision_loss)]
             let steady = 1.0 - unexplained as f32 / level.frames as f32;
             if steady < MIN_CONSTANCY {
                 continue;
             }
-            #[allow(clippy::cast_precision_loss)]
-            let holds_in_siblings = siblings
-                .iter()
-                .all(|h| f32::from(h.bins[b * 256 + mode]) >= SIBLING_SHARE * h.frames as f32);
-            if !holds_in_siblings {
+            // W35-05: one value covers nearly all of the frames the player played on, in every
+            // room (a value that is a room's own data covers one room's share; a mode byte that
+            // takes another value indoors still covers nearly all of the session).
+            let score = states.score(b, mode);
+            if score.cover < MIN_PLAY_COVER {
                 continue;
             }
+            // Few changes away from the cuts: a stack byte, a timer or a pointer changes dozens
+            // of times, a mode byte a handful.
+            let off_cut = self.g_changes[b].saturating_sub(self.g_cut_changes[b]);
+            #[allow(clippy::cast_precision_loss)]
+            let calm = 1.0 / (1.0 + off_cut as f32 / 16.0);
+            // A counter changes all the time away from the states' changes: the score is held
+            // against it a little.
+            let mode_score = score.mode * (0.8 + 0.2 * calm);
+            let (freeze_apart, frozen_frames) = score.pause;
+            let (speech_apart, speech_frames) = score.speech;
             let same: u32 = rest.iter().map(|h| u32::from(h.bins[b * 256 + mode])).sum();
             #[allow(clippy::cast_precision_loss)]
             let differs = 1.0 - same as f32 / other_frames as f32;
-            if differs < 0.6 {
+            // W35-05: a byte that is gone in every pause and speech may be a guard even when
+            // its value is also the menus' (a pause flag is 0 in a menu too).
+            let guard_fit = frozen_frames >= MIN_FROZEN_FRAMES && freeze_apart >= MIN_FREEZE_APART;
+            // (W35-05: a byte that says nothing about the states is out; that a mode byte holds
+            // its value in a room the player cannot move in, a title or a speech room, must not
+            // count against it, so `differs` is no longer a bar of its own.)
+            if mode_score < MIN_MODE_SCORE && !guard_fit {
                 continue;
             }
             // A mode byte takes a handful of values over a whole session; a
@@ -1488,13 +1892,28 @@ impl ScoutFinder {
             // (the level, the rooms beside it, the doors between them): a
             // mode byte lets go of its value at a door or a pause, a flag set
             // when the game began never does.
-            let played_values = (0..256)
-                .filter(|&v| {
-                    level.bins[b * 256 + v] > 0
-                        || siblings
+            // (W35-05: the values that matter, a hundredth of the frames played at least, and
+            // not the ones of a text box or a pause, which a game reads in a room too.)
+            let frozen_here = states.frozen_values(b, mode);
+            let played_total: u32 = (0..256)
+                .map(|v| {
+                    u32::from(level.bins[b * 256 + v])
+                        + siblings
                             .iter()
                             .chain(&transit)
-                            .any(|h| h.bins[b * 256 + v] > 0)
+                            .map(|h| u32::from(h.bins[b * 256 + v]))
+                            .sum::<u32>()
+                })
+                .sum();
+            let played_values = (0..256)
+                .filter(|&v| {
+                    let n = u32::from(level.bins[b * 256 + v])
+                        + siblings
+                            .iter()
+                            .chain(&transit)
+                            .map(|h| u32::from(h.bins[b * 256 + v]))
+                            .sum::<u32>();
+                    n > 0 && (v == mode || (!frozen_here[v] && n * 100 >= played_total))
                 })
                 .count();
             // ...but only a few values: a byte that takes many while the
@@ -1507,9 +1926,10 @@ impl ScoutFinder {
             let reacts = played_values >= 2;
             // Where doors were seen, a gate is gone in them: that is what it
             // is for (the scout must not start in a transition).
-            if transit_differs < MIN_TRANSIT_DIFFERS {
+            if transit_differs < MIN_TRANSIT_DIFFERS && !guard_fit {
                 continue;
             }
+            let regular = mode_score >= MIN_MODE_SCORE && transit_differs >= MIN_TRANSIT_DIFFERS;
             #[allow(clippy::cast_possible_truncation)]
             let mode_u8 = mode as u8;
             // The share of cuts the byte's value differs across: over all of
@@ -1541,17 +1961,23 @@ impl ScoutFinder {
                 let covered = (all * cuts as f32).round().max(1.0);
                 ((self.g_cut_changes[b] as f32 / covered - 1.0) / 2.0).clamp(0.0, 1.0)
             };
-            // Few changes away from the cuts: a stack byte, a timer or a
-            // pointer changes dozens of times, a mode byte a handful.
-            let off_cut = self.g_changes[b].saturating_sub(self.g_cut_changes[b]);
-            #[allow(clippy::cast_precision_loss)]
-            let calm = 1.0 / (1.0 + off_cut as f32 / 16.0);
             let contrast = (0.35 * cut_cover
                 + 0.2 * cut_sync
                 + 0.25 * cut_steps
                 + 0.1 * differs
                 + 0.1 * transit_differs)
                 * (0.5 + 0.5 * calm);
+            // A byte that tells the session's states apart is a mode byte, whatever it does at
+            // the cuts; a guard is trusted for what it does in the pauses.
+            let quality = if guard_fit {
+                freeze_apart.max(if regular {
+                    contrast.max(mode_score)
+                } else {
+                    0.0
+                })
+            } else {
+                contrast.max(mode_score)
+            };
             out.push((
                 GateCandidate {
                     offset: b,
@@ -1560,15 +1986,20 @@ impl ScoutFinder {
                     differs,
                     // Held through steady play, and told from the rest of the
                     // session by what it does at the cuts.
-                    confidence: steady.min(1.0) * (0.5 + 0.5 * contrast),
+                    confidence: steady.min(1.0) * (0.5 + 0.5 * quality),
                     cut_sync,
                     cut_cover,
                     cut_steps,
                     contrast,
                     off_cut,
                     cuts,
+                    mode_score,
+                    freeze_apart,
+                    frozen_frames,
+                    speech_apart,
+                    speech_frames,
                 },
-                (reacts, distinct, transit_differs),
+                (reacts, distinct, transit_differs, regular),
             ));
         }
         // Contrast first (W35-03): a mode byte changes at the cuts between
@@ -1577,20 +2008,256 @@ impl ScoutFinder {
         // with no cut near. Equally good bytes (to a tenth) are told apart by
         // which of them lets go in a door or a fade: a mode byte does, a flag
         // set once at the start of the game does not.
-        out.sort_by(|(a, (ar, ad, at)), (b, (br, bd, bt))| {
-            let (xa, xb) = ((a.contrast * 10.0).round(), (b.contrast * 10.0).round());
+        out.sort_by(|(a, (ar, ad, at, _)), (b, (br, bd, bt, _))| {
+            // W35-05: the byte that tells the states apart first (to a fiftieth: the evidence of a
+            // short session is thin and nearly equal scores are told apart by what follows).
+            let (sa, sb) = ((a.mode_score * 50.0).round(), (b.mode_score * 50.0).round());
+            let (xa, xb) = ((a.contrast * 20.0).round(), (b.contrast * 20.0).round());
             let (ac, bc) = ((a.confidence * 10.0).round(), (b.confidence * 10.0).round());
-            xb.total_cmp(&xa)
+            sb.total_cmp(&sa)
+                .then(xb.total_cmp(&xa))
                 .then(br.cmp(ar))
                 .then(bc.total_cmp(&ac))
                 .then(ad.cmp(bd))
                 .then(bt.total_cmp(at))
                 .then(a.offset.cmp(&b.offset))
         });
-        let mut out: Vec<GateCandidate> = out.into_iter().map(|(g, _)| g).collect();
-        out.truncate(keep);
+        // The bytes that are not mode bytes at all (the guards) come after the best of them,
+        // not among them.
+        let (regular, guards): (Vec<_>, Vec<_>) = out.into_iter().partition(|(_, (.., r))| *r);
+        let guard_wanted = regular.first().is_some_and(|(g, _)| {
+            g.frozen_frames >= MIN_FROZEN_FRAMES && g.freeze_apart < MIN_FREEZE_APART
+        });
+        let mut ranked: Vec<GateCandidate> = Vec::new();
+        if guard_wanted {
+            // Best guard, regular candidates that happen to be gone in the pauses included: the
+            // one the pause leaves furthest away, that holds through play, the calmest.
+            // (A few speech frames say nothing: neutral.)
+            let speech_gone = |g: &GateCandidate| {
+                if g.speech_frames >= MIN_FROZEN_FRAMES {
+                    g.speech_apart
+                } else {
+                    1.0
+                }
+            };
+            let fits = |g: &GateCandidate| {
+                g.frozen_frames >= MIN_FROZEN_FRAMES && g.freeze_apart >= MIN_FREEZE_APART
+            };
+            let mut pool: Vec<(GateCandidate, usize, bool)> = guards
+                .iter()
+                .map(|(g, (_, d, ..))| (*g, *d, false))
+                .chain(
+                    regular
+                        .iter()
+                        .filter(|(g, _)| fits(g))
+                        .map(|(g, (_, d, ..))| (*g, *d, true)),
+                )
+                .collect();
+            pool.sort_by(|(a, ad, _), (b, bd, _)| {
+                b.freeze_apart
+                    .total_cmp(&a.freeze_apart)
+                    .then(b.constancy.total_cmp(&a.constancy))
+                    .then(speech_gone(b).total_cmp(&speech_gone(a)))
+                    .then(a.off_cut.cmp(&b.off_cut))
+                    .then(ad.cmp(bd))
+                    .then(a.offset.cmp(&b.offset))
+            });
+            let guard = pool.first().map(|(g, ..)| *g);
+            let mut it = regular
+                .into_iter()
+                .map(|(g, _)| g)
+                .filter(|g| Some(g.offset) != guard.map(|g| g.offset));
+            ranked.extend(it.next());
+            ranked.extend(guard);
+            ranked.extend(it);
+        } else {
+            ranked.extend(regular.into_iter().map(|(g, _)| g));
+        }
+        ranked.truncate(keep);
+        ranked
+    }
+}
+
+/// W35-05: the states a session showed, as histograms of the work RAM, to score a byte by how well its
+/// value tells them apart. Play is the level and the rooms the player scrolled through (one state:
+/// a value that changes from room to room while play goes on tells nothing); every other scene
+/// that held still for a while is a state; the frames in the cuts' zones (doors, fades, loads) are
+/// one; a pause and a speech are one each.
+struct States<'a> {
+    /// The scenes that make up play.
+    play: Vec<&'a SceneHist>,
+    /// Each other scene with frames of its own, and the transitions' scenes.
+    scenes: Vec<&'a SceneHist>,
+    /// The scenes the player crossed between rooms.
+    transit: Vec<&'a SceneHist>,
+    /// Every scene, for the zones.
+    all: Vec<&'a SceneHist>,
+    paused: Option<&'a SceneHist>,
+    ignored: Option<&'a SceneHist>,
+}
+
+impl<'a> States<'a> {
+    fn new(
+        f: &'a ScoutFinder,
+        level: &'a SceneHist,
+        siblings: &[&'a SceneHist],
+        rest: &[&'a SceneHist],
+        transit: &[&'a SceneHist],
+    ) -> Self {
+        let mut play = vec![level];
+        play.extend(siblings.iter().copied());
+        let is_transit = |h: &&SceneHist| transit.iter().any(|t| std::ptr::eq(*t, *h));
+        Self {
+            play,
+            scenes: rest
+                .iter()
+                .copied()
+                .filter(|h| !is_transit(h) && h.clean_frames() >= MIN_LABEL_FRAMES)
+                .collect(),
+            transit: transit.to_vec(),
+            all: f.scenes.values().collect(),
+            paused: f.paused.as_ref(),
+            ignored: f.ignored.as_ref(),
+        }
+    }
+
+    /// The values (other than `mode`) byte `b` read on at least a quarter of the frames of a
+    /// pause or a speech: when the byte reads one of them in the middle of play, the game was
+    /// not in control then either (a door, a text box that does not freeze the picture).
+    fn frozen_values(&self, b: usize, mode: usize) -> [bool; 256] {
+        let mut out = [false; 256];
+        let hists: Vec<&SceneHist> = [self.paused, self.ignored].into_iter().flatten().collect();
+        let total: u32 = hists.iter().map(|h| h.frames).sum();
+        if total < MIN_FROZEN_FRAMES {
+            return out;
+        }
+        for (v, o) in out.iter_mut().enumerate() {
+            let n: u32 = hists.iter().map(|h| u32::from(h.bins[b * 256 + v])).sum();
+            *o = v != mode && n * 4 >= total;
+        }
         out
     }
+
+    /// The symmetric uncertainty of byte `b`'s value against the states, and how far its play value
+    /// `mode` is from the values of the pauses and speeches (with their frames).
+    fn score(&self, b: usize, mode: usize) -> Score {
+        let mut counts: Vec<[u32; 256]> = Vec::new();
+        let mut keep = |c: [u32; 256]| {
+            if c.iter().sum::<u32>() >= MIN_LABEL_FRAMES {
+                counts.push(c);
+            }
+        };
+        let mut play = [0u32; 256];
+        self.play.iter().for_each(|h| h.tally(b, false, &mut play));
+        for (c, _) in play
+            .iter_mut()
+            .zip(self.frozen_values(b, mode))
+            .filter(|(_, f)| *f)
+        {
+            *c = 0;
+        }
+        // The share of play the value holds on (a value that changes from room to room while
+        // play goes on is data of the room).
+        let play_all: u32 = play.iter().sum();
+        #[allow(clippy::cast_precision_loss)]
+        let play_cover = if play_all == 0 {
+            1.0
+        } else {
+            play[mode] as f32 / play_all as f32
+        };
+        keep(play);
+        for h in &self.scenes {
+            let mut c = [0u32; 256];
+            h.tally(b, false, &mut c);
+            keep(c);
+        }
+        let mut cuts = [0u32; 256];
+        self.all.iter().for_each(|h| h.tally(b, true, &mut cuts));
+        self.transit
+            .iter()
+            .for_each(|h| h.tally(b, false, &mut cuts));
+        keep(cuts);
+        let mut apart = [(1.0f32, 0u32); 2];
+        for (slot, h) in apart.iter_mut().zip([self.paused, self.ignored]) {
+            let Some(h) = h else { continue };
+            let mut c = [0u32; 256];
+            h.bins[b * 256..b * 256 + 256]
+                .iter()
+                .zip(c.iter_mut())
+                .for_each(|(&x, y)| *y = u32::from(x));
+            let all: u32 = c.iter().sum();
+            if all > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    *slot = ((all - c[mode]) as f32 / all as f32, all);
+                }
+            }
+            if all >= MIN_FROZEN_FRAMES {
+                counts.push(c);
+            }
+        }
+        let slices: Vec<&[u32]> = counts.iter().map(<[u32; 256]>::as_slice).collect();
+        let (nmi, purity) = state_information(&slices);
+        Score {
+            mode: nmi * play_cover * (0.7 + 0.3 * purity),
+            cover: play_cover,
+            pause: apart[0],
+            speech: apart[1],
+        }
+    }
+}
+
+/// W35-05: what the states say of one byte.
+struct Score {
+    /// How well its value tells the states apart (0..=1).
+    mode: f32,
+    /// The share of the frames of play its play value holds on.
+    cover: f32,
+    /// The share of the pause's frames its play value is gone from, and the frames.
+    pause: (f32, u32),
+    /// The same for the speeches (frames the pad was held on a frozen picture).
+    speech: (f32, u32),
+}
+
+/// W35-05: how well a byte's value `V` tells the states `L` it was read in apart, one histogram of
+/// values per state, the states weighed equally (a pause of a hundred frames counts as much as a
+/// level of ten thousand). Returns `(nmi, purity)`: `nmi = I(V; L) / H(L)` is 1 when the value
+/// tells every state apart and 0 when it says nothing (a constant, a value that is the same
+/// everywhere but in one state tells one state apart and scores low); `purity = I(V; L) / H(V)` is
+/// 1 when every value the byte takes belongs to one state, and low for a counter (many values, a
+/// few frames of each in every state). `(0, 0)` below two states.
+#[must_use]
+pub fn state_information(states: &[&[u32]]) -> (f32, f32) {
+    let states: Vec<(&[u32], f64)> = states
+        .iter()
+        .map(|c| (*c, c.iter().map(|&x| f64::from(x)).sum::<f64>()))
+        .filter(|(_, n)| *n > 0.0)
+        .collect();
+    if states.len() < 2 {
+        return (0.0, 0.0);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let k = states.len() as f64;
+    let width = states.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    let (mut mi, mut hv) = (0.0f64, 0.0f64);
+    for v in 0..width {
+        let at = |c: &[u32], n: f64| c.get(v).map_or(0.0, |&x| f64::from(x)) / n;
+        let p_v: f64 = states.iter().map(|(c, n)| at(c, *n) / k).sum();
+        if p_v <= 0.0 {
+            continue;
+        }
+        hv -= p_v * p_v.log2();
+        for (c, n) in &states {
+            let p_vl = at(c, *n);
+            if p_vl > 0.0 {
+                mi += p_vl / k * (p_vl / p_v).log2();
+            }
+        }
+    }
+    let nmi = mi / k.log2();
+    let purity = if hv > 0.0 { mi / hv } else { 0.0 };
+    #[allow(clippy::cast_possible_truncation)]
+    (nmi.clamp(0.0, 1.0) as f32, purity.clamp(0.0, 1.0) as f32)
 }
 
 /// What a skeleton row is for (the profile's `[[scout.addr]]` roles).
@@ -1798,6 +2465,7 @@ mod tests {
                 jump: u8::from(jump),
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),
+                ..Frame::default()
             });
         };
         for s in 0..pre {
@@ -1857,6 +2525,7 @@ mod tests {
                 jump,
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),
+                ..Frame::default()
             });
         };
         // A title, then a level: walk into the left wall (the session is under
@@ -1994,6 +2663,7 @@ mod tests {
                 jump: u8::from(press),
                 scroll: &[(&[], &[]), (&x, &y)],
                 scene: Some(1),
+                ..Frame::default()
             });
         };
         for _ in 0..40 {
@@ -2264,6 +2934,7 @@ mod tests {
                 jump: 0,
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),
+                ..Frame::default()
             });
         };
         for _ in 0..100 {
@@ -2297,5 +2968,284 @@ mod tests {
             hud.players.first().map(|p| p.lo),
             plain.players.first().map(|p| p.lo)
         );
+    }
+
+    // ---- W35-05: the mode byte --------------------------------------------------------------
+
+    /// A game with a mode byte (0x40: title 1, map 2, play 3), a pause flag (0x41) that leaves the
+    /// mode alone, the data of a level (0x42: 7 in the first, 9 in the second), a byte that never
+    /// changes (0x44) and twelve that tick while the game runs (0x60..0x6C: its frame counters).
+    struct Modes {
+        ram: Vec<u8>,
+        t: u32,
+        cam: u32,
+        shown: u64,
+    }
+
+    impl Modes {
+        fn new() -> Self {
+            Self {
+                ram: vec![0; 0x80],
+                t: 0,
+                cam: 0,
+                shown: 1,
+            }
+        }
+
+        /// One frame. `running`: the game ticks its counters and the picture moves. `scene`: the
+        /// mode and the level data to write; `walking`: the camera follows.
+        fn frame(&mut self, mode: u8, level: u8, paused: bool, running: bool, walking: bool) {
+            self.t += 1;
+            self.ram[0x40] = mode;
+            self.ram[0x41] = u8::from(paused);
+            self.ram[0x42] = level;
+            self.ram[0x44] = 5;
+            if running {
+                for i in 0..12 {
+                    self.ram[0x60 + i] = (self.t as u8).wrapping_mul(i as u8 + 3);
+                }
+                self.shown = self.shown.wrapping_add(0x9E37_79B9) | 1;
+            } else {
+                self.ram[0x60] = 0;
+            }
+            if walking && running {
+                self.cam += 2;
+            }
+            self.ram[0x20] = self.cam as u8;
+            self.ram[0x21] = (self.cam >> 8) as u8;
+        }
+    }
+
+    /// Feed `n` frames of one state to the finder.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_modes(
+        f: &mut ScoutFinder,
+        g: &mut Modes,
+        n: u32,
+        scene: u64,
+        (mode, level): (u8, u8),
+        (pad, start): (Pad, bool),
+        (paused, running): (bool, bool),
+    ) {
+        for _ in 0..n {
+            g.frame(mode, level, paused, running, pad == Pad::Right);
+            let scroll = [g.ram[0x20]];
+            f.observe(&Frame {
+                ram: &g.ram,
+                pad,
+                scroll: &[(&scroll, &[0])],
+                scene: Some(scene),
+                start,
+                shown: g.shown,
+                ..Frame::default()
+            });
+        }
+    }
+
+    /// The whole session: a title (Start pressed), a map, a level walked in with a pause in the
+    /// middle, a second level walked in, a speech in it.
+    fn run_modes(pause: bool, speech: bool) -> ScoutFinder {
+        let mut f = ScoutFinder::new(0x80, 1);
+        let mut g = Modes::new();
+        let go = (Pad::Right, false);
+        let idle = (Pad::Idle, false);
+        let live = (false, true);
+        feed_modes(&mut f, &mut g, 150, 1, (1, 0), idle, live);
+        feed_modes(&mut f, &mut g, 6, 1, (1, 0), (Pad::Idle, true), live);
+        feed_modes(&mut f, &mut g, 120, 2, (2, 0), idle, live);
+        feed_modes(&mut f, &mut g, 400, 3, (3, 7), go, live);
+        if pause {
+            // Start; the game freezes and stops ticking; Start again.
+            feed_modes(
+                &mut f,
+                &mut g,
+                6,
+                3,
+                (3, 7),
+                (Pad::Idle, true),
+                (true, false),
+            );
+            feed_modes(&mut f, &mut g, 80, 3, (3, 7), idle, (true, false));
+            feed_modes(&mut f, &mut g, 6, 3, (3, 7), (Pad::Idle, true), live);
+        }
+        feed_modes(&mut f, &mut g, 300, 3, (3, 7), go, live);
+        feed_modes(&mut f, &mut g, 100, 4, (3, 9), idle, live);
+        feed_modes(&mut f, &mut g, 400, 4, (3, 9), go, live);
+        if speech {
+            // A speech box: the pad is held, the picture does not move, the memory idles.
+            feed_modes(&mut f, &mut g, 80, 4, (3, 9), go, (false, false));
+        }
+        feed_modes(&mut f, &mut g, 200, 4, (3, 9), go, live);
+        f
+    }
+
+    #[test]
+    fn state_information_tells_a_separator_from_a_constant_and_a_counter() {
+        // Three states, one value each: the value tells them apart and says nothing else.
+        let (a, b, c): (Vec<u32>, Vec<u32>, Vec<u32>) =
+            (vec![50, 0, 0, 0], vec![0, 50, 0, 0], vec![0, 0, 50, 0]);
+        let (nmi, purity) = state_information(&[&a, &b, &c]);
+        assert!(nmi > 0.99 && purity > 0.99, "{nmi} {purity}");
+        // The same value in every state: nothing.
+        let same = vec![50, 0, 0, 0];
+        assert_eq!(state_information(&[&same, &same, &same]), (0.0, 0.0));
+        // One state apart from two that are alike: a third of the answer.
+        let (nmi, _) = state_information(&[&a, &b, &b]);
+        assert!(nmi > 0.3 && nmi < 0.7, "{nmi}");
+        // A counter: every state spreads over all the values; no value belongs to a state.
+        let flat = vec![5; 32];
+        let (nmi, purity) = state_information(&[&flat, &flat, &flat]);
+        assert!(nmi < 0.01 && purity < 0.01, "{nmi} {purity}");
+        // A counter that lands on different values in different states tells states apart by
+        // accident, but most of its values belong to no state: low purity.
+        let (x, y): (Vec<u32>, Vec<u32>) = (
+            (0..32).map(|i| u32::from(i < 16)).collect(),
+            (0..32).map(|i| u32::from(i >= 16)).collect(),
+        );
+        let (nmi, purity) = state_information(&[&x, &y]);
+        assert!(nmi > 0.99, "{nmi}");
+        assert!(purity < 0.25, "{purity}");
+        // Fewer than two states: no information.
+        assert_eq!(state_information(&[&a]), (0.0, 0.0));
+        assert_eq!(state_information(&[]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_mode_byte_outranks_the_data_of_a_level() {
+        let o = run_modes(true, false).observed();
+        let first = o.gates.first().expect("a gate");
+        // 0x40 reads 3 in both levels; 0x42 reads 7 in one and 9 in the other (a room's own
+        // data), 0x44 never changes.
+        assert_eq!((first.offset, first.value), (0x40, 3), "{:?}", o.gates);
+        let data = o.gates.iter().find(|g| g.offset == 0x42);
+        assert!(
+            data.is_none_or(|d| d.mode_score + 0.1 < first.mode_score),
+            "{:?}",
+            o.gates
+        );
+        assert!(o.gates.iter().all(|g| g.offset != 0x44), "{:?}", o.gates);
+        // The counters tick all the time: none is a gate.
+        assert!(o.gates.iter().all(|g| !(0x60..0x6C).contains(&g.offset)));
+    }
+
+    #[test]
+    fn a_pause_that_leaves_the_mode_alone_gets_a_guard_next() {
+        let o = run_modes(true, false).observed();
+        let (mode, guard) = (&o.gates[0], &o.gates[1]);
+        assert_eq!(mode.offset, 0x40);
+        // The mode byte does not change in the pause; the flag does, and nothing else is a
+        // flag that holds 0 through play.
+        assert!(mode.freeze_apart < MIN_FREEZE_APART, "{mode:?}");
+        assert!(mode.frozen_frames >= MIN_FROZEN_FRAMES, "{mode:?}");
+        assert_eq!((guard.offset, guard.value), (0x41, 0), "{:?}", o.gates);
+        assert!(guard.freeze_apart >= MIN_FREEZE_APART, "{guard:?}");
+        // Written as a row: its confidence clears the discovery's bar.
+        assert!(guard.confidence >= 0.7, "{guard:?}");
+        assert!(mode.confidence >= 0.7, "{mode:?}");
+    }
+
+    #[test]
+    fn no_pause_means_no_guard() {
+        let o = run_modes(false, false).observed();
+        assert_eq!(o.gates[0].offset, 0x40);
+        assert!(
+            o.gates.iter().all(|g| g.frozen_frames == 0),
+            "{:?}",
+            o.gates
+        );
+        assert!(o.gates.iter().all(|g| g.offset != 0x41), "{:?}", o.gates);
+    }
+
+    #[test]
+    fn the_frames_of_a_pause_are_not_held_against_the_mode_byte() {
+        // 80 frames of pause inside the level, where a byte that reads the paused value
+        // (0x41 = 1) would break the 95 % bar if they were counted as the level's.
+        let with = run_modes(true, false).observed();
+        let flag = with.gates.iter().find(|g| g.offset == 0x41).expect("0x41");
+        assert!((flag.constancy - 1.0).abs() < 0.01, "{flag:?}");
+    }
+
+    #[test]
+    fn start_in_a_menu_is_not_a_pause() {
+        // Start pressed on a static title, twice: the picture holds, the memory idles; but no
+        // one has played in that scene.
+        let mut f = ScoutFinder::new(0x80, 1);
+        let mut g = Modes::new();
+        let idle = (Pad::Idle, false);
+        feed_modes(&mut f, &mut g, 100, 1, (1, 0), idle, (false, true));
+        feed_modes(
+            &mut f,
+            &mut g,
+            6,
+            1,
+            (1, 0),
+            (Pad::Idle, true),
+            (false, false),
+        );
+        feed_modes(&mut f, &mut g, 60, 1, (1, 0), idle, (false, false));
+        feed_modes(
+            &mut f,
+            &mut g,
+            6,
+            1,
+            (1, 0),
+            (Pad::Idle, true),
+            (false, true),
+        );
+        assert!(
+            f.paused.is_none() && f.staging.is_none(),
+            "a pause in a menu"
+        );
+    }
+
+    #[test]
+    fn a_start_the_game_ignores_is_not_a_pause() {
+        // Start in a level: the picture happens to hold (a standing player), but the game keeps
+        // counting its frames: it did not pause.
+        let mut f = ScoutFinder::new(0x80, 1);
+        let mut g = Modes::new();
+        let (go, idle) = ((Pad::Right, false), (Pad::Idle, false));
+        feed_modes(&mut f, &mut g, 200, 3, (3, 7), go, (false, true));
+        // The picture stands still but the counters tick.
+        for _ in 0..60 {
+            g.frame(3, 7, false, true, false);
+            let shown = g.shown;
+            f.observe(&Frame {
+                ram: &g.ram,
+                scene: Some(3),
+                start: g.t % 60 < 6,
+                shown: 77,
+                ..Frame::default()
+            });
+            g.shown = shown;
+        }
+        feed_modes(&mut f, &mut g, 60, 3, (3, 7), idle, (false, true));
+        assert!(f.paused.is_none() && f.staging.is_none(), "{:?}", f.pause);
+    }
+
+    #[test]
+    fn a_speech_that_holds_the_pad_is_a_state_of_its_own() {
+        let f = run_modes(false, true);
+        let speech = f.ignored.as_ref().map_or(0, |h| h.frames);
+        assert!(speech >= 40, "speech frames {speech}");
+        // Its frames are not the level's: the mode byte still holds on all of them.
+        let o = f.observed();
+        let mode = o.gates.iter().find(|g| g.offset == 0x40).expect("0x40");
+        assert!(mode.speech_frames >= MIN_FROZEN_FRAMES, "{mode:?}");
+    }
+
+    #[test]
+    fn a_picture_hash_follows_the_picture() {
+        use rf_core_api::PixelLayer;
+        let px = |i: u8| PpuPixel {
+            palette_index: i,
+            layer: PixelLayer::Backdrop,
+            sprite_id: None,
+            priority: 0,
+        };
+        let (a, b) = (vec![px(1), px(2), px(3)], vec![px(1), px(2), px(4)]);
+        assert_eq!(picture_hash(&a), picture_hash(&a.clone()));
+        assert_ne!(picture_hash(&a), picture_hash(&b));
+        assert_ne!(picture_hash(&[]), 0);
     }
 }
