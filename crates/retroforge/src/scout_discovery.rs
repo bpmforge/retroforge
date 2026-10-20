@@ -194,6 +194,12 @@ fn with_player(mut plan: ScoutPlan, snes: bool, p: &PlayerCandidate) -> ScoutPla
 
 fn run(scout: &mut Scout, plan: ScoutPlan, ctx: &Context<'_>) -> Result<Outcome, DiscoveryError> {
     let frames = plan.frame_budget;
+    let (plan_strategy, plan_dirs, plan_step, plan_hold) = (
+        plan.strategy,
+        plan.dirs.clone(),
+        plan.step_px,
+        plan.hold.clone(),
+    );
     scout
         .restart_with(plan)
         .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
@@ -206,11 +212,25 @@ fn run(scout: &mut Scout, plan: ScoutPlan, ctx: &Context<'_>) -> Result<Outcome,
             break;
         }
     }
-    Ok(Outcome {
-        extent: scout.extent(),
+    let out = Outcome {
+        extent: scout.main_extent(),
         died,
         frames: scout.frames_run(),
-    })
+    };
+    if std::env::var_os("RF_TRACE_TRIALS").is_some() {
+        eprintln!(
+            "TRIAL {:?} dirs {:?} step {} hold {:?}: extent {} width {} died {} frames {}",
+            plan_strategy,
+            plan_dirs,
+            plan_step,
+            plan_hold,
+            out.extent,
+            scout.width(),
+            out.died,
+            out.frames
+        );
+    }
+    Ok(out)
 }
 
 /// The hold rows for a Y candidate held `delta` pixels above where the player
@@ -288,11 +308,12 @@ fn gate_survival(
 /// alone) and the one that scrolls the screen furthest wins.
 fn confirm_y(
     ctx: &Context<'_>,
+    vertical: Option<&Vertical<'_>>,
     obs: &Observed,
     mover: &ScoutPlan,
     report: &mut Report,
 ) -> Result<VerticalOutcome, DiscoveryError> {
-    let (Some(v), true) = (ctx.vertical.as_ref(), ctx.snes) else {
+    let (Some(v), true) = (vertical, ctx.snes) else {
         return Ok(VerticalOutcome::default());
     };
     let Some(cam_y) = obs.camera.and_then(|c| c.y) else {
@@ -388,6 +409,13 @@ pub fn discover(
     ));
     let base = base_plan(&ctx, obs);
     let seed = ctx.live;
+    // W35-04: a top-down game scrolls both ways wherever the player stands, so the vertical room
+    // is the room the trials start in.
+    let main_room = (obs.top_down && ctx.vertical.is_none()).then(|| Vertical {
+        snapshot: snapshot.clone(),
+        live: ctx.live,
+        scene: ctx.scene,
+    });
     let mut scout = Scout::start(ctx.rom, snapshot, base.clone(), seed, ctx.scene, ctx.size)
         .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
     let bands = scout.places_by_bands();
@@ -418,7 +446,7 @@ pub fn discover(
     let mut best: Option<Winner> = None;
     for (player, mut plan) in movers {
         plan.frame_budget = TRIAL_FRAMES;
-        let none = run(&mut scout, plan.clone(), &ctx)?;
+        let mut none = run(&mut scout, plan.clone(), &ctx)?;
         report.trials.push(format!(
             "{:?} {:?} no hold: extent {} died {} after {} frames",
             plan.strategy,
@@ -427,8 +455,29 @@ pub fn discover(
             none.died,
             none.frames
         ));
+        // W35-04: a player standing at the right end of the world (a camera clamped at the edge
+        // of an overworld screen) scrolls nowhere to the right: try the other way before judging
+        // the recipe.
+        if none.extent < floor && plan.strategy == ScoutStrategy::PlayerMove {
+            let mut left = plan.clone();
+            left.dirs = vec![ScoutDir::Left];
+            let l = run(&mut scout, left.clone(), &ctx)?;
+            report.trials.push(format!(
+                "{:?} {:?} no hold, Left: extent {} died {} after {} frames",
+                plan.strategy,
+                player.map(|p| p.lo),
+                l.extent,
+                l.died,
+                l.frames
+            ));
+            if l.score() > none.score() {
+                (none, plan) = (l, left);
+            }
+        }
         let mut tried: Vec<(Option<Hold>, Outcome)> = vec![(None, none)];
-        for y in obs.ys.iter().take(MAX_Y) {
+        // W35-04: a top-down game has no ground to float above: a Y poke is a move.
+        let hold_ys: &[YCandidate] = if obs.top_down { &[] } else { &obs.ys };
+        for y in hold_ys.iter().take(MAX_Y) {
             for wide in [true, false] {
                 if !ctx.snes && wide {
                     continue;
@@ -561,7 +610,13 @@ pub fn discover(
         }
     }
 
-    let vertical = confirm_y(&ctx, obs, &plan, &mut report)?;
+    let vertical = confirm_y(
+        &ctx,
+        ctx.vertical.as_ref().or(main_room.as_ref()),
+        obs,
+        &plan,
+        &mut report,
+    )?;
     // The gates the winning recipe leaves true (and, where a vertical room was
     // seen, that hold there too).
     let mut final_plan = plan.clone();
@@ -721,14 +776,24 @@ fn skeleton(
                 role,
                 addr: bus_address(snes, y.offset) + i as u32,
                 value: None,
-                notes: format!(
-                    "{} of the player's Y word: it read {} standing and moved within 6 frames of a jump press in {} of {} presses; a Down pass that moved it from a room that scrolls vertically took the canvases to {:.1} screens.",
-                    if i == 0 { "Low byte" } else { "High byte" },
-                    y.standing,
-                    y.hits,
-                    y.windows,
-                    *extent as f32 / screen as f32
-                ),
+                notes: if obs.top_down {
+                    format!(
+                        "{} of the player's Y word: it stepped with the camera's Y on {} of {} frames the screen scrolled vertically while the pad held Up or Down; a Down pass that moved it took the canvases to {:.1} screens.",
+                        if i == 0 { "Low byte" } else { "High byte" },
+                        y.hits,
+                        y.windows,
+                        *extent as f32 / screen as f32
+                    )
+                } else {
+                    format!(
+                        "{} of the player's Y word: it read {} standing and moved within 6 frames of a jump press in {} of {} presses; a Down pass that moved it from a room that scrolls vertically took the canvases to {:.1} screens.",
+                        if i == 0 { "Low byte" } else { "High byte" },
+                        y.standing,
+                        y.hits,
+                        y.windows,
+                        *extent as f32 / screen as f32
+                    )
+                },
                 confidence: 0.9,
             });
         }

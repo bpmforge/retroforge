@@ -4591,6 +4591,249 @@ fn shot_sm_scout(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W35-04: A Link to the Past with NO hand-made `[scout]` table. A scripted session
+/// outside Link's house (the door, the road, the trees) finds one; the app's own "Save scout settings" writes it
+/// to the player's profile; the app, reading that profile, scouts the road at 32:9 (off,
+/// then on, cold canvas cache); a second visit over the same cache must have the margins at once
+/// and start no scout.
+fn shot_alttp_scout(readme: &mut Vec<String>) {
+    use egui_kittest::kittest::Queryable as _;
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "alttp-scout";
+    if !wanted(name) {
+        return;
+    }
+    let file = discovery::ALTTP.1;
+    let Some(path) = rom("snes", file) else {
+        skip(readme, name, &format!("{file} not found"));
+        return;
+    };
+    let Some(mut rig) = discovery::Rig::open(discovery::ALTTP.0, discovery::ALTTP.1, None) else {
+        skip(readme, name, "no rig");
+        return;
+    };
+    rig.script(&discovery::alttp_to_free_play());
+    let mut road = None;
+    let mut road_frame = 0;
+    let t0 = Instant::now();
+    let skeleton = discovery::alttp_find_table(&mut rig, 600, &mut |r| {
+        road = Some(r.st.snapshot().expect("snapshot"));
+        road_frame = r.st.frame_count();
+    });
+    println!(
+        "ALTTP-FIND: {:.1}s\n{}",
+        t0.elapsed().as_secs_f32(),
+        skeleton.to_toml()
+    );
+    let road = road.expect("the road's snapshot");
+    drop(rig);
+
+    let cold = std::env::temp_dir().join(format!("rf_scout_alttp_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this process reads the
+    // environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    let config = PathBuf::from(
+        std::env::var("RETROFORGE_CONFIG_DIR").expect("w30_w31_screens sets the config dir"),
+    );
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../profiles/snes/the-legend-of-zelda-a-link-to-the-past/profile.toml");
+    let before = std::fs::read(&shipped).expect("the shipped profile");
+    let user =
+        config.join("retroforge/profiles/snes/the-legend-of-zelda-a-link-to-the-past/profile.toml");
+    let _ = std::fs::remove_file(&user);
+
+    // The player's save: through the card, into the player's own profile folder.
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    h.state_mut().offer_scout_for_test((*skeleton).clone());
+    run_n(&mut h, 3);
+    h.get_by_label("Save scout settings").click();
+    run_n(&mut h, 3);
+    assert_eq!(
+        std::fs::read(&shipped).expect("still there"),
+        before,
+        "the shipped profile was written to"
+    );
+    let saved = std::fs::read_to_string(&user).expect("the player's profile");
+    let table = rf_profiles::load_str(&saved)
+        .expect("the saved profile loads")
+        .profile
+        .scout
+        .expect("a [scout] table");
+    assert!(table.addr.iter().all(|r| r
+        .source
+        .as_deref()
+        .is_some_and(|s| s.starts_with("observed:"))));
+    println!(
+        "ALTTP-SAVED: {} rows in {}",
+        table.addr.len(),
+        user.display()
+    );
+    // Read the profile again (the app picks the player's copy first).
+    open_and_run(&mut h, &path);
+
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(road.clone())));
+    run_n(&mut h, 40);
+    probe(&h, "alttp-road");
+    let t = h.state().frame_count_for_test() + 20;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let off = grab(&h);
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state_mut().set_widescreen(true);
+    let t1 = Instant::now();
+    while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+        let t = h.state().frame_count_for_test() + 2;
+        run_frames(&mut h, t, Duration::from_secs(10));
+    }
+    let live_at_start = h.state().frame_count_for_test();
+    h.state().send_core_command_for_test(CoreCommand::Pause);
+    let mut finished = false;
+    while t1.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_millis(100));
+        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+            finished = telemetry.finished.load(Relaxed) >= 1;
+            break;
+        }
+    }
+    h.state().send_core_command_for_test(CoreCommand::Resume);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let t = h.state().frame_count_for_test() + 90;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let (Some(off), Some(on)) = (off, grab(&h)) else {
+        skip(readme, name, "no frame");
+        return;
+    };
+    let first_known = h.state().margin_known_for_test();
+    println!(
+        "SCOUT-ALTTP: finished {finished} (scout started at live frame {live_at_start}); {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells; gave up {}; {}; margins after the scout {first_known:?}",
+        telemetry.frames.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+        telemetry.gave_up.load(Relaxed),
+        telemetry.last_summary().unwrap_or_default(),
+    );
+    let d = w35_dir();
+    save(&d.join("alttp-32x9-off.png"), &off.opaque());
+    save(&d.join("alttp-32x9-on.png"), &on.opaque());
+    note(readme, format!("alttp-32x9|{file}|{}x{}", on.w, on.h));
+    let first_started = telemetry.started.load(Relaxed);
+    assert!(
+        finished && telemetry.aborted.load(Relaxed) == 0 && first_started >= 1,
+        "the road was not scouted from the saved table: finished {finished}"
+    );
+    // The core thread writes the scene as it stops; give it the time.
+    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+    std::thread::sleep(Duration::from_secs(3));
+    drop(h);
+
+    // The second visit: a new app over the same cache and profile folder.
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state_mut().set_widescreen(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(road)));
+    // The snapshot sets the frame counter to its own: count from there.
+    let base = road_frame;
+    let mut samples = Vec::new();
+    for _ in 0..240 {
+        let t = h.state().frame_count_for_test() + 1;
+        run_frames(&mut h, t, Duration::from_secs(10));
+        if let Some((scene, k, t, cells)) = h.state().margin_known_for_test() {
+            samples.push((h.state().frame_count_for_test() - base, scene, k, t, cells));
+        }
+    }
+    let t = h.state().frame_count_for_test() + 600;
+    run_frames(&mut h, t, Duration::from_secs(120));
+    let peak = samples.iter().map(|s| s.4).max().unwrap_or(0);
+    let target = peak - peak / 100;
+    let full_at = samples.iter().find(|s| s.4 >= target).map(|s| s.0);
+    let line = format!(
+        "ALTTP-PERSIST: first visit margins {first_known:?}; second visit: first sample {:?}, peak {peak} cells, full (99%) at live frame {full_at:?}; scouts started {} skipped {}",
+        samples.first(),
+        telemetry.started.load(Relaxed),
+        telemetry.skipped.load(Relaxed),
+    );
+    println!("{line}");
+    note(readme, line);
+    assert_eq!(
+        telemetry.started.load(Relaxed),
+        0,
+        "the second visit started a scout"
+    );
+    assert!(
+        telemetry.skipped.load(Relaxed) >= 1,
+        "the scout was not skipped"
+    );
+}
+
+/// Ticket W35-04: The Legend of Zelda (NES), what the 32:9 margins show today: the shipped
+/// profile (no `[scout]` table, `[decode] kind = "room_grid"` with no sizes), a session that
+/// walks across the first screen's right edge and back, the scout on (it has no table to run).
+fn shot_z1_margins(readme: &mut Vec<String>) {
+    let name = "z1-margins";
+    if !wanted(name) {
+        return;
+    }
+    let file = discovery::ZELDA1.1;
+    let Some(path) = rom("nes", file) else {
+        skip(readme, name, &format!("{file} not found"));
+        return;
+    };
+    let Some(mut rig) = discovery::Rig::open(discovery::ZELDA1.0, discovery::ZELDA1.1, None) else {
+        skip(readme, name, "no rig");
+        return;
+    };
+    rig.script(discovery::Z1_TO_PLAY);
+    rig.script("w60 R60 R60 R60 w100 L60 L60 L60 L60 w100");
+    let snap = rig.st.snapshot().expect("snapshot");
+    drop(rig);
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(snap)));
+    run_n(&mut h, 40);
+    let t = h.state().frame_count_for_test() + 60;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let Some(off) = grab(&h) else {
+        skip(readme, name, "no frame");
+        return;
+    };
+    let d = w35_dir();
+    save(&d.join("zelda1-32x9-on.png"), &off.opaque());
+    note(readme, format!("zelda1-32x9|{file}|{}x{}", off.w, off.h));
+}
+
 /// Ticket W35-03: Castlevania (NES) with NO hand-made `[scout]` table. A scripted session in
 /// stage 1 (the courtyard, its door, the entrance hall) finds one; the app's own "Save scout settings" writes it
 /// to the player's profile; the app, reading that profile, scouts the midblock at 32:9 (off,
@@ -4813,6 +5056,8 @@ fn w30_w31_screens() {
     shot_scout_mm2_climb(&mut readme);
     shot_sm_scout(&mut readme);
     shot_cv_scout(&mut readme);
+    shot_alttp_scout(&mut readme);
+    shot_z1_margins(&mut readme);
     shot_persist(&mut readme);
     shot_confidence(&mut readme);
     shot_fps(&mut readme);

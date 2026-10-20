@@ -67,13 +67,25 @@ pub enum Pad {
     Right,
 }
 
+/// The vertical direction the pad held on a frame (W35-04: a top-down game's player is found by
+/// walking up and down).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Vert {
+    #[default]
+    Idle,
+    Up,
+    Down,
+}
+
 /// One frame of play.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Frame<'a> {
     /// Work RAM at the frame's end.
     pub ram: &'a [u8],
     /// The horizontal pad direction held this frame.
     pub pad: Pad,
+    /// The vertical pad direction held this frame.
+    pub vert: Vert,
     /// The face buttons held this frame, one bit each (any of them might be
     /// the jump button; a run button held all the time must not hide the
     /// press of another).
@@ -107,6 +119,12 @@ const MIN_LAG_RATIO: f32 = 0.5;
 const LAG_MIN_CAMERA: i16 = 8;
 /// Windows the lag-tolerant test needs before it can name a word.
 const LAG_MIN_WINDOWS: u32 = 6;
+/// W35-04: a camera step of at most this many pixels is a walk's; a bigger one is a scripted scroll
+/// (A Link to the Past's screen-edge transition moves the camera 8 px a frame while the player
+/// stands). The player is also judged over the walk's frames alone.
+const SLOW_STEP: i16 = 4;
+/// W35-04: camera-moving frames on the vertical axis the walk-found player Y wants.
+pub const MIN_VERT_MOVING: u32 = 60;
 /// Frames a Y byte must change in a window (an arc changes nearly every frame;
 /// a flag a button press sets changes once).
 const MIN_Y_CHANGES: u8 = 5;
@@ -228,6 +246,10 @@ pub struct Observed {
     pub gates: Vec<GateCandidate>,
     /// Jumps the Y evidence comes from.
     pub jump_windows: u32,
+    /// W35-04: the Y candidates were named by walking up and down with the camera's Y (no jump
+    /// moved any byte): a top-down game. A hold that floats the player above the ground means
+    /// nothing in one.
+    pub top_down: bool,
 }
 
 impl Observed {
@@ -238,7 +260,7 @@ impl Observed {
         self.camera.is_some()
             && self.players.first().is_some_and(|p| p.hi.is_some())
             && !self.ys.is_empty()
-            && self.jump_windows >= MIN_JUMP_WINDOWS
+            && (self.jump_windows >= MIN_JUMP_WINDOWS || self.top_down)
     }
 }
 
@@ -315,9 +337,25 @@ pub struct ScoutFinder {
     /// Every x write of the previous frame, per layer.
     prev_scroll_all: Vec<Vec<u8>>,
     prev_pad: Pad,
+    prev_vert: Vert,
     prev_jump: u8,
+    // player Y by walking (W35-04)
+    moving_y: u32,
+    moving_y_slow: u32,
+    ystep_slow: Vec<[u32; 2]>,
+    up_frames: u32,
+    down_frames: u32,
+    ystep: Vec<[u32; 2]>,
+    down_up: Vec<u32>,
+    up_down: Vec<u32>,
+    ywrong: Vec<u32>,
+    ywall: Vec<u32>,
     // player X
     moving: u32,
+    /// W35-04: the camera-moving frames of a walk's pace (see [`SLOW_STEP`]), and per byte the
+    /// matches among them.
+    moving_slow: u32,
+    step_slow: Vec<[u32; 2]>,
     right_frames: u32,
     left_frames: u32,
     step: Vec<[u32; 2]>,
@@ -400,8 +438,21 @@ impl ScoutFinder {
             prev_scroll_y: vec![None; layers.max(1)],
             prev_scroll_all: Vec::new(),
             prev_pad: Pad::Idle,
+            prev_vert: Vert::Idle,
             prev_jump: 0,
+            moving_y: 0,
+            moving_y_slow: 0,
+            ystep_slow: vec![[0; 2]; len],
+            up_frames: 0,
+            down_frames: 0,
+            ystep: vec![[0; 2]; len],
+            down_up: vec![0; len],
+            up_down: vec![0; len],
+            ywrong: vec![0; len],
+            ywall: vec![0; len],
             moving: 0,
+            moving_slow: 0,
+            step_slow: vec![[0; 2]; len],
             right_frames: 0,
             left_frames: 0,
             step: vec![[0; 2]; len],
@@ -465,19 +516,21 @@ impl ScoutFinder {
         // The camera finder arms on the first horizontal press: the menus
         // before it hold Start and A, and a title that scrolls in would dilute
         // the game's camera.
-        let armed = self.camera.armed() || f.pad != Pad::Idle;
+        let armed = self.camera.armed() || f.pad != Pad::Idle || f.vert != Vert::Idle;
         self.camera.observe(f.scroll, f.ram, armed);
         let cd = self.camera_delta(f.scroll);
         let cdy = self.camera_delta_y(f.scroll);
         if self.prev.is_empty() {
             self.prev = f.ram[..n].to_vec();
             self.prev_pad = f.pad;
+            self.prev_vert = f.vert;
             self.prev_jump = f.jump;
             return;
         }
         self.gate_frame(f, n, cd, armed && (cd != 0 || cdy != 0));
         if armed {
             self.player_frame(f, n, cd);
+            self.vert_frame(f, n, cdy);
         }
         self.y_frame(f, n);
         for ((d, q), (&now, &before)) in self
@@ -492,6 +545,7 @@ impl ScoutFinder {
         self.prev.clear();
         self.prev.extend_from_slice(&f.ram[..n]);
         self.prev_pad = f.pad;
+        self.prev_vert = f.vert;
         self.prev_jump = f.jump;
     }
 
@@ -560,6 +614,8 @@ impl ScoutFinder {
         self.left_frames += u32::from(left_now);
         let cam_moved = cd != 0 && cd.abs() <= MAX_STEP;
         self.moving += u32::from(cam_moved);
+        let slow = cam_moved && cd.abs() <= SLOW_STEP;
+        self.moving_slow += u32::from(slow);
         let wall_frame = (right || left) && cd == 0;
         let steady_right = right_now && self.prev_pad == Pad::Right;
         let steady_left = left_now && self.prev_pad == Pad::Left;
@@ -572,6 +628,10 @@ impl ScoutFinder {
             if cam_moved {
                 self.step[b][0] += u32::from(d == cd);
                 self.step[b][1] += u32::from(pd == cd);
+            }
+            if slow {
+                self.step_slow[b][0] += u32::from(d == cd);
+                self.step_slow[b][1] += u32::from(pd == cd);
             }
             if d == 0 || d.abs() > MAX_STEP {
                 continue;
@@ -603,6 +663,99 @@ impl ScoutFinder {
             self.close_lag_window(n);
         }
         self.wrap_pairs(f, n);
+    }
+
+    /// W35-04: the player's Y by walking, the vertical twin of the X test: a byte that steps with
+    /// the camera's Y when it scrolls, rises on Down and falls on Up, and keeps moving in the
+    /// direction held while the camera's Y stands still (the camera's own shadows do not).
+    fn vert_frame(&mut self, f: &Frame<'_>, n: usize, cdy: i16) {
+        let down_now = f.vert == Vert::Down;
+        let up_now = f.vert == Vert::Up;
+        // A press can take a frame to reach the game's variables.
+        let down = down_now || self.prev_vert == Vert::Down;
+        let up = up_now || self.prev_vert == Vert::Up;
+        self.down_frames += u32::from(down_now);
+        self.up_frames += u32::from(up_now);
+        // Only a camera that moved the way the pad was held counts: one that eases back the other
+        // way while the player pushes against a wall is not following him.
+        let cam_moved = cdy != 0 && cdy.abs() <= MAX_STEP && ((cdy > 0 && down) || (cdy < 0 && up));
+        self.moving_y += u32::from(cam_moved);
+        let slow = cam_moved && cdy.abs() <= SLOW_STEP;
+        self.moving_y_slow += u32::from(slow);
+        let wall_frame = (down || up) && cdy == 0;
+        let steady_down = down_now && self.prev_vert == Vert::Down;
+        let steady_up = up_now && self.prev_vert == Vert::Up;
+        for b in 0..n {
+            let d = i16::from(f.ram[b].wrapping_sub(self.prev[b]) as i8);
+            let pd = i16::from(self.last_delta[b]);
+            if cam_moved {
+                self.ystep[b][0] += u32::from(d == cdy);
+                self.ystep[b][1] += u32::from(pd == cdy);
+            }
+            if slow {
+                self.ystep_slow[b][0] += u32::from(d == cdy);
+                self.ystep_slow[b][1] += u32::from(pd == cdy);
+            }
+            if d == 0 || d.abs() > MAX_STEP {
+                continue;
+            }
+            if down && d > 0 {
+                self.down_up[b] += 1;
+            }
+            if up && d < 0 {
+                self.up_down[b] += 1;
+            }
+            if (steady_down && d < 0) || (steady_up && d > 0) {
+                self.ywrong[b] += 1;
+            }
+            if wall_frame && ((down && d > 0) || (up && d < 0)) {
+                self.ywall[b] += 1;
+            }
+        }
+    }
+
+    /// The Y candidates a walk names (best first): bytes that matched the camera's Y on at least
+    /// [`MIN_PLAYER_STEP`] of its scrolling frames and passed the wall and direction tests.
+    fn walk_ys(&self) -> Vec<YCandidate> {
+        if self.moving_y < MIN_VERT_MOVING {
+            return Vec::new();
+        }
+        let dir_frames = self.down_frames + self.up_frames;
+        let mut out: Vec<(usize, f32, u32)> = (0..self.len)
+            .filter_map(|b| {
+                let steps = self.ystep[b][0].max(self.ystep[b][1]);
+                #[allow(clippy::cast_precision_loss)]
+                let exact = steps as f32 / self.moving_y as f32;
+                // Over the walk's frames alone (a screen-edge transition scrolls the camera
+                // without the player).
+                #[allow(clippy::cast_precision_loss)]
+                let paced = if self.moving_y_slow >= MIN_VERT_MOVING {
+                    self.ystep_slow[b][0].max(self.ystep_slow[b][1]) as f32
+                        / self.moving_y_slow as f32
+                } else {
+                    0.0
+                };
+                let ratio = exact.max(paced);
+                let ok = ratio >= MIN_PLAYER_STEP
+                    && self.ywall[b] >= MIN_WALL
+                    && self.down_up[b] >= 10
+                    && (self.up_frames < 30 || self.up_down[b] >= 2)
+                    && self.ywrong[b] * 8 <= dir_frames;
+                ok.then_some((b, ratio, self.ywall[b]))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+        out.into_iter()
+            .take(4 * KEEP)
+            .map(|(b, ratio, wall)| YCandidate {
+                offset: b,
+                standing: self.prev.get(b).copied().unwrap_or(0),
+                up: -1,
+                hits: self.ystep[b][0].max(self.ystep[b][1]),
+                windows: self.moving_y,
+                confidence: ratio.min(1.0) * (wall as f32 / (wall as f32 + 10.0)).min(1.0),
+            })
+            .collect()
     }
 
     /// Judge the lag window: every byte whose changes added up to the camera's
@@ -692,8 +845,16 @@ impl ScoutFinder {
                 } else {
                     0.0
                 };
-                let ratio = exact.max(lagged);
-                let follows = exact >= MIN_PLAYER_STEP || lagged >= MIN_LAG_RATIO;
+                // W35-04: over the walk's frames alone, when there were enough of them.
+                #[allow(clippy::cast_precision_loss)]
+                let paced = if self.moving_slow >= min_moving {
+                    self.step_slow[b][0].max(self.step_slow[b][1]) as f32 / self.moving_slow as f32
+                } else {
+                    0.0
+                };
+                let ratio = exact.max(lagged).max(paced);
+                let follows =
+                    exact >= MIN_PLAYER_STEP || lagged >= MIN_LAG_RATIO || paced >= MIN_PLAYER_STEP;
                 let ok = follows
                     && (!wall_test || self.wall[b] >= min_wall)
                     && self.right_up[b] >= 10
@@ -1020,7 +1181,8 @@ impl ScoutFinder {
     pub fn probe(&self, b: usize) -> String {
         format!(
             "off {b:#06x}: moving {} step {:?} right_up {} left_down {} wrong {} wall {} changes {} | \
-             jump_hit {}/{} control_hit {}/{} | frames {} camera moving {} | lag windows {}/{}",
+             jump_hit {}/{} control_hit {}/{} | frames {} camera moving {} | lag windows {}/{} | \
+             slow {:?}/{} | y: moving {} step {:?} slow {:?}/{} wall {} down_up {} up_down {} wrong {}",
             self.moving,
             self.step[b],
             self.right_up[b],
@@ -1036,6 +1198,16 @@ impl ScoutFinder {
             self.camera.moving(),
             self.wstep[b],
             self.wwindows,
+            self.step_slow[b],
+            self.moving_slow,
+            self.moving_y,
+            self.ystep[b],
+            self.ystep_slow[b],
+            self.moving_y_slow,
+            self.ywall[b],
+            self.down_up[b],
+            self.up_down[b],
+            self.ywrong[b],
         )
     }
 
@@ -1075,18 +1247,34 @@ impl ScoutFinder {
     /// What the session has shown so far.
     #[must_use]
     pub fn observed(&self) -> Observed {
+        let (ys, top_down) = self.ys_and_kind();
         Observed {
             camera: self.camera.verdict(),
             players: self.players(),
-            ys: self.ys(),
+            ys,
             gates: self.gates(),
             jump_windows: self.jump_windows,
+            top_down,
         }
     }
 
     fn players(&self) -> Vec<PlayerCandidate> {
+        // W35-04: the camera's own word is not the player (a game whose scroll mirror happens to
+        // stand still a few frames with a direction held passes the wall test: The Legend of
+        // Zelda's `$FD`, which a scout then "walked" by poking the scroll, stitching the same
+        // screen's nametable over and over into a canvas 8,000 wide).
+        let camera = self.camera.verdict();
+        let is_camera = |b: usize| {
+            camera.is_some_and(|c| {
+                [Some(c.x), c.y]
+                    .into_iter()
+                    .flatten()
+                    .any(|a| b == a.offset)
+            })
+        };
         let lows = self.low_candidates(MIN_PLAYER_MOVING);
         lows.into_iter()
+            .filter(|&(lo, _, _)| !is_camera(lo))
             .take(KEEP)
             .map(|(lo, step, wall)| {
                 let hi = self.high_half(lo);
@@ -1106,7 +1294,32 @@ impl ScoutFinder {
             .collect()
     }
 
-    fn ys(&self) -> Vec<YCandidate> {
+    /// The Y candidates and whether the game is top-down. A byte that answers a face button (a
+    /// text box's cursor: A pages through a speech) looks like a jump's Y, so a game where
+    /// walking up and down moves some other byte with the camera's Y is top-down, and the walk's
+    /// bytes are the only Y candidates. A platformer's ladder moves the same byte a jump does:
+    /// both lists are kept.
+    fn ys_and_kind(&self) -> (Vec<YCandidate>, bool) {
+        let mut jumped = self.jump_ys();
+        let walked = self.walk_ys();
+        if walked.is_empty() {
+            return (jumped, false);
+        }
+        if !jumped
+            .iter()
+            .any(|j| walked.iter().any(|w| w.offset == j.offset))
+        {
+            return (walked, true);
+        }
+        for w in walked {
+            if !jumped.iter().any(|j| j.offset == w.offset) {
+                jumped.push(w);
+            }
+        }
+        (jumped, false)
+    }
+
+    fn jump_ys(&self) -> Vec<YCandidate> {
         if self.jump_windows < MIN_JUMPS {
             return Vec::new();
         }
@@ -1581,6 +1794,7 @@ mod tests {
             finder.observe(&Frame {
                 ram: &g.ram,
                 pad,
+                vert: Vert::Idle,
                 jump: u8::from(jump),
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),
@@ -1639,6 +1853,7 @@ mod tests {
             finder.observe(&Frame {
                 ram: &g.ram,
                 pad,
+                vert: Vert::Idle,
                 jump,
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),
@@ -1672,6 +1887,215 @@ mod tests {
             feed(&g, Pad::Right, false, 2);
         }
         finder
+    }
+
+    /// W35-04: a top-down game. The player's X at 0x10/0x11 and Y at 0x12/0x13 move 2 px a frame
+    /// with the pad (no jump moves anything), the camera (X 0x20/0x21, Y 0x22/0x23) follows him
+    /// once he is past the middle of the screen, a half-speed layer's word (0x30) wobbles by
+    /// itself, and every 250 frames a screen-edge transition scrolls the camera 8 px a frame for
+    /// 24 frames while the player stands (then drops him a page further on).
+    struct TopDown {
+        ram: Vec<u8>,
+        px: i32,
+        py: i32,
+        cx: i32,
+        cy: i32,
+        t: u32,
+        burst: u32,
+        /// A text box's byte that answers a button: it rises by 2 a frame for 8 frames and falls
+        /// back (frames since the press, `None` when idle).
+        junk: Option<u8>,
+    }
+
+    impl TopDown {
+        fn new() -> Self {
+            let mut g = Self {
+                ram: vec![0; 0x100],
+                px: 40,
+                py: 40,
+                cx: 0,
+                cy: 0,
+                t: 0,
+                burst: 0,
+                junk: None,
+            };
+            g.store();
+            g
+        }
+
+        fn store(&mut self) {
+            self.ram[0x70] =
+                self.junk
+                    .map_or(0, |k| if k < 8 { 2 * (k + 1) } else { 16 - 2 * (k - 7) });
+            for (at, v) in [
+                (0x10, self.px),
+                (0x12, self.py),
+                (0x20, self.cx),
+                (0x22, self.cy),
+            ] {
+                self.ram[at] = v as u8;
+                self.ram[at + 1] = (v >> 8) as u8;
+            }
+            self.ram[0x30] = (self.cx / 2) as u8;
+            self.ram[0x60] = (self.t / 7) as u8;
+        }
+
+        fn frame(&mut self, pad: Pad, vert: Vert, press: bool) {
+            self.t += 1;
+            self.junk = match self.junk {
+                None if press => Some(0),
+                Some(k) if k < 15 => Some(k + 1),
+                _ => None,
+            };
+            let (dx, dy) = (
+                match pad {
+                    Pad::Right => 2,
+                    Pad::Left => -2,
+                    Pad::Idle => 0,
+                },
+                match vert {
+                    Vert::Down => 2,
+                    Vert::Up => -2,
+                    Vert::Idle => 0,
+                },
+            );
+            if self.burst > 0 {
+                self.burst -= 1;
+                self.cx += if pad == Pad::Left { -8 } else { 8 };
+                if self.burst == 0 {
+                    self.px += if pad == Pad::Left { -256 } else { 256 };
+                }
+            } else if self.t.is_multiple_of(250) && dx != 0 {
+                self.burst = 24;
+            } else {
+                self.px = (self.px + dx).max(0);
+                self.py = (self.py + dy).max(0);
+                if (dx > 0 && self.px - self.cx > 120) || (dx < 0 && self.px - self.cx < 100) {
+                    self.cx = (self.cx + dx).max(0);
+                }
+                if (dy > 0 && self.py - self.cy > 110) || (dy < 0 && self.py - self.cy < 90) {
+                    self.cy = (self.cy + dy).max(0);
+                }
+            }
+            self.store();
+        }
+    }
+
+    fn run_top_down() -> ScoutFinder {
+        let mut finder = ScoutFinder::new(0x100, 2);
+        let mut g = TopDown::new();
+        let mut feed = |g: &TopDown, pad: Pad, vert: Vert, press: bool| {
+            // Layer 0 is switched off (no writes fed), layer 1 is the map.
+            let (x, y) = ([g.ram[0x20]], [g.ram[0x22]]);
+            finder.observe(&Frame {
+                ram: &g.ram,
+                pad,
+                vert,
+                jump: u8::from(press),
+                scroll: &[(&[], &[]), (&x, &y)],
+                scene: Some(1),
+            });
+        };
+        for _ in 0..40 {
+            g.frame(Pad::Idle, Vert::Idle, false);
+            feed(&g, Pad::Idle, Vert::Idle, false);
+        }
+        // Walk in each direction, in pure directions; between two legs a speech, paged with A
+        // seven times, standing still.
+        for (pad, vert, n) in [
+            (Pad::Left, Vert::Idle, 30),
+            (Pad::Right, Vert::Idle, 320),
+            (Pad::Idle, Vert::Idle, 7 * 60),
+            (Pad::Idle, Vert::Down, 420),
+            (Pad::Idle, Vert::Up, 140),
+            (Pad::Idle, Vert::Up, 120),
+            (Pad::Left, Vert::Idle, 330),
+            (Pad::Right, Vert::Idle, 330),
+            (Pad::Idle, Vert::Down, 100),
+        ] {
+            for i in 0..n {
+                let press = pad == Pad::Idle && vert == Vert::Idle && i % 60 < 3;
+                g.frame(pad, vert, press);
+                feed(&g, pad, vert, press);
+            }
+        }
+        finder
+    }
+
+    #[test]
+    fn a_top_down_game_names_the_player_by_walking_in_both_axes() {
+        let o = run_top_down().observed();
+        let cam = o.camera.expect("camera");
+        assert_eq!((cam.x.offset, cam.y.map(|y| y.offset)), (0x20, Some(0x22)));
+        // The half-speed word and the timer are not the player.
+        let p = o.players.first().expect("a player");
+        assert_eq!((p.lo, p.hi), (0x10, Some(0x11)), "{:?}", o.players);
+        assert!(
+            o.top_down,
+            "the walk's Y is not the byte a button moves: a top-down game"
+        );
+        let y = o.ys.first().expect("a Y by walking");
+        assert_eq!((y.offset, y.up), (0x12, -1));
+        assert!(o.ready(), "ready with no jump window at all");
+        assert!(!o
+            .ys
+            .iter()
+            .any(|y| y.offset == 0x30 || y.offset == 0x60 || y.offset == 0x70));
+    }
+
+    /// A screen-edge transition scrolls the camera without the player; it must not hide him.
+    /// W35-04: a camera word that stood still a few frames while a direction was held (a screen
+    /// that flips: the scroll mirror holds while Link walks to the edge) passes the wall test but
+    /// is not the player.
+    #[test]
+    fn the_cameras_own_word_is_not_the_player() {
+        let mut finder = ScoutFinder::new(0x100, 1);
+        let mut cam: i32 = 0;
+        let mut ram = vec![0u8; 0x100];
+        // A player whose X changes every frame but never with the camera (it flips by 256 in 64
+        // frames when he reaches the edge): only the camera word follows the scroll register.
+        for f in 0..2400u32 {
+            let walking = f % 400 < 300;
+            let flip = (300..364).contains(&(f % 400)) && f >= 300;
+            if flip {
+                cam += 4;
+            }
+            ram[0x10] = if walking { (f % 300) as u8 } else { 0 };
+            // The game updates its mirror a frame before the register is written.
+            let scroll = [ram[0xFD]];
+            ram[0xFD] = cam as u8;
+            finder.observe(&Frame {
+                ram: &ram,
+                pad: if walking || flip {
+                    Pad::Right
+                } else {
+                    Pad::Idle
+                },
+                scroll: &[(&scroll, &[0])],
+                scene: Some(1),
+                ..Frame::default()
+            });
+        }
+        let o = finder.observed();
+        assert_eq!(o.camera.map(|c| c.x.offset), Some(0xFD));
+        assert!(
+            o.players.iter().all(|p| p.lo != 0xFD),
+            "the camera word named as the player: {:?}",
+            o.players
+        );
+    }
+
+    #[test]
+    fn a_scripted_scroll_does_not_hide_the_player() {
+        let f = run_top_down();
+        // 250-frame transitions put ~2 bursts of 24 camera-moving frames beside ~600 walking ones;
+        // the player still clears the bar over the walk's frames.
+        assert!(
+            f.moving > f.moving_slow,
+            "the bursts are camera-moving frames too"
+        );
+        let p = f.observed().players;
+        assert_eq!(p.first().map(|p| p.lo), Some(0x10));
     }
 
     #[test]
@@ -1836,6 +2260,7 @@ mod tests {
             finder.observe(&Frame {
                 ram: &g.ram,
                 pad,
+                vert: Vert::Idle,
                 jump: 0,
                 scroll: &[(&scroll, &[0])],
                 scene: Some(scene),

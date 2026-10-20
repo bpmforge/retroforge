@@ -35,6 +35,12 @@ use rf_core_api::{PixelLayer, PpuPixel};
 
 use crate::scroll_tracker::{BandWorldPos, ScanlineBand};
 
+/// The longest side a canvas may grow to (cells); see [`Canvas::may_cover`] (W35-04). Far beyond a
+/// GPU texture (16,384): the area cap is what bounds the memory.
+pub const MAX_SIDE: usize = 65_536;
+/// The most cells a canvas may hold (8 million: Super Mario World's widest level is 2.2 million).
+pub const MAX_CELLS: usize = 8_000_000;
+
 /// A growable, deterministically-laid-out canvas of observed background
 /// pixels in world space. Backed by a flat `Vec` (row-major, bounded by
 /// `origin`/`width`/`height`), not a hash-keyed map — iteration order of a
@@ -243,6 +249,25 @@ impl Canvas {
     /// function of the current bounds and the requested region — the same
     /// two inputs always produce the same new bounds, regardless of call
     /// history beyond what those bounds already encode.
+    /// W35-04: whether a row of `len` cells at `(world_x, world_y)` may widen this canvas. The
+    /// canvas is one dense rectangle, so a single row placed far from the rest (a layer whose
+    /// registers jumped: A Link to the Past's rain overlay put one 18,000 rows away) allocates the
+    /// whole gap, gigabytes of it, for one row of picture. A canvas that would grow past
+    /// [`MAX_SIDE`] a side or [`MAX_CELLS`] cells refuses the row; one that already covers it (or
+    /// is empty) never does.
+    fn may_cover(&self, world_x: i64, world_y: i64, len: usize) -> bool {
+        if self.width == 0 || self.height == 0 {
+            return true;
+        }
+        let min_x = self.origin_x.min(world_x);
+        let min_y = self.origin_y.min(world_y);
+        let max_x = (self.origin_x + self.width as i64).max(world_x + len as i64);
+        let max_y = (self.origin_y + self.height as i64).max(world_y + 1);
+        let (w, h) = ((max_x - min_x) as usize, (max_y - min_y) as usize);
+        (w == self.width && h == self.height)
+            || (w <= MAX_SIDE && h <= MAX_SIDE && w * h <= MAX_CELLS)
+    }
+
     fn ensure_bounds(
         &mut self,
         world_x: i64,
@@ -308,7 +333,7 @@ impl Canvas {
     /// writes only the `Some` entries, leaving every other cell exactly as
     /// it was (a prior real observation, or still unvisited).
     pub fn blit_row(&mut self, world_x: i64, world_y: i64, row: &[Option<PpuPixel>]) {
-        if row.is_empty() {
+        if row.is_empty() || !self.may_cover(world_x, world_y, row.len()) {
             return;
         }
         self.ensure_bounds(world_x, world_y, row.len(), 1);
@@ -329,7 +354,7 @@ impl Canvas {
     /// As [`Self::blit_row`], tagging every cell written as a Scout cell (the
     /// merge of a scout's delta; W33-06). Callers fill unknown cells only.
     pub fn blit_row_scout(&mut self, world_x: i64, world_y: i64, row: &[Option<PpuPixel>]) {
-        if row.is_empty() {
+        if row.is_empty() || !self.may_cover(world_x, world_y, row.len()) {
             return;
         }
         self.ensure_bounds(world_x, world_y, row.len(), 1);
@@ -415,6 +440,36 @@ mod tests {
             sprite_id: None,
             priority: 0,
         }
+    }
+
+    /// W35-04: one row placed far from the rest must not allocate the gap (a layer whose
+    /// registers jumped put a row 18,000 rows below the picture: gigabytes for one row).
+    #[test]
+    fn a_row_far_from_the_canvas_is_refused() {
+        let mut c = Canvas::new();
+        let row: Vec<Option<PpuPixel>> = (0..256).map(|i| Some(bg_pixel(i as u8))).collect();
+        c.blit_row(0, 0, &row);
+        c.blit_row(300, 100, &row);
+        assert_eq!(
+            (c.width(), c.height()),
+            (556, 101),
+            "near rows still widen it"
+        );
+        c.blit_row(0, 18_000, &row);
+        assert_eq!(
+            (c.width(), c.height()),
+            (556, 101),
+            "a row 18,000 rows away is refused"
+        );
+        c.blit_row_scout(100_000, 0, &row);
+        assert_eq!(
+            (c.width(), c.height()),
+            (556, 101),
+            "and so is a scout row far to the side"
+        );
+        // Within the canvas, nothing is ever refused.
+        c.blit_row(10, 50, &row);
+        assert_eq!((c.width(), c.height()), (556, 101));
     }
 
     fn sprite_pixel(idx: u8) -> PpuPixel {

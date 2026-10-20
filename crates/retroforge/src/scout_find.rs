@@ -16,7 +16,7 @@ use rf_core_api::{CoreEvent, FrameBundle};
 use rf_enhance::canvas::{CanvasModel, LayerScroll, LAYERS};
 use rf_enhance::scene_identity::SceneId;
 use rf_enhance::scene_tracker::SETTLING;
-use rf_enhance::scout_finder::{Frame, Pad, ScoutFinder, Skeleton};
+use rf_enhance::scout_finder::{Frame, Pad, ScoutFinder, Skeleton, Vert};
 use rf_input::{NesButton, SnesButton};
 
 use crate::core_thread::ScoutFindProgress;
@@ -67,6 +67,34 @@ pub struct ScoutFind {
     vertical: Option<(MachineSnapshot, CanvasModel, SceneId)>,
 }
 
+/// The SNES scroll registers the finder is fed: per background (BG1, BG2) the low bytes of its
+/// x and y registers, EMPTY for a layer that is not the one the player scrolls. W35-04: a layer
+/// that is switched off keeps its registers, and one that is only on the sub screen (a colour-math
+/// overlay: A Link to the Past's BG1 is a half-speed rain layer that way) scrolls at its own pace;
+/// the camera finder takes the first layer that moves, so it named the overlay's word as the
+/// camera and no player step ever matched it. A sub-screen layer counts only when no layer is on
+/// the main screen.
+#[must_use]
+pub fn finder_snes_scroll(stepper: &EmuStepper) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let bgs = stepper.bg_layer_views()?;
+    let sub = stepper.sub_screen_bg_mask().unwrap_or(0);
+    let any_main = bgs.iter().any(|b| b.enabled);
+    Some(
+        (0..2)
+            .map(|i| {
+                if bgs[i].enabled || (!any_main && sub & (1 << i) != 0) {
+                    (
+                        vec![(bgs[i].hofs & 0xFF) as u8],
+                        vec![(bgs[i].vofs & 0xFF) as u8],
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            })
+            .collect(),
+    )
+}
+
 fn no_scrolls(_: &EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]> {
     None
 }
@@ -104,10 +132,12 @@ impl ScoutFind {
                 }
             };
         }
-        let (left, right, faces): (u8, u8, &[u8]) = if self.snes {
+        let (left, right, up, down, faces): (u8, u8, u8, u8, &[u8]) = if self.snes {
             (
                 SnesButton::Left.bit(),
                 SnesButton::Right.bit(),
+                SnesButton::Up.bit(),
+                SnesButton::Down.bit(),
                 &[
                     SnesButton::B.bit(),
                     SnesButton::A.bit(),
@@ -119,6 +149,8 @@ impl ScoutFind {
             (
                 NesButton::Left.bit(),
                 NesButton::Right.bit(),
+                NesButton::Up.bit(),
+                NesButton::Down.bit(),
                 &[NesButton::A.bit(), NesButton::B.bit()],
             )
         };
@@ -130,12 +162,19 @@ impl ScoutFind {
         } else {
             Pad::Idle
         };
+        let vert = if held(down) {
+            Vert::Down
+        } else if held(up) {
+            Vert::Up
+        } else {
+            Vert::Idle
+        };
         let jump = faces
             .iter()
             .enumerate()
             .filter(|(_, &b)| held(b))
             .fold(0u8, |m, (i, _)| m | (1 << i));
-        self.idle = if pad == Pad::Idle && jump == 0 {
+        self.idle = if pad == Pad::Idle && vert == Vert::Idle && jump == 0 {
             self.idle.saturating_add(1)
         } else {
             0
@@ -149,16 +188,9 @@ impl ScoutFind {
                 &nes_ram
             }
         };
-        let scroll: Vec<(Vec<u8>, Vec<u8>)> = match f.stepper.bg_layer_views() {
+        let scroll: Vec<(Vec<u8>, Vec<u8>)> = match finder_snes_scroll(f.stepper) {
             // SNES: BG1 then BG2, the low bytes of the registers.
-            Some(bgs) => (0..2)
-                .map(|i| {
-                    (
-                        vec![(bgs[i].hofs & 0xFF) as u8],
-                        vec![(bgs[i].vofs & 0xFF) as u8],
-                    )
-                })
-                .collect(),
+            Some(layers) => layers,
             // NES: every $2005/$2006 write this frame.
             None => {
                 let (mut xs, mut ys) = (Vec::new(), Vec::new());
@@ -189,6 +221,7 @@ impl ScoutFind {
         self.finder.observe(&Frame {
             ram,
             pad,
+            vert,
             jump,
             scroll: &layers,
             scene,

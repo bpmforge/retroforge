@@ -1047,6 +1047,9 @@ fn stitch_registers(
         let wx_frame = axes.frame.0.advance(scroll.hofs, i64::from(tw));
         let vofs = line0.map_or(scroll.vofs, |l| l.vofs[n] % th);
         let wy = axes.frame.1.advance(vofs, i64::from(th));
+        if axes.is_wild(wx_frame, wy) {
+            continue;
+        }
         if has_lines && axes.rows.len() < height {
             axes.rows.resize(height, WorldAxis::new());
         }
