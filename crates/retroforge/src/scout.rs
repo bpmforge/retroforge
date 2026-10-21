@@ -783,6 +783,26 @@ impl Scout {
         Ok(())
     }
 
+    /// W35-08: a second scout that starts where this one stands now, with the
+    /// scene tracking this one has built on the way (discovery asks whether a
+    /// camera scrolls back from the middle of a level, which the level start
+    /// cannot say; the model of the start would see the new place as a cut).
+    ///
+    /// # Errors
+    /// The machine cannot be saved, or the ROM cannot be opened.
+    pub fn start_from_here(
+        &self,
+        rom: &[u8],
+        plan: ScoutPlan,
+        size: (u16, u16),
+    ) -> Result<Self, ScoutError> {
+        let snapshot = self
+            .stepper
+            .snapshot()
+            .map_err(|e| ScoutError::Restore(format!("{e:?}")))?;
+        Self::start(rom, snapshot, plan, &self.acc, self.scene, size)
+    }
+
     /// Ticket W33-07: [`Self::restart`] with a whole other plan (another
     /// player word, another hold), for the discovery trials that try one
     /// recipe after another from the same snapshot.
@@ -2536,6 +2556,42 @@ mod tests {
         }
         // The live machine was only read.
         assert_eq!(word(&live_st, NES_CAMERA_X), cam_now);
+    }
+
+    /// W35-08: a scout started from where another stands carries that one's scene tracking, so
+    /// the new place is not a cut on its first frame, and its Left pass scrolls back over ground
+    /// the first one crossed.
+    #[test]
+    fn a_scout_started_from_here_scouts_left_from_where_the_right_pass_ended() {
+        let Some(rom) = fixture() else { return };
+        let (live_st, live, scene) = nes_live(&rom, 200);
+        let snapshot = live_st.snapshot().expect("snapshot");
+        let mut scout =
+            Scout::start(&rom, snapshot, nes_plan(), &live, scene, (256, 240)).expect("starts");
+        // Law 8: bounded; the plan's own budget ends the pass well before.
+        for _ in 0..2_000 {
+            if scout.step(&no_scrolls) != ScoutStatus::Running {
+                break;
+            }
+        }
+        let mut left_plan = nes_plan();
+        left_plan.dirs = vec![ScoutDir::Left];
+        let mut back = scout
+            .start_from_here(&rom, left_plan, (256, 240))
+            .expect("starts from here");
+        for _ in 0..2_000 {
+            if back.step(&no_scrolls) != ScoutStatus::Running {
+                break;
+            }
+        }
+        // A model that did not know the place would call its first frame a cut (frame 1); the
+        // fixture's world wraps, so the pass may still end in a cut later.
+        assert!(
+            back.frames_run() > 30,
+            "the new place was taken for a cut: {:?} after {} frames",
+            back.ends,
+            back.frames_run()
+        );
     }
 
     #[test]

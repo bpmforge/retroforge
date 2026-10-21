@@ -4825,6 +4825,8 @@ fn shot_cv_scout(readme: &mut Vec<String>) {
     let mut midblock_frame = 0;
     let t0 = Instant::now();
     let skeleton = discovery::cv_find_table(&mut rig, 600, &mut |r| {
+        // W35-08: two more screens of walking, so the snapshot is mid-level and has a left side.
+        r.script("R60 R+A30 R60 R+A30");
         midblock = Some(r.st.snapshot().expect("snapshot"));
         midblock_frame = r.st.frame_count();
     });
@@ -4993,6 +4995,98 @@ fn shot_cv_scout(readme: &mut Vec<String>) {
     assert!(
         telemetry.skipped.load(Relaxed) >= 1,
         "the scout was not skipped"
+    );
+}
+
+/// Ticket W35-08: Super Mario World from the MIDDLE of Yoshi's Island 1 (Mario ran right ~2
+/// screens first), the shipped profile's table (`right`, `left`), cold canvas cache: 32:9 with the
+/// scout off, then on. The canvas of the app starts empty at the snapshot, so the left margin is
+/// what the scout's Left pass found.
+fn shot_smw_left(readme: &mut Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = "smw-left";
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom("snes", "Super Mario World (USA).zip") else {
+        return skip(readme, name, "Super Mario World (USA) not found");
+    };
+    let Some(mut rig) = discovery::Rig::open(discovery::SMW.0, discovery::SMW.1, None) else {
+        return skip(readme, name, "no rig");
+    };
+    rig.script(discovery::SMW_TO_LEVEL);
+    rig.script("w60");
+    rig.script(discovery::SMW_PLAY);
+    let mid = rig.st.snapshot().expect("snapshot");
+    drop(rig);
+    let cold = std::env::temp_dir().join(format!("rf_scout_smwl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this process reads the
+    // environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(mid)));
+    run_n(&mut h, 40);
+    probe(&h, "smw-midlevel");
+    let t = h.state().frame_count_for_test() + 20;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let off = grab(&h);
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state_mut().set_widescreen(true);
+    let t1 = Instant::now();
+    while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(60) {
+        let t = h.state().frame_count_for_test() + 2;
+        run_frames(&mut h, t, Duration::from_secs(10));
+    }
+    h.state().send_core_command_for_test(CoreCommand::Pause);
+    let mut finished = false;
+    while t1.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_millis(100));
+        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+            finished = telemetry.finished.load(Relaxed) >= 1;
+            break;
+        }
+    }
+    h.state().send_core_command_for_test(CoreCommand::Resume);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let t = h.state().frame_count_for_test() + 90;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let (Some(off), Some(on)) = (off, grab(&h)) else {
+        return skip(readme, name, "no frame");
+    };
+    println!(
+        "SCOUT-SMWL: finished {finished}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells; margins {:?}",
+        telemetry.frames.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+        h.state().margin_known_for_test(),
+    );
+    let d = w35_dir();
+    save(&d.join("smw-left-32x9-off.png"), &off.opaque());
+    save(&d.join("smw-left-32x9-on.png"), &on.opaque());
+    note(
+        readme,
+        format!("smw-left-32x9|Super Mario World (USA)|{}x{}", on.w, on.h),
     );
 }
 
@@ -5215,6 +5309,7 @@ fn w30_w31_screens() {
     shot_scout_mm2_climb(&mut readme);
     shot_sm_scout(&mut readme);
     shot_cv_scout(&mut readme);
+    shot_smw_left(&mut readme);
     shot_alttp_scout(&mut readme);
     shot_z1_scout(&mut readme);
     shot_persist(&mut readme);

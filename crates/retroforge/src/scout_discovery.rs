@@ -50,6 +50,8 @@ pub const TRIAL_STEP_PX: u16 = 4;
 /// its camera only when the player gets there (the Legend of Zelda's screen flips) has stitched
 /// nothing new for all of it; the other recipes' 90 ended its walk 30 frames short of the edge.
 pub const WALK_STALL_FRAMES: u32 = 260;
+/// W35-08: frames a walk goes right before the Left trial is tried from where it stands.
+pub const MIDWAY_FRAMES: u32 = 480;
 /// Y candidates tried.
 pub const MAX_Y: usize = 16;
 /// A trial that grew the canvases to less than this many tenths of a screen
@@ -697,6 +699,45 @@ pub fn discover(
                 .into_iter()
                 .filter(|(_, o)| !o.died && o.extent * 50 >= top * 49)
                 .max_by_key(|(h, _)| h.delta);
+        }
+    }
+
+    // W35-08: the level start has nothing to its left (Castlevania's camera sits at its left stop
+    // there), so a Left that grew nothing from the start says nothing. Walk right first (the
+    // winning recipe, hold included: Mega Man 2's walker dies in a pit without it), then try Left
+    // from where the walk stands.
+    if plan.strategy == ScoutStrategy::Walk && !walks_left {
+        let mut walker = plan.clone();
+        if let Some((h, _)) = champion.as_ref() {
+            walker.hold = h.pokes.clone();
+        }
+        let mut right = walker.clone();
+        right.dirs = vec![ScoutDir::Right];
+        right.frame_budget = MIDWAY_FRAMES;
+        let r = run(&mut scout, right, &ctx)?;
+        if !r.died {
+            let mut left = walker.clone();
+            left.dirs = vec![ScoutDir::Left];
+            let mut from_mid = scout
+                .start_from_here(ctx.rom, left.clone(), ctx.size)
+                .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+            let l = run(&mut from_mid, left, &ctx)?;
+            report.trials.push(format!(
+                "{:?} {:?} hold {:?}, Left from {} frames of Right: extent {} died {} after {} frames",
+                walker.strategy,
+                player.map(|p| p.lo),
+                walker.hold,
+                r.frames,
+                l.extent,
+                l.died,
+                l.frames
+            ));
+            walks_left = l.extent >= floor && !l.died;
+        } else {
+            report.trials.push(format!(
+                "{:?} Right for the midway Left trial died after {} frames: no Left verdict",
+                walker.strategy, r.frames
+            ));
         }
     }
 
