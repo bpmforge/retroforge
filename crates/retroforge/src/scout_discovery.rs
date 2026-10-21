@@ -189,6 +189,7 @@ fn base_plan(ctx: &Context<'_>, obs: &Observed) -> ScoutPlan {
         start_when: Vec::new(),
         pin: true,
         scene_key: ctx.scene_key.clone(),
+        reach_px: 0,
     }
 }
 
@@ -1032,6 +1033,7 @@ pub fn plan_of(sk: &Skeleton) -> ScoutPlan {
         start_when: valued("start_when"),
         pin: false,
         scene_key: None,
+        reach_px: 0,
     }
 }
 

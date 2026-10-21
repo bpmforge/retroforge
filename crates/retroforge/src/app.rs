@@ -15359,6 +15359,13 @@ impl RetroForgeApp {
                     if let Some(step) = self.scout_step_override {
                         plan.step_px = step;
                     }
+                    // W35-09: the margin the picture's aspect asks of the scout, each side.
+                    plan.reach_px = u32::try_from(
+                        self.widescreen_out_width(WIDESCREEN_LINES)
+                            .saturating_sub(rf_snes::ppu::WIDTH)
+                            / 2,
+                    )
+                    .unwrap_or(0);
                     Box::new(crate::scout::ScoutSetup {
                         plan,
                         telemetry: self.scout_telemetry.clone(),

@@ -130,3 +130,67 @@ cargo test --release -p retroforge --test w35_07_zelda1 -- --ignored --nocapture
 cargo test --release -p retroforge --test w35_04_zelda -- --ignored --nocapture discover_z1           # ~15 s
 RF_SCREENS_ONLY=z1-scout (w30_screens, scripts: shot.sh)                                              # ~25 s
 ```
+
+## 8. W35-09: a second neighbour screen each side
+
+At 32:9 (856 px) the margin is 300 px each side, so the first neighbour (256 px) left a 44 px strip black
+at each far end. The walk stopped there because Link's path was blocked, not because the camera was
+(probe `z1_pass_probe`): going right he reaches the next screen, walks to x `$50` and stands against a
+tree, 260 frames, stall. Observation only (D-021); no game bytes read beyond the finder's own.
+
+Generic change (`scout.rs`, `app.rs`): `ScoutPlan::reach_px` is how far past the live picture the
+margins reach, per side, derived by the app from the aspect (`(output width - 256) / 2` = 300 here;
+0 = not asked, as in discovery and every other caller). A `walk` pass that has STALLED (the stall
+rule's count, 260 frames without growth) while the canvas does not yet reach `reach_px` past where
+the pass began (`margin_covered`: canvas edge >= start camera + 256 + reach on the right, <= start
+camera - reach on the left) no longer ends: it sidesteps (`sidestep_pad`): up for 8 frames, forward
+(the pass's direction) for 160, down for 16, forward 160, up 24 ... 8 sidesteps, then gives up and the
+stall rule ends the pass. Any growth (a screen flip) resets the stall count, so a later blockage gets its
+own zigzag; covered margin or a spent zigzag leaves the old behaviour. X passes only (a vertical scene
+is untouched), pad bits only (the NES pad). Budget: the pass is still bounded by its `frame_budget`
+(3000) and the zigzag is bounded by itself (8 sidesteps = 288 + 1280 = 1568 frames at most per
+blockage). Measured: the Right pass crosses the blocked tree line on its first sidestep (frame ~740
+of the pass, canvas 768 wide, then stalls 260 frames at the next screen: 1,044 frames), the Left pass
+likewise (1,098 frames); the whole scout is 2,054 to 2,138 frames (897 before), the same worker thread,
+a few seconds. A game whose margin is already covered, or whose pass ends by budget or a scene cut,
+behaves as before. A path that stays blocked through all 8 sidesteps ends like before and the strip
+stays black (honest).
+
+Result (`z1_two_screens_vs_walked`, `w35_09_zelda_reach.rs`, ROM-gated; the discovered table with
+`reach_px` 300): canvas 1280 x 241, origin -512: the start screen and TWO each side. A second rig
+walked the same screens by hand (round the tree line: up 12 at x `$50`; left side up 12 at x `$90`) and
+the five 256 px columns agree 100.00% each (45,056 playfield cells a screen, none known to one only);
+self-check agreement 99.8%.
+
+In the app (`z1-scout`, cold canvas cache, 32:9, the card's saved table): scout started 1, finished 1,
+aborted 0, passes ended `[Stalled, Stalled]`, 2,138 scout frames, agreement 99.7% over 378,294 shared
+cells; margins known 106,200 of 144,000 cells (it was 90,624): every playfield row (64..240) of both
+margins, none of the status-bar rows (the 64 top rows are black on purpose, section 3; no bar in the
+margins). Shot `docs/screens/w35/zelda1-32x9-on.png` (uncommitted), looked at: both 44 px far-end
+strips hold real terrain, not black: left, the forest's edge and sand continuing the left screen (the
+tree rows at the top and bottom); right, the next screen's rock face (brown) at the top right and
+bottom right, sand between; no seam at either join; Link only in the live picture. Second visit:
+first sample at live frame 16 with 106,200 margin cells, scouts started 0, skipped 1.
+
+Regression, one process at a time, release: discovery has `reach_px` 0, so by construction its numbers
+are a re-run: SMB3 2816 px / 99.7%, MM2 2560 px (100% of hand) / 99.0%, SMW 5120 px / 100.0%,
+Castlevania courtyard 768 px / 100.0%, `z1_scout_vs_walked` 3 screens 100% each (all as in section 6
+and W35-08). The app path (`reach_px` 300) shots: `cv-scout` 985 scout frames, agreement 100.0%,
+margins 75,618 cells, second visit 15 frames / skipped (identical to W35-08), `smw-left` 1,071 frames,
+100.0% (identical), `scout-nes` SMB3 (player_move) 99.6%, MM2 (walk, hand `dirs = right`) 2,050
+frames 98.7%; `scout-mm2-climb` (vertical, untouched) re-run. Changed PNGs of the other shots were
+reverted.
+
+Known flake (test harness, not the scout): `z1-scout`'s second visit can fail "started a scout" (about 4
+runs in 10 here, 0 in 5 before this change). Cause, verified with a debug log (removed): the first
+visit's `open_rom_path` leaves the earlier core thread (ThreadId 5) running; it owns its own `rf-cache`
+index in memory, and a late `put` from it (a different scene, ~13 KB) persists an index that lacks the
+scouted scene the second core thread (ThreadId 6) had put, so the next app finds no entry. A longer
+first visit gives it more time; the app proper has one core thread. Rerun when it hits.
+
+Run:
+```
+cargo test --release -p retroforge --test w35_09_zelda_reach -- --ignored --nocapture z1_two_screens_vs_walked   # ~20 s
+cargo test --release -p retroforge --test w35_09_zelda_reach -- --ignored --nocapture z1_pass_probe             # RF_DIR=left RF_REACH=300
+RF_SCREENS_ONLY=z1-scout (w30_screens, scripts: shot.sh)                                                         # ~25 s
+```

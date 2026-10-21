@@ -290,6 +290,7 @@ fn plan(strategy: ScoutStrategy, player: &[u32], camera: &[u32], step: u16) -> S
         start_when: Vec::new(),
         pin: false,
         scene_key: None,
+        reach_px: 0,
     }
 }
 
