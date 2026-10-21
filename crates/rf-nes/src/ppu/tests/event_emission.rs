@@ -320,3 +320,62 @@ fn dollar_2006_scrollwrite_respects_event_mask_none() {
         "EventMask::NONE must silence the $2006 site too"
     );
 }
+
+// W35-07: a `$2005` write mid-picture reaches `t` only, so its ScrollWrite carries the Y the raster
+// is at (the picture's top row as the registers last placed it, plus the rows down), not `t`'s.
+
+fn last_scroll_write(ppu: &mut super::Ppu) -> Option<(u16, u16)> {
+    let mut sink = RecordingSink::default();
+    ppu.drain(&mut sink);
+    sink.events.iter().rev().find_map(|e| match e {
+        CoreEvent::ScrollWrite { x, y, .. } => Some((*x, *y)),
+        _ => None,
+    })
+}
+
+#[test]
+fn dollar_2005_mid_picture_reports_the_raster_not_t_and_not_a_v_the_game_disturbed() {
+    let mut ppu = ppu_rendering_at_scanline(62);
+    ppu.copy_vertical(); // the pre-render copy: t's Y is 0, the top row is row 0
+    ppu.v = 0x7FFF; // tiles streamed through $2007 mid-picture leave v anywhere
+    ppu.dot = 300; // after the Y increment of line 62: the next row drawn is 63
+    ppu.write_register(5, 0x10); // x = 16
+    ppu.write_register(5, 0x00); // Y = 0 goes to t, which the picture ignores until the next frame
+    assert_eq!(last_scroll_write(&mut ppu), Some((16, 63)));
+}
+
+#[test]
+fn dollar_2005_in_vblank_reports_t_the_next_frames_scroll() {
+    let mut ppu = ppu_rendering_at_scanline(245);
+    ppu.write_register(5, 0x10);
+    ppu.write_register(5, 0x28); // Y = 40
+    assert_eq!(last_scroll_write(&mut ppu), Some((16, 40)));
+}
+
+#[test]
+fn a_dollar_2006_commit_mid_picture_does_not_move_the_raster_a_dollar_2005_continues_from() {
+    let mut ppu = ppu_rendering_at_scanline(100);
+    ppu.copy_vertical(); // top row: 0
+    ppu.dot = 300;
+    ppu.write_register(6, 0x03);
+    ppu.write_register(6, 0x20); // v points at a nametable row (tiles are about to be streamed)
+    ppu.scanline = 120;
+    ppu.write_register(5, 0x00);
+    ppu.write_register(5, 0x00);
+    assert_eq!(last_scroll_write(&mut ppu), Some((0, 121)));
+}
+
+#[test]
+fn a_t_that_holds_an_address_at_the_pre_render_copy_is_not_the_scroll() {
+    let mut ppu = ppu_rendering_at_scanline(62);
+    ppu.write_register(5, 0x00);
+    ppu.write_register(5, 0x28); // a scroll: Y = 40
+    ppu.copy_vertical();
+    ppu.write_register(6, 0x2B);
+    ppu.write_register(6, 0x40); // then an address (the vblank work overran): t is not a scroll
+    ppu.copy_vertical(); // the next frame's pre-render copy: the top row stays where it was
+    ppu.dot = 300;
+    ppu.write_register(5, 0x00);
+    ppu.write_register(5, 0x00);
+    assert_eq!(last_scroll_write(&mut ppu), Some((0, 40 + 63)));
+}

@@ -67,6 +67,9 @@ impl Ppu {
             render_enable_pipe,
             frame_count,
             suppress_vblank_this_frame,
+            // W35-07: an observation for one event kind, rebuilt at the pre-render line.
+            raster_top_y: _,
+            t_is_scroll: _,
             secondary_oam,
             secondary_oam_count,
             active_sprites,

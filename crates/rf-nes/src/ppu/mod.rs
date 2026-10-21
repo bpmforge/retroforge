@@ -728,6 +728,18 @@ pub struct Ppu {
     /// resets, so it can never leak into a later frame's own VBlank window.
     suppress_vblank_this_frame: bool,
 
+    /// W35-07: the Y, in the pixel space of `CoreEvent::ScrollWrite`, of the picture's top row as
+    /// the scroll registers last placed it: set where `t`'s Y reaches `v` (the pre-render copy, when
+    /// `t` holds a scroll, see `t_is_scroll`). Only the event of a mid-picture `$2005` write reads
+    /// it (`write_scroll`); not machine state, not serialised (rebuilt before the picture). A
+    /// `$2006` commit mid-picture does not move it: a game that streams tiles through `$2007` while
+    /// the picture is drawn points `v` at a nametable, which is no scroll.
+    raster_top_y: u16,
+    /// W35-07: `t` last came from a `$2005` write (a scroll) and not from a `$2006` (an address):
+    /// a game whose vblank work overruns the pre-render line leaves an address in `t` there, and
+    /// that is not where its picture is scrolled to. Not machine state either.
+    t_is_scroll: bool,
+
     // ---- sprite evaluation + output units (ticket W1-05a; see
     // `sprites.rs` module doc) ----
     /// Filled by [`Ppu::evaluate_sprites`] during dots 65-256 of a visible
@@ -933,6 +945,8 @@ impl Ppu {
             render_enable_pipe: 0,
             frame_count: 0,
             suppress_vblank_this_frame: false,
+            raster_top_y: 0,
+            t_is_scroll: true,
             secondary_oam: [EMPTY_EVALUATED_SPRITE; 8],
             secondary_oam_count: 0,
             active_sprites: [EMPTY_SPRITE_UNIT; 8],

@@ -74,6 +74,8 @@ pub struct Rig {
     pub find_out: Vec<retroforge::scout_find::Out>,
     /// The scroll writes of the last frame (NES), x then y low bytes.
     pub last_scroll: Vec<(u8, u8)>,
+    /// The last frame's events (a probe reads the bands from them).
+    pub last_events: Vec<CoreEvent>,
     /// W35-05: the hash of the last frame's indexed picture.
     pub shown: u64,
 }
@@ -126,6 +128,7 @@ impl Rig {
             find: None,
             find_out: Vec::new(),
             last_scroll: Vec::new(),
+            last_events: Vec::new(),
             shown: 0,
         })
     }
@@ -167,6 +170,7 @@ impl Rig {
                 .observe_frame(&bundle, &FrameFeed::bands().with_scene_hints(hints));
             let (mut xs, mut ys) = (Vec::new(), Vec::new());
             self.last_scroll.clear();
+            self.last_events = bundle.events.clone();
             for e in &bundle.events {
                 if let CoreEvent::ScrollWrite { x, y, .. } = e {
                     xs.push((x & 0xFF) as u8);
@@ -865,3 +869,28 @@ pub const ZELDA1: (&str, &str, &str) = (
 /// start it: Link stands on the first overworld screen.
 pub const Z1_TO_PLAY: &str =
     "w300 S6 w300 S6 w300 A6 w30 E6 w20 E6 w20 E6 w20 S6 w200 E6 w20 E6 w20 E6 w20 S6 w400";
+
+/// W35-07: the session a player gives the finder on the first overworld screen: walk over the
+/// screen's right edge and back, over and over (the screens flip).
+pub const Z1_WALK: &str = "R60 R60 R60 w100 L60 L60 L60 L60 w100 R60 R60 R60 w100 L60 L60 L60 L60 w100 R60 R60 R60 w100 L60 L60 L60 L60 w100 R60 R60 R60 w100 L60 L60 L60 L60 w100";
+
+/// The finder as the core thread runs it ("Find scout settings for this game"), from the first
+/// overworld screen: the session, then standing still until the trials answer.
+pub fn z1_find_table(rig: &mut Rig, secs: u64) -> Box<rf_enhance::scout_finder::Skeleton> {
+    use retroforge::scout_find::{Out, ScoutFind};
+    rig.find = Some(ScoutFind::new(false));
+    rig.script(Z1_WALK);
+    let t0 = std::time::Instant::now();
+    let mut found = None;
+    // Bounded: `secs` seconds of idle frames.
+    while t0.elapsed() < std::time::Duration::from_secs(secs) && found.is_none() {
+        rig.script("w30");
+        for out in rig.find_out.drain(..) {
+            if let Out::Done(r) = out {
+                found.get_or_insert(r);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    found.expect("an answer").expect("a table, not an error")
+}
