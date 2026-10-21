@@ -45,6 +45,11 @@ pub const DELTAS: [i32; 6] = [200, 160, 120, 88, 64, 40];
 pub const TUNE_FRAMES: u32 = 1100;
 /// Pixels per frame the trials scout at.
 pub const TRIAL_STEP_PX: u16 = 4;
+/// W35-07: a `walk` trial's patience. A player who walks at a pixel a frame takes a screen's width
+/// (256 frames) to reach the far edge of the screen the trial starts on, and a game that moves
+/// its camera only when the player gets there (the Legend of Zelda's screen flips) has stitched
+/// nothing new for all of it; the other recipes' 90 ended its walk 30 frames short of the edge.
+pub const WALK_STALL_FRAMES: u32 = 260;
 /// Y candidates tried.
 pub const MAX_Y: usize = 16;
 /// A trial that grew the canvases to less than this many tenths of a screen
@@ -503,6 +508,7 @@ pub fn discover(
     if bands {
         let mut walk = base.clone();
         walk.strategy = ScoutStrategy::Walk;
+        walk.stall_frames = WALK_STALL_FRAMES;
         movers.push((None, walk));
     }
     for p in obs.players.iter().skip(1).take(2) {
@@ -626,6 +632,24 @@ pub fn discover(
     let Some((player, plan, hold, best_out)) = best else {
         return Err(DiscoveryError::NothingFollows(report));
     };
+    // W35-07: a walk that scrolled to the right is also tried to the left: a margin has two sides,
+    // and a screen-flip game (the overworld's neighbours) scrolls both ways. A forward-only game
+    // walks nowhere to the left (the extent stays under the floor) and keeps its one direction.
+    let mut walks_left = false;
+    if plan.strategy == ScoutStrategy::Walk {
+        let mut left = plan.clone();
+        left.dirs = vec![ScoutDir::Left];
+        let l = run(&mut scout, left, &ctx)?;
+        report.trials.push(format!(
+            "{:?} {:?} no hold, Left: extent {} died {} after {} frames",
+            plan.strategy,
+            player.map(|p| p.lo),
+            l.extent,
+            l.died,
+            l.frames
+        ));
+        walks_left = l.extent >= floor && !l.died;
+    }
 
     // Tune the height of the winning hold: the HIGHEST that does about as well
     // as the best (the pipes and platforms are below the top of the screen, so
@@ -709,12 +733,17 @@ pub fn discover(
         gates.iter().map(|g| g.offset).collect::<Vec<_>>(),
         obs.gates.iter().map(|g| g.offset).collect::<Vec<_>>()
     ));
+    // The later trials stay on the direction they were tuned in; only the table says "left" too.
+    let mut shipped = plan.clone();
+    if walks_left {
+        shipped.dirs = vec![ScoutDir::Right, ScoutDir::Left];
+    }
     let skeleton = skeleton(
         &ctx,
         obs,
         &gates,
         player,
-        &plan,
+        &shipped,
         champion.as_ref().map(|c| &c.0),
         vertical.y_word.as_ref(),
     );
@@ -907,7 +936,9 @@ fn skeleton(
         // its first frame; the camera starts to follow a few dozen frames in).
         stall_frames: plan.stall_frames,
         settle_frames: 60,
-        dirs: if walk {
+        dirs: if walk && plan.dirs.contains(&ScoutDir::Left) {
+            vec!["right", "left"]
+        } else if walk {
             vec!["right"]
         } else {
             vec!["right", "left"]

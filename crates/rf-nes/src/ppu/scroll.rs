@@ -226,6 +226,7 @@ impl Ppu {
             self.t = (self.t & 0x8C1F)
                 | (((value & 0x07) as u16) << 12)
                 | (((value & 0xF8) as u16) << 2);
+            self.t_is_scroll = true;
         }
         self.w = !self.w;
         // Ticket W4-00: fires on BOTH the first (X) and second (Y) write —
@@ -234,7 +235,21 @@ impl Ppu {
         // previous event itself. Reads only `t`/`x`, already-in-hand
         // register state (this ticket's hazard note) — no bus access.
         if self.event_mask.is_subscribed(EventMask::SCROLL_WRITE) {
-            let (x, y) = self.effective_scroll();
+            let (x, mut y) = self.effective_scroll();
+            // W35-07: a `$2005` write DURING the picture only reaches `t`; the vertical part of
+            // `v` is copied from `t` once a frame (dot 280-304 of the pre-render line, nesdev
+            // "PPU scrolling": "Without the second write to $2006, only the horizontal portion
+            // of v will be reloaded from t"), so the rows below the write keep drawing where
+            // the raster already was. The event's Y is that one (the picture's top row as the
+            // scroll registers last placed it, plus the rows down), as the `$2006` path's is
+            // (`v` is committed there). The Legend of Zelda's screen flip splits at the status
+            // bar with `$2005 = (x, 0)`: `t`'s Y put the playfield's first row at world row 0
+            // instead of its own row 63 and the new screen landed 63 rows high on the canvas.
+            // `v` itself is not read: a game that streams tiles through `$2007` while the
+            // picture is drawn leaves it anywhere.
+            if self.rendering_enabled() && self.scanline < 240 {
+                y = (self.raster_top_y + self.next_row()) % 480;
+            }
             self.queue_event(CoreEvent::ScrollWrite {
                 x,
                 y,
@@ -282,6 +297,25 @@ impl Ppu {
         let y = nt_y * 240 + coarse_y * 8 + fine_y;
 
         (x, y)
+    }
+
+    /// The Y of `v`'s vertical position in the pixel space of [`Self::effective_scroll`]
+    /// (nametable bit 11 folded in as 240 rows).
+    fn decode_y(v: u16) -> u16 {
+        let coarse_y = (v >> 5) & 0x001F;
+        let fine_y = (v >> 12) & 0x07;
+        let nt_y = (v >> 11) & 0x01;
+        nt_y * 240 + coarse_y * 8 + fine_y
+    }
+
+    /// The first picture row the registers written now apply to: the row being drawn while the
+    /// beam is before dot 256 (the Y increment), the next one after it.
+    fn next_row(&self) -> u16 {
+        if self.dot < 256 {
+            self.scanline
+        } else {
+            self.scanline + 1
+        }
     }
 
     /// `$2006` write, first/second per the `w` toggle (nesdev):
@@ -360,6 +394,7 @@ impl Ppu {
             self.t = (self.t & 0x00FF) | (((value & 0x3F) as u16) << 8);
         } else {
             self.t = (self.t & 0xFF00) | value as u16;
+            self.t_is_scroll = false;
             self.v = self.t;
             // Ticket W2-03: on real hardware the PPU address bus
             // continuously reflects `v` whenever the PPU isn't actively
@@ -516,5 +551,8 @@ impl Ppu {
     /// `v`.
     pub(super) fn copy_vertical(&mut self) {
         self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
+        if self.t_is_scroll {
+            self.raster_top_y = Self::decode_y(self.v);
+        }
     }
 }

@@ -2717,11 +2717,18 @@ mod tests {
         );
         assert_eq!(a[1].1, ScoutStrategy::PlayerMove);
         assert_eq!((a[1].0, a[1].2), ("delta", 2), "{a:?}");
+        // W35-07: the fixture's frames where its vblank work runs into the picture (FORMAT.md
+        // "Known defects") now sit on the canvas where they are drawn, and the 2 px scout agrees
+        // with the live canvas on 92% of the cells it shares (96% while a mid-frame `$2005` Y
+        // put the playfield 15 rows high): under the 95% bar. The ladder leaves player_move for
+        // walk, which agrees on every shared cell.
+        assert_eq!(a[1].3, Some(ScoutVerdict::Reject), "{a:?}");
+        assert_eq!(a[2].1, ScoutStrategy::Walk, "{a:?}");
         assert!(
-            matches!(a[1].3, Some(ScoutVerdict::Merge | ScoutVerdict::SlowDown)),
+            matches!(a[2].3, Some(ScoutVerdict::Merge | ScoutVerdict::SlowDown)),
             "accepted, whichever of the two: {a:?}"
         );
-        assert_eq!(report.winner(), Some((ScoutStrategy::PlayerMove, 2)));
+        assert_eq!(report.winner().map(|w| w.0), Some(ScoutStrategy::Walk));
         assert!(!report.gave_up);
         assert!(
             ran.deltas > 0 && ran.delta_cells > 0,
@@ -2878,14 +2885,19 @@ mod tests {
         }
         assert_eq!(ScoutTelemetry::get(&telemetry.finished), 1);
         let memo = live.scene_scout_memo(scene.0).expect("the rung was kept");
+        // W35-07: the 2 px player_move scout of this fixture agrees with the live canvas on 92%
+        // of the cells it shares now (see `a_step_the_game_cannot_keep_up_...`), so the rung
+        // kept is walk's, as the summary says.
         assert_eq!(
-            (memo.rung, memo.step_px),
-            (rf_enhance::persistence::ScoutMemo::PLAYER_MOVE, 2)
+            memo.rung,
+            rf_enhance::persistence::ScoutMemo::WALK,
+            "{:?}",
+            telemetry.last_summary()
         );
         assert!(live.scene_scouted(scene.0));
         assert!(telemetry
             .last_summary()
-            .is_some_and(|s| s.contains("player_move@2px")));
+            .is_some_and(|s| s.contains("walk@")));
         assert!(ScoutTelemetry::get(&telemetry.cells) > 0);
         // The cells it filled are Scout cells; none is a live one.
         let c = &live.scene_canvases(scene.0).unwrap()[0];

@@ -142,7 +142,19 @@ pub fn compute_bands(
             is_hud: false,
         });
     }
-    (bands, base)
+    // W35-07: the scroll a frame with NO write starts from is the picture's TOP row's. A write
+    // made while the picture was drawn carries the Y of the row it took effect on (the core's
+    // events say so: `$2006` commits and mid-picture `$2005` writes alike), so the carry is that
+    // Y less the rows above the band it opened.
+    let carry = match band_start {
+        Some(start) if start > 0 => (
+            base.0,
+            u16::try_from((i64::from(base.1) - i64::from(start)).rem_euclid(Y_WRAP))
+                .unwrap_or(base.1),
+        ),
+        _ => base,
+    };
+    (bands, carry)
 }
 
 /// Horizontal/vertical scroll-register wrap moduli
@@ -159,6 +171,8 @@ const Y_WRAP: i64 = 480;
 /// Ticket W32-09: a non-primary band shorter than this is a split's
 /// transition line, not content.
 const MIN_BAND_ROWS: u16 = 8;
+/// W35-07: the NES picture's rows (the bottom edge a bar is anchored to).
+const PICTURE_ROWS: u16 = 240;
 
 /// Ticket W32-09: the most a scroll can plausibly move in one frame when it
 /// is read as a wrap of the LOW BYTE alone (see [`WorldAxis::advance_x`]).
@@ -302,6 +316,50 @@ pub struct ScrollTracker {
     previous_bands: Vec<ScanlineBand>,
     world_x: WorldAxis,
     world_y: WorldAxis,
+    /// W35-07: the rows a status bar was seen to take (a non-primary band that did not move,
+    /// judged by the zero-delta rule on a frame that had a split), remembered so that the frames
+    /// of the same scene with NO split (a game that raster-splits its bar only while the screen
+    /// flips: the Legend of Zelda) do not paint it into the level. Cleared at a scene cut.
+    hud_rows: Option<(u16, u16)>,
+}
+
+/// W35-07: `bands` with the remembered bar's rows (`hud`, `start..end`) cut out of every band that
+/// covers any of them: the cut-out piece keeps the band's scroll (the Y it has at its first row,
+/// as the hardware would write it), the pieces above and below take the Y the band had there.
+/// The flags say which of the returned bands is the bar.
+fn split_remembered_hud(
+    bands: Vec<ScanlineBand>,
+    hud: (u16, u16),
+) -> (Vec<ScanlineBand>, Vec<bool>) {
+    let (hs, he) = hud;
+    let mut out = Vec::with_capacity(bands.len() + 2);
+    let mut forced = Vec::with_capacity(bands.len() + 2);
+    for b in bands {
+        let (from, to) = (b.start.max(hs), b.end.min(he));
+        if from >= to {
+            forced.push(false);
+            out.push(b);
+            continue;
+        }
+        let piece = |start: u16, end: u16| ScanlineBand {
+            start,
+            end,
+            #[allow(clippy::cast_possible_truncation)]
+            base_scroll: (b.base_scroll.0, b.y_at(start).rem_euclid(1 << 16) as u16),
+            is_hud: false,
+        };
+        if b.start < from {
+            out.push(ScanlineBand { end: from, ..b });
+            forced.push(false);
+        }
+        out.push(piece(from, to));
+        forced.push(true);
+        if to < b.end {
+            out.push(piece(to, b.end));
+            forced.push(false);
+        }
+    }
+    (out, forced)
 }
 
 impl ScrollTracker {
@@ -312,6 +370,7 @@ impl ScrollTracker {
             previous_bands: Vec::new(),
             world_x: WorldAxis::new(),
             world_y: WorldAxis::new(),
+            hud_rows: None,
         }
     }
 
@@ -324,6 +383,7 @@ impl ScrollTracker {
     pub fn rebase_world(&mut self) {
         self.world_x = WorldAxis::new();
         self.world_y = WorldAxis::new();
+        self.hud_rows = None;
     }
 
     /// Process one frame's events, returning its bands (HUD-classified)
@@ -349,6 +409,10 @@ impl ScrollTracker {
     pub fn observe_frame(&mut self, events: &[CoreEvent]) -> Vec<(ScanlineBand, BandWorldPos)> {
         let (mut bands, carry_out) = compute_bands(events, self.carry_scroll);
         self.carry_scroll = carry_out;
+        let mut forced = vec![false; bands.len()];
+        if let Some(hud) = self.hud_rows {
+            (bands, forced) = split_remembered_hud(bands, hud);
+        }
 
         // Which band drives world-space accumulation this frame, and is
         // trusted as real content even with zero cross-frame history: the
@@ -391,6 +455,7 @@ impl ScrollTracker {
             .map(|(i, _)| i);
 
         let previous_bands_is_empty = self.previous_bands.is_empty();
+        let mut learned = None;
         for (i, band) in bands.iter_mut().enumerate() {
             let matched_previous_zero_delta = self.previous_bands.iter().any(|prev| {
                 prev.start == band.start
@@ -422,7 +487,21 @@ impl ScrollTracker {
                 Some(i) != primary_index && band.end.saturating_sub(band.start) < MIN_BAND_ROWS;
             band.is_hud = matched_previous_zero_delta
                 || unproven_secondary_on_first_ever_frame
-                || transition_line;
+                || transition_line
+                || forced[i];
+            // W35-07: a bar of real height that stood still beside a level band that was drawn,
+            // at the top or the bottom of the picture (a status bar is; a stretch of the level
+            // that a glitched frame split off is not).
+            if matched_previous_zero_delta
+                && Some(i) != primary_index
+                && band.end.saturating_sub(band.start) >= MIN_BAND_ROWS
+                && (band.start == 0 || band.end >= PICTURE_ROWS)
+            {
+                learned = Some((band.start, band.end));
+            }
+        }
+        if learned.is_some() {
+            self.hud_rows = learned;
         }
 
         let mut result = Vec::with_capacity(bands.len());
@@ -515,7 +594,9 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(carry_out, (40, 100));
+        // W35-07: the next frame starts from the picture's TOP row: the split's Y (100 at row
+        // 16) less the 16 rows above it.
+        assert_eq!(carry_out, (40, 84));
     }
 
     #[test]
@@ -625,6 +706,36 @@ mod tests {
         let mut cut = WorldAxis::new();
         cut.advance_x(0, 512);
         assert_eq!(cut.advance_x(300, 512), -212);
+    }
+
+    #[test]
+    fn a_bar_seen_in_a_split_is_cut_out_of_the_frames_with_no_split_until_a_scene_cut() {
+        let mut tracker = ScrollTracker::new();
+        // Two frames of a flip: the bar's rows 0-15 stand still, the level's move.
+        for world_y in [50, 58] {
+            let mut frame = vec![scroll(0, 0)];
+            frame.extend(scanlines(0..16));
+            frame.push(scroll(0, world_y));
+            frame.extend(scanlines(16..240));
+            tracker.observe_frame(&frame);
+        }
+        // A frame with one band: the bar is cut out of it, and the level's rows keep their own Y.
+        let mut frame = vec![scroll(5, 66)];
+        frame.extend(scanlines(0..240));
+        let bands = tracker.observe_frame(&frame);
+        let shape: Vec<_> = bands
+            .iter()
+            .map(|(b, _)| (b.start, b.end, b.base_scroll, b.is_hud))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![(0, 16, (5, 66), true), (16, 240, (5, 82), false)]
+        );
+        // A scene cut forgets the bar.
+        tracker.rebase_world();
+        let mut frame = vec![scroll(5, 66)];
+        frame.extend(scanlines(0..240));
+        assert_eq!(tracker.observe_frame(&frame).len(), 1);
     }
 
     #[test]

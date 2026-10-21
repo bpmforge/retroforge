@@ -322,7 +322,24 @@ pub struct Observed {
     pub top_down: bool,
 }
 
+/// W35-07: frames the camera must have moved, in a session that named no player, before a camera
+/// alone is enough to try the `walk` recipe. A platformer's session names its player long before
+/// this (the camera moves a frame in a step); a game whose camera moves only in screen flips (the
+/// Legend of Zelda's player stays still on the screen while the screen scrolls past: no byte
+/// steps with the camera) never does.
+pub const CAMERA_ONLY_FRAMES: u32 = 384;
+
 impl Observed {
+    /// W35-07: the session named a camera that moved a long time and NO player: the only recipe
+    /// left is to hold the pad (a `walk`), which needs neither a player word nor a Y.
+    #[must_use]
+    pub fn camera_only(&self) -> bool {
+        self.players.is_empty()
+            && self
+                .camera
+                .is_some_and(|c| c.x.moving >= CAMERA_ONLY_FRAMES)
+    }
+
     /// Whether the observations are complete enough to try the candidates on
     /// a machine: a camera, a player word whose high half is known, a Y.
     #[must_use]
@@ -3247,5 +3264,32 @@ mod tests {
         assert_eq!(picture_hash(&a), picture_hash(&a.clone()));
         assert_ne!(picture_hash(&a), picture_hash(&b));
         assert_ne!(picture_hash(&[]), 0);
+    }
+
+    #[test]
+    fn a_camera_that_moved_long_and_no_player_is_enough_for_a_walk() {
+        use crate::camera_finder::{Found, FoundAxis, Width};
+        let axis = |moving| FoundAxis {
+            offset: 0xFD,
+            width: Width::U8,
+            ratio: 1.0,
+            moving,
+        };
+        let mut o = Observed {
+            camera: Some(Found {
+                x: axis(CAMERA_ONLY_FRAMES),
+                y: None,
+            }),
+            ..Observed::default()
+        };
+        assert!(o.camera_only());
+        assert!(!o.ready(), "no player, no Y: not ready the usual way");
+        o.camera = Some(Found {
+            x: axis(CAMERA_ONLY_FRAMES - 1),
+            y: None,
+        });
+        assert!(!o.camera_only(), "too short a session");
+        o.camera = None;
+        assert!(!o.camera_only(), "no camera");
     }
 }

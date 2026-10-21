@@ -271,7 +271,9 @@ impl ScoutFind {
             testing: false,
             moving: self.finder.moving(),
         };
-        if obs.ready() && self.idle >= STAND_FRAMES && scene.is_some() && self.hold_off == 0 {
+        // W35-07: on the NES a camera alone is enough for a `walk` (`Observed::camera_only`).
+        let ready = obs.ready() || (!self.snes && obs.camera_only());
+        if ready && self.idle >= STAND_FRAMES && scene.is_some() && self.hold_off == 0 {
             // Start the trials: one snapshot of the live machine, read only.
             match f.stepper.snapshot() {
                 Ok(snapshot) => {
