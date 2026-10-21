@@ -269,6 +269,7 @@ fn explore_trial() {
         start_when: Vec::new(),
         pin: true,
         scene_key: None,
+        reach_px: 0,
     };
     let mut scout = Scout::start(&rom, snap, plan, &seed, scene, (256, 224)).expect("scout");
     for i in 0..300 {

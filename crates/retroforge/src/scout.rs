@@ -208,6 +208,11 @@ pub struct ScoutPlan {
     /// level the profile names is a "key change" on the scout's first frame,
     /// which ends the pass at once). The app sets it from the matched profile.
     pub scene_key: Option<crate::scene_key::SceneKeySpec>,
+    /// W35-09: how far past the live picture the margins reach, in pixels each side (derived
+    /// from the widescreen aspect by the app: `(output width - source width) / 2`). 0 = not
+    /// asked: a pass ends on its stall rule only. A walk that is stalled with a margin still
+    /// unfilled sidesteps (see [`sidestep_pad`]) before it gives up.
+    pub reach_px: u32,
 }
 
 /// No addresses (the walk strategy pokes none).
@@ -260,6 +265,7 @@ impl ScoutPlan {
             start_when: valued("start_when"),
             pin: t.pin.unwrap_or(false),
             scene_key: None,
+            reach_px: 0,
         }
     }
 
@@ -405,6 +411,46 @@ pub enum ScoutEnd {
     SceneChanged,
 }
 
+/// The NES picture's width: its frame stays this wide whatever the output (core_thread).
+const NES_SOURCE_WIDTH: i64 = 256;
+
+/// Sidesteps per stuck spell; sidestep `k` goes sideways for `SIDESTEP_UNIT * (k + 1)` frames
+/// (alternately up and down: a zigzag of growing reach), then forward for [`SIDESTEP_FORWARD`].
+pub const SIDESTEPS: u32 = 8;
+const SIDESTEP_UNIT: u32 = 8;
+/// Frames of forward walking after each sidestep.
+pub const SIDESTEP_FORWARD: u32 = 160;
+
+/// W35-09: the pad bits a blocked walker presses `stuck` frames after it first stood still, or
+/// `None` once the zigzag is spent. A walk that holds only its direction stops at the first
+/// tree, rock or wall of a top-down screen; a game that moves its camera by flips (the Legend of
+/// Zelda) shows nothing beyond until the player gets past. The walker goes sideways (up, then
+/// down, then up further...) and tries the way forward again after each. Only `Up`/`Down` are
+/// pressed: a game that needs another sidestep key gets none. Total frames
+/// `sum(SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)`, bounded: the zigzag is spent after that.
+#[must_use]
+pub fn sidestep_pad(stuck: u32, dir: ScoutDir) -> Option<u8> {
+    let mut at = 0;
+    // Bounded: SIDESTEPS iterations.
+    for k in 0..SIDESTEPS {
+        let side = SIDESTEP_UNIT * (k + 1);
+        if stuck < at + side {
+            let perp = if k % 2 == 0 {
+                ScoutDir::Up
+            } else {
+                ScoutDir::Down
+            };
+            return Some(perp.nes_pad_bit());
+        }
+        at += side;
+        if stuck < at + SIDESTEP_FORWARD {
+            return Some(dir.nes_pad_bit());
+        }
+        at += SIDESTEP_FORWARD;
+    }
+    None
+}
+
 /// The stop rules, as a small state machine over per-frame facts.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopRule {
@@ -419,6 +465,9 @@ pub struct StopRule {
     /// its own), and whether anything has grown past it since.
     first: Option<usize>,
     grew: bool,
+    /// W35-09: the walker is sidestepping round an obstacle: the stall rule waits (the pass is
+    /// still bounded by its frame budget and by the zigzag's own end).
+    defer_stall: bool,
 }
 
 /// A vertical pass's lead-in. A game that scrolls down only for a player who
@@ -438,6 +487,12 @@ impl StopRule {
             },
             ..Self::default()
         }
+    }
+
+    /// Frames since the canvases last grew.
+    #[must_use]
+    pub fn still(&self) -> u32 {
+        self.still
     }
 
     /// Whether `camera` is a jump from the last frame's (a scene change).
@@ -463,7 +518,10 @@ impl StopRule {
         }
         let first = *self.first.get_or_insert(extent);
         self.grew |= extent > first;
-        if self.still >= plan.stall_frames && (self.grew || self.frames >= self.lead_in) {
+        if self.still >= plan.stall_frames
+            && !self.defer_stall
+            && (self.grew || self.frames >= self.lead_in)
+        {
             Some(ScoutEnd::Stalled)
         } else if self.frames >= plan.frame_budget {
             Some(ScoutEnd::Budget)
@@ -568,6 +626,8 @@ pub struct Scout {
     /// floor is put back on it every frame, and a poke from his own value
     /// would never get past it.
     y_target: Option<u16>,
+    /// W35-09: the camera at the pass's first frame (the margins are measured from it).
+    camera0: Option<i64>,
     /// How the passes ended, in order.
     pub ends: Vec<ScoutEnd>,
 }
@@ -642,6 +702,7 @@ impl Scout {
             bands,
             camera: None,
             y_target: None,
+            camera0: None,
             ends: Vec::new(),
             plan,
         }
@@ -776,6 +837,7 @@ impl Scout {
         self.primed = false;
         self.camera = None;
         self.y_target = None;
+        self.camera0 = None;
         self.ends.clear();
         // Anything the last attempt's frames left in the sink is not this
         // attempt's picture.
@@ -875,6 +937,43 @@ impl Scout {
             .map_or(0, |set| set.iter().map(|c| c.width()).max().unwrap_or(0))
     }
 
+    /// W35-09: whether the canvas reaches `reach_px` past the live picture on the side `dir`
+    /// walks to, measured from where the pass began (the first layer's bounding box: the NES
+    /// level layer).
+    fn margin_covered(&self, dir: ScoutDir) -> bool {
+        let Some(cam0) = self.camera0 else {
+            return false;
+        };
+        let Some(c) = self
+            .acc
+            .scene_canvases(self.scene.0)
+            .and_then(|set| set.first())
+        else {
+            return false;
+        };
+        let reach = i64::from(self.plan.reach_px);
+        let (left, width) = (c.origin().0, c.width() as i64);
+        match dir {
+            ScoutDir::Right => left + width >= cam0 + NES_SOURCE_WIDTH + reach,
+            ScoutDir::Left => left <= cam0 - reach,
+            ScoutDir::Up | ScoutDir::Down => true,
+        }
+    }
+
+    /// W35-09: the pad bits of a sidestep this frame, if the walker is stuck with a margin to
+    /// fill and the zigzag is not spent.
+    fn sidestep(&self, dir: ScoutDir) -> Option<u8> {
+        if self.plan.reach_px == 0
+            || dir.axis() != ScoutAxis::X
+            || self.rule.still() + 1 < self.plan.stall_frames
+            || self.margin_covered(dir)
+        {
+            return None;
+        }
+        // `+ 1`: this frame's own stall count, which the stop rule reads right after it.
+        sidestep_pad(self.rule.still() + 1 - self.plan.stall_frames, dir)
+    }
+
     fn end_pass(&mut self, why: ScoutEnd) {
         self.ends.push(why);
         self.pass += 1;
@@ -943,9 +1042,16 @@ impl Scout {
         // that the camera of some NES games (Mega Man 2) only follows a
         // player who walks.
         let mut input = InputFrame::empty();
+        let mut sidestepping = false;
         if self.bands && self.plan.strategy == ScoutStrategy::Walk {
-            input.ports[0] = u16::from(dir.nes_pad_bit());
+            let mut pad = dir.nes_pad_bit();
+            if let Some(side) = self.sidestep(dir) {
+                pad = side;
+                sidestepping = true;
+            }
+            input.ports[0] = u16::from(pad);
         }
+        self.rule.defer_stall = sidestepping;
         self.stepper.latch_and_advance_frame(input, &mut self.sink);
         self.frames_total += 1;
         let camera = if self.bands {
@@ -979,6 +1085,9 @@ impl Scout {
                     ScoutAxis::X => origin.0 - pad,
                     ScoutAxis::Y => origin.1,
                 });
+            }
+            if self.camera0.is_none() {
+                self.camera0 = self.camera;
             }
             self.camera.unwrap_or(0)
         } else {
@@ -1986,6 +2095,7 @@ mod tests {
             start_when: Vec::new(),
             pin: false,
             scene_key: None,
+            reach_px: 0,
         }
     }
 
@@ -2130,6 +2240,49 @@ mod tests {
     }
 
     #[test]
+    fn a_sidestep_zigzags_up_then_down_with_forward_runs_between_and_ends() {
+        let right = ScoutDir::Right.nes_pad_bit();
+        let (up, down) = (ScoutDir::Up.nes_pad_bit(), ScoutDir::Down.nes_pad_bit());
+        // Sidestep 0: UNIT frames up, then FORWARD frames the way the pass goes.
+        assert_eq!(sidestep_pad(0, ScoutDir::Right), Some(up));
+        assert_eq!(sidestep_pad(SIDESTEP_UNIT - 1, ScoutDir::Right), Some(up));
+        assert_eq!(sidestep_pad(SIDESTEP_UNIT, ScoutDir::Right), Some(right));
+        // Sidestep 1 is down, twice as long.
+        let k1 = SIDESTEP_UNIT + SIDESTEP_FORWARD;
+        assert_eq!(sidestep_pad(k1, ScoutDir::Right), Some(down));
+        assert_eq!(
+            sidestep_pad(k1 + 2 * SIDESTEP_UNIT, ScoutDir::Right),
+            Some(right)
+        );
+        // Spent after SIDESTEPS of them, and the total is bounded (law 8: no index to stall).
+        let total: u32 = (0..SIDESTEPS)
+            .map(|k| SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)
+            .sum();
+        assert_eq!(
+            sidestep_pad(total - 1, ScoutDir::Left),
+            Some(ScoutDir::Left.nes_pad_bit())
+        );
+        assert_eq!(sidestep_pad(total, ScoutDir::Left), None);
+        assert_eq!(sidestep_pad(u32::MAX, ScoutDir::Left), None);
+    }
+
+    #[test]
+    fn a_stall_waits_while_the_walker_sidesteps_and_the_budget_still_ends_the_pass() {
+        let plan = plan(ScoutStrategy::Walk);
+        let mut rule = StopRule::for_dir(ScoutDir::Right);
+        rule.defer_stall = true;
+        for _ in 0..plan.stall_frames + 5 {
+            assert_eq!(rule.observe(&plan, 0, 10), None);
+        }
+        rule.defer_stall = false;
+        assert_eq!(rule.observe(&plan, 0, 10), Some(ScoutEnd::Stalled));
+        let mut rule = StopRule::for_dir(ScoutDir::Right);
+        rule.defer_stall = true;
+        let ended = (0..=plan.frame_budget).find_map(|_| rule.observe(&plan, 0, 10));
+        assert_eq!(ended, Some(ScoutEnd::Budget));
+    }
+
+    #[test]
     fn walking_left_stops_at_zero_instead_of_wrapping() {
         let p = plan(ScoutStrategy::PlayerMove).pokes(ScoutDir::Left, 0, 2);
         assert_eq!(p[..2], [(0x7E_0094, 0), (0x7E_0095, 0)]);
@@ -2238,6 +2391,7 @@ mod tests {
             start_when: Vec::new(),
             pin: false,
             scene_key: None,
+            reach_px: 0,
         }
     }
 

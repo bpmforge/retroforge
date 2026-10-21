@@ -368,6 +368,7 @@ mod tests {
             start_when: Vec::new(),
             pin,
             scene_key: None,
+            reach_px: 0,
         }
     }
 
