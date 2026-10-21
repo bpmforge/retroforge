@@ -675,6 +675,20 @@ impl Scout {
         )
     }
 
+    /// W35-06: the plan's camera words on both axes as they read now, `[x, y]`, 0 where the plan
+    /// names none. The gate survival check reads it to tell frames the game answered the scout's
+    /// pokes (the camera follows) from frames it did not (a scroll of its own, a held player).
+    #[must_use]
+    pub fn camera_pose(&self) -> [u16; 2] {
+        let cam = |axis| {
+            self.plan
+                .camera_words(axis)
+                .first()
+                .map_or(0, |&a| word(&self.stepper, a))
+        };
+        [cam(ScoutAxis::X), cam(ScoutAxis::Y)]
+    }
+
     /// Where the last frame sat on the scout's canvases (diagnostics, tests).
     #[must_use]
     pub fn frames(&self) -> Option<LayerFrames> {

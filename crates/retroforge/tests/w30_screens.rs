@@ -186,8 +186,13 @@ fn save(path: &Path, pic: &Pic) {
     println!("SHOT {}", path.display());
 }
 
+/// `RF_SCREENS_ONLY=scout$` (a trailing `$`) names one shot exactly; without it, any shot whose
+/// name contains the text.
 fn wanted(name: &str) -> bool {
-    std::env::var("RF_SCREENS_ONLY").map_or(true, |f| name.contains(&f))
+    std::env::var("RF_SCREENS_ONLY").map_or(true, |f| match f.strip_suffix('$') {
+        Some(exact) => name == exact,
+        None => name.contains(&f),
+    })
 }
 
 fn rom(console: &str, file: &str) -> Option<PathBuf> {
