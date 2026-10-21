@@ -441,6 +441,10 @@ pub struct FrameMsg {
     /// (`FrameBundle::lines`), for composing the margins through the row's
     /// colour math; empty unless `layer_frames` is set.
     pub line_regs: Vec<Option<rf_core_api::LineRegisters>>,
+    /// Ticket W35-06: per picture row, the live sub screen's mean colour
+    /// (`rf_enhance::canvas::sub_fill_rows`), the margins' stand-in for a
+    /// sub-screen overlay nothing is remembered of; empty unless `line_regs` is.
+    pub sub_fill: Vec<Option<u16>>,
     /// Ticket W34-01: this frame's background tile grids
     /// (`crate::tile_capture`), one per band of each layer; EMPTY unless
     /// `CoreCommand::SetTileGridCapture(true)` is in effect. Nothing reads it
@@ -2267,6 +2271,16 @@ fn core_thread_main(
             } else {
                 Vec::new()
             };
+            let sub_fill = if layer_scrolls.is_some() {
+                let rows = sink.line_palettes();
+                rf_enhance::canvas::sub_fill_rows(&bundle, &|y, i| {
+                    rows.get(y)
+                        .and_then(Option::as_ref)
+                        .map_or(0, |p| p.words[usize::from(i)])
+                })
+            } else {
+                Vec::new()
+            };
             // Ticket W34-01: the tile grids, read before `bundle` moves (its
             // per-line registers position the bands). The HUD verdict is
             // the canvas model's, when it is tracking the scene.
@@ -2410,6 +2424,7 @@ fn core_thread_main(
                 backdrop_rows,
                 layer_order,
                 line_regs,
+                sub_fill,
                 tile_grids,
                 sprites,
                 heights,
@@ -2738,6 +2753,7 @@ mod tests {
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
             line_regs: Vec::new(),
+            sub_fill: Vec::new(),
             tile_grids: Vec::new(),
             sprites: Vec::new(),
             heights: None,

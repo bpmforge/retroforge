@@ -33,6 +33,20 @@ const LOOK_EVERY: u64 = 30;
 /// Frames the pad must have been idle before the trials start.
 const STAND_FRAMES: u32 = 20;
 
+/// W35-06: a trial that fails is tried again from a later standing moment this many times. A
+/// snapshot can land in a speech box (A Link to the Past's telepathy comes every ~4,500 frames and
+/// holds the player until A pages it away): the trial machine pokes a player who cannot move and
+/// nothing follows. The machine that stood still is not wrong, the moment was.
+const MAX_RETRIES: u8 = 2;
+/// Frames the live game runs, after a failed trial, before the next snapshot (a box paged away by
+/// the player, or by the session's own dismissals, is gone by then).
+const RETRY_AFTER: u32 = 900;
+
+/// Whether a trial's answer is worth another snapshot.
+fn worth_retrying(result: &TrialResult, retries: u8) -> bool {
+    result.is_err() && retries < MAX_RETRIES
+}
+
 /// What a frame of the live game hands the finder.
 pub struct Fed<'a> {
     pub stepper: &'a EmuStepper,
@@ -59,6 +73,9 @@ pub struct ScoutFind {
     finder: ScoutFinder,
     snes: bool,
     idle: u32,
+    /// W35-06: trials that failed so far, and the live frames still to wait before the next.
+    retries: u8,
+    hold_off: u32,
     trial: Option<Receiver<TrialResult>>,
     last: ScoutFindProgress,
     /// Ticket W35-02: the machine, the live model and the scene of the first
@@ -109,6 +126,8 @@ impl ScoutFind {
             ),
             snes,
             idle: 0,
+            retries: 0,
+            hold_off: 0,
             trial: None,
             last: ScoutFindProgress::default(),
             vertical: None,
@@ -121,6 +140,11 @@ impl ScoutFind {
             return match rx.try_recv() {
                 Ok(result) => {
                     self.trial = None;
+                    if worth_retrying(&result, self.retries) {
+                        self.retries += 1;
+                        self.hold_off = RETRY_AFTER;
+                        return Vec::new();
+                    }
                     vec![Out::Done(result)]
                 }
                 Err(TryRecvError::Empty) => Vec::new(),
@@ -132,6 +156,7 @@ impl ScoutFind {
                 }
             };
         }
+        self.hold_off = self.hold_off.saturating_sub(1);
         let start_bit = if self.snes {
             SnesButton::Start.bit()
         } else {
@@ -246,7 +271,7 @@ impl ScoutFind {
             testing: false,
             moving: self.finder.moving(),
         };
-        if obs.ready() && self.idle >= STAND_FRAMES && scene.is_some() {
+        if obs.ready() && self.idle >= STAND_FRAMES && scene.is_some() && self.hold_off == 0 {
             // Start the trials: one snapshot of the live machine, read only.
             match f.stepper.snapshot() {
                 Ok(snapshot) => {
@@ -301,5 +326,18 @@ impl ScoutFind {
             out.push(Out::Progress(progress));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_trial_is_retried_twice_only() {
+        let failed: TrialResult = Err("the game's camera did not follow any recipe tried".into());
+        assert!(worth_retrying(&failed, 0));
+        assert!(worth_retrying(&failed, MAX_RETRIES - 1));
+        assert!(!worth_retrying(&failed, MAX_RETRIES));
     }
 }

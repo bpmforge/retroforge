@@ -1058,7 +1058,7 @@ fn the_margin_shows_a_sub_screen_layer_behind_the_backdrop_through_colour_math()
 fn a_margin_dot_says_which_layer_it_belongs_to() {
     let (layers, frames, pal) = compose_fixture();
     let layer = |dx: i64, r: &LineRegisters| {
-        let (rgb, layer) = margin_color_layer(&layers, &frames, 0, dx, None, r, &pal);
+        let (rgb, layer) = margin_color_layer(&layers, &frames, 0, dx, None, r, &pal, None);
         assert_eq!(rgb, margin_color(&layers, &frames, 0, dx, None, r, &pal));
         layer
     };
@@ -1104,6 +1104,52 @@ fn math_applies_to_the_main_layer_only_when_its_own_enable_bit_is_set() {
         rgb(word(5, 6, 6)),
         "backdrop + BG1 on the sub screen, halved"
     );
+}
+
+/// A bundle of `rows` rows 8 dots wide whose sub screen is opaque (`word` per dot) on the rows
+/// `covered` says, a fixed-colour gap elsewhere, every row with `regs()`.
+fn sub_bundle(rows: u16, covered: impl Fn(u16) -> bool) -> rf_core_api::FrameBundle {
+    use rf_core_api::{ColorMathOp, CoreSink, FrameBundleBuilder, PixelLayer, SubPixel};
+    let mut b = FrameBundleBuilder::new(8, rows);
+    b.set_capture_wide(true);
+    for y in 0..rows {
+        let dot = SubPixel {
+            palette_index: if covered(y) { 3 } else { 0 },
+            layer: PixelLayer::Background(0),
+            op: ColorMathOp::AddHalf,
+            fixed: !covered(y),
+            main_black: false,
+        };
+        b.sub_scanline(y, &[dot; 8], 0);
+        b.line_registers(y, &regs());
+    }
+    b.take(1)
+}
+
+#[test]
+fn a_sub_screen_over_the_whole_picture_gives_the_margins_its_row_mean() {
+    // Palette index 3 is (8, 12, 16); the picture is covered on every row.
+    let words = |_: usize, i: u8| if i == 3 { word(8, 12, 16) } else { 0 };
+    let fill = sub_fill_rows(&sub_bundle(10, |_| true), &words);
+    assert_eq!(fill, vec![Some(word(8, 12, 16)); 10]);
+    // Scenery on the lower rows only (a hill band): no overlay, no fill on any row.
+    let hills = sub_fill_rows(&sub_bundle(10, |y| y >= 6), &words);
+    assert!(hills.iter().all(Option::is_none), "{hills:?}");
+    // No bundle sub screen at all: nothing.
+    assert!(sub_fill_rows(&rf_core_api::FrameBundle::default(), &words).is_empty());
+}
+
+#[test]
+fn a_margin_dot_with_no_known_sub_cell_blends_the_rows_overlay_mean_like_the_picture() {
+    let (layers, frames, pal) = compose_fixture();
+    // x = 6: BG2 unknown. Without the fill the sub source is the fixed colour and no half (above).
+    let fill = word(8, 12, 16);
+    let with = |dx: i64, f| margin_color_layer(&layers, &frames, 0, dx, None, &regs(), &pal, f).0;
+    // Backdrop (10,10,10) + overlay (8,12,16), halved, as the dots inside the picture do.
+    assert_eq!(with(6, Some(fill)), rgb(word(9, 11, 13)));
+    assert_eq!(with(6, None), rgb(word(14, 14, 14)));
+    // A known sub-screen cell (the hill at x = 5) always wins over the fill.
+    assert_eq!(with(5, Some(fill)), rgb(word(15, 5, 5)));
 }
 
 #[test]

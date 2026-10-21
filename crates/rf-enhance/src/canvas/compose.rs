@@ -128,7 +128,7 @@ pub fn margin_color(
     regs: &LineRegisters,
     current: &Cgram,
 ) -> [u8; 3] {
-    margin_color_layer(layers, frames, row, dx, order, regs, current).0
+    margin_color_layer(layers, frames, row, dx, order, regs, current, None).0
 }
 
 /// [`margin_color`] with the background layer the dot belongs to (ticket
@@ -137,7 +137,18 @@ pub fn margin_color(
 /// screen through colour math, the sub screen's (Super Mario World keeps
 /// its hills there), else `None` (the backdrop). The same rule the core's
 /// own per-dot layer map uses inside the 256 dots.
+///
+/// Ticket W35-06: `sub_fill` is the row's live sub-screen colour
+/// ([`sub_fill_rows`]). It stands in for the sub screen's second operand when
+/// the sub screen is selected but no layer on it has a known cell at this dot
+/// (A Link to the Past's rain is BG1 on the sub screen, halved into the whole
+/// picture, and is a moving overlay: remembered cells are junk past the
+/// picture). Without it the margins would take the fixed colour, unhalved,
+/// and stand brighter than the picture beside them. A known cell (Super Mario
+/// World's hills) always wins; the fill exists only for rows the live sub
+/// screen covers whole ([`sub_fill_rows`]).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn margin_color_layer(
     layers: &LayerCanvases,
     frames: &LayerFrames,
@@ -146,6 +157,7 @@ pub fn margin_color_layer(
     order: Option<&[u8; LAYERS]>,
     regs: &LineRegisters,
     current: &Cgram,
+    sub_fill: Option<u16>,
 ) -> ([u8; 3], Option<u8>) {
     let dy = row as i64;
     let at =
@@ -164,7 +176,11 @@ pub fn margin_color_layer(
         None => (regs.backdrop_color, 5),
     };
     let sub = regs.use_subscreen.then(|| at(regs.ts & 0x0F)).flatten();
-    let sub_word = sub.as_ref().map(|(_, p)| word(p));
+    let sub_word = match &sub {
+        Some((_, p)) => Some(word(p)),
+        None if regs.use_subscreen => sub_fill,
+        None => None,
+    };
     // The layer the dot shows: the main screen's, else the sub screen's.
     let layer = main.as_ref().or(sub.as_ref()).map(|(n, _)| *n as u8);
     (shade(regs, main_word, main_bit, sub_word), layer)
@@ -296,6 +312,55 @@ pub fn margin_palette_index(
     front_layer_pixel(layers, origins, dx, dy, None).map_or(0, |p| p.palette_index)
 }
 
+/// Ticket W35-06: per picture row, the mean colour of the live sub screen
+/// (BGR555, per-channel mean over the row's sub-screen dots, each resolved by
+/// `word(row, index)` through the row's palette), for rows whose registers
+/// select the sub screen as the second operand AND whose sub screen covers at
+/// least nine dots in ten, and only when nine rows in ten are so covered (a
+/// full-picture overlay, not scenery on part of the picture). `None` elsewhere.
+///
+/// An animated overlay (A Link to the Past's rain, a moving BG1 on the sub
+/// screen) cannot be remembered cell by cell; its mean over the row is what it
+/// contributes to the row's colour math, and the margins use that. Empty when
+/// the bundle carries no sub screen or no registers.
+#[must_use]
+pub fn sub_fill_rows(bundle: &FrameBundle, word: &dyn Fn(usize, u8) -> u16) -> Vec<Option<u16>> {
+    let mut rows: Vec<Option<u16>> = bundle
+        .lines
+        .iter()
+        .zip(&bundle.sub)
+        .enumerate()
+        .map(|(y, (regs, sub))| {
+            let (regs, sub) = (regs.as_ref()?, sub.as_ref()?);
+            if !regs.use_subscreen {
+                return None;
+            }
+            let (mut sum, mut n) = ([0u32; 3], 0u32);
+            for p in sub.pixels.iter().filter(|p| !p.fixed) {
+                let w = word(y, p.palette_index);
+                for (c, s) in sum.iter_mut().enumerate() {
+                    *s += u32::from((w >> (5 * c)) & 0x1F);
+                }
+                n += 1;
+            }
+            // Uncovered rows keep the fixed colour as their second operand.
+            (n > 0 && n * 10 >= u32::try_from(sub.pixels.len()).unwrap_or(0) * 9).then(|| {
+                (0..3).fold(0u16, |acc, c| {
+                    acc | (u16::try_from((sum[c] + n / 2) / n).unwrap_or(0) << (5 * c))
+                })
+            })
+        })
+        .collect();
+    // Only a sub screen that covers the whole picture is an overlay (rain, a haze): a layer that
+    // fills the bottom of it and not the top (Super Mario World's hills) is scenery, and its
+    // margins are the layer's own cells or the backdrop, never a row mean.
+    let seen = bundle.lines.iter().filter(|r| r.is_some()).count();
+    if rows.iter().flatten().count() * 10 < seen * 9 {
+        rows.fill(None);
+    }
+    rows
+}
+
 /// Everything the compose needs to know about one picture row.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RowFacts<'a> {
@@ -308,6 +373,8 @@ pub struct RowFacts<'a> {
     /// The row's written palette words and master brightness (SNES); `None`
     /// on the NES, whose cells are already master-colour values.
     pub palette: Option<(&'a Cgram, u8)>,
+    /// Ticket W35-06: the row's live sub-screen colour ([`sub_fill_rows`]).
+    pub sub_fill: Option<u16>,
 }
 
 /// The one margin compose for both consoles: the colour of the margin dot
@@ -351,6 +418,7 @@ pub fn margin_pixel_layer(
             facts.order,
             regs,
             words,
+            facts.sub_fill,
         ));
     }
     let cell = front_layer_in(

@@ -789,10 +789,18 @@ pub fn alttp_dismiss() -> String {
 /// The first half of the session: back into the house and out again, down onto the road and a
 /// little west: Link stands in the middle of the road.
 pub fn alttp_play_head() -> String {
-    format!(
-        "w60 U60 w200 D60 w200 D80 w30 L120 w30 S6 w100 S6 w100{}",
-        alttp_dismiss()
-    )
+    format!("{} {}", alttp_play_walk(), alttp_play_start())
+}
+
+/// W35-06: the head's walk alone (the area edge's scroll has finished: a Start pressed during it is
+/// swallowed and the next one opens the menu, which a snapshot "on the road" must not catch).
+pub fn alttp_play_walk() -> String {
+    "w60 U60 w200 D60 w200 D80 w30 L120 w90".to_string()
+}
+
+/// W35-06: the head's Start pause (W35-05) and the dismissals after it.
+pub fn alttp_play_start() -> String {
+    format!("S6 w100 S6 w100{}", alttp_dismiss())
 }
 
 /// The rest of the session: on west to the trees, the vertical corridor there, east and west
@@ -826,8 +834,9 @@ pub fn alttp_find_table(
 ) -> Box<rf_enhance::scout_finder::Skeleton> {
     use retroforge::scout_find::{Out, ScoutFind};
     rig.find = Some(ScoutFind::new(true));
-    rig.script(&alttp_play_head());
+    rig.script(&alttp_play_walk());
     mid_road(rig);
+    rig.script(&alttp_play_start());
     rig.script(&alttp_play_tail());
     let t0 = std::time::Instant::now();
     let mut found = None;

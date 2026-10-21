@@ -1682,6 +1682,7 @@ type MarginRows<'a> = (
     &'a [Option<[u8; 3]>],
     &'a [[u8; rf_enhance::canvas::LAYERS]],
     &'a [Option<rf_core_api::LineRegisters>],
+    &'a [Option<u16>],
 );
 
 impl RetroForgeApp {
@@ -6031,7 +6032,12 @@ impl RetroForgeApp {
         rgba: Vec<u8>,
         size: (usize, usize),
     ) -> (Vec<u8>, (usize, usize)) {
-        let rows: MarginRows<'_> = (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs);
+        let rows: MarginRows<'_> = (
+            &msg.backdrop_rows,
+            &msg.layer_order,
+            &msg.line_regs,
+            &msg.sub_fill,
+        );
         let narrow = usize::from(rf_enhance::widescreen::NARROW_WIDTH);
         let core_ids = msg
             .heights
@@ -6113,7 +6119,12 @@ impl RetroForgeApp {
             cut,
             (msg.width, rows_n),
             msg.layer_frames.as_ref(),
-            (&msg.backdrop_rows, &msg.layer_order, &msg.line_regs),
+            (
+                &msg.backdrop_rows,
+                &msg.layer_order,
+                &msg.line_regs,
+                &msg.sub_fill,
+            ),
             &msg.line_palettes,
             core_ids,
         );
@@ -13280,7 +13291,7 @@ impl RetroForgeApp {
         rgba: Vec<u8>,
         size: (usize, usize),
         layer_frames: Option<&rf_enhance::canvas::LayerFrames>,
-        (backdrops, order, line_regs): MarginRows<'_>,
+        (backdrops, order, line_regs, sub_fill): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
         core_ids: Option<&[u8]>,
     ) -> (Vec<u8>, (usize, usize), Option<Vec<u8>>) {
@@ -13400,6 +13411,7 @@ impl RetroForgeApp {
                             .get(row)
                             .and_then(Option::as_ref)
                             .map(|p| (&p.words, p.brightness)),
+                        sub_fill: sub_fill.get(row).copied().flatten(),
                     };
                     let (rgb, layer) = rf_enhance::canvas::margin_pixel_layer(
                         layers,
@@ -14528,6 +14540,7 @@ impl RetroForgeApp {
             backdrop_rows: Vec::new(),
             layer_order: Vec::new(),
             line_regs: Vec::new(),
+            sub_fill: Vec::new(),
             tile_grids: Vec::new(),
             sprites: Vec::new(),
             heights: None,

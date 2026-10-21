@@ -270,7 +270,74 @@ const MIN_GATE_CONFIDENCE: f32 = 0.7;
 /// on (the run moves the player through every pose the level allows).
 const GATE_SURVIVAL: f32 = 0.98;
 
-/// Run `plan` and count, per gate candidate, the frames its value held.
+/// W35-06: the most a camera word moves in a frame the scout is walking it (the walking pace the
+/// finder uses, `scout_finder`'s `|step| <= 4`). A bigger step is a scripted scroll or a rewind:
+/// the game, not the scout, moves the picture.
+const CONTROL_STEP: i32 = 4;
+/// Frames after such a step before the scout is in control again (a fade, a load).
+const CONTROL_SETTLE: usize = 30;
+/// Frames of the scout's pokes that move no camera (either axis) before the game is judged to hold
+/// the player (a speech box, a lock): the finder's own `speech` test.
+const CONTROL_FROZEN: usize = 24;
+/// Fewer judged frames than this say nothing: the gate is judged on every frame instead.
+const MIN_JUDGED: usize = 30;
+
+/// One frame of a scouting run: the scout's camera words (x, y) and which gates held. (Not the
+/// player's: the scout pokes those every frame, a held player included.)
+struct Sample {
+    pose: [u16; 2],
+    held: Vec<bool>,
+}
+
+/// Per gate, the share of the run's frames the gate held on, counting only the frames the SCOUT
+/// was in control of (W35-06). Left out: a frame within [`CONTROL_SETTLE`] of a camera step above
+/// [`CONTROL_STEP`] (the game's own scroll between areas, a cut, the rewind between passes), and
+/// every frame of a run of at least [`CONTROL_FROZEN`] frames where the camera did not move
+/// though the scout poked the player on (the game holds the player: A Link to the Past's speech boxes come every ~4,500
+/// frames and read mode `$0E` where the real mode byte reads 9; a gate that is false there is
+/// RIGHT to be, and must not be dropped for it). A run with fewer than [`MIN_JUDGED`] such frames
+/// is judged on all of them.
+fn control_survival(run: &[Sample], gates: usize) -> Vec<f32> {
+    let mut judged = vec![true; run.len()];
+    let mut settle = 0usize;
+    for (i, w) in run.windows(2).enumerate() {
+        let step = |axis: usize| i32::from(w[1].pose[axis].wrapping_sub(w[0].pose[axis]) as i16);
+        if step(0).abs() > CONTROL_STEP || step(1).abs() > CONTROL_STEP {
+            settle = CONTROL_SETTLE;
+        }
+        if settle > 0 {
+            judged[i + 1] = false;
+            settle -= 1;
+        }
+    }
+    // Runs of frames where nothing moved, marked whole (the first frames of a speech read the box too).
+    let mut from = 0;
+    for i in 1..=run.len() {
+        if i == run.len() || run[i].pose != run[from].pose {
+            if i - from >= CONTROL_FROZEN {
+                judged[from..i].fill(false);
+            }
+            from = i;
+        }
+    }
+    let all = judged.iter().all(|j| !j) || judged.iter().filter(|j| **j).count() < MIN_JUDGED;
+    let keep = |i: usize| all || judged[i];
+    let total = (0..run.len()).filter(|&i| keep(i)).count();
+    (0..gates)
+        .map(|g| {
+            let held = (0..run.len())
+                .filter(|&i| keep(i) && run[i].held[g])
+                .count();
+            #[allow(clippy::cast_precision_loss)]
+            {
+                held as f32 / total.max(1) as f32
+            }
+        })
+        .collect()
+}
+
+/// Run `plan` and count, per gate candidate, the frames its value held while the scout was in
+/// control ([`control_survival`]).
 fn gate_survival(
     scout: &mut Scout,
     plan: ScoutPlan,
@@ -282,25 +349,24 @@ fn gate_survival(
         .restart_with(plan)
         .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
     let reader = ctx.scrolls;
-    let mut held = vec![0u32; gates.len()];
-    let mut run = 0u32;
+    let mut run = Vec::new();
     // Bounded: the plan's own frame budget.
     for _ in 0..frames {
         let status = scout.step(&reader);
-        run += 1;
-        for (n, g) in held.iter_mut().zip(gates) {
-            let now = scout.peek_word(bus_address(ctx.snes, g.offset)) & 0xFF;
-            *n += u32::from(now == u16::from(g.value));
-        }
+        run.push(Sample {
+            pose: scout.camera_pose(),
+            held: gates
+                .iter()
+                .map(|g| {
+                    scout.peek_word(bus_address(ctx.snes, g.offset)) & 0xFF == u16::from(g.value)
+                })
+                .collect(),
+        });
         if matches!(status, ScoutStatus::Finished(_)) {
             break;
         }
     }
-    #[allow(clippy::cast_precision_loss)]
-    Ok(held
-        .into_iter()
-        .map(|n| n as f32 / run.max(1) as f32)
-        .collect())
+    Ok(control_survival(&run, gates.len()))
 }
 
 /// The player's Y word, by a vertical pass from a room that scrolls that way:
@@ -901,6 +967,62 @@ pub fn plan_of(sk: &Skeleton) -> ScoutPlan {
 mod tests {
     use super::*;
     use rf_enhance::scout_finder::Row;
+
+    /// `frames` frames of one pose (camera x walking `step` px a frame from `cam`), the gate
+    /// reading `value` (held when it is 9).
+    fn leg(out: &mut Vec<Sample>, frames: usize, cam: &mut u16, step: u16, value: u8) {
+        for _ in 0..frames {
+            *cam = cam.wrapping_add(step);
+            out.push(Sample {
+                pose: [*cam, 0],
+                held: vec![value == 9],
+            });
+        }
+    }
+
+    #[test]
+    fn a_gate_that_is_false_only_where_the_game_holds_the_player_survives() {
+        // 80 frames walked, a speech box of 100 frozen frames (mode 0x0e), 60 walked again.
+        let (mut run, mut cam) = (Vec::new(), 0u16);
+        leg(&mut run, 80, &mut cam, 2, 9);
+        leg(&mut run, 100, &mut cam, 0, 0x0e);
+        leg(&mut run, 60, &mut cam, 2, 9);
+        let judged = control_survival(&run, 1);
+        assert!(judged[0] >= GATE_SURVIVAL, "{judged:?}");
+        // The plain share is what dropped it (140 of 240).
+        let plain = run.iter().filter(|s| s.held[0]).count() as f32 / run.len() as f32;
+        assert!(plain < 0.6, "{plain}");
+    }
+
+    #[test]
+    fn a_gate_that_is_false_while_the_game_scrolls_between_areas_survives() {
+        // Walking, 20 frames of the game's own 8 px scroll (mode 0x0f), walking.
+        let (mut run, mut cam) = (Vec::new(), 100u16);
+        leg(&mut run, 80, &mut cam, 2, 9);
+        leg(&mut run, 20, &mut cam, 8, 0x0f);
+        leg(&mut run, 80, &mut cam, 2, 9);
+        assert!(control_survival(&run, 1)[0] >= GATE_SURVIVAL);
+    }
+
+    #[test]
+    fn a_gate_that_is_false_while_the_scout_walks_is_still_dropped() {
+        // False on a third of the frames the camera walks at 2 px: no excuse.
+        let (mut run, mut cam) = (Vec::new(), 0u16);
+        leg(&mut run, 100, &mut cam, 2, 9);
+        leg(&mut run, 50, &mut cam, 2, 3);
+        leg(&mut run, 100, &mut cam, 2, 9);
+        assert!(control_survival(&run, 1)[0] < GATE_SURVIVAL);
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_judge_is_judged_on_every_frame() {
+        let (mut run, mut cam) = (Vec::new(), 0u16);
+        leg(&mut run, 120, &mut cam, 0, 3);
+        assert_eq!(control_survival(&run, 1), vec![0.0]);
+        let mut held = Vec::new();
+        leg(&mut held, 120, &mut cam, 0, 9);
+        assert_eq!(control_survival(&held, 1), vec![1.0]);
+    }
 
     #[test]
     fn finder_offsets_are_bus_addresses() {
