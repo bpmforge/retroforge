@@ -300,7 +300,8 @@ fn mm2_profile() {
     let mut plan = profile_plan("../../profiles/nes/mega-man-2/profile.toml");
     plan.settle_frames = 0;
     let d = drive(&rom, &st, &mut live, scene, plan, no_scrolls, (W, H), 600);
-    assert_finished_both_passes(&d, 1);
+    // W35-12: right and left (the Left pass ends at once from the level start)
+    assert_finished_both_passes(&d, 2);
     let report = d.telemetry.last_report.lock().unwrap().clone().unwrap();
     assert_eq!(
         report.winner().map(|w| w.0),

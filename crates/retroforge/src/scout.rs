@@ -2871,8 +2871,13 @@ mod tests {
         let plan = profile_plan_of("../../profiles/nes/mega-man-2/profile.toml");
         assert_eq!(plan.strategy, ScoutStrategy::Walk);
         assert_eq!(plan.hold, vec![(0x04A0, 0x20)]);
-        assert_eq!(plan.start_when, vec![(0x06C0, 0x1C)]);
-        assert_eq!(plan.dirs, vec![ScoutDir::Right]);
+        // W35-11's gate: $36D is 0x38 and $2A is 1 or 2 (alternatives on one address)
+        assert_eq!(
+            plan.start_when,
+            vec![(0x036D, 0x38), (0x002A, 1), (0x002A, 2)]
+        );
+        // W35-12: left as well (the Left pass ends at once from a stage's start)
+        assert_eq!(plan.dirs, vec![ScoutDir::Right, ScoutDir::Left]);
         assert_eq!(plan.frame_budget, 3000);
     }
 
