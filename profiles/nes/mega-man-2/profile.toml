@@ -157,13 +157,22 @@ source = "https://datacrystal.tcrf.net/wiki/Mega_Man_2/RAM_map"
 # Mega Man's X does not move the camera, so the scout holds Right on its own
 # pad and Mega Man's Y near the top of the screen (out of reach of the pits
 # and of the Air Tikki).
+#
+# W35-12: the scout goes both ways. A Right pass from the level start is the
+# whole of a stage's way forward; the Left pass is judged from where the camera
+# is, and at the start of a stage it sits at its left stop, so that pass ends at
+# once with no growth (one stall window of frames; nothing is added to the
+# canvas). From the middle of a stage it walks back over what the player has
+# already passed. Evidence (docs/research/W35-08-left-passes.md, tests/w35_12_mm2_profile_dirs.rs): the table
+# discovery writes for this dump says right + left, and the canvas it fills
+# agrees with the hand table 98.7% (Right alone) -> 99.0% (both).
 [scout]
 strategy = "walk"
 step_px = 1
 frame_budget = 3000
 stall_frames = 60
 settle_frames = 60
-dirs = ["right"]
+dirs = ["right", "left"]
 
 [[scout.addr]]
 role = "hold"
@@ -185,12 +194,37 @@ addr = 0x04A0
 notes = "Mega Man's Y, one byte (no high byte): 0x54 standing on the first cloud platform of the climb, 0xF0 or more starts the downward screen transition, 0x07..0x0B on landing at the top of the next screen."
 source = "observed: W33-08 probe (tests/w33_08_vertical.rs)"
 
+# W32-09 gated the start on Mega Man's health being 0x1c (full); W35-12 drops
+# that row: health is not an alive flag (it still read 0x1a after the fall that
+# ended a run) and any hit shuts it for the rest of the stage (0x18 two screens
+# in), so a hurt Mega Man was never scouted. The gate below replaces it.
+# W35-11: the stage is being PLAYED, not shown. Rows on one address are
+# alternatives, rows on different addresses all have to hold: `$36D` reads 0x38
+# on the frames of play and not on the title, the attract, the menus or the
+# fades between them, and `$2A` (the stage index, below) is 1 or 2 there (Air
+# Man, Metal Man: the two stages the finder watched, with the gate open on
+# 2398 of 2445 frames of the first and every frame of the second). Found by the
+# finder, not guessed (tests/w35_11_start_gates.rs).
 [[scout.addr]]
 role = "start_when"
-addr = 0x06C0
-value = 0x1C
-notes = "Mega Man's health, 0x1c (28) at the start of a stage. The scout starts only at full health: health is not an alive flag (it still read 0x1a after the fall that ended a run), so a hurt Mega Man is not scouted."
-source = "observed: W32-09 note"
+addr = 0x036D
+value = 0x38
+notes = "Reads 0x38 while a stage is being played; anything else on the title, the attract, the menus and the cuts."
+source = "observed: auto (W35-11)"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x002A
+value = 1
+notes = "Stage index 1 (Air Man's) while it is played."
+source = "observed: auto (W35-11)"
+
+[[scout.addr]]
+role = "start_when"
+addr = 0x002A
+value = 2
+notes = "Stage index 2 (Metal Man's) while it is played."
+source = "observed: auto (W35-11)"
 
 # W33-09: which stage the game is in, and how a stage is cut into scenes.
 # `$2A` holds the stage's index from the moment the stage starts (Air Man 1,
