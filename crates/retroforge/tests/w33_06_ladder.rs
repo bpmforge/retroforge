@@ -186,6 +186,7 @@ fn drive(
             scene,
             size,
             scrolls,
+            blank: false,
         });
         if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
             break;

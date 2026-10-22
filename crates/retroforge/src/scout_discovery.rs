@@ -365,9 +365,7 @@ fn gate_survival(
             pose: scout.camera_pose(),
             held: gates
                 .iter()
-                .map(|g| {
-                    scout.peek_word(bus_address(ctx.snes, g.offset)) & 0xFF == u16::from(g.value)
-                })
+                .map(|g| g.holds((scout.peek_word(bus_address(ctx.snes, g.offset)) & 0xFF) as u8))
                 .collect(),
         });
         if matches!(status, ScoutStatus::Finished(_)) {
@@ -771,6 +769,15 @@ pub fn discover(
         .map(|(_, g)| *g)
         .collect();
     report.trials.push(format!(
+        "gate survival (first 8): {:?}",
+        obs.gates
+            .iter()
+            .zip(&survived)
+            .take(8)
+            .map(|(g, f)| format!("{:#x}={:#x} {:.3}", g.offset, g.value, f))
+            .collect::<Vec<_>>()
+    ));
+    report.trials.push(format!(
         "gates kept {:?} of {:?}",
         gates.iter().map(|g| g.offset).collect::<Vec<_>>(),
         obs.gates.iter().map(|g| g.offset).collect::<Vec<_>>()
@@ -935,15 +942,19 @@ fn skeleton(
             });
         }
     }
+    // (W35-11: the first two gates the finder is sure of, not the first two of which the sure ones
+    // are kept: a second row that is under the floor must not leave the table with one row while
+    // a third is sure.)
     for g in gates
         .iter()
-        .take(2)
         .filter(|g: &&GateCandidate| g.confidence >= MIN_GATE_CONFIDENCE)
+        .take(2)
     {
-        rows.push(Row {
+        for v in std::iter::once(g.value).chain(g.also[..usize::from(g.also_n)].iter().copied()) {
+            rows.push(Row {
             role: "start_when",
             addr: bus_address(snes, g.offset),
-            value: Some(g.value),
+            value: Some(v),
             notes: if g.differs < 0.6 {
                 // A guard (W35-05): the game's mode byte does not change in a pause, this does.
                 format!(
@@ -964,6 +975,7 @@ fn skeleton(
             },
             confidence: g.confidence,
         });
+        }
     }
     let walk = plan.strategy == ScoutStrategy::Walk;
     Skeleton {
@@ -1150,5 +1162,36 @@ mod tests {
         assert_eq!(plan, from_profile);
         assert_eq!(plan.hold, vec![(0x7E_0096, 150), (0x7E_0097, 0)]);
         assert_eq!(plan.start_when, vec![(0x7E_0100, 0x14)]);
+    }
+
+    /// W35-11: a gate on one address with several values is several rows on it; they load as a
+    /// profile table and come back as the same plan.
+    #[test]
+    fn a_gate_with_several_values_is_rows_on_one_address() {
+        let sk = Skeleton {
+            strategy: "walk",
+            step_px: 1,
+            frame_budget: 3000,
+            stall_frames: 260,
+            settle_frames: 60,
+            dirs: vec!["right"],
+            rows: vec![
+                row("start_when", 0x12, Some(5)),
+                row("start_when", 0x12, Some(7)),
+                row("start_when", 0x6F, Some(4)),
+            ],
+            confidence: 0.9,
+        };
+        let text = format!(
+            "[meta]\nprofile_version = \"0.1\"\ntitle = \"T\"\nconsole = \"nes\"\nregion = \"ntsc\"\nauthors = [\"t\"]\nsources = []\n[[identity]]\nsha256 = \"{}\"\nrevision = \"t\"\n[capabilities]\nfull_level = false\nhud_separation = false\nentity_overlay = false\nwidescreen = \"decoded\"\n\n{}",
+            "0".repeat(64),
+            sk.to_toml()
+        );
+        let profile = rf_profiles::load_str(&text)
+            .expect("the table loads")
+            .profile;
+        let plan = ScoutPlan::from_profile(profile.scout.as_ref().expect("[scout]"));
+        assert_eq!(plan.start_when, vec![(0x12, 5), (0x12, 7), (0x6F, 4)]);
+        assert_eq!(plan, plan_of(&sk));
     }
 }

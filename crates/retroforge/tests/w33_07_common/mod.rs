@@ -78,6 +78,8 @@ pub struct Rig {
     pub last_events: Vec<CoreEvent>,
     /// W35-05: the hash of the last frame's indexed picture.
     pub shown: u64,
+    /// W35-11: the last frame's picture was one flat colour.
+    pub flat: bool,
 }
 
 pub fn roms_dir() -> String {
@@ -115,11 +117,15 @@ impl Rig {
         });
         let (w, h) = if snes { (256, 224) } else { (256, 240) };
         let len = if snes { 0x2000 } else { 0x800 + 0x2000 };
+        let mut finder = ScoutFinder::new(len, if snes { 2 } else { 1 });
+        if !snes {
+            finder.set_save_ram_from(0x800);
+        }
         Some(Self {
             st,
             sink: Sink::new(w, h),
             live: CanvasModel::new(),
-            finder: ScoutFinder::new(len, if snes { 2 } else { 1 }),
+            finder,
             snes,
             scene_key,
             lag: ScrollLag::default(),
@@ -130,6 +136,7 @@ impl Rig {
             last_scroll: Vec::new(),
             last_events: Vec::new(),
             shown: 0,
+            flat: false,
         })
     }
 
@@ -141,6 +148,7 @@ impl Rig {
         self.st.latch_and_advance_frame(input, &mut self.sink);
         let bundle = self.sink.bundle.take(self.st.frame_count());
         self.shown = rf_enhance::scout_finder::picture_hash(&bundle.video);
+        self.flat = retroforge::scout::picture_is_flat(&bundle.video);
         let level = self
             .scene_key
             .as_ref()
@@ -283,6 +291,9 @@ impl Rig {
         let len = if self.snes { 0x2000 } else { 0x800 + 0x2000 };
         self.live = CanvasModel::new();
         self.finder = ScoutFinder::new(len, if self.snes { 2 } else { 1 });
+        if !self.snes {
+            self.finder.set_save_ram_from(0x800);
+        }
         self.lag = ScrollLag::default();
         self.last_scene = None;
     }
@@ -503,6 +514,7 @@ pub fn scout_width(rig: &mut Rig, rom: &[u8], plan: ScoutPlan, secs: u64) -> (us
             scene,
             size,
             scrolls,
+            blank: false,
         });
         if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
             break;
@@ -540,10 +552,23 @@ pub fn scout_width(rig: &mut Rig, rom: &[u8], plan: ScoutPlan, secs: u64) -> (us
 /// One game: play the session, find the table, scout with it, and (when the
 /// profile has a hand-made `[scout]`) scout with that too.
 pub fn discover_game(
+    game: (&str, &str, &str),
+    to_level: &str,
+    play: &str,
+    hand: bool,
+) -> Option<(rf_enhance::scout_finder::Skeleton, usize, Option<usize>)> {
+    discover_game_with(game, to_level, play, hand, None)
+}
+
+/// [`discover_game`], with a second area (W35-11): after the session's play the machine is put
+/// back to the `snapshot` (made by another run of the game, in another level) and the second
+/// script is played there, so the finder has seen two areas.
+pub fn discover_game_with(
     (console, file, profile): (&str, &str, &str),
     to_level: &str,
     play: &str,
     hand: bool,
+    second: Option<(&retroforge::stepper::MachineSnapshot, &str)>,
 ) -> Option<(rf_enhance::scout_finder::Skeleton, usize, Option<usize>)> {
     // `RF_HINTS=0`: the live model gets no profile scene hints.
     let hints = std::env::var("RF_HINTS").map_or(true, |v| v != "0");
@@ -561,6 +586,26 @@ pub fn discover_game(
     let seed = rig.live.fork_for_scout();
     // The session.
     rig.script(play);
+    if let Some((snap, play2)) = second {
+        rig.st.restore(snap).expect("restore the second area");
+        rig.script(play2);
+    }
+    for o in std::env::var("RF_PROBE")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|o| usize::from_str_radix(o.trim(), 16).ok())
+    {
+        println!("{}", rig.finder.state_probe(o));
+    }
+    for c in rig.finder.clean_gates(12) {
+        println!(
+            "clean gate {:#06x} = {:#04x} +{:02x?} off-cut {}",
+            c.offset,
+            c.value,
+            &c.also[..usize::from(c.also_n)],
+            c.off_cut
+        );
+    }
     let observed = rig.finder.observed();
     describe(&observed);
     let scrolls: retroforge::scout::ScrollReader = if rig.snes {

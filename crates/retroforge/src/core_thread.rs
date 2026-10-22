@@ -1625,9 +1625,19 @@ fn core_thread_main(
                     });
                 }
                 CoreCommand::FindScout(on) => {
-                    scout_find = on.then(|| {
-                        crate::scout_find::ScoutFind::new(stepper.bg_layer_views().is_some())
-                    });
+                    // W35-11: the finder watches from the first widescreen frame (see below), so
+                    // asking for it arms the one that has seen the menus.
+                    if on {
+                        scout_find
+                            .get_or_insert_with(|| {
+                                crate::scout_find::ScoutFind::passive(
+                                    stepper.bg_layer_views().is_some(),
+                                )
+                            })
+                            .arm();
+                    } else if let Some(find) = scout_find.as_mut() {
+                        find.disarm();
+                    }
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
@@ -2157,8 +2167,14 @@ fn core_thread_main(
             });
             let scene = canvases.observe_frame(&bundle, &feed);
             let bundle_size = (bundle.width, bundle.height);
+            let blank = crate::scout::picture_is_flat(&bundle.video);
             // Ticket W33-07: the scout-settings finder, an observer of this
             // frame; its trials run on a thread of their own.
+            if scout_find.is_none() && widescreen.is_some() {
+                scout_find = Some(crate::scout_find::ScoutFind::passive(
+                    stepper.bg_layer_views().is_some(),
+                ));
+            }
             if let Some(find) = scout_find.as_mut() {
                 let outs = find.frame(&crate::scout_find::Fed {
                     stepper: &stepper,
@@ -2490,6 +2506,7 @@ fn core_thread_main(
                     scene,
                     size: bundle_size,
                     scrolls: snes_layer_scrolls,
+                    blank,
                 });
             }
         } else {

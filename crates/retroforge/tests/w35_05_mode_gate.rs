@@ -19,6 +19,7 @@ fn game(name: &str) -> ((&'static str, &'static str, &'static str), String, Stri
             SM_PLAY.into(),
         ),
         "cv" => (CV, CV_TO_STAGE.into(), CV_PLAY.into()),
+        "z1" => (ZELDA1, Z1_TO_PLAY.into(), Z1_WALK.into()),
         "alttp" => (ALTTP, alttp_to_free_play(), alttp_play()),
         other => panic!("unknown game {other}"),
     }
@@ -60,18 +61,115 @@ fn explore_session() {
     }
 }
 
+/// Explore: every frame of the session, bytes of the first 2 KB of RAM. `RF_PLAY_FROM` is the
+/// frame play starts on (observed in `explore_session`); a byte is a separator when its values in
+/// play (from there on) and before it share no value. Prints the bytes with at most `RF_MAXV`
+/// (default 3) play values, the values they take before play, and in play.
+#[test]
+#[ignore = "explore"]
+fn explore_separators() {
+    let name = std::env::var("RF_GAME").unwrap_or_else(|_| "z1".into());
+    let from: usize = std::env::var("RF_PLAY_FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1716);
+    let maxv: usize = std::env::var("RF_MAXV")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let (g, to_level, play) = game(&name);
+    let Some(mut rig) = Rig::open(g.0, g.1, Some(g.2)) else {
+        return;
+    };
+    let script = std::env::var("RF_SCRIPT").unwrap_or_else(|_| format!("{to_level} {play}"));
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    for tok in unit_tokens(&script) {
+        rig.script(&tok);
+        let bus = |o: u32| if rig.snes { 0x7E_0000 + o } else { o };
+        frames.push((0..0x800u32).map(|o| rig.st.peek_bus(bus(o))).collect());
+    }
+    let (pre, post) = frames.split_at(from.min(frames.len()));
+    for b in 0..0x800usize {
+        let count = |set: &[Vec<u8>]| {
+            let mut c = [0u32; 256];
+            set.iter().for_each(|f| c[usize::from(f[b])] += 1);
+            c
+        };
+        let (cp, cq) = (count(pre), count(post));
+        let pv: Vec<usize> = (0..256).filter(|&v| cq[v] > 0).collect();
+        let pre_in_play: u32 = pv.iter().map(|&v| cp[v]).sum();
+        if pv.len() > maxv || pre_in_play * 10 > pre.len() as u32 * 3 {
+            continue;
+        }
+        let fmt = |c: &[u32; 256]| {
+            (0..256)
+                .filter(|&v| c[v] > 0)
+                .map(|v| format!("{v:02x}x{}", c[v]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if (0..256).filter(|&v| cp[v] > 0).count() <= 40 {
+            println!("SEP {b:#05x}: pre [{}] play [{}]", fmt(&cp), fmt(&cq));
+        }
+    }
+}
+
 // ---- the ranking, per game ----------------------------------------------------------------------
 
 /// Run the game's session and print the gate ranking with the values the top bytes take in each
 /// state; `RF_EXPECT=0xOFFSET=0xVALUE` makes the first gate an assertion.
 fn rank_game(name: &str, expect: Option<(usize, u8)>) {
     let (g, to_level, play) = game(name);
+    let to_level = std::env::var("RF_TO").unwrap_or(to_level);
     let Some(mut rig) = Rig::open(g.0, g.1, Some(g.2)) else {
         return;
     };
     rig.script(&to_level);
     rig.script(&play);
-    let gates = rig.finder.gates_ranked(6);
+    for g in rig.finder.gates_ranked(4) {
+        println!(
+            "{name} old gate {:#06x} = {:#04x} open on {:?} of the stretch before play; worst unplayed scene {:?}",
+            g.offset,
+            g.value,
+            rig.finder.prelude_open(g.offset, &g),
+            rig.finder.unplayed_open(&g)
+        );
+    }
+    println!(
+        "{name} observed gates {:?}",
+        rig.finder
+            .observed()
+            .gates
+            .iter()
+            .take(4)
+            .map(|g| (g.offset, g.value, g.also_n))
+            .collect::<Vec<_>>()
+    );
+    let keep = std::env::var("RF_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let gates = rig.finder.gates_ranked(keep);
+    // `RF_WATCH=12,98`: where these offsets (hex) rank, and the values they read in each state.
+    for w in std::env::var("RF_WATCH").unwrap_or_default().split(',') {
+        if let Ok(o) = usize::from_str_radix(w.trim(), 16) {
+            let at = gates.iter().position(|g| g.offset == o);
+            println!("WATCH {o:#06x}: rank {at:?} of {}", gates.len());
+            if let Some(i) = at {
+                println!("WATCH {:?}", gates[i]);
+            }
+            println!("{}", rig.finder.state_probe(o));
+        }
+    }
+    let show: usize = std::env::var("RF_SHOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let gates = if keep > show {
+        gates[..show.min(gates.len())].to_vec()
+    } else {
+        gates
+    };
     for (i, c) in gates.iter().enumerate() {
         println!(
             "{name} #{i}: {:#06x} = {:#04x} mode {:.3} contrast {:.2} pause apart {:.2}/{} speech apart {:.2}/{} confidence {:.2}",
@@ -79,6 +177,24 @@ fn rank_game(name: &str, expect: Option<(usize, u8)>) {
             c.speech_apart, c.speech_frames, c.confidence
         );
         println!("{}", rig.finder.state_probe(c.offset));
+    }
+    // W35-11: the gates that tell play from the stretch before it.
+    let clean = rig.finder.clean_gates(
+        std::env::var("RF_CLEAN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
+    );
+    println!("{name} clean gates: {}", clean.len());
+    for c in &clean {
+        println!(
+            "{name} clean {:#06x} = {:#04x} +{:02x?} off-cut {} open on {:.2} of the rest",
+            c.offset,
+            c.value,
+            &c.also[..usize::from(c.also_n)],
+            c.off_cut,
+            1.0 - c.differs
+        );
     }
     if let Some((offset, value)) = expect {
         let first = gates.first().expect("a gate");
@@ -108,6 +224,12 @@ fn rank_cv() {
 #[ignore = "needs A Link to the Past"]
 fn rank_alttp() {
     rank_game("alttp", Some((0x0010, 0x09)));
+}
+
+#[test]
+#[ignore = "needs The Legend of Zelda"]
+fn rank_z1() {
+    rank_game("z1", None);
 }
 
 #[test]
@@ -214,6 +336,7 @@ fn smw_scout_never_starts_while_paused() {
             scene,
             size: (256, 224),
             scrolls: retroforge::core_thread::snes_layer_scrolls,
+            blank: false,
         });
     };
     // Start: the game pauses. The driver is ticked on every frame, as the core thread does.

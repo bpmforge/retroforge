@@ -117,6 +117,7 @@ pub fn scout_dims(
             scene,
             size: (256, 224),
             scrolls: retroforge::core_thread::snes_layer_scrolls,
+            blank: false,
         });
         if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
             break;

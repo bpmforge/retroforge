@@ -71,6 +71,9 @@ type TrialResult = Result<Box<Skeleton>, String>;
 /// The finder and the trial thread, for one game.
 pub struct ScoutFind {
     finder: ScoutFinder,
+    /// W35-11: `false` = only watching (the app starts the finder at ROM load, so the menus before
+    /// "Find" are in its histograms); no trial starts and nothing is reported until [`Self::arm`].
+    armed: bool,
     snes: bool,
     idle: u32,
     /// W35-06: trials that failed so far, and the live frames still to wait before the next.
@@ -117,13 +120,38 @@ fn no_scrolls(_: &EmuStepper) -> Option<[Option<LayerScroll>; LAYERS]> {
 }
 
 impl ScoutFind {
+    /// A finder that watches and does nothing else, until [`Self::arm`]ed.
+    #[must_use]
+    pub fn passive(snes: bool) -> Self {
+        let mut f = Self::new(snes);
+        f.armed = false;
+        f
+    }
+
+    /// Start answering ("Find scout settings"): trials start once the session is enough.
+    pub fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    /// Stop answering (a trial in flight is dropped); the observations stay.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+        self.trial = None;
+    }
+
     #[must_use]
     pub fn new(snes: bool) -> Self {
+        let mut finder = ScoutFinder::new(
+            if snes { SEARCH_SNES } else { SEARCH_NES },
+            if snes { 2 } else { 1 },
+        );
+        if !snes {
+            // The NES search space is the 2 KB of work RAM, then the cartridge's 8 KB.
+            finder.set_save_ram_from(0x800);
+        }
         Self {
-            finder: ScoutFinder::new(
-                if snes { SEARCH_SNES } else { SEARCH_NES },
-                if snes { 2 } else { 1 },
-            ),
+            finder,
+            armed: true,
             snes,
             idle: 0,
             retries: 0,
@@ -136,7 +164,7 @@ impl ScoutFind {
 
     /// Feed one live frame; may start the trials or report their result.
     pub fn frame(&mut self, f: &Fed<'_>) -> Vec<Out> {
-        if let Some(rx) = &self.trial {
+        if let Some(rx) = self.trial.as_ref().filter(|_| self.armed) {
             return match rx.try_recv() {
                 Ok(result) => {
                     self.trial = None;
@@ -258,7 +286,7 @@ impl ScoutFind {
             start: f.pad & (1 << start_bit) != 0,
             shown: picture_hash(&f.bundle.video),
         });
-        if !self.finder.frames().is_multiple_of(LOOK_EVERY) {
+        if !self.armed || !self.finder.frames().is_multiple_of(LOOK_EVERY) {
             return Vec::new();
         }
         let obs = self.finder.observed();
