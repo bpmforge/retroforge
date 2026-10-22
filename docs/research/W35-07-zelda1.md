@@ -194,3 +194,28 @@ cargo test --release -p retroforge --test w35_09_zelda_reach -- --ignored --noca
 cargo test --release -p retroforge --test w35_09_zelda_reach -- --ignored --nocapture z1_pass_probe             # RF_DIR=left RF_REACH=300
 RF_SCREENS_ONLY=z1-scout (w30_screens, scripts: shot.sh)                                                         # ~25 s
 ```
+
+## 9. W35-10: the z1-scout flake, fixed (core thread handoff)
+
+Root causes, ranked, and how each was checked:
+1. (the bug) `open_rom_path` assigned `self.core = Some(new)`, dropping the old `CoreHandle` with no `Shutdown`
+   and no join. Verified by reading: the core loop drains commands with `cmd_rx.try_iter()`, which ignores a
+   hung-up sender, and it only stops on `Shutdown` or when an event send fails (next frame). So the old thread
+   lives on with its own `rf-cache` handle. The new regression test fails without the fix (first thread still
+   reachable after the second open), passes with it. Quit-to-library sent `Shutdown` but did not join; app exit
+   did neither.
+2. (consequence) its final flush (canvas model drop) then ran after the new thread's: last writer wins.
+3. (amplifier) `Cache::persist_index` rewrote the whole `index.bin` from the in-memory index, so a stale
+   writer dropped rows another writer added, although the entry file was safe on disk (the write was already
+   temp-then-rename). Not the trigger on its own with one thread, but it turned a leak into a lost scene.
+
+Fix: `RetroForgeApp::stop_core_and_join` (Shutdown, then poll `is_finished` up to 5 s, logged and detached if
+exceeded; the time is kept in `last_core_join`). Called by `open_rom_path` before the spawn, by quit-to-library
+and by `Drop` (exit). `persist_index` now folds in on-disk rows whose entry file exists and which the writer
+does not hold (its own win; evicted rows have no file, so none are resurrected), then renames into place.
+Accuracy Mode untouched (no core, renderer or cache-format change).
+
+Measured: ROM switch join 7.5 ms (NES fixture to SNES fixture, release); `z1-scout` (cold TMPDIR, one at a
+time, release) 10/10 passes, 25 s each, peak RSS 300 to 368 MB (was failing about 4 in 10).
+Tests: `w35_10_core_handoff.rs` (first thread exited after the second open, join time, exit ends the thread),
+`rf-cache` `a_stale_writer_cannot_drop_a_newer_writers_entry`.
