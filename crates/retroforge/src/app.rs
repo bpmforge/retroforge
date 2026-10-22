@@ -46,6 +46,9 @@ use rf_enhance::trust::TrustState;
 /// size"). 30 repaints is roughly twice a second at the app's normal
 /// repaint cadence — frequent enough that Ultrawide visibly keeps up with
 /// play, far below the cost of a per-frame clone.
+/// W35-10: the longest a ROM switch / exit waits for the old core thread.
+const CORE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const CANVAS_SNAPSHOT_REFRESH_INTERVAL: u32 = 30;
 
 /// The size `main.rs` opens the window at, and the size
@@ -601,6 +604,8 @@ pub struct RetroForgeApp {
     /// `open_rom_path`'s call sites is the smaller change.
     ctx: egui::Context,
     core: Option<CoreHandle>,
+    /// W35-10: how long the last `stop_core_and_join` took (UI-stall metric).
+    last_core_join: std::time::Duration,
     texture: Option<egui::TextureHandle>,
     /// Ticket W3-03: the same frame's BG-only layer as a separate egui
     /// texture (`rf_renderer::LayeredFrame::bg_rgba`, via
@@ -1685,6 +1690,14 @@ type MarginRows<'a> = (
     &'a [Option<u16>],
 );
 
+impl Drop for RetroForgeApp {
+    /// W35-10: on exit the core thread finishes its cache flush before the
+    /// process (or the next app on the same cache) goes on.
+    fn drop(&mut self) {
+        self.stop_core_and_join();
+    }
+}
+
 impl RetroForgeApp {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -1830,6 +1843,7 @@ impl RetroForgeApp {
             upscale_studio_write_dir: None,
             ctx: cc.egui_ctx.clone(),
             core: None,
+            last_core_join: std::time::Duration::ZERO,
             texture: None,
             bg_layer_texture: None,
             sprite_layer_texture: None,
@@ -2598,6 +2612,21 @@ impl RetroForgeApp {
             time / 3600,
             (time % 3600) / 60
         )
+    }
+
+    /// W35-10: a clone of the live core's command sender. `send` fails
+    /// exactly when the core thread has exited (its receiver is gone).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn core_cmd_sender_for_test(&self) -> Option<std::sync::mpsc::Sender<CoreCommand>> {
+        self.core.as_ref().map(|c| c.cmd_tx.clone())
+    }
+
+    /// W35-10: how long the last core stop-and-join took.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_core_join_for_test(&self) -> std::time::Duration {
+        self.last_core_join
     }
 
     /// Point the state manager at a game hash without opening a ROM
@@ -3905,6 +3934,35 @@ impl RetroForgeApp {
     /// which is this — the same body the library's Play button uses — so
     /// everything after the file picker is the shipped path rather than a
     /// test-only one.
+    /// Ticket W35-10: stop the running core thread and WAIT for it, so its
+    /// final cache flush (canvas model drop) lands before anything else
+    /// (a new core, the next app) reads or writes the same cache. Dropping
+    /// the handle alone left the thread running (its command loop ignores a
+    /// hung-up sender) with a stale in-memory index. Bounded: past
+    /// [`CORE_JOIN_TIMEOUT`] the thread is detached and the stall is logged.
+    /// Returns how long the stop took (0 with no core).
+    fn stop_core_and_join(&mut self) -> std::time::Duration {
+        let Some(core) = self.core.take() else {
+            return std::time::Duration::ZERO;
+        };
+        let started = std::time::Instant::now();
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let join = core.join_handle;
+        while !join.is_finished() && started.elapsed() < CORE_JOIN_TIMEOUT {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if join.is_finished() {
+            let _ = join.join();
+        } else {
+            eprintln!(
+                "retroforge: core thread still running {CORE_JOIN_TIMEOUT:?} after Shutdown; detaching"
+            );
+        }
+        let took = started.elapsed();
+        self.last_core_join = took;
+        took
+    }
+
     pub fn open_rom_path(&mut self, path: &std::path::Path) {
         // Ticket W20-09: an HD pack belongs to the game it was loaded
         // for. Kept across a ROM change it went quietly dead — the new
@@ -4127,6 +4185,8 @@ impl RetroForgeApp {
         // request alone was not enough on 2026-09-17.
         let ctx_for_waker = self.ctx.clone();
         let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx_for_waker.request_repaint());
+        // W35-10: the previous core finishes (and flushes its cache) first.
+        self.stop_core_and_join();
         match core_thread::spawn_with_waker(bytes, Some(waker)) {
             Ok(handle) => {
                 self.core = Some(handle);
@@ -13485,8 +13545,7 @@ impl RetroForgeApp {
         self.show_overlay_menu = false;
         self.menu_paused_game = false;
         self.current_rom_path = None;
-        self.send_command(CoreCommand::Shutdown);
-        self.core = None;
+        self.stop_core_and_join();
         self.texture = None;
         self.bg_layer_texture = None;
         self.sprite_layer_texture = None;

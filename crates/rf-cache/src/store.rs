@@ -65,7 +65,7 @@ impl Cache {
         ensure_contained(&root, &index_path)?;
         let index = load_or_rebuild_index(&root, &entries_dir, &index_path);
 
-        let cache = Cache {
+        let mut cache = Cache {
             root,
             entries_dir,
             index_path,
@@ -217,7 +217,28 @@ impl Cache {
         }
     }
 
-    fn persist_index(&self) -> Result<(), CacheError> {
+    /// Write the index, first folding in entries a second `Cache` on the
+    /// same root persisted since we loaded (W35-10). Every `put` writes its
+    /// entry file before touching the index, so an entry file with no index
+    /// row is just a row some other writer's whole-file rewrite dropped:
+    /// adopt rows from disk whose entry file still exists and that we do
+    /// not hold (ours win on conflict; rows we evicted have no file, so
+    /// they are not resurrected). Then rename-into-place via `atomic_write`.
+    fn persist_index(&mut self) -> Result<(), CacheError> {
+        if let Ok(bytes) = std::fs::read(&self.index_path) {
+            if let Ok((disk, _)) =
+                bincode::decode_from_slice::<Index, _>(&bytes, bincode::config::standard())
+            {
+                for (hash, row) in disk.entries {
+                    if !self.index.entries.contains_key(&hash)
+                        && self.entries_dir.join(format!("{hash}.bin")).is_file()
+                    {
+                        self.index.entries.insert(hash, row);
+                    }
+                }
+                self.index.next_counter = self.index.next_counter.max(disk.next_counter);
+            }
+        }
         let bytes = bincode::encode_to_vec(&self.index, bincode::config::standard())
             .map_err(|e| CacheError::Encode(e.to_string()))?;
         atomic_write(&self.index_path, &bytes)
@@ -511,6 +532,26 @@ mod tests {
 
         std::fs::remove_file(&link_root).ok();
         std::fs::remove_dir_all(&real_root).ok();
+    }
+
+    #[test]
+    fn a_stale_writer_cannot_drop_a_newer_writers_entry() {
+        // W35-10: two Caches on one root (an old core thread and its
+        // successor). The stale one puts last from an index that never saw
+        // the other's entry; the entry must survive in the persisted index.
+        let root = unique_dir("two-writers");
+        let mut stale = Cache::open(&root, 1 << 20).expect("open stale");
+        let mut fresh = Cache::open(&root, 1 << 20).expect("open fresh");
+        fresh
+            .put(&test_key("scouted"), b"scene")
+            .expect("fresh put");
+        stale.put(&test_key("late"), b"other").expect("stale put");
+        let mut reopened = Cache::open(&root, 1 << 20).expect("reopen");
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(
+            reopened.get(&test_key("scouted")).unwrap().as_deref(),
+            Some(&b"scene"[..])
+        );
     }
 
     #[test]
