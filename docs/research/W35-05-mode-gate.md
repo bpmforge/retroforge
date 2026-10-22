@@ -97,3 +97,122 @@ SM, CV and ALttP got a Start pause. `rank_<game>` prints the ranking and the val
 
 `cargo test --release -p retroforge --test w35_05_mode_gate -- --ignored --nocapture <rank_smw|rank_sm|rank_cv|rank_alttp|rank_smb3|rank_mm2|rank_mmx|smw_scout_never_starts_while_paused|sm_gate_is_shut_in_the_door|alttp_gate_is_shut_in_a_speech>`;
 `explore_session` with `RF_GAME`, `RF_SCRIPT`, `RF_PROBES` prints a probe byte per token.
+
+## 7. W35-11: start gates for Zelda 1, SMB3, MM2, MMX
+
+Observation only (D-021): the bytes below were found by the finder from the sessions in
+`crates/retroforge/tests/w35_11_start_gates.rs` (no RAM map, no disassembly; the Zelda profile's own RAM-map
+comment was not used). Release builds, one process at a time under an RSS watchdog (peak 340 MB).
+
+### 7.1 Zelda 1: why no gate was right (ranked causes, each checked)
+
+Before: the discovered rows were `$0211 = 8`, `$0215 = 0x0a` (sprite-table bytes) and the real `ScoutDriver`, ticked
+every frame from power-on, **started a scout in the file-select menus** (frame 2451).
+
+1. **The level's scene holds the menus.** Scene identity is the picture's colours (`palette_scene_id`), so the title
+   stays its own scene but the story/name entry/file select and the overworld Link then walks are ONE scene
+   (`explore_session`: scene 28709 from frame 606 to the end). Verified with `state_probe`: the true state byte
+   (`$12`) reads 1/0x0e/3 on 1,100 frames of that scene before play, 5/7/4/6 in play; the level histogram held
+   both, so every real separator read its play value on 51 to 74 % of the "level" and failed `MIN_CONSTANCY`
+   (0.95); the bytes that ranked were sprite-table bytes that read the same value in the menus (they only differ from the
+   title). *This was the cause.*
+2. The mode byte takes several play values (5 field, 7 a screen scrolling in, 4/6 short ones), so a single-value
+   gate covers 66 % of play (`MIN_PLAY_COVER` 0.6 barely, and a scouting run through screen flips fails the 98 %
+   survival bar). True, but secondary: it only matters once cause 1 is out of the way.
+3. Too few contrasting states in the session (no pause): the title was present (248 frames); a pause adds a guard
+   row but does not touch cause 1.
+
+Ranking in the scoring itself was tried and dropped: a prelude as one more NMI state, and a leak factor on the
+score, both reorder SM/SMW (margins 0.580/0.579 and 0.517/0.503) because their stretch before play is the game
+running (Ceres' story pages read mode 8) and indistinguishable from Zelda's menus by evidence alone.
+
+### 7.2 The fix (generic, additive; the old ranking is untouched)
+
+* `scout_finder`: a scene's stretch before the player first played in it (up to the last button press, so the
+  standing frames after Start are play) is kept as a copy of the histogram (`preludes`, at most `MAX_SCENES`, only
+  when >= 200 frames). `clean_gates()`: bytes whose play values (at most 4, each >= 1 % of play, covering 98 %) are
+  open on <= 10 % of the stretch before play and of every other unplayed scene; a byte that dwells (128 frames
+  running) on more of its play values than there are played scenes is room data and is out; counters (> 24 values) are out; ranked state variable
+  before latch, calmest, fewest values. Save RAM (NES `$6000..`) is excluded (a save is the player's own).
+* `Observed::gates` uses it only when the old ranking is **blind**: every one of its first four gates is open on
+  >= 95 % of that stretch (`BLIND_OPEN`). SMW (`$0100` 78 %), SM, CV, ALttP, SMB3, MM2, MMX are not blind or have no
+  stretch, so their lists are byte-identical to before (rank outputs and discovery tables compared below).
+* A gate may be several values: rows on one `start_when` address are alternatives, different addresses all hold
+  (`start_gate_open`, `GateCandidate::holds`, `gate_survival`, `docs/design/GAME_PROFILES.md`).
+* `ScoutDriver` waits while the live picture is one flat colour (`LiveView::blank`, `picture_is_flat`): the
+  black screen between MMX's title and its stage read as "in play" to every byte the finder had.
+
+### 7.3 Per game (`w35_11_start_gates`, real `ScoutDriver` ticked every frame from power-on over a 2,400-frame title
+(attract/story), the menus, then play; the finder watched the game's own session)
+
+| Game | Rows found (no hand `[scout]`) | Scouts started: menus / play | Gate open on play |
+|---|---|---|---|
+| Zelda 1 | `$12` in {5,7,3,4}, `$6F` = 4 | 0 / 2 | 2849 of 2886 frames |
+| SMB3 | `$7F50` = 0xF2 (cartridge RAM), `$0302` = 0x28 | 0 / 1 | 1115 of 1238 |
+| MM2 | `$2A` = 1, `$36D` = 0x38 | 0 / 1 | 2398 of 2445 |
+| MMX | `$7E0352` = 0x11, `$7E0350` = 0x78 | 0 / 2 (1 / 3 without the blank rule) | 1259 of 1345 |
+
+Zelda second visit unchanged (see 7.4). Widths and agreement as before, one process at a time: SMW 5120 px
+(100.0 %), SM 512 (99.8 %), CV 768 (100 %), ALttP 1024 (99.8 %), SMB3 2816 (99.7 %), MM2 2560 (99.0 %), MMX 2820
+(100 %), Zelda 768 (99.8 %). Gates kept: SMW `$0100`,`$13D4`; SM `$0998`,`$0001`; CV `$18`; ALttP `$10`.
+
+### 7.4 Honest gaps
+
+* SMB3, MM2, MMX rows are not the mode bytes W35-05 named. The ranked mode bytes (`$071E`, `$002A`, `$0960`) do not
+  all survive here: with the long title in the session SMB3's pause is not recognised and `$071E` fails the 95 %
+  bar; MMX's `$0960` holds 52.7 % of a scouting run. What ships are bytes that tell play from the title/menus/black
+  screen on this evidence (sprite and data bytes), and SMB3's first row is cartridge RAM. The tests show 0 starts in
+  menus and the gate open on 90 to 98 % of play, not that these are the games' mode bytes.
+* Second level: not verified for SMB3/MM2/MMX (one level per session; a second needs stage select scripting). Zelda:
+  two overworld screens (flip to and fro), no dungeon; `$12`'s dungeon values are unseen and the gate would be shut
+  there. The in-app finder starts at "Find", so it never sees the menus: there the old ranking stands (the gap
+  above applies to what the app saves).
+* The stretch before play is judged by Start/A/B presses; a game with menus answered by a direction only is not seen.
+* `clean_gates` takes whatever separates this session; per-session data that happens to hold (e.g. a flag set at
+  game start) can pass; `GATE_SURVIVAL` and the second visit are the checks.
+
+### 7.5 Run
+
+```
+cargo test --release -p retroforge --test w35_11_start_gates -- --ignored --nocapture <z1|smb3|mm2|mmx>_start_gate
+cargo test --release -p retroforge --test w35_05_mode_gate -- --ignored --nocapture rank_z1   # RF_WATCH, RF_KEEP, RF_CLEAN
+```
+
+### 7.7 W35-11b: in the app, and a second area
+
+**In the app.** The core thread now starts the finder watching (`ScoutFind::passive`) on the first widescreen
+frame, so the title and menus before "Find scout settings" are in its histograms; asking for it arms the one
+that has seen them (`arm`/`disarm`; after an answer a fresh one starts). Memory is the finder's own bound
+(`MAX_SCENES` histograms + at most as many press copies, 100 to 110 MB peak in the runs). It watches only while
+widescreen is on (the scout is a widescreen feature). Real core thread, real time (`z1_in_app_start_gate`, ~3 min):
+Zelda played from power-on through the menus, "Find" pressed in the field: it saved
+`start_when` `$6F`=4 and `$12` in {5,7,3,4} (the same rows as the harness); a fresh core with that table over the
+2,400-frame title, attract and menus started **0** scouts, and **2** in play.
+
+**Second area (generic rule).** A gate is now validated against every scene the player played in (the level, the
+rooms beside it, another stage), not one (`open_in_every_played_scene`, `MIN_SCENE_OPEN` 0.9 of each scene's
+frames outside the cuts' zones, the values the byte reads in a pause or speech left out): a gate shut on more than a
+tenth of any of them is widened to the values the byte reads in play in all of them (at most `MAX_SET_VALUES` = 8,
+covering 98 % of each) or dropped. Clean gates take their values from the same union. The second area enters the
+finder's session as a snapshot made by another run of the game (`discover_game_with`); no ROM bytes in git.
+Rows: the first two gates the finder is sure of (`MIN_GATE_CONFIDENCE`), not the first two with the sure ones
+kept (MM2 had shipped one row because the second was under the floor).
+
+| Game | Second area | Outcome |
+|---|---|---|
+| Zelda 1 | the old man's cave on the first screen (scene 56468, 488 frames; not a dungeon) | rows `$6F`=4, `$0530` in {0xAA,0xFF}; menus 0, play 3, cave gate open 500 of 500 frames |
+| MM2 | another stage from the select screen | `$2A` was shut there (reads another value): widened to {1,2}; rows `$36D`=0x38, `$2A` in {1,2}; menus 0, play 2, stage 2 open 1047 of 1047 |
+| SMB3 | not reached | 1-1 not cleared by the scripts (Mario dies near its end, 1-2 stays locked): gap |
+| MMX | not reached | stage select comes after the intro stage, X dies in a loop under the scripts: gap |
+| Zelda dungeon 1 | not reached | the entrance was not found by walking; the cave stands in for it: gap |
+
+Without the second area MM2's `$2A`=1 alone was a shipped row that is shut in other stages; the rule found it. The
+second-area runs also made the finder rank differently (`$36D` first), and `$36D` is open in MM2's title: with only
+one row the scout started in the menus (frame 430), which the row-picking fix above repairs (two rows). ALttP: its
+mode byte reads 0x0e in text boxes the finder did not recognise as speech (1,442 frames, 16 % of the field); counting
+them made the gate "shut" and dropped it, so values read in a pause or speech are excluded from the check (the same
+exclusion `frozen_values` already makes in the ranking). Re-run, all as in 7.3: SMW `$0100`+`$13D4`, SM `$0998`+`$0001`,
+CV `$18`, ALttP `$10` kept; widths and agreement unchanged; the speech, door and pause tests pass.
+
+Not verified for SMB3/MMX/Zelda-dungeon: nothing in the finder is shipped for them from a second area, so a gate
+there that is shut elsewhere is not excluded; see the gaps above.

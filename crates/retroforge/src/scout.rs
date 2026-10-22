@@ -198,7 +198,9 @@ pub struct ScoutPlan {
     /// `(bus address, value)` conditions on the LIVE machine that must all
     /// hold for a scout to start (the player is alive and in control: a
     /// scout started from a dying player only gets as far as the game's
-    /// own restart timer).
+    /// own restart timer). W35-11: rows on one address are alternatives (a
+    /// mode byte that reads one value in a field and another while the
+    /// screen scrolls); different addresses must all hold ([`start_gate_open`]).
     pub start_when: Vec<(u32, u8)>,
     /// Ticket W33-06: the profile's strategy is final: the ladder tries no
     /// other rung.
@@ -1781,6 +1783,24 @@ fn run_worker(
     let _ = send_or_cancel(tx, cancel, msg);
 }
 
+/// W35-11: whether a frame's picture is one flat colour ([`LiveView::blank`]). Stops at the first
+/// pixel that differs, so a picture with anything on it costs a couple of reads.
+#[must_use]
+pub fn picture_is_flat(video: &[rf_core_api::PpuPixel]) -> bool {
+    video
+        .first()
+        .is_none_or(|a| video.iter().all(|p| p.palette_index == a.palette_index))
+}
+
+/// Whether the `start_when` rows hold: for every address, the byte reads one of the values the
+/// rows name for it (W35-11: a gate on one address may be open on several values).
+pub fn start_gate_open(rows: &[(u32, u8)], peek: impl Fn(u32) -> u8) -> bool {
+    rows.iter().all(|&(addr, _)| {
+        let now = peek(addr);
+        rows.iter().any(|&(a, v)| a == addr && v == now)
+    })
+}
+
 /// Decides WHEN to scout, hands the work to a worker thread and merges what
 /// it sends back. Driven once per live frame from the core thread.
 #[derive(Default)]
@@ -1805,6 +1825,9 @@ pub struct LiveView<'a> {
     /// The live frame's `(width, height)`.
     pub size: (u16, u16),
     pub scrolls: ScrollReader,
+    /// W35-11: the live picture is one flat colour (a black screen between scenes, a fade at its
+    /// darkest): there is nothing on it to scout, whatever the game's memory says.
+    pub blank: bool,
 }
 
 impl ScoutDriver {
@@ -1877,14 +1900,9 @@ impl ScoutDriver {
 
     /// Try to start the scene's scout; `false` = not now.
     fn start(&mut self, setup: &ScoutSetup, live: &LiveView<'_>) -> bool {
-        // Not ready (the player is dead, in a cutscene): wait, without
+        // Not ready (the player is dead, in a cutscene, the picture is black): wait, without
         // using up a retry; the live game will get there or it will not.
-        if setup
-            .plan
-            .start_when
-            .iter()
-            .any(|&(addr, v)| live.stepper.peek_bus(addr) != v)
-        {
+        if live.blank || !start_gate_open(&setup.plan.start_when, |a| live.stepper.peek_bus(a)) {
             self.ready = 0;
             return false;
         }
@@ -2408,7 +2426,65 @@ mod tests {
             scene,
             size: (256, 240),
             scrolls: no_scrolls,
+            blank: false,
         }
+    }
+
+    #[test]
+    fn rows_on_one_address_are_alternatives_and_addresses_all_hold() {
+        let rows = [(0x12, 5), (0x12, 7), (0x6F, 4)];
+        let at = |a: u32, b: u32| move |addr: u32| if addr == 0x12 { a as u8 } else { b as u8 };
+        assert!(start_gate_open(&rows, at(5, 4)));
+        assert!(start_gate_open(&rows, at(7, 4)));
+        assert!(
+            !start_gate_open(&rows, at(3, 4)),
+            "no value of 0x12 matches"
+        );
+        assert!(!start_gate_open(&rows, at(5, 0)), "0x6F must hold as well");
+        assert!(start_gate_open(&[], at(0, 0)));
+    }
+
+    #[test]
+    fn a_picture_of_one_colour_is_flat() {
+        let px = |i: u8| PpuPixel {
+            palette_index: i,
+            layer: rf_core_api::PixelLayer::Backdrop,
+            sprite_id: None,
+            priority: 0,
+        };
+        assert!(picture_is_flat(&[]));
+        assert!(picture_is_flat(&[px(3), px(3), px(3)]));
+        assert!(!picture_is_flat(&[px(3), px(3), px(4)]));
+    }
+
+    #[test]
+    fn a_blank_picture_never_starts_a_scout() {
+        let Some(rom) = fixture() else { return };
+        let mut st = EmuStepper::open(&rom).expect("opens");
+        let mut sink = nes_sink();
+        let mut live = CanvasModel::new();
+        let telemetry = std::sync::Arc::new(ScoutTelemetry::default());
+        let mut driver = ScoutDriver::default();
+        driver.set(Some(ScoutSetup {
+            plan: plan_of(2, 600, 40, 0),
+            telemetry: telemetry.clone(),
+        }));
+        // Bounded: 200 live frames on a blank picture, then 200 on a real one.
+        for f in 0..400u32 {
+            let scene = live_frame(
+                &mut st,
+                &mut sink,
+                &mut live,
+                if f >= 60 { RIGHT } else { 0 },
+            );
+            let mut view = live_view(&st, &rom, &mut live, scene);
+            view.blank = f < 200;
+            driver.tick(view);
+            if f < 200 {
+                assert!(!driver.running(), "started on a blank picture (frame {f})");
+            }
+        }
+        assert!(driver.running() || ScoutTelemetry::get(&telemetry.started) >= 1);
     }
 
     #[test]

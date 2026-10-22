@@ -202,6 +202,24 @@ pub const KEEP: usize = 4;
 pub const MIN_MODE_SCORE: f32 = 0.15;
 /// W35-05: frames a state needs before the mode score counts it as a label.
 pub const MIN_LABEL_FRAMES: u32 = 20;
+/// W35-11: frames a scene must have run before the player first played in it for the stretch to be
+/// judged as a prelude (a file select and a name entry that share the field's scene identity).
+pub const MIN_PRELUDE_FRAMES: u32 = MIN_ROOM_FRAMES;
+/// W35-11: the share of the frames of EVERY scene the player played in (the level, the rooms beside
+/// it, a second stage) a gate must be open on. A gate that is shut for a tenth of the play in one
+/// of them keeps the scout from running there, which is worse than no gate.
+pub const MIN_SCENE_OPEN: f32 = 0.9;
+/// W35-11: the share of the stretch before play a gate may be open on, at most, and still tell play
+/// from it.
+const BLIND_OPEN: f32 = 0.95;
+/// W35-11: frames a byte must hold a value for it to be one the byte dwells on (a room's data
+/// holds for as long as the player stays in it, a mode byte's transition values do not).
+const DWELL: u8 = 128;
+/// W35-11: the most values a prelude-clean gate may take in play (a mode byte with one value for
+/// the field, one for a screen scrolling in).
+pub const MAX_SET_VALUES: usize = 8;
+/// W35-11: the most of the prelude (and of every other scene) a prelude-clean gate may be open in.
+pub const MAX_LEAK: f32 = 0.1;
 /// W35-05: frames of a pause or a speech box needed before the guard test counts.
 pub const MIN_FROZEN_FRAMES: u32 = 12;
 /// W35-05: frames a direction is held in a scene before it is one the player has played in, with
@@ -305,6 +323,38 @@ pub struct GateCandidate {
     /// lock; also a wall in a game whose player stands still against it).
     pub speech_apart: f32,
     pub speech_frames: u32,
+    /// W35-11: further values (after `value`) the gate is open on, when the byte takes several in
+    /// play (a field and the scroll to the next screen): `also[..also_n]`.
+    pub also: [u8; MAX_SET_VALUES - 1],
+    pub also_n: u8,
+}
+
+/// W35-11: the values a byte reads in play across the scenes the player played in (`tallies`: per
+/// scene its frames and the counts of each value): every value that is a hundredth of any one
+/// scene, commonest first, at most [`MAX_SET_VALUES`]; `None` when they are more, or when they
+/// leave more than 2 % of a scene uncovered.
+fn union_set(tallies: &[(u32, [u32; 256])]) -> Option<Vec<(u32, usize)>> {
+    let mut set: Vec<(u32, usize)> = (0..256)
+        .filter(|&v| tallies.iter().any(|(t, c)| c[v] * 100 >= *t))
+        .map(|v| (tallies.iter().map(|(_, c)| c[v]).sum(), v))
+        .collect();
+    set.sort_by(|a, b| b.cmp(a));
+    if set.is_empty() || set.len() > MAX_SET_VALUES {
+        return None;
+    }
+    let covered = |(t, c): &(u32, [u32; 256])| -> bool {
+        let n: u32 = set.iter().map(|(_, v)| c[*v]).sum();
+        n as f32 >= MIN_CONSTANCY * 1.03 * *t as f32
+    };
+    tallies.iter().all(covered).then_some(set)
+}
+
+impl GateCandidate {
+    /// Whether the gate is open when its byte reads `v`.
+    #[must_use]
+    pub fn holds(&self, v: u8) -> bool {
+        v == self.value || self.also[..usize::from(self.also_n)].contains(&v)
+    }
 }
 
 /// Everything the session has shown so far.
@@ -485,6 +535,8 @@ pub struct ScoutFinder {
     last_delta: Vec<i8>,
     /// Frames each byte has held its value (capped).
     quiet_run: Vec<u8>,
+    /// W35-11: per byte, a bit per value it has held for [`DWELL`] frames in a row.
+    dwell: Vec<[u64; 4]>,
     prev_scroll: Vec<Option<u8>>,
     prev_scroll_y: Vec<Option<u8>>,
     /// Every x write of the previous frame, per layer.
@@ -566,6 +618,15 @@ pub struct ScoutFinder {
     /// Per scene, the frames inside a cut's zone (a mode byte is allowed to be
     /// anything on them).
     scene_zone: HashMap<Option<u64>, u32>,
+    /// W35-11: per scene, a copy of its histogram as it stood the first frame the player played in
+    /// it, when it had run [`MIN_PRELUDE_FRAMES`] by then; `None`: judged, too short.
+    preludes: HashMap<u64, Option<SceneHist>>,
+    /// W35-11: per scene not yet played in, a copy of its histogram as it stood at the last
+    /// button press (Start, Select or a face button): a press is how a menu is answered.
+    press_snap: HashMap<u64, SceneHist>,
+    /// W35-11: the first offset of battery-backed memory (a save file, not the game's state): no
+    /// gate is taken from it. `usize::MAX`: none.
+    save_ram_from: usize,
     cut_key: Option<u64>,
     cut_ring: std::collections::VecDeque<Vec<u8>>,
     settle_start: Option<u64>,
@@ -612,6 +673,7 @@ impl ScoutFinder {
             prev: Vec::new(),
             last_delta: vec![0; len],
             quiet_run: vec![0; len],
+            dwell: vec![[0; 4]; len],
             prev_scroll: vec![None; layers.max(1)],
             prev_scroll_y: vec![None; layers.max(1)],
             prev_scroll_all: Vec::new(),
@@ -665,6 +727,9 @@ impl ScoutFinder {
             scene_play: HashMap::new(),
             scene_walk: HashMap::new(),
             scene_zone: HashMap::new(),
+            preludes: HashMap::new(),
+            press_snap: HashMap::new(),
+            save_ram_from: usize::MAX,
             cut_key: None,
             cut_ring: std::collections::VecDeque::new(),
             settle_start: None,
@@ -687,6 +752,12 @@ impl ScoutFinder {
             staging: None,
             ignored: None,
         }
+    }
+
+    /// W35-11: offsets from `offset` on are the cartridge's save memory, whose contents are the
+    /// player's own (a gate read there would not open for another save).
+    pub fn set_save_ram_from(&mut self, offset: usize) {
+        self.save_ram_from = offset;
     }
 
     /// Frames fed so far.
@@ -725,14 +796,18 @@ impl ScoutFinder {
             self.vert_frame(f, n, cdy);
         }
         self.y_frame(f, n);
-        for ((d, q), (&now, &before)) in self
+        for (((d, q), (&now, &before)), long) in self
             .last_delta
             .iter_mut()
             .zip(self.quiet_run.iter_mut())
             .zip(f.ram.iter().zip(&self.prev))
+            .zip(self.dwell.iter_mut())
         {
             *d = now.wrapping_sub(before) as i8;
             *q = if *d == 0 { q.saturating_add(1) } else { 0 };
+            if *q == DWELL {
+                long[usize::from(now >> 6)] |= 1 << (now & 63);
+            }
         }
         self.prev.clear();
         self.prev.extend_from_slice(&f.ram[..n]);
@@ -1292,6 +1367,7 @@ impl ScoutFinder {
     fn gate_frame(&mut self, f: &Frame<'_>, n: usize, camera: (i16, i16), played: bool) {
         let in_zone = self.cut_frame(f, n);
         let key = f.scene;
+        self.note_press(f, key);
         let cd = camera.0;
         if cd != 0 && cd.abs() <= MAX_STEP {
             *self.scene_moving.entry(key).or_insert(0) += 1;
@@ -1317,6 +1393,7 @@ impl ScoutFinder {
                 .count(&f.ram[..n], false);
             return;
         }
+        self.note_prelude(key);
         if in_zone {
             *self.scene_zone.entry(key).or_insert(0) += 1;
         }
@@ -1407,9 +1484,7 @@ impl ScoutFinder {
         if dir && known && self.since_change < WALK_LIVE {
             *self.scene_walk.entry(key).or_insert(0) += 1;
         }
-        let played_in = key.is_some()
-            && (self.scene_play.get(&key).copied().unwrap_or(0) >= MIN_TRANSIT_FRAMES
-                || self.scene_walk.get(&key).copied().unwrap_or(0) >= MIN_WALK_FRAMES);
+        let played_in = self.played_in(key);
         if played_in {
             if edge {
                 self.press = Some(frame);
@@ -1436,6 +1511,53 @@ impl ScoutFinder {
             return Some(false);
         }
         None
+    }
+
+    /// Whether the player has played in scene `key` so far (it moved the screen at the pad, or a
+    /// direction was held on a live picture).
+    fn played_in(&self, key: Option<u64>) -> bool {
+        key.is_some()
+            && (self.scene_play.get(&key).copied().unwrap_or(0) >= MIN_TRANSIT_FRAMES
+                || self.scene_walk.get(&key).copied().unwrap_or(0) >= MIN_WALK_FRAMES)
+    }
+
+    /// W35-11: a button press (Start or a face button, on this frame and not the last) in a scene
+    /// the player has not yet played in: keep what the scene's histogram holds up to it.
+    fn note_press(&mut self, f: &Frame<'_>, key: Option<u64>) {
+        let Some(k) = key else { return };
+        let press = (f.start && !self.prev_start) || f.jump & !self.prev_jump != 0;
+        if !press || self.preludes.contains_key(&k) {
+            return;
+        }
+        let Some(h) = self
+            .scenes
+            .get(&key)
+            .filter(|h| h.frames >= MIN_PRELUDE_FRAMES)
+        else {
+            return;
+        };
+        if self.press_snap.len() >= MAX_SCENES && !self.press_snap.contains_key(&k) {
+            return;
+        }
+        match self.press_snap.get_mut(&k) {
+            Some(snap) => snap.clone_from(h),
+            None => {
+                self.press_snap.insert(k, h.clone());
+            }
+        }
+    }
+
+    /// W35-11: the first frame the player has played in a scene, the stretch before it is what
+    /// the scene held at its last button press (see [`Self::note_press`]; `None`: too short). A
+    /// scene is the picture's identity, not the game's: a file select and the field the player
+    /// then walks in can be one scene. Nothing is taken out of the scene's histogram.
+    fn note_prelude(&mut self, key: Option<u64>) {
+        let Some(k) = key else { return };
+        if self.preludes.contains_key(&k) || !self.played_in(key) {
+            return;
+        }
+        let before = self.press_snap.remove(&k);
+        self.preludes.insert(k, before);
     }
 
     /// End the pause being staged: keep its frames as a pause, or give them back to their scene.
@@ -1748,8 +1870,310 @@ impl ScoutFinder {
         out
     }
 
+    /// W35-11: the bytes that tell the field the player played in from everything the session
+    /// showed before and beside it. The level's scene can hold a game's menus as well as its play
+    /// (one picture identity), so a byte that reads one value through all of it passes the other
+    /// bars and says nothing about the menus. Here play is the scene's frames from the first one
+    /// the player had the pad in hand and the screen answered; the byte's play values (at most
+    /// [`MAX_SET_VALUES`], a hundredth of play each, covering 98 % of it: a field and the scroll to
+    /// the next screen) are the gate, and it must be open on at most [`MAX_LEAK`] of the frames
+    /// before play and of every other scene (a title, a map). Ranked: a byte that took three values or more in the
+    /// session (a state variable, not a latch), then the fewest play values, then the calmest. Empty when the level had no stretch before play.
+    #[must_use]
+    pub fn clean_gates(&self, keep: usize) -> Vec<GateCandidate> {
+        let Some((Some(level_key), _)) = self
+            .scene_moving
+            .iter()
+            .filter(|(k, _)| k.is_some() && self.scenes.contains_key(k))
+            .max_by_key(|(k, v)| (**v, std::cmp::Reverse(k.unwrap_or(0))))
+        else {
+            return Vec::new();
+        };
+        let (Some(level), Some(Some(pre))) = (
+            self.scenes.get(&Some(*level_key)),
+            self.preludes.get(level_key),
+        ) else {
+            return Vec::new();
+        };
+        let play_frames = level.frames.saturating_sub(pre.frames);
+        if play_frames < MIN_LEVEL_FRAMES {
+            return Vec::new();
+        }
+        // Every other scene that held still for a while and was not played in.
+        let others: Vec<&SceneHist> = self
+            .scenes
+            .iter()
+            .filter(|(k, h)| {
+                **k != Some(*level_key)
+                    && k.is_some()
+                    && h.frames >= MIN_LABEL_FRAMES
+                    && self.played_frames(k) < MIN_SIBLING_FRAMES
+            })
+            .map(|(_, h)| h)
+            .collect();
+        let mut out: Vec<(GateCandidate, (bool, u32))> = Vec::new();
+        for b in 0..self.len.min(self.save_ram_from) {
+            let row = b * 256..b * 256 + 256;
+            let tallies = self.played_tallies(b, None);
+            let Some(play) = union_set(&tallies) else {
+                continue;
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let cover = tallies
+                .iter()
+                .map(|(t, c)| play.iter().map(|(_, v)| c[*v]).sum::<u32>() as f32 / *t as f32)
+                .fold(1.0f32, f32::min);
+            let open = |h: &SceneHist| -> f32 {
+                let n: u32 = play
+                    .iter()
+                    .map(|(_, v)| u32::from(h.bins[row.start + v]))
+                    .sum();
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    n as f32 / h.frames.max(1) as f32
+                }
+            };
+            let leak = others.iter().map(|h| open(h)).fold(open(pre), f32::max);
+            if leak > MAX_LEAK {
+                continue;
+            }
+            // A counter or a pointer takes dozens of values; a latch the game sets once takes
+            // two; a state variable takes a handful.
+            let distinct = (0..256)
+                .filter(|&v| self.scenes.values().any(|h| h.bins[row.start + v] > 0))
+                .count();
+            if distinct > MAX_MODE_VALUES {
+                continue;
+            }
+            // A byte that dwells on two of its play values is the data of the room the player
+            // stood in (the map location, a screen's tiles), not a mode: the next room reads
+            // another value.
+            if self.dwells_on(b, &play) > tallies.len() {
+                continue;
+            }
+            let off_cut = self.g_changes[b].saturating_sub(self.g_cut_changes[b]);
+            let mut also = [0u8; MAX_SET_VALUES - 1];
+            for (slot, (_, v)) in also.iter_mut().zip(play.iter().skip(1)) {
+                *slot = u8::try_from(*v).unwrap_or(0);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let g = GateCandidate {
+                offset: b,
+                value: u8::try_from(play[0].1).unwrap_or(0),
+                constancy: cover,
+                differs: 1.0 - leak,
+                confidence: cover * (1.0 - leak),
+                cut_sync: 0.0,
+                cut_cover: 0.0,
+                cut_steps: 0.0,
+                off_cut,
+                contrast: 1.0 - leak,
+                cuts: 0,
+                mode_score: 1.0 - leak,
+                freeze_apart: 1.0,
+                frozen_frames: 0,
+                speech_apart: 1.0,
+                speech_frames: 0,
+                also,
+                also_n: (play.len() - 1) as u8,
+            };
+            out.push((g, (distinct < 3, off_cut)));
+        }
+        // A state variable before a latch, the fewest play values, the calmest.
+        out.sort_by(|(a, ao), (b, bo)| {
+            (ao.0, a.also_n, ao.1, a.offset).cmp(&(bo.0, b.also_n, bo.1, b.offset))
+        });
+        out.into_iter().map(|(g, _)| g).take(keep).collect()
+    }
+
+    /// W35-11: the most frames-weighted evidence against gate `g`: for each scene the player did
+    /// not play in (a title, a menu, a map, a black screen) that held still for [`MIN_LABEL_FRAMES`],
+    /// the share of its frames outside the cuts' zones the gate is open on, with the scene's frames;
+    /// the worst one.
+    #[must_use]
+    pub fn unplayed_open(&self, g: &GateCandidate) -> Option<(f32, u32)> {
+        let played: Vec<u64> = (0..1)
+            .flat_map(|_| self.scenes.keys().copied().flatten())
+            .filter(|k| {
+                self.played_frames(&Some(*k)) >= MIN_SIBLING_FRAMES
+                    || self
+                        .scene_moving
+                        .get(&Some(*k))
+                        .is_some_and(|m| *m >= MIN_LEVEL_FRAMES)
+            })
+            .collect();
+        self.scenes
+            .iter()
+            .filter(|(k, _)| k.is_some_and(|k| !played.contains(&k)))
+            .filter_map(|(_, h)| {
+                let mut c = [0u32; 256];
+                h.tally(g.offset, false, &mut c);
+                let total: u32 = c.iter().sum();
+                let open: u32 = (0..=255u8)
+                    .filter(|v| g.holds(*v))
+                    .map(|v| c[usize::from(v)])
+                    .sum();
+                #[allow(clippy::cast_precision_loss)]
+                (total >= MIN_LABEL_FRAMES).then(|| (open as f32 / total as f32, total))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// W35-11: the share of the level's frames before the player played in it (up to the last
+    /// button press) on which byte `b` read one of `values`; `None` when the level had no such
+    /// stretch.
+    #[must_use]
+    pub fn prelude_open(&self, b: usize, g: &GateCandidate) -> Option<f32> {
+        let (Some(level_key), _) = self
+            .scene_moving
+            .iter()
+            .filter(|(k, _)| k.is_some() && self.scenes.contains_key(k))
+            .max_by_key(|(k, v)| (**v, std::cmp::Reverse(k.unwrap_or(0))))?
+        else {
+            return None;
+        };
+        let pre = self.preludes.get(level_key)?.as_ref()?;
+        let n: u32 = (0..=255u8)
+            .filter(|v| g.holds(*v))
+            .map(|v| u32::from(pre.bins[b * 256 + usize::from(v)]))
+            .sum();
+        #[allow(clippy::cast_precision_loss)]
+        Some(n as f32 / pre.frames.max(1) as f32)
+    }
+
+    /// W35-11: per scene the player played in (the level with the stretch before play left out,
+    /// the rooms beside it, a second stage; each ran [`MIN_ROOM_FRAMES`]), the frames outside the
+    /// cuts' zones and byte `b`'s values on them.
+    fn played_tallies(&self, b: usize, own: Option<u8>) -> Vec<(u32, [u32; 256])> {
+        let level_key = self
+            .scene_moving
+            .iter()
+            .filter(|(k, _)| k.is_some() && self.scenes.contains_key(k))
+            .max_by_key(|(k, v)| (**v, std::cmp::Reverse(k.unwrap_or(0))))
+            .map(|(k, _)| *k);
+        let mut frozen = [false; 256];
+        let hists: Vec<&SceneHist> = [self.paused.as_ref(), self.ignored.as_ref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let frozen_total: u32 = hists.iter().map(|h| h.frames).sum();
+        if frozen_total >= MIN_FROZEN_FRAMES {
+            for (v, f) in frozen.iter_mut().enumerate() {
+                let n: u32 = hists.iter().map(|h| u32::from(h.bins[b * 256 + v])).sum();
+                *f = n * 4 >= frozen_total;
+            }
+        }
+        let mut out = Vec::new();
+        for (k, h) in &self.scenes {
+            let played = Some(*k) == level_key
+                || (k.is_some()
+                    && *k != OTHER_SCENE
+                    && *k != OTHER_PLAY
+                    && self.played_frames(k) >= MIN_SIBLING_FRAMES);
+            if !played || h.frames < MIN_ROOM_FRAMES {
+                continue;
+            }
+            let mut all = [0u32; 256];
+            h.tally(b, false, &mut all);
+            if let Some(pre) = k
+                .and_then(|k| self.preludes.get(&k))
+                .and_then(Option::as_ref)
+            {
+                let mut before = [0u32; 256];
+                pre.tally(b, false, &mut before);
+                for (a, x) in all.iter_mut().zip(before) {
+                    *a = a.saturating_sub(x);
+                }
+            }
+            // The values the byte reads in a pause or a speech (a text box the picture does not
+            // always freeze for) are the game not being in control: not play, except the gate's
+            // own (a ranked gate's; a clean gate's values are whatever play read).
+            for (v, a) in all.iter_mut().enumerate() {
+                if frozen[v] && own.is_some_and(|o| usize::from(o) != v) {
+                    *a = 0;
+                }
+            }
+            let total: u32 = all.iter().sum();
+            if total >= MIN_LABEL_FRAMES {
+                out.push((total, all));
+            }
+        }
+        out
+    }
+
+    /// How many of `set`'s values byte `b` has held for [`DWELL`] frames running.
+    fn dwells_on(&self, b: usize, set: &[(u32, usize)]) -> usize {
+        set.iter()
+            .filter(|(_, v)| self.dwell[b][v / 64] >> (v % 64) & 1 == 1)
+            .count()
+    }
+
+    /// W35-11: a gate the session ranked, made to hold in every scene the player played in: kept
+    /// as it is when it is open on [`MIN_SCENE_OPEN`] of each; else widened to the values the byte
+    /// reads in play in any of them (at most [`MAX_SET_VALUES`], a mode byte that reads another
+    /// value in a second stage); dropped when no such set covers them all.
+    fn widened(&self, g: GateCandidate) -> Option<GateCandidate> {
+        if self.open_in_every_played_scene(&g) {
+            return Some(g);
+        }
+        let tallies = self.played_tallies(g.offset, Some(g.value));
+        let set = union_set(&tallies)?;
+        let mut also = [0u8; MAX_SET_VALUES - 1];
+        for (slot, (_, v)) in also.iter_mut().zip(set.iter().skip(1)) {
+            *slot = u8::try_from(*v).unwrap_or(0);
+        }
+        Some(GateCandidate {
+            value: u8::try_from(set[0].1).unwrap_or(0),
+            also,
+            also_n: u8::try_from(set.len() - 1).unwrap_or(0),
+            ..g
+        })
+    }
+
+    /// W35-11: whether gate `g` (on byte `b`) is open on at least [`MIN_SCENE_OPEN`] of the frames
+    /// outside the cuts' zones of every scene the player played in and that ran [`MIN_ROOM_FRAMES`]
+    /// (the level's stretch before play left out).
+    fn open_in_every_played_scene(&self, g: &GateCandidate) -> bool {
+        self.played_tallies(g.offset, Some(g.value))
+            .iter()
+            .all(|(total, all)| {
+                let open: u32 = (0..=255u8)
+                    .filter(|v| g.holds(*v))
+                    .map(|v| all[usize::from(v)])
+                    .sum();
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    open as f32 >= MIN_SCENE_OPEN * *total as f32
+                }
+            })
+    }
+
     fn gates(&self) -> Vec<GateCandidate> {
-        self.gates_ranked(4 * KEEP)
+        self.gates_inner()
+            .into_iter()
+            .filter_map(|g| self.widened(g))
+            .collect()
+    }
+
+    fn gates_inner(&self) -> Vec<GateCandidate> {
+        let ranked = self.gates_ranked(4 * KEEP);
+        // W35-11: when every gate the session ranked first is open on (nearly) all of the
+        // stretch before play, none of them tells play from the menus there (the level's scene
+        // holds the game's menus too): a byte that does comes first, the rest follow for the
+        // discovery's own checks. A ranking with a gate that is shut on a good part of that
+        // stretch is left as it was.
+        let blind = ranked.iter().take(KEEP).all(|g| {
+            self.prelude_open(g.offset, g)
+                .is_some_and(|open| open >= BLIND_OPEN)
+        });
+        if !blind {
+            return ranked;
+        }
+        let mut out = self.clean_gates(2 * KEEP);
+        let clean: Vec<usize> = out.iter().map(|g| g.offset).collect();
+        out.extend(ranked.into_iter().filter(|g| !clean.contains(&g.offset)));
+        out.truncate(4 * KEEP);
+        out
     }
 
     /// The gate candidates in rank order, `keep` of them (the discovery tests
@@ -2015,6 +2439,8 @@ impl ScoutFinder {
                     frozen_frames,
                     speech_apart,
                     speech_frames,
+                    also: [0; MAX_SET_VALUES - 1],
+                    also_n: 0,
                 },
                 (reacts, distinct, transit_differs, regular),
             ));
@@ -3094,6 +3520,80 @@ mod tests {
         }
         feed_modes(&mut f, &mut g, 200, 4, (3, 9), go, live);
         f
+    }
+
+    /// W35-11: a title scene, then ONE scene that holds a menu (mode 2, Start answered) and the field
+    /// the player then walks in (mode 3, with 4 for a few frames at each screen change; the level
+    /// data byte 0x42 reads 7 in one room and 9 in the next, for 200 frames each).
+    fn run_lumped(menu_frames: u32) -> ScoutFinder {
+        let mut f = ScoutFinder::new(0x80, 1);
+        let mut g = Modes::new();
+        let idle = (Pad::Idle, false);
+        let go = (Pad::Right, false);
+        let live = (false, true);
+        feed_modes(&mut f, &mut g, 150, 1, (1, 0), idle, live);
+        feed_modes(&mut f, &mut g, 6, 1, (1, 0), (Pad::Idle, true), live);
+        feed_modes(&mut f, &mut g, menu_frames, 5, (2, 0), idle, live);
+        feed_modes(&mut f, &mut g, 6, 5, (2, 0), (Pad::Idle, true), live);
+        feed_modes(&mut f, &mut g, 150, 5, (3, 7), idle, live);
+        for _ in 0..4 {
+            feed_modes(&mut f, &mut g, 100, 5, (3, 7), go, live);
+            feed_modes(&mut f, &mut g, 20, 5, (4, 7), go, live);
+        }
+        for _ in 0..4 {
+            feed_modes(&mut f, &mut g, 100, 5, (3, 9), go, live);
+            feed_modes(&mut f, &mut g, 20, 5, (4, 9), go, live);
+        }
+        f
+    }
+
+    #[test]
+    fn a_byte_that_tells_the_field_from_the_menu_before_it_is_a_clean_gate_with_its_values() {
+        let f = run_lumped(300);
+        let clean = f.clean_gates(8);
+        let mode = clean
+            .iter()
+            .find(|g| g.offset == 0x40)
+            .expect("the mode byte");
+        assert_eq!(mode.value, 3);
+        assert!(mode.holds(3) && mode.holds(4) && !mode.holds(2) && !mode.holds(1));
+        // Room data that dwells on two values, a pause flag that is always off, and a constant
+        // are not gates; nor is a counter.
+        for off in [0x42, 0x41, 0x44, 0x60] {
+            assert!(clean.iter().all(|g| g.offset != off), "{off:#x} {clean:?}");
+        }
+        // The ranking is blind (nothing it ranks is shut in the menu): the clean gate leads.
+        assert_eq!(f.observed().gates.first().map(|g| g.offset), Some(0x40));
+    }
+
+    #[test]
+    fn a_clean_gate_holds_in_every_scene_the_player_played_in() {
+        // The lumped scene (mode 3), then a second stage (scene 6) where the same byte reads 8:
+        // the gate is both values, not the first.
+        let mut f = run_lumped(300);
+        let mut g = Modes::new();
+        g.cam = 500;
+        let go = (Pad::Right, false);
+        let live = (false, true);
+        feed_modes(&mut f, &mut g, 400, 6, (8, 9), go, live);
+        let clean = f.clean_gates(8);
+        let mode = clean
+            .iter()
+            .find(|g| g.offset == 0x40)
+            .expect("the mode byte");
+        assert!(mode.holds(3) && mode.holds(8) && !mode.holds(2), "{mode:?}");
+        assert!(f.open_in_every_played_scene(mode));
+        // A gate on 3 alone is shut in the second stage: widened to both, or it would be dropped.
+        let narrow = GateCandidate { also_n: 0, ..*mode };
+        assert!(!f.open_in_every_played_scene(&narrow));
+        let widened = f.widened(narrow).expect("a set covers both");
+        assert!(widened.holds(3) && widened.holds(8));
+    }
+
+    #[test]
+    fn a_short_stretch_before_play_is_not_judged() {
+        let f = run_lumped(60);
+        assert!(f.clean_gates(8).is_empty());
     }
 
     #[test]

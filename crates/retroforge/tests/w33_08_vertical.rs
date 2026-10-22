@@ -68,6 +68,7 @@ fn scout_dims(
             scene,
             size: (256, 240),
             scrolls: no_scrolls,
+            blank: false,
         });
         if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
             break;
