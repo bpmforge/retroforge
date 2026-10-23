@@ -2326,6 +2326,8 @@ fn shot_w34_baseline(readme: &mut Vec<String>) {
     let mut fps: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut p95 = [0.0f64; 3];
     let mut opaque = [0usize; 3];
+    // W35-15: mean per-frame stage times (ms), summed over chunks per state.
+    let mut stages = [[0.0f64; 10]; 3];
     let mut preset_on = false;
     for chunk in 0..60 {
         let state = chunk % 3;
@@ -2350,10 +2352,21 @@ fn shot_w34_baseline(readme: &mut Vec<String>) {
         }
         let f0 = h.state().frame_count_for_test();
         run_frames(&mut h, f0 + 3, Duration::from_secs(60));
+        let _ = h.state_mut().diorama_stage_ms_for_test();
         let f0 = h.state().frame_count_for_test();
         let t0 = Instant::now();
         run_frames(&mut h, f0 + 30, Duration::from_secs(120));
         let n = h.state().frame_count_for_test() - f0;
+        if state > 0 {
+            let ps = h.state().diorama_pass_stage_ms_for_test();
+            let ([wide, split, pass, mesh], _) = h.state_mut().diorama_stage_ms_for_test();
+            let all = [
+                wide, split, pass, mesh, ps[0], ps[1], ps[2], ps[3], ps[4], ps[5],
+            ];
+            for (a, b) in stages[state].iter_mut().zip(all) {
+                *a += b / 20.0;
+            }
+        }
         fps[state].push(n as f64 / t0.elapsed().as_secs_f64());
         if state > 0 {
             p95[state] = h.state().diorama_p95_ms_for_test();
@@ -2366,6 +2379,13 @@ fn shot_w34_baseline(readme: &mut Vec<String>) {
         v.sort_by(|a, b| a.total_cmp(b));
         v[v.len() / 2]
     };
+    for (st, m) in stages.iter().enumerate().skip(1) {
+        println!(
+            "W35-15 stages state {st} mean ms: wide {:.3} split {:.3} pass {:.3} (mesh {:.3}); \
+             in render: tex {:.3} bind {:.3} vtx {:.3} encode {:.3} submit {:.3} readback {:.3}",
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9]
+        );
+    }
     let [mut a, mut b, mut c] = fps;
     note(
         readme,
