@@ -4324,6 +4324,9 @@ impl RetroForgeApp {
                 // this as a fresh transition and re-arms the probe/layer
                 // extraction if the new ROM's settings/profile want it —
                 // it does not need to happen here directly.
+                // W35-13: and the pass itself, so no frame of the old game is
+                // still in flight to be shown as the new one's first.
+                self.diorama_pass = None;
                 self.diorama_render = None;
                 self.diorama_texture = None;
                 self.diorama_ground_rgba = None;
@@ -5601,7 +5604,7 @@ impl RetroForgeApp {
             return;
         };
         if self.diorama_pass.is_none() {
-            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+            self.diorama_pass = Some(new_live_diorama_pass(gpu));
         }
         let pass = self
             .diorama_pass
@@ -5830,7 +5833,7 @@ impl RetroForgeApp {
             return;
         };
         if self.diorama_pass.is_none() {
-            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+            self.diorama_pass = Some(new_live_diorama_pass(gpu));
         }
         let pass = self
             .diorama_pass
@@ -6522,7 +6525,7 @@ impl RetroForgeApp {
             return;
         };
         if self.diorama_pass.is_none() {
-            self.diorama_pass = Some(rf_renderer::diorama::DioramaPass::new(gpu));
+            self.diorama_pass = Some(new_live_diorama_pass(gpu));
         }
         let pass = self
             .diorama_pass
@@ -13552,6 +13555,7 @@ impl RetroForgeApp {
         self.ultrawide_texture = None;
         self.ultrawide_render = None;
         // Ticket W16-13: same reasoning as the ROM-load reset above.
+        self.diorama_pass = None;
         self.diorama_render = None;
         self.diorama_texture = None;
         self.diorama_ground_rgba = None;
@@ -14518,7 +14522,12 @@ impl RetroForgeApp {
         sprite_rgba: Vec<u8>,
         snes: core_thread::SnesDebugFrame,
     ) {
+        // W35-13: the live pass answers with the previous frame; a test that
+        // injects one frame and reads its render settles it with a second.
+        let again = (rgba.clone(), sprite_rgba.clone(), snes.clone());
         let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
+        self.refresh_diorama_render(&msg);
+        let msg = Self::synthetic_frame_msg(again.0, again.1, 256, 224, again.2, None);
         self.refresh_diorama_render(&msg);
     }
 
@@ -14546,12 +14555,22 @@ impl RetroForgeApp {
             voices: Vec::new(),
             bg_scroll: [(0, 0); 4],
         };
-        let mut msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
-        msg.snes = None;
-        msg.tile_grids = tile_grids;
-        msg.sprites = sprites;
-        msg.heights = Some(Box::new(heights));
-        self.refresh_diorama_render(&msg);
+        // W35-13: twice, so the double-buffered pass has the frame asked for.
+        for _ in 0..2 {
+            let mut msg = Self::synthetic_frame_msg(
+                rgba.clone(),
+                sprite_rgba.clone(),
+                256,
+                224,
+                snes.clone(),
+                None,
+            );
+            msg.snes = None;
+            msg.tile_grids = tile_grids.clone();
+            msg.sprites = sprites.clone();
+            msg.heights = Some(Box::new(heights.clone()));
+            self.refresh_diorama_render(&msg);
+        }
     }
 
     /// A `FrameMsg` with only the fields the diorama paths read filled in.
@@ -18845,4 +18864,15 @@ fn snes_oam_boxes(oam: &[u8], ppu_regs: &[u8]) -> Vec<rf_enhance::heights::Sprit
             }
         })
         .collect()
+}
+
+/// The Diorama pass the live view draws with (W35-13): the readback is
+/// double-buffered, so the UI thread collects the previous frame instead of
+/// waiting for its own. The picture lags the game by one UI frame, which a
+/// visual overlay over an unmodified simulation can afford (Accuracy Mode
+/// never uses it); a still scene is pixel-identical.
+fn new_live_diorama_pass(gpu: &rf_renderer::gpu::GpuContext) -> rf_renderer::diorama::DioramaPass {
+    let pass = rf_renderer::diorama::DioramaPass::new(gpu);
+    pass.set_async_readback(true);
+    pass
 }
