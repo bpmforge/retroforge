@@ -216,3 +216,18 @@ CV `$18`, ALttP `$10` kept; widths and agreement unchanged; the speech, door and
 
 Not verified for SMB3/MMX/Zelda-dungeon: nothing in the finder is shipped for them from a second area, so a gate
 there that is shut elsewhere is not excluded; see the gaps above.
+
+### 7.8 W35-14: the second areas of SMB3, Mega Man X and Zelda (`w35_14_gate_areas`)
+
+The areas are reached by playing (D-021: no RAM maps). The scripts are fixed input strings found by search with
+in-memory snapshots, judged by what the picture and the scene show, then replayed frame for frame (the machine is
+deterministic); no ROM bytes or states are in git. The searches are capped (`RF_BUDGET` frames, a 35-minute wall cap
+in the runs). Run: `cargo test --release -p retroforge --test w35_14_gate_areas -- --ignored --nocapture <name>`.
+
+| Game | Second area | How it was reached | Verdict |
+|---|---|---|---|
+| SMB3 | 1-2 (900 frames alive) | `search_smb3`: random input chunks in 1-1 (run, jump, hold), a death (the level scene leaves) rolls back about 200 frames; "cleared" = after the card two steps right and A enters another level. Found in about 36,000 frames of search. | **verified**: the shipped rows (`$7C6`=0xF, `$71F`=0) are open 904 of 908 frames of 1-2; the rows without the second area (`$7F50`=0xF2, `$0302`=0x28) are also open 901 of 908 there; menus 0 starts, play 2 |
+| Zelda | dungeon 1 ("LEVEL-1" on the HUD) | `explore_z1_overworld`: take the sword from the first cave, then search screen by screen (Link's cell read from the HUD map's green square, sweeps and random walks with retries, an entrance = another scene with a black playfield and the HUD still on after 320 frames, which tells it from Link's death); the dungeon is behind the hollow dead tree two screens up and one right | **widened/replaced**: the old rows (`$6F`=4 and `$12`) are shut in the dungeon (0 of 730 frames open); with it in the session the finder ships `$539`/`$53A` in {0xAA,0xFF}, open 730 of 730 in the dungeon and 2862 of 2886 in the field; menus 0, play 3 |
+| MMX | stage select / stage 2 | `search_mmx` (same search; "cleared" = a scene the search never showed, and Start from it leads to another new scene) | **still unreachable**: the search gets X to the end of the intro highway (about 5,000 frames, past the first mini-boss) but not through the boss section; the one candidate it found was the game-over password grid, not the stage select (Start from it restarts the intro stage; the judge now rejects that). What would do it: a player that fights (aims and shoots a moving target, dodges) instead of random chunks, or a longer search with a death-aware rollback (the death takes 150-250 frames to show, so rollbacks of 400 frames were still not enough in a 35-minute run). The W35-11 result for MMX stands: not verified in a second area. |
+
+Tests: `smb3_second_area_gate`, `z1_dungeon_gate` (assert the gate is open on >= 90 % of the second area, 0 scouts in the menus, >= 1 in play).
