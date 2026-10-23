@@ -345,3 +345,79 @@ fn the_double_buffered_readback_lags_exactly_one_frame() {
     assert_eq!(render(&gpu, &pass, &a), ra);
     assert_eq!(render(&gpu, &pass, &b), rb);
 }
+
+/// `render` at an explicit output size (W35-13: resize while double-buffered).
+fn render_sized(gpu: &GpuContext, pass: &DioramaPass, f: &Fixture, w: u32, h: u32) -> Vec<u8> {
+    let scene = DioramaScene {
+        tiles_w: COLS,
+        tiles_h: COLS,
+        tile_px: TILE as f32,
+        solid: &f.solid,
+        depth: &f.depth,
+        billboards: &f.billboards,
+    };
+    let camera = DioramaCamera::default();
+    let v = vertices_for_camera(&scene, w, h, &camera);
+    pass.render_camera(
+        gpu,
+        &v,
+        &f.ground,
+        COLS * TILE,
+        COLS * TILE,
+        &f.sprite,
+        f.sprite_size.0,
+        f.sprite_size.1,
+        COLS,
+        COLS,
+        TILE,
+        w,
+        h,
+        &camera,
+    )
+    .expect("renders")
+}
+
+/// W35-13: with the readback double-buffered, a still scene is the same
+/// picture, pixel for pixel, as the synchronous pass's, for thousands of
+/// frames, and the pass creates nothing after the first frames (the staging
+/// buffers are a fixed pair, not one per frame).
+#[test]
+fn a_still_scene_is_identical_double_buffered_and_creates_nothing() {
+    let Some(gpu) = gpu_or_skip("a_still_scene_is_identical_double_buffered") else {
+        return;
+    };
+    let f = fixture(16, true, false);
+    let sync = DioramaPass::new(&gpu);
+    let want = render(&gpu, &sync, &f);
+    let pass = DioramaPass::new(&gpu);
+    pass.set_async_readback(true);
+    let mut differing = 0usize;
+    let mut counts = None;
+    for i in 0..3000 {
+        let got = render(&gpu, &pass, &f);
+        differing += got.iter().zip(&want).filter(|(a, b)| a != b).count();
+        if i == 3 {
+            counts = Some(pass.resource_counts());
+        }
+    }
+    assert_eq!(differing, 0, "a still scene must not change by lagging");
+    assert_eq!(Some(pass.resource_counts()), counts, "no per-frame buffers");
+}
+
+/// W35-13: a resize (or aspect change) while a frame is in flight answers
+/// with a frame of the new size, never the old one, and so does going back.
+#[test]
+fn a_resize_while_double_buffered_never_returns_a_stale_size() {
+    let Some(gpu) = gpu_or_skip("a_resize_while_double_buffered") else {
+        return;
+    };
+    let f = fixture(16, true, false);
+    let pass = DioramaPass::new(&gpu);
+    pass.set_async_readback(true);
+    for (w, h) in [(W, H), (W / 2, H / 2), (W, H / 2), (W, H), (W + 8, H)] {
+        for _ in 0..3 {
+            let got = render_sized(&gpu, &pass, &f, w, h);
+            assert_eq!(got.len(), (w * h * 4) as usize, "{w}x{h}");
+        }
+    }
+}

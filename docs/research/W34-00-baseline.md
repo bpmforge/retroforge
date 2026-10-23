@@ -151,3 +151,44 @@ Findings that shaped the capture:
   from `v`, written only while capture is on and read by nothing in the
   simulation) so rows can be found and tiles paired on the attribute
   table's 2x2 alignment.
+
+## W35-13: async readback in the app (before / after)
+
+Cause: the live Diorama path (`refresh_live_diorama` and the painted and
+Mode 7 variants) used the synchronous readback, so the UI thread spun on the
+GPU every frame. The pass already had a double-buffered readback
+(`set_async_readback`, W34-06) that the app never switched on. The other
+`read_buffer_sync` callers (screenshots, shader chain, lens/fog scale
+references, save-state thumbnails) are one-shot, not per frame, and were left
+alone.
+
+Fix: `new_live_diorama_pass` (app.rs) turns it on for all three live sites;
+the pass is dropped on ROM open and on core stop, so no frame of the old game
+is in flight. Two fixed staging buffers per target size (bounded); a resize
+rebuilds the target and drops the in-flight frame. Latency: one UI frame
+(about 10 ms at 100 fps). Acceptable: the Diorama is a visual overlay over an
+unmodified simulation (Accuracy Mode never uses it) and a still scene is
+unchanged.
+
+Measured (`RF_SCREENS_ONLY='w34-baseline$'`, release, SMW YI1, same
+interleaved 20 x 30 frame protocol, shared machine, app gate p95 of mesh +
+upload + draw + readback):
+
+| State | Before | After |
+|---|---|---|
+| Diorama on | 2.05 ms | 0.69 ms |
+| HD-2D preset | 2.05 ms | 0.51 ms |
+
+Median fps 96.7 / 97.3 before, 97.1 / 95.9 after (noise). The remaining
+0.5 to 0.7 ms is the floor of the call: mesh build, vertex upload and
+command submit; the GPU wait is gone (target < 0.5 ms is met by the HD-2D
+row, missed by the plain row by 0.2 ms, which is mesh work, not waiting).
+
+Pixels: `a_still_scene_is_identical_double_buffered_and_creates_nothing`
+(3000 frames, 0 differing bytes against the synchronous pass, resource counts
+flat after frame 3) and `a_resize_while_double_buffered_never_returns_a_stale_size`.
+App shots (`w35-smw`, `w35-alttp`, sync vs async): the still ALttP shot
+`w35-alttp-follow-start` is 0 px different; the real-time shots differ run to
+run by as many pixels with the synchronous path (sync vs sync control), so they
+cannot show a one-frame lag. RSS peak 550 vs 536 MB (SMW), 964 vs 954 MB
+(ALttP).
