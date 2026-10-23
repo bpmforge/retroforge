@@ -1464,7 +1464,7 @@ pub struct RetroForgeApp {
     /// Ticket W34-09: where a layered Diorama frame's CPU time goes, summed
     /// since the test hook last read it: `[wide picture, split, pass, frames,
     /// mesh (side view; the pass's own mesh build)]`.
-    diorama_stage: [f64; 5],
+    diorama_stage: [f64; 11],
     /// Ticket W34-05 (D1): the Diorama camera's target, gliding to where the
     /// player is (or the middle of the game's window) instead of jumping.
     diorama_smoother: rf_renderer::diorama::CameraSmoother,
@@ -2097,7 +2097,7 @@ impl RetroForgeApp {
             diorama_wanted: false,
             diorama_ground_rgba: None,
             diorama_budget: rf_renderer::fog::BudgetGate::new(),
-            diorama_stage: [0.0; 5],
+            diorama_stage: [0.0; 11],
             diorama_smoother: rf_renderer::diorama::CameraSmoother::default(),
             diorama_zoom_ramp: 0.0,
             mode7_seen: false,
@@ -6082,6 +6082,11 @@ impl RetroForgeApp {
         stage[4] += crate::diorama_learned::LAST_MESH_US.load(std::sync::atomic::Ordering::Relaxed)
             as f64
             / 1000.0;
+        for i in 0..6 {
+            stage[5 + i] += rf_renderer::diorama::LAST_STAGE_US[i]
+                .load(std::sync::atomic::Ordering::Relaxed) as f64
+                / 1000.0;
+        }
         self.store_diorama_result(result, msg.frame_count);
     }
 
@@ -14712,9 +14717,18 @@ impl RetroForgeApp {
     /// last call, and how many frames that was.
     #[doc(hidden)]
     pub fn diorama_stage_ms_for_test(&mut self) -> ([f64; 4], u32) {
-        let s = std::mem::replace(&mut self.diorama_stage, [0.0; 5]);
+        let s = std::mem::replace(&mut self.diorama_stage, [0.0; 11]);
         let n = s[3].max(1.0);
         ([s[0] / n, s[1] / n, s[2] / n, s[4] / n], s[3] as u32)
+    }
+
+    /// Ticket W35-15: the mean milliseconds per frame inside the pass's
+    /// render call since the last call: texture writes, bind groups and
+    /// uniforms, vertex upload, encode, submit, readback collect.
+    #[doc(hidden)]
+    pub fn diorama_pass_stage_ms_for_test(&self) -> [f64; 6] {
+        let n = self.diorama_stage[3].max(1.0);
+        std::array::from_fn(|i| self.diorama_stage[5 + i] / n)
     }
 
     /// Ticket W34-08: the raw Diorama image of the last frame (RGBA, what

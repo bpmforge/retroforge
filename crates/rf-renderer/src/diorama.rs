@@ -1198,6 +1198,20 @@ fn vertex_bytes_into(verts: &[Vertex], out: &mut Vec<u8>) {
     }
 }
 
+/// W35-15: where the last `render_with_vp` call spent its time, in
+/// microseconds: texture writes, bind groups and uniforms, vertex bytes and
+/// upload, encoding, submit, readback collect. For profiling only.
+pub static LAST_STAGE_US: [std::sync::atomic::AtomicU64; 6] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+fn stage_us(i: usize, since: std::time::Instant) -> std::time::Instant {
+    LAST_STAGE_US[i].store(
+        u64::try_from(since.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    std::time::Instant::now()
+}
+
 /// Colour format of the resolved image the pass reads back.
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Depth format of the pass's depth attachment (W34-05, D5).
@@ -1236,6 +1250,31 @@ struct SampledTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     size: (u32, u32),
+    /// The bytes the texture holds now (W35-15): the next frame uploads only
+    /// the rows that differ from them, and nothing when none do.
+    held: Vec<u8>,
+}
+
+/// The first and last row (of `row_bytes` each) where `new` differs from
+/// `old`, or `None` when they are the same. Both are whole numbers of rows
+/// and the same length.
+fn dirty_rows(old: &[u8], new: &[u8], row_bytes: usize) -> Option<(usize, usize)> {
+    debug_assert_eq!(old.len(), new.len());
+    if row_bytes == 0 {
+        return None;
+    }
+    let rows = new.len() / row_bytes;
+    fn row(b: &[u8], y: usize, n: usize) -> &[u8] {
+        &b[y * n..(y + 1) * n]
+    }
+    let first = (0..rows).find(|y| row(old, *y, row_bytes) != row(new, *y, row_bytes))?;
+    // A row exists at `first`, so the search from the end finds one at or
+    // after it; the fallback only keeps the type total.
+    let last = (first..rows)
+        .rev()
+        .find(|y| row(old, *y, row_bytes) != row(new, *y, row_bytes))
+        .unwrap_or(first);
+    Some((first, last))
 }
 
 /// The per-size render targets and readback buffer.
@@ -1887,6 +1926,7 @@ impl DioramaPass {
         // Textures: recreated only when their size changes, rewritten each
         // call (the live path's picture is new every frame).
         let mut rebind = false;
+        let t_stage = std::time::Instant::now();
         for (slot, label, w, h, bytes) in [
             (
                 &mut cache.ground,
@@ -1924,34 +1964,54 @@ impl DioramaPass {
                     texture,
                     view,
                     size,
+                    held: Vec::new(),
                 });
                 made.textures += 1;
                 rebind = true;
             }
             if w > 0 && h > 0 {
                 if let Some(t) = slot {
+                    let row_bytes = w as usize * 4;
+                    // A fresh texture holds nothing yet: the whole picture.
+                    let (y0, y1) = if t.held.len() == bytes.len() {
+                        match dirty_rows(&t.held, bytes, row_bytes) {
+                            Some(r) => r,
+                            None => continue,
+                        }
+                    } else {
+                        t.held.clear();
+                        t.held.resize(bytes.len(), 0);
+                        (0, h as usize - 1)
+                    };
+                    let part = y0 * row_bytes..(y1 + 1) * row_bytes;
+                    t.held[part.clone()].copy_from_slice(&bytes[part.clone()]);
                     gpu.queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &t.texture,
                             mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: y0 as u32,
+                                z: 0,
+                            },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        bytes,
+                        &bytes[part],
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
                             bytes_per_row: Some(w * 4),
-                            rows_per_image: Some(h),
+                            rows_per_image: Some((y1 - y0 + 1) as u32),
                         },
                         wgpu::Extent3d {
                             width: w,
-                            height: h,
+                            height: (y1 - y0 + 1) as u32,
                             depth_or_array_layers: 1,
                         },
                     );
                 }
             }
         }
+        let t_stage = stage_us(0, t_stage);
         // The shadow map: one texel while unused, `map_size` squared when a
         // sun casts into it. Recreated only when that size changes.
         let want_size = fit.as_ref().map_or(1, |f| f.map_size);
@@ -2048,6 +2108,7 @@ impl DioramaPass {
         gpu.queue
             .write_buffer(&self.light_buffer, 0, &light_ubo.to_bytes());
 
+        let t_stage = stage_us(1, t_stage);
         // Vertices: one buffer that only grows; a mesh identical to the last
         // one (a still scene) is not uploaded again.
         vertex_bytes_into(vertices, &mut cache.scratch);
@@ -2081,6 +2142,7 @@ impl DioramaPass {
             made.vertex_uploads += 1;
         }
 
+        let t_stage = stage_us(2, t_stage);
         // Targets and readback: rebuilt only when the output size changes.
         if cache
             .target
@@ -2240,7 +2302,9 @@ impl DioramaPass {
                 depth_or_array_layers: 1,
             },
         );
+        let t_stage = stage_us(3, t_stage);
         gpu.queue.submit(std::iter::once(encoder.finish()));
+        let t_stage = stage_us(4, t_stage);
         let rgba = if async_mode {
             let (tx, done) = std::sync::mpsc::channel();
             target.readbacks[slot]
@@ -2287,6 +2351,7 @@ impl DioramaPass {
                 target.padded_bytes_per_row,
             )?
         };
+        stage_us(5, t_stage);
         self.shadow_map_used
             .store(fit.is_some(), std::sync::atomic::Ordering::Relaxed);
         if fit.is_some() {
@@ -2577,6 +2642,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a, b);
+    }
+
+    /// W35-15: only the rows that changed are uploaded; none when none did.
+    #[test]
+    fn dirty_rows_finds_the_first_and_last_changed_row() {
+        let old = vec![7u8; 4 * 5];
+        assert_eq!(dirty_rows(&old, &old.clone(), 4), None);
+        let mut new = old.clone();
+        new[0] = 1;
+        assert_eq!(dirty_rows(&old, &new, 4), Some((0, 0)));
+        new[19] = 1;
+        assert_eq!(dirty_rows(&old, &new, 4), Some((0, 4)));
+        let mut mid = old.clone();
+        mid[9] = 2;
+        assert_eq!(dirty_rows(&old, &mid, 4), Some((2, 2)));
+        assert_eq!(dirty_rows(&[], &[], 4), None);
+    }
+
+    /// W35-15: a pass that keeps its textures between frames draws every
+    /// frame of a changing sequence (a scroll, a one-row edit at either end,
+    /// a palette change, a sprite change, a resize and back) exactly as a
+    /// fresh pass does.
+    #[test]
+    fn kept_textures_draw_like_fresh_ones_across_scroll_palette_and_resize() {
+        let Some(gpu) = gpu_or_skip("kept_textures_draw_like_fresh_ones") else {
+            return;
+        };
+        let scene = crate::diorama_mesh::DioramaScene {
+            tiles_w: 1,
+            tiles_h: 1,
+            tile_px: 16.0,
+            solid: &[1],
+            depth: &[8],
+            billboards: &[],
+        };
+        let verts = crate::diorama_mesh::build_vertices(&scene);
+        let picture = |shift: usize, tint: u8, n: usize| -> Vec<u8> {
+            (0..n * n * 4)
+                .map(|i| {
+                    let (x, y, c) = ((i / 4) % n, (i / 4) / n, i % 4);
+                    if c == 3 {
+                        255
+                    } else {
+                        (((x + shift) * 13 + y * 7) as u8)
+                            .wrapping_add(tint.wrapping_mul(c as u8 + 1))
+                    }
+                })
+                .collect()
+        };
+        let sprite = |v: u8| vec![v; 4 * 4 * 4];
+        let edit = |mut g: Vec<u8>, row: usize| {
+            g[row * 16 * 4] ^= 0x55;
+            g
+        };
+        let base = picture(0, 0, 16);
+        let frames: Vec<(Vec<u8>, u32, Vec<u8>, u32)> = vec![
+            (base.clone(), 16, sprite(9), 32),
+            (base.clone(), 16, sprite(9), 32),
+            (picture(1, 0, 16), 16, sprite(9), 32),
+            (picture(2, 0, 16), 16, sprite(9), 32),
+            (edit(picture(2, 0, 16), 0), 16, sprite(9), 32),
+            (edit(picture(2, 0, 16), 15), 16, sprite(9), 32),
+            (picture(2, 40, 16), 16, sprite(9), 32),
+            (picture(2, 40, 16), 16, sprite(200), 32),
+            (picture(3, 40, 24), 24, sprite(200), 32),
+            (picture(3, 40, 24), 24, sprite(200), 48),
+            (base.clone(), 16, sprite(9), 32),
+        ];
+        let kept = DioramaPass::new(&gpu);
+        for (i, (ground, n, spr, out)) in frames.iter().enumerate() {
+            let draw = |pass: &DioramaPass| {
+                pass.render(
+                    &gpu, &verts, ground, *n, *n, spr, 4, 4, 1, 1, 16, *out, *out,
+                )
+                .unwrap()
+            };
+            let want = draw(&DioramaPass::new(&gpu));
+            assert_eq!(draw(&kept), want, "frame {i} differs from a fresh pass");
+        }
     }
 
     /// W30-05b: screen-left is level-left (and screen-top is level-top) at

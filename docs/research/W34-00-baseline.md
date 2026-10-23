@@ -192,3 +192,42 @@ App shots (`w35-smw`, `w35-alttp`, sync vs async): the still ALttP shot
 run by as many pixels with the synchronous path (sync vs sync control), so they
 cannot show a one-frame lag. RSS peak 550 vs 536 MB (SMW), 964 vs 954 MB
 (ALttP).
+
+## W35-15: Diorama UI-thread time under 0.5 ms
+
+Profile (same `w34-baseline` shot, release, SMW YI1, shared machine; mean ms
+per frame, Diorama / HD-2D): layer split 0.18 / 0.18, mesh build 0.013 / 0.013,
+inside `render_with_vp`: texture writes 0.14 / 0.14, bind groups and uniforms
+0.01 / 0.02, vertex bytes and upload 0.002, encode 0.003, submit 0.10 / 0.06,
+readback collect and unpack 0.06 / 0.06. Ranked: split, texture writes,
+submit, readback. The mesh is not the cost: it is 13 us, and the vertex
+upload already skips an identical mesh, so mesh reuse and persistent
+vertex/index buffers were not built (nothing to win; bind groups are already
+cached and the encoder is 3 us).
+
+Fix: the pass keeps the bytes each sampled texture holds (ground atlas,
+sprite layer) and uploads only the rows between the first and last that
+changed, nothing when none did. A scroll changes most rows (a full upload as
+before, plus a row compare that stops at the first differing row); a still
+frame uploads nothing, which also shortens the submit that flushes the write.
+
+| State | W35-13 | After (two runs) |
+|---|---|---|
+| Diorama on, app gate p95 | 0.69 ms | 0.46, 0.38 ms |
+| HD-2D preset, app gate p95 | 0.51 ms | 0.42, 0.38 ms |
+
+Both rows are under 0.5 ms. Median fps 97.6 / 97.6 and 99.1 / 98.3 against off
+at 102.0 and 103.4 (noise, load average 8 to 10). RSS peak 530 and 541 MB (was
+550). Floor now: the layer split (0.18 ms, a pure function of the frame; a
+memo keyed on its inputs would help only still frames), submit, and the
+readback unpack.
+
+Pixels: `kept_textures_draw_like_fresh_ones_across_scroll_palette_and_resize`
+renders an 11-frame sequence (still, scroll by 1 and 2, a one-byte edit in the
+first row, in the last row, a palette change, a sprite change, a ground resize,
+an output resize, back) on a kept pass and on a fresh pass each frame: 0 bytes
+differ. `a_still_scene_is_identical_double_buffered_and_creates_nothing`
+(3000 frames, 0 differing bytes, resource counts flat) still passes, and
+`dirty_rows_finds_the_first_and_last_changed_row` covers the row search. A
+ROM switch drops the pass (existing behaviour), so the held bytes go with it.
+Workspace: 3321 passing.
