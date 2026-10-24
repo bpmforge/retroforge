@@ -130,6 +130,8 @@ pub struct EnhanceActions {
     /// Ticket W30-03: the widescreen aspect picker changed; the core must
     /// be re-asked for the new width.
     pub widescreen_aspect_changed: bool,
+    /// Ticket W35-16: the "Objects past the edge" checkbox changed.
+    pub margin_sprites_changed: bool,
     /// Ticket W11-02: the full-level view was toggled; the level probe
     /// must be armed or disarmed.
     pub full_level_set: Option<bool>,
@@ -412,6 +414,18 @@ pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Asp
     changed
 }
 
+/// Ticket W35-16: the "Objects past the edge" checkbox (off by default). `true` when it changed.
+/// Shared by the Enhance workspace and the Enhancements cards so the two cannot drift.
+pub fn margin_sprites_toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
+    ui.checkbox(on, "Objects past the edge")
+        .on_hover_text(
+            "SNES. Shows the part of an object (an enemy, an item) the game itself drew past the \
+             picture's edge, in the margin. Nothing is guessed: objects the game has not drawn yet \
+             stay out of the margins.",
+        )
+        .changed()
+}
+
 /// Ticket W30-07: the run-ahead choice (1 or 2 frames) as a pair of
 /// selectable labels. `true` when the choice changed. Shared by the Enhance
 /// workspace and the Enhancements cards so the two cannot drift.
@@ -660,6 +674,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
             if aspect_picker(ui, &mut ctx.settings.widescreen_aspect) {
                 actions.settings_changed = true;
                 actions.widescreen_aspect_changed = true;
+            }
+            if margin_sprites_toggle(ui, &mut ctx.settings.margin_sprites) {
+                actions.settings_changed = true;
+                actions.margin_sprites_changed = true;
             }
         }
         // Ticket W30-08: each clock's ceiling, mode and live status, and the

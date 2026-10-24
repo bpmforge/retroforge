@@ -342,6 +342,10 @@ pub struct FrameMsg {
     /// The app layer's debug view turns these into separate egui textures.
     pub bg_rgba: Vec<u8>,
     pub sprite_rgba: Vec<u8>,
+    /// Ticket W35-16: `width * height` flags (1 = this dot is the core's own pixel of an object the
+    /// game placed past the picture's edge), only while "Sprites past the edge" is on and widescreen
+    /// is; empty otherwise (the UI then paints nothing). `rf_enhance::margin_sprites`.
+    pub margin_sprites: Vec<u8>,
     /// Ticket W4-06a: the same frame's full 256-byte OAM
     /// (`EmuStepper::oam`, a side-effect-free `&self` read — never
     /// perturbs the core, same "read-only is a hard requirement" posture
@@ -832,6 +836,10 @@ pub enum CoreCommand {
     /// [`CoreEvent::Frame`], so the first frame carrying layers is the
     /// next one the core produces anyway (≤16.6 ms later at 60 Hz).
     SetLayerExtraction(bool),
+    /// Ticket W35-16: capture which object won each dot of the widened frame and send the mask of the
+    /// ones the game placed past the picture's edge (`FrameMsg::margin_sprites`). SNES only; off (the
+    /// default) allocates and computes nothing.
+    SetMarginSprites(bool),
     /// Ticket W27-02: look for this game's camera while it plays (a game
     /// with no profile camera). Observer only; replies once with
     /// `CoreEvent::CameraFound`. `false` stops looking.
@@ -1215,6 +1223,25 @@ pub(crate) fn hd_mode7_frame(
     }))
 }
 
+/// Ticket W35-16: the frame's margin-sprite mask: per dot of the widened frame, 1 where the sprite
+/// that won it is an entry the game placed partly on the picture and partly past its edge
+/// (`rf_enhance::margin_sprites`). Empty on the NES (its core draws 256 dots) and when the sink
+/// holds no ids. Reads OAM by borrow only.
+pub fn margin_sprite_mask(stepper: &EmuStepper, sink: &rf_renderer::FrameBuffer) -> Vec<u8> {
+    let (Some((oam, size)), Some(ids)) = (stepper.snes_oam_view(), sink.sprite_ids()) else {
+        return Vec::new();
+    };
+    let (small, big) = rf_snes::debug::obj_sizes(size);
+    let set = rf_enhance::margin_sprites::edge_straddlers(
+        rf_snes::debug::decode_oam(oam).into_iter().map(|e| {
+            let (w, _) = if e.large { big } else { small };
+            (e.index, i32::from(e.x), i32::from(w))
+        }),
+        i32::from(rf_snes::ppu::WIDTH as u16),
+    );
+    rf_enhance::margin_sprites::mask_of(ids, set)
+}
+
 pub(crate) struct FanoutSink<'a> {
     pub(crate) frame: &'a mut rf_renderer::FrameBuffer,
     /// `None` when layer extraction is off (ticket W3-03a) — the split is
@@ -1393,6 +1420,8 @@ fn core_thread_main(
     // Ticket W3-03a: off until the UI asks, so a closed debug window costs
     // nothing on the frame path (see `CoreCommand::SetLayerExtraction`).
     let mut layers_enabled = false;
+    // Ticket W35-16: see `CoreCommand::SetMarginSprites`.
+    let mut margin_sprites = false;
     // Widescreen (W11-03). `None` is off, and off means the core never
     // reaches its widening path at all.
     let mut widescreen: Option<WidescreenRequest> = None;
@@ -1642,6 +1671,10 @@ fn core_thread_main(
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
                 }
+                CoreCommand::SetMarginSprites(on) => {
+                    margin_sprites = on;
+                    sink.set_sprite_id_capture(on);
+                }
                 CoreCommand::SetTileCapture(on) => {
                     hd_capture = on;
                     stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
@@ -1685,6 +1718,7 @@ fn core_thread_main(
                         layers = rf_renderer::LayeredFrame::with_size(width, height);
                         // The new buffer starts with mask capture off.
                         sink.set_mode7_mask_capture(stepper.hd_mode7_on());
+                        sink.set_sprite_id_capture(margin_sprites);
                     }
                     if let Some(buf) = overlay_capture.as_mut() {
                         buf.resize(
@@ -2402,6 +2436,11 @@ fn core_thread_main(
                 } else {
                     Vec::new()
                 },
+                margin_sprites: if margin_sprites && widescreen.is_some() {
+                    margin_sprite_mask(&stepper, &sink)
+                } else {
+                    Vec::new()
+                },
                 oam: Box::new(*stepper.oam()),
                 audio_traces: if audio_capture {
                     // ~64 points is more than a 32-pixel-tall scope can
@@ -2463,6 +2502,7 @@ fn core_thread_main(
                 && loading_unpaced.is_none()
                 && pacer.is_enabled()
                 && !layers_enabled
+                && !margin_sprites
                 && !audio_capture
                 && !hd_capture
                 && !studio_capture
@@ -2754,6 +2794,7 @@ mod tests {
             last_scanline: None,
             bg_rgba: Vec::new(),
             sprite_rgba: Vec::new(),
+            margin_sprites: Vec::new(),
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             snes: None,

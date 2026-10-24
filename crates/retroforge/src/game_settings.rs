@@ -336,6 +336,10 @@ pub struct GameSettings {
     /// Ticket W30-03: the screen shape decoded widescreen aims for. 16:9
     /// by default; only a non-default choice is persisted.
     pub widescreen_aspect: rf_enhance::widescreen::Aspect,
+    /// Ticket W35-16: show the part of an object the game itself placed past the picture's edge in
+    /// the widescreen margins (SNES; `docs/research/W35-16-margin-sprites.md`). Off by default and
+    /// persisted only when on.
+    pub margin_sprites: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -478,6 +482,7 @@ impl Default for GameSettings {
             diorama_zoom: DIORAMA_ZOOM_DEFAULT,
             diorama_follow: false,
             widescreen_aspect: rf_enhance::widescreen::Aspect::default(),
+            margin_sprites: false,
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
             last_played_epoch_secs: None,
@@ -695,6 +700,9 @@ impl GameSettings {
                 self.widescreen_aspect.key().to_string(),
             );
         }
+        if self.margin_sprites {
+            fields.insert("margin_sprites".to_string(), "true".to_string());
+        }
         if let Some(shader) = &self.shader {
             fields.insert("shader".to_string(), shader.clone());
         }
@@ -830,6 +838,7 @@ impl GameSettings {
                         settings.widescreen_aspect = a;
                     }
                 }
+                "margin_sprites" => settings.margin_sprites = value == "true",
                 "hd_mode7" => settings.hd_mode7 = value == "true",
                 "hd_mode7_supersample" => settings.hd_mode7_supersample = value == "true",
                 "hd_mode7_perspective" => settings.hd_mode7_perspective = value != "false",
@@ -1358,6 +1367,26 @@ mod mode_and_feature_persistence_tests {
         assert!(!restored.mode.enhancement_active());
     }
 
+    /// Ticket W35-16: "Objects past the edge" is off by default, written only when on, and read back.
+    #[test]
+    fn margin_sprites_defaults_off_and_persists_only_when_on() {
+        assert!(!GameSettings::default().margin_sprites);
+        let on = GameSettings {
+            margin_sprites: true,
+            ..GameSettings::default()
+        };
+        let text = on.to_text();
+        assert!(text.contains("margin_sprites=true"), "{text}");
+        assert!(
+            GameSettings::from_text(&text)
+                .expect("parses")
+                .margin_sprites
+        );
+        let off =
+            GameSettings::from_text(&format!("{MAGIC}\nmargin_sprites=false\n")).expect("parses");
+        assert!(!off.margin_sprites);
+    }
+
     /// FR-ENH-010: the per-game enhancement toggles persist, and an
     /// untouched game writes none of them — the default stays a property
     /// of the code rather than something a file has to assert.
@@ -1381,6 +1410,7 @@ mod mode_and_feature_persistence_tests {
             "hd_mode7",
             "superfx_hd",
             "lens_",
+            "margin_sprites",
         ] {
             assert!(
                 !untouched.contains(key),

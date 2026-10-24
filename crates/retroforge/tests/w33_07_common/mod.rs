@@ -17,6 +17,9 @@ pub struct Sink {
     pub bundle: FrameBundleBuilder,
     /// The picture as the player sees it (screenshots of an explored session).
     pub fb: rf_renderer::FrameBuffer,
+    /// W35-16: the widened picture, when the test asked the core for one (the bundle and `fb`
+    /// still get the console's own 256 dots, as the app's `FanoutSink` gives its bundle).
+    pub wide: Option<rf_renderer::FrameBuffer>,
 }
 
 impl Sink {
@@ -27,6 +30,7 @@ impl Sink {
         Self {
             bundle,
             fb: rf_renderer::FrameBuffer::with_size(usize::from(w), usize::from(h)),
+            wide: None,
         }
     }
 }
@@ -36,7 +40,17 @@ impl CoreSink for Sink {
         self.bundle.video_scanline(y, pixels);
         self.fb.video_scanline(y, pixels);
     }
+    fn video_scanline_widened(&mut self, y: u16, pixels: &[PpuPixel], pad: usize) {
+        if let Some(wide) = self.wide.as_mut() {
+            wide.video_scanline(y, pixels);
+        }
+        let middle = pixels.get(pad..pad + 256).unwrap_or(pixels);
+        self.video_scanline(y, middle);
+    }
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
+        if let Some(wide) = self.wide.as_mut() {
+            wide.sub_scanline(y, pixels, fixed_color);
+        }
         self.bundle.sub_scanline(y, pixels, fixed_color);
         self.fb.sub_scanline(y, pixels, fixed_color);
     }
@@ -47,6 +61,9 @@ impl CoreSink for Sink {
         self.bundle.line_registers(y, regs);
     }
     fn palette_scanline(&mut self, y: u16, palette: &[u16], brightness: u8) {
+        if let Some(wide) = self.wide.as_mut() {
+            wide.palette_scanline(y, palette, brightness);
+        }
         self.fb.palette_scanline(y, palette, brightness);
     }
     fn audio(&mut self, _samples: &[i16]) {}
