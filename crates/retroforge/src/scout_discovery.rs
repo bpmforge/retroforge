@@ -19,6 +19,10 @@
 //!    canvases to two screens (the camera followed it, the player was not cut
 //!    short) wins. A hold has to beat the same mover without one by a tenth.
 //! 2. **Height.** The winning hold is tuned over [`DELTAS`].
+//! 3. **Both axes (W35-17).** A game seen to scroll both ways under a walking player (a top-down
+//!    game: its Up trial grows the canvases as far as its Down one, or, for a `walk`, one way along
+//!    Y as far as the floor and the other from where that stands) gets `down, up` in its table
+//!    beside `right, left`; the scout then runs both axes ([`crate::scout::ScoutPlan::two_axis`]).
 //!
 //! Everything it keeps is written as observation rows
 //! (`rf_enhance::scout_finder::SOURCE`). The census-style acceptance lives in
@@ -67,6 +71,9 @@ const MIN_SCREEN_TENTHS: usize = 14;
 const VERTICAL_FIFTHS: usize = 6;
 /// Frames of a vertical trial (4 px a frame covers a three-screen shaft).
 pub const VERTICAL_FRAMES: u32 = 420;
+/// W35-17: frames of a walk's vertical trial: a screen of walking, the stall that starts the
+/// zigzag ([`WALK_STALL_FRAMES`]) and the first of its sidesteps.
+pub const WALK_VERTICAL_FRAMES: u32 = 1500;
 
 /// What the trials run on.
 pub struct Context<'a> {
@@ -445,10 +452,76 @@ fn confirm_y(
                 .collect()
         }
     };
+    // W35-17: a top-down game scrolls up as well as down from the room the trials start in.
+    let up_too = match &best {
+        Some((y, wide, _)) if obs.top_down => {
+            let addr = bus_address(true, y.offset);
+            let mut plan = base.clone();
+            plan.player_y = vec![addr];
+            plan.player_y_hi = if *wide { vec![addr + 1] } else { Vec::new() };
+            plan.dirs = vec![ScoutDir::Up];
+            let out = run(&mut scout, plan, ctx)?;
+            report.trials.push(format!(
+                "vertical {:#x} wide {wide}, Up: extent {} died {} after {} frames",
+                y.offset, out.extent, out.died, out.frames
+            ));
+            !out.died && out.extent >= floor
+        }
+        _ => false,
+    };
     Ok(VerticalOutcome {
         y_word: best,
         gates_hold: Some(gates_hold),
+        up_too,
     })
+}
+
+/// W35-17: whether `plan`'s walker goes one way along Y as far as the floor from where `scout`
+/// stands, and then the opposite way as far from where that left it.
+fn walk_vertically(
+    scout: &mut Scout,
+    plan: &ScoutPlan,
+    floor: usize,
+    ctx: &Context<'_>,
+    report: &mut Report,
+) -> Result<bool, DiscoveryError> {
+    for (first, back) in [
+        (ScoutDir::Up, ScoutDir::Down),
+        (ScoutDir::Down, ScoutDir::Up),
+    ] {
+        // A walker held up by a tree line goes round it (the zigzag of W35-09, sideways of the
+        // way walked: `reach_px` only says the passes may).
+        let mut v = plan.clone();
+        v.dirs = vec![first];
+        v.frame_budget = WALK_VERTICAL_FRAMES;
+        v.reach_px = 1;
+        let o = run(scout, v, ctx)?;
+        report.trials.push(format!(
+            "{:?} no hold, {first:?}: extent {} died {} after {} frames",
+            plan.strategy, o.extent, o.died, o.frames
+        ));
+        // (a pass cut short by a scene change has still gone as far as it grew: the tracker names
+        // the screen one flips back to a different scene)
+        if o.extent < floor {
+            continue;
+        }
+        let mut b = plan.clone();
+        b.dirs = vec![back];
+        b.frame_budget = WALK_VERTICAL_FRAMES;
+        b.reach_px = 1;
+        let mut from_end = scout
+            .start_from_here(ctx.rom, b.clone(), ctx.size)
+            .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+        let o = run(&mut from_end, b, ctx)?;
+        report.trials.push(format!(
+            "{:?} no hold, {back:?} from the end of {first:?}: extent {} died {} after {} frames",
+            plan.strategy, o.extent, o.died, o.frames
+        ));
+        if o.extent >= floor {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What the vertical room told.
@@ -459,6 +532,8 @@ struct VerticalOutcome {
     y_word: Option<(YCandidate, bool, usize)>,
     /// Per finder gate candidate, whether its value holds in that room.
     gates_hold: Option<Vec<bool>>,
+    /// W35-17: a top-down game's Up trial grew the canvases as far as its Down one.
+    up_too: bool,
 }
 
 /// Run the trials and build the table.
@@ -740,6 +815,15 @@ pub fn discover(
         }
     }
 
+    // W35-17: a walk that goes one way up or down as far as the floor and then, from where it
+    // stands, the other way as far, is in a game that scrolls both ways under a walking player
+    // (the overworld of the Legend of Zelda; its first screen is on the bottom row of the map, so
+    // only the way up is open from the start). A platformer's walker cannot climb: it fails the
+    // first half, and a shaft it falls down it cannot climb back.
+    let mut walks_vertical = false;
+    if plan.strategy == ScoutStrategy::Walk && walks_left {
+        walks_vertical = walk_vertically(&mut scout, &plan, floor, &ctx, &mut report)?;
+    }
     let vertical = confirm_y(
         &ctx,
         ctx.vertical.as_ref().or(main_room.as_ref()),
@@ -786,6 +870,9 @@ pub fn discover(
     let mut shipped = plan.clone();
     if walks_left {
         shipped.dirs = vec![ScoutDir::Right, ScoutDir::Left];
+    }
+    if walks_vertical || vertical.up_too {
+        shipped.dirs.extend([ScoutDir::Down, ScoutDir::Up]);
     }
     let skeleton = skeleton(
         &ctx,
@@ -990,12 +1077,19 @@ fn skeleton(
         // its first frame; the camera starts to follow a few dozen frames in).
         stall_frames: plan.stall_frames,
         settle_frames: 60,
-        dirs: if walk && plan.dirs.contains(&ScoutDir::Left) {
-            vec!["right", "left"]
-        } else if walk {
-            vec!["right"]
-        } else {
-            vec!["right", "left"]
+        dirs: {
+            let mut dirs = if walk && plan.dirs.contains(&ScoutDir::Left) {
+                vec!["right", "left"]
+            } else if walk {
+                vec!["right"]
+            } else {
+                vec!["right", "left"]
+            };
+            // (W35-17: the plan's own Down and Up say the game scrolls both ways)
+            if plan.dirs.contains(&ScoutDir::Down) && plan.dirs.contains(&ScoutDir::Up) {
+                dirs.extend(["down", "up"]);
+            }
+            dirs
         },
         rows,
         confidence,

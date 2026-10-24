@@ -306,6 +306,31 @@ impl ScoutPlan {
         }
     }
 
+    /// W35-17: the table names directions on BOTH axes (a top-down game, found by observation to
+    /// scroll both ways under a walking player): its scene gets the X passes, then the Y passes
+    /// with an X sweep at each depth they reach ([`Worker::run`]).
+    #[must_use]
+    pub fn two_axis(&self) -> bool {
+        self.dirs.iter().any(|d| d.axis() == ScoutAxis::X)
+            && self.dirs.iter().any(|d| d.axis() == ScoutAxis::Y)
+    }
+
+    /// The passes a scene scrolling along `axis` gets, or, for a [`Self::two_axis`] table that can
+    /// move on both, every direction the table names, X first.
+    #[must_use]
+    pub fn passes_for(&self, axis: ScoutAxis, bands: bool) -> Vec<ScoutDir> {
+        if self.two_axis()
+            && self.can_scout(ScoutAxis::X, bands)
+            && self.can_scout(ScoutAxis::Y, bands)
+        {
+            let mut out = self.dirs_for(ScoutAxis::X);
+            out.extend(self.dirs_for(ScoutAxis::Y));
+            out
+        } else {
+            self.dirs_for(axis)
+        }
+    }
+
     /// Whether this recipe can move the scout along `axis` on a machine
     /// placed by `bands` (the NES: `walk` holds the pad): some word to poke,
     /// or a pad to hold. A scene whose axis it cannot move is scouted along
@@ -431,16 +456,22 @@ pub const SIDESTEP_FORWARD: u32 = 160;
 /// pressed: a game that needs another sidestep key gets none. Total frames
 /// `sum(SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)`, bounded: the zigzag is spent after that.
 #[must_use]
-pub fn sidestep_pad(stuck: u32, dir: ScoutDir) -> Option<u8> {
+pub fn sidestep_pad(stuck: u32, dir: ScoutDir, down_first: bool) -> Option<u8> {
     let mut at = 0;
     // Bounded: SIDESTEPS iterations.
     for k in 0..SIDESTEPS {
         let side = SIDESTEP_UNIT * (k + 1);
         if stuck < at + side {
-            let perp = if k % 2 == 0 {
-                ScoutDir::Up
+            // Sideways of the way walked: up and down for a pass along X, left and right (W35-17)
+            // for one along Y.
+            let (first, second) = match dir.axis() {
+                ScoutAxis::X => (ScoutDir::Up, ScoutDir::Down),
+                ScoutAxis::Y => (ScoutDir::Left, ScoutDir::Right),
+            };
+            let perp = if (k % 2 == 0) != down_first {
+                first
             } else {
-                ScoutDir::Down
+                second
             };
             return Some(perp.nes_pad_bit());
         }
@@ -632,7 +663,75 @@ pub struct Scout {
     camera0: Option<i64>,
     /// How the passes ended, in order.
     pub ends: Vec<ScoutEnd>,
+    /// W35-17: the picture's height (a Y pass's depth is measured in it).
+    src_h: u16,
+    /// W35-17: a Y pass leaves a [`Branch`] each [`Self::stride`] pixels the camera moves, up to
+    /// [`BRANCH_LEVELS`], and ends at the last.
+    branching: bool,
+    branches: Vec<Branch>,
+    /// How far the camera had moved at the last branch, and where it was a frame ago.
+    last_branch_at: i64,
+    prev_camera: Option<i64>,
+    calm_frames: u32,
+    /// Frames since the camera reached the next depth, while the branch waits.
+    advancing: Option<u32>,
+    advance_step: usize,
+    /// Frames a sweep has had its margin covered.
+    covered_frames: u32,
+    /// The rows a sweep from a branch may stitch ([`Branch::rows`]).
+    row_clip: Option<(i64, i64)>,
+    /// The vertical scroll values the sweep's first frame wrote.
+    sweep_ys: Vec<u16>,
+    sweep_carry: (u16, u16),
+    /// W35-17: the zigzag of a blocked walker starts downwards (a second try at the same wall).
+    down_first: bool,
+    /// W35-17: an X pass ends once the canvas reaches `plan.reach_px` past where it began
+    /// (the sweeps along a depth; the first passes run to their stall).
+    limit_reach: bool,
+    /// The snapshot and seed the scout started with (`snapshot`/`seed` move to a branch).
+    home: Option<(MachineSnapshot, CanvasModel)>,
 }
+
+/// W35-17: `c` with every cell outside the world rows `[top, bottom)` forgotten.
+fn clip_rows(c: &Canvas, top: i64, bottom: i64) -> Canvas {
+    let w = c.width();
+    if w == 0 {
+        return Canvas::new();
+    }
+    let (ox, oy) = c.origin();
+    let mut cells = c.cells().to_vec();
+    // Bounded: one pass over the cells.
+    for (i, cell) in cells.iter_mut().enumerate() {
+        let y = oy + (i / w) as i64;
+        if y < top || y >= bottom {
+            *cell = None;
+        }
+    }
+    Canvas::from_raw_parts(ox, oy, w, c.height(), cells)
+}
+
+/// W35-17: a place a Y pass went through: the machine there and the scene tracking it had built,
+/// from which an X sweep starts (the margins of that depth are the screens to the side of it).
+pub struct Branch {
+    snapshot: MachineSnapshot,
+    seed: CanvasModel,
+    /// World rows `[top, bottom)` of the picture there (NES): a sweep along it stitches nothing
+    /// above or below (a flip of its own would, wrongly placed).
+    rows: Option<(i64, i64)>,
+}
+
+/// Branch points a Y pass leaves: one each half picture the camera moves, this many (a depth of one
+/// picture, which is one screen up or down in a game that scrolls freely, and two flips of Zelda 1's).
+pub const BRANCH_LEVELS: usize = 2;
+/// Frames the camera must have moved at most 2 px each before a branch is made.
+const SETTLED_FRAMES: u32 = 6;
+/// Pixels the player goes on past a depth before each of its branches is made (frames at a pixel a
+/// frame).
+const BRANCH_ADVANCES_PX: [u32; 2] = [60, 100];
+/// A sweep whose margin is covered ends when the camera has stood still this many frames ...
+const REACH_CALM_FRAMES: u32 = 30;
+/// ... or this many frames after.
+const REACH_MAX_FRAMES: u32 = 240;
 
 impl Scout {
     /// Open a second machine of `rom` and put it where `snapshot` was taken.
@@ -706,6 +805,21 @@ impl Scout {
             y_target: None,
             camera0: None,
             ends: Vec::new(),
+            src_h: size.1,
+            branching: false,
+            branches: Vec::new(),
+            last_branch_at: 0,
+            prev_camera: None,
+            calm_frames: 0,
+            advancing: None,
+            advance_step: 0,
+            covered_frames: 0,
+            row_clip: None,
+            sweep_ys: Vec::new(),
+            sweep_carry: (0, 0),
+            down_first: false,
+            limit_reach: false,
+            home: None,
             plan,
         }
     }
@@ -796,7 +910,11 @@ impl Scout {
     #[must_use]
     pub fn peek_delta(&mut self) -> Option<[Canvas; LAYERS]> {
         self.since_merge = 0;
-        self.acc.peek_delta(self.scene.0)
+        let delta = self.acc.peek_delta(self.scene.0)?;
+        Some(match self.row_clip {
+            Some((top, bottom)) => delta.map(|c| clip_rows(&c, top, bottom)),
+            None => delta,
+        })
     }
 
     /// Forget what was stitched since the last delta (it was sent, or it was
@@ -840,6 +958,15 @@ impl Scout {
         self.camera = None;
         self.y_target = None;
         self.camera0 = None;
+        self.branches.clear();
+        self.last_branch_at = 0;
+        self.prev_camera = None;
+        self.calm_frames = 0;
+        self.advancing = None;
+        self.advance_step = 0;
+        self.covered_frames = 0;
+        self.sweep_ys.clear();
+        self.sweep_carry = (0, 0);
         self.ends.clear();
         // Anything the last attempt's frames left in the sink is not this
         // attempt's picture.
@@ -946,10 +1073,12 @@ impl Scout {
         let Some(cam0) = self.camera0 else {
             return false;
         };
+        // The level layer: the first on the NES, the biggest on the SNES (a rain overlay is first
+        // in A Link to the Past).
         let Some(c) = self
             .acc
             .scene_canvases(self.scene.0)
-            .and_then(|set| set.first())
+            .and_then(|set| set.iter().max_by_key(|c| c.width() * c.height()))
         else {
             return false;
         };
@@ -958,7 +1087,10 @@ impl Scout {
         match dir {
             ScoutDir::Right => left + width >= cam0 + NES_SOURCE_WIDTH + reach,
             ScoutDir::Left => left <= cam0 - reach,
-            ScoutDir::Up | ScoutDir::Down => true,
+            // A pass along Y has reached when it has gone a picture's height.
+            ScoutDir::Up | ScoutDir::Down => self
+                .camera
+                .is_some_and(|c| (c - cam0).abs() >= i64::from(self.src_h)),
         }
     }
 
@@ -966,14 +1098,173 @@ impl Scout {
     /// fill and the zigzag is not spent.
     fn sidestep(&self, dir: ScoutDir) -> Option<u8> {
         if self.plan.reach_px == 0
-            || dir.axis() != ScoutAxis::X
             || self.rule.still() + 1 < self.plan.stall_frames
             || self.margin_covered(dir)
         {
             return None;
         }
         // `+ 1`: this frame's own stall count, which the stop rule reads right after it.
-        sidestep_pad(self.rule.still() + 1 - self.plan.stall_frames, dir)
+        sidestep_pad(
+            self.rule.still() + 1 - self.plan.stall_frames,
+            dir,
+            self.down_first,
+        )
+    }
+
+    /// W35-17: leave a [`Branch`] on the camera's way (see [`Self::set_branching`]) and say whether
+    /// the last one is made.
+    fn branch_on_the_way(&mut self, camera: i64) -> bool {
+        let Some(c0) = self.camera0 else {
+            return false;
+        };
+        let stride = i64::from(self.src_h / 2).max(1);
+        let moved = (camera - c0).abs();
+        // Not mid-flip: a screen flip scrolls 4 px a frame, a walking player's camera at most 2.
+        let settled = self.calm_frames >= SETTLED_FRAMES;
+        // A player who has just crossed into the new screen stands at its edge, often in a gap
+        // of the trees that goes nowhere sideways, and where he walks on to decides which gaps a
+        // sweep from there meets: a branch is made at each of [`BRANCH_ADVANCES_PX`] past the
+        // depth.
+        if moved >= self.last_branch_at + stride && self.advancing.is_none() {
+            self.advancing = Some(0);
+        }
+        if let Some(n) = self.advancing.as_mut() {
+            *n += 1;
+            let at = BRANCH_ADVANCES_PX[self.advance_step.min(BRANCH_ADVANCES_PX.len() - 1)];
+            if *n >= at / self.pace().max(1) && settled {
+                if let Ok(snapshot) = self.stepper.snapshot() {
+                    let rows = self
+                        .acc
+                        .frames()
+                        .and_then(|f| f.reference_origin())
+                        .filter(|_| self.bands)
+                        .map(|(_, y)| (y, y + i64::from(self.src_h)));
+                    self.branches.push(Branch {
+                        snapshot,
+                        seed: self.acc.fork_for_scout(),
+                        rows,
+                    });
+                    self.advance_step += 1;
+                    if self.advance_step >= BRANCH_ADVANCES_PX.len() {
+                        // The depth is done: the next one is a stride further.
+                        self.last_branch_at = moved;
+                        self.advancing = None;
+                        self.advance_step = 0;
+                    }
+                } else {
+                    return true;
+                }
+            }
+        }
+        self.branches.len() >= BRANCH_LEVELS * BRANCH_ADVANCES_PX.len()
+    }
+
+    /// W35-17: a Y pass leaves branches ([`BRANCH_LEVELS`]) and ends at the last.
+    pub fn set_branching(&mut self, on: bool) {
+        self.branching = on;
+    }
+
+    /// W35-17: the branches the last Y pass left, shallowest first.
+    pub fn take_branches(&mut self) -> Vec<Branch> {
+        std::mem::take(&mut self.branches)
+    }
+
+    /// W35-17: X passes end once the margin is covered (`plan.reach_px`).
+    pub fn set_reach_limit(&mut self, on: bool) {
+        self.limit_reach = on;
+    }
+
+    /// W35-17: whether `bundle` writes a vertical scroll the pass has not seen (the first frame's
+    /// values are the pass's own).
+    fn vertical_scrolled(&mut self, bundle: &rf_core_api::FrameBundle) -> bool {
+        // The picture's top row, as each band's own scroll says (a split's second band starts
+        // below the top: its Y less its first row is the picture's).
+        let (bands, carry) =
+            rf_enhance::scroll_tracker::compute_bands(&bundle.events, self.sweep_carry);
+        self.sweep_carry = carry;
+        let tops: Vec<i64> = bands
+            .iter()
+            // (a nametable is 240 rows tall, nesdev "PPU scrolling")
+            .map(|b| (i64::from(b.base_scroll.1) - i64::from(b.start)).rem_euclid(240))
+            .collect();
+        if self.sweep_ys.is_empty() {
+            self.sweep_ys = tops.iter().map(|&t| t as u16).collect();
+            if self.sweep_ys.is_empty() {
+                self.sweep_ys.push(u16::MAX);
+            }
+            return false;
+        }
+        // (a split row lands a row off now and then: two rows are the same top)
+        let near = |t: i64, s: u16| {
+            let d = (t - i64::from(s)).rem_euclid(240);
+            d.min(240 - d) <= 2
+        };
+        tops.iter().any(|&t| {
+            !self.sweep_ys.contains(&u16::MAX) && !self.sweep_ys.iter().any(|&s| near(t, s))
+        })
+    }
+
+    /// W35-17: pixels a frame the pass moves its player or camera: its step for a poke, a walker's
+    /// own pace (one pixel) otherwise.
+    fn pace(&self) -> u32 {
+        match self.plan.strategy {
+            ScoutStrategy::Walk => 1,
+            _ => u32::from(self.plan.step_px),
+        }
+    }
+
+    /// W35-17: the camera has been still (a walking pace at most) for `frames` frames running.
+    #[must_use]
+    pub fn calm(&self, frames: u32) -> bool {
+        self.calm_frames >= frames
+    }
+
+    /// W35-17: a sweep is done once its canvas reaches the margin AND the screen that did it has
+    /// stopped (a flip adds its screen whole, 256 px, and a pass cut at the 300th px of one
+    /// leaves the far strip of it unknown), or a while after, for a camera that never stops.
+    fn reach_done(&mut self, dir: ScoutDir) -> bool {
+        // (On the SNES the camera word and the canvas' world x are not one scale, so this ends a
+        // sweep early there; with it off the sweeps cross the area's edge, 2,540 px wide, seen:
+        // left as it was measured, a known gap.)
+        if !self.limit_reach
+            || dir.axis() != ScoutAxis::X
+            || self.plan.reach_px == 0
+            || !self.margin_covered(dir)
+        {
+            return false;
+        }
+        self.covered_frames += 1;
+        self.calm_frames >= REACH_CALM_FRAMES || self.covered_frames >= REACH_MAX_FRAMES
+    }
+
+    /// W35-17: the next pass's zigzag starts downwards.
+    pub fn set_down_first(&mut self, on: bool) {
+        self.down_first = on;
+    }
+
+    /// W35-17: whether the last pass's canvas reaches the margin on the side it walked to.
+    #[must_use]
+    pub fn reach_met(&self, dir: ScoutDir) -> bool {
+        self.margin_covered(dir)
+    }
+
+    /// W35-17: restarts begin at `branch` instead of the start.
+    pub fn rebase(&mut self, branch: Branch) {
+        if self.home.is_none() {
+            self.home = Some((self.snapshot.clone(), self.seed.fork_for_scout()));
+        }
+        self.snapshot = branch.snapshot;
+        self.seed = branch.seed;
+        self.row_clip = branch.rows;
+    }
+
+    /// W35-17: restarts begin at the start again.
+    pub fn rebase_home(&mut self) {
+        if let Some((snapshot, seed)) = self.home.take() {
+            self.snapshot = snapshot;
+            self.seed = seed;
+        }
+        self.row_clip = None;
     }
 
     fn end_pass(&mut self, why: ScoutEnd) {
@@ -1060,6 +1351,13 @@ impl Scout {
             // The stitcher's own placement is the camera. A game that cuts to
             // another scene (a respawn, a transition) ends the pass.
             let bundle = self.sink.bundle.take(self.stepper.frame_count());
+            // W35-17: a sweep along a row keeps the vertical scroll it began with: the game
+            // scrolling the other way (a screen flip of its own) is not this pass's picture, and
+            // the tracker cannot place the seam of a flip, so the frame is not stitched.
+            if self.row_clip.is_some() && self.vertical_scrolled(&bundle) {
+                self.end_pass(ScoutEnd::SceneChanged);
+                return self.status;
+            }
             let pad = i64::from(bundle.width.saturating_sub(256) / 2);
             let level = self
                 .plan
@@ -1108,6 +1406,9 @@ impl Scout {
                 self.end_pass(ScoutEnd::SceneChanged);
                 return self.status;
             }
+            if self.camera0.is_none() {
+                self.camera0 = Some(after);
+            }
             let bundle = self.sink.bundle.take(self.stepper.frame_count());
             let read = FrameScrolls {
                 scene: None,
@@ -1124,8 +1425,19 @@ impl Scout {
             return self.status;
         }
         let extent = self.extent();
+        // Frames the camera has moved at most 2 px each (a flip steps 4, every other frame, and
+        // stalls a frame now and then).
+        let calm = self
+            .prev_camera
+            .is_some_and(|p| (camera - p).abs() <= i64::from(self.pace()).max(2));
+        self.calm_frames = if calm { self.calm_frames + 1 } else { 0 };
+        self.prev_camera = Some(camera);
         if let Some(why) = self.rule.observe(&self.plan, camera, extent) {
             self.end_pass(why);
+        } else if (self.branching && axis == ScoutAxis::Y && self.branch_on_the_way(camera))
+            || self.reach_done(dir)
+        {
+            self.end_pass(ScoutEnd::Stalled);
         }
         self.status
     }
@@ -1248,6 +1560,9 @@ const PROBE_LEAD_PX: u32 = 256;
 /// Most rung/step changes one pass may go through (3 rungs x 4 steps, with
 /// room): a backstop for law 8, the ladder itself is finite.
 const MAX_ATTEMPTS_PER_PASS: u32 = 24;
+/// W35-17: no pass of the second axis starts once the scout has run this many frames (Zelda 1's
+/// first axis is ~2,100; the whole scout 12,700 in the app, 13,600 headless).
+const MAX_TOTAL_FRAMES: u64 = 24_000;
 
 /// Reads the per-layer scroll the stitcher needs off a scout's machine (the
 /// same function the live path uses, so the two agree on layers). A plain
@@ -1374,6 +1689,15 @@ struct Worker<'a> {
     /// The `(rung, step)` a probe already vouched for.
     validated: Option<(ScoutStrategy, u16)>,
     scene: u64,
+    /// W35-17: deltas are compared with the live canvas. Off on the second axis: what it adds lies
+    /// away from what the live game drew, and what overlaps is junk the live canvas holds from
+    /// before the level (Zelda 1: twenty rows of status bar above the first screen).
+    judge: bool,
+    /// W35-17: deltas go at the end of a pass only. A vertical flip streams the new screen's rows
+    /// in while it scrolls, so a delta cut mid-flip holds half-loaded rows, and a merge writes
+    /// only unknown cells: the first (wrong) write would stay. The pass's own canvas has the last
+    /// write of every cell, as the live one does.
+    hold_deltas: bool,
 }
 
 /// What the worker does with a delta (the rules of the self-check, apart from
@@ -1548,6 +1872,7 @@ impl Worker<'_> {
         let check = self
             .reference
             .as_ref()
+            .filter(|_| self.judge)
             .map_or_else(DeltaCheck::default, |r| {
                 check_delta(&r.layers, &delta, r.trusted)
             });
@@ -1613,7 +1938,7 @@ impl Worker<'_> {
             }
             let status = self.scout.step(&self.reader);
             let ScoutStatus::Finished(end) = status else {
-                if self.scout.frames_since_merge() >= DELTA_EVERY {
+                if self.scout.frames_since_merge() >= DELTA_EVERY && !self.hold_deltas {
                     self.count_frames();
                     if self.deliver(ladder, recipe, &mut accepted, false)? {
                         return Ok(PassRun::Refused);
@@ -1672,7 +1997,16 @@ impl Worker<'_> {
     /// Every pass; `None` = the scout began in the middle of a transition.
     fn run(&mut self, mut ladder: Ladder) -> Result<Option<Vec<ScoutEnd>>, Stop> {
         let mut ends = Vec::new();
-        let dirs = self.base.dirs.clone();
+        // W35-17: a table that names both axes runs its X passes as ever; the Y passes follow.
+        let two_axis = self.base.two_axis();
+        let (dirs, y_dirs): (Vec<ScoutDir>, Vec<ScoutDir>) = if two_axis {
+            self.base
+                .dirs
+                .iter()
+                .partition(|d| d.axis() == ScoutAxis::X)
+        } else {
+            (self.base.dirs.clone(), Vec::new())
+        };
         // A pass that fails leaves the ladder spent; the next pass starts
         // from the rung the last accepted one finished on.
         let mut good = ladder.clone();
@@ -1702,7 +2036,99 @@ impl Worker<'_> {
                 PassEnd::Aborted => return Ok(None),
             }
         }
+        if !self.report.gave_up && !y_dirs.is_empty() {
+            self.run_second_axis(&good, &dirs, &y_dirs)?;
+        }
         Ok(Some(ends))
+    }
+
+    /// W35-17: the second axis of a top-down game. Each Y pass walks from the start until the
+    /// camera has moved a picture ([`BRANCH_LEVELS`] half pictures), leaving a branch at each; an X
+    /// sweep (to the margin's reach) then runs from every branch, so the margins stay full at that
+    /// depth, which a column of Y alone would not do. Priority is the order: X first (above), then
+    /// Y, deepest last; the whole scout stops adding passes at [`MAX_TOTAL_FRAMES`]. A pass that
+    /// fails or is cut by a scene change here costs only itself: the first axis is already
+    /// delivered.
+    fn run_second_axis(
+        &mut self,
+        x_ladder: &Ladder,
+        x_dirs: &[ScoutDir],
+        y_dirs: &[ScoutDir],
+    ) -> Result<(), Stop> {
+        let bands = self.scout.places_by_bands();
+        for &ydir in y_dirs {
+            if self.scout.frames_run() >= MAX_TOTAL_FRAMES {
+                break;
+            }
+            let rungs = rungs_for(&self.base, ScoutAxis::Y, bands, None);
+            let step = if rungs.first() == Some(&ScoutStrategy::Walk) {
+                self.base.step_px
+            } else {
+                crate::scout_ladder::DEFAULT_STEP_PX
+            };
+            let mut ladder = Ladder::new(rungs, step);
+            self.validated = None;
+            self.scout.set_branching(true);
+            self.hold_deltas = true;
+            self.judge = false;
+            let passed = self.pass(&mut ladder, ydir)?;
+            self.scout.set_branching(false);
+            let branches = self.scout.take_branches();
+            let report = match passed {
+                PassEnd::Accepted(end, recipe) => PassReport {
+                    dir: ydir,
+                    finished_on: Some(recipe),
+                    end: Some(end),
+                },
+                PassEnd::Failed | PassEnd::Aborted => {
+                    self.report.passes.push(PassReport {
+                        dir: ydir,
+                        finished_on: None,
+                        end: None,
+                    });
+                    continue;
+                }
+            };
+            self.report.passes.push(report);
+            self.scout.set_reach_limit(true);
+            self.validated = None;
+            for branch in branches {
+                self.scout.rebase(branch);
+                for &xdir in x_dirs {
+                    if self.scout.frames_run() >= MAX_TOTAL_FRAMES {
+                        break;
+                    }
+                    // A second try, the zigzag the other way up, when the first got no further
+                    // than a wall (a branch does not know where the gaps are).
+                    let mut got = PassEnd::Aborted;
+                    for down_first in [false, true] {
+                        // (only a walker zigzags: a poked player does not meet walls)
+                        if self.scout.frames_run() >= MAX_TOTAL_FRAMES || (down_first && !bands) {
+                            break;
+                        }
+                        self.scout.set_down_first(down_first);
+                        let mut ladder = x_ladder.clone();
+                        got = self.pass(&mut ladder, xdir)?;
+                        if matches!(got, PassEnd::Accepted(..)) && self.scout.reach_met(xdir) {
+                            break;
+                        }
+                    }
+                    self.scout.set_down_first(false);
+                    if let PassEnd::Accepted(end, recipe) = got {
+                        self.report.passes.push(PassReport {
+                            dir: xdir,
+                            finished_on: Some(recipe),
+                            end: Some(end),
+                        });
+                    }
+                }
+            }
+            self.scout.set_reach_limit(false);
+            self.scout.rebase_home();
+            self.judge = true;
+            self.hold_deltas = false;
+        }
+        Ok(())
     }
 }
 
@@ -1768,6 +2194,8 @@ fn run_worker(
         counted: 0,
         validated: None,
         scene: scene.0,
+        judge: true,
+        hold_deltas: false,
     };
     let outcome = worker.run(Ladder::new(rungs, start_step));
     ScoutTelemetry::add(&telemetry.wall_us, t0.elapsed().as_micros() as u64);
@@ -1924,7 +2352,7 @@ impl ScoutDriver {
             return false;
         };
         let mut plan = setup.plan.clone();
-        plan.dirs = plan.dirs_for(axis);
+        plan.dirs = plan.passes_for(axis, live.stepper.bg_layer_views().is_none());
         let job = ScoutJob {
             rom: live.rom.to_vec(),
             snapshot,
@@ -2262,14 +2690,20 @@ mod tests {
         let right = ScoutDir::Right.nes_pad_bit();
         let (up, down) = (ScoutDir::Up.nes_pad_bit(), ScoutDir::Down.nes_pad_bit());
         // Sidestep 0: UNIT frames up, then FORWARD frames the way the pass goes.
-        assert_eq!(sidestep_pad(0, ScoutDir::Right), Some(up));
-        assert_eq!(sidestep_pad(SIDESTEP_UNIT - 1, ScoutDir::Right), Some(up));
-        assert_eq!(sidestep_pad(SIDESTEP_UNIT, ScoutDir::Right), Some(right));
+        assert_eq!(sidestep_pad(0, ScoutDir::Right, false), Some(up));
+        assert_eq!(
+            sidestep_pad(SIDESTEP_UNIT - 1, ScoutDir::Right, false),
+            Some(up)
+        );
+        assert_eq!(
+            sidestep_pad(SIDESTEP_UNIT, ScoutDir::Right, false),
+            Some(right)
+        );
         // Sidestep 1 is down, twice as long.
         let k1 = SIDESTEP_UNIT + SIDESTEP_FORWARD;
-        assert_eq!(sidestep_pad(k1, ScoutDir::Right), Some(down));
+        assert_eq!(sidestep_pad(k1, ScoutDir::Right, false), Some(down));
         assert_eq!(
-            sidestep_pad(k1 + 2 * SIDESTEP_UNIT, ScoutDir::Right),
+            sidestep_pad(k1 + 2 * SIDESTEP_UNIT, ScoutDir::Right, false),
             Some(right)
         );
         // Spent after SIDESTEPS of them, and the total is bounded (law 8: no index to stall).
@@ -2277,11 +2711,11 @@ mod tests {
             .map(|k| SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)
             .sum();
         assert_eq!(
-            sidestep_pad(total - 1, ScoutDir::Left),
+            sidestep_pad(total - 1, ScoutDir::Left, false),
             Some(ScoutDir::Left.nes_pad_bit())
         );
-        assert_eq!(sidestep_pad(total, ScoutDir::Left), None);
-        assert_eq!(sidestep_pad(u32::MAX, ScoutDir::Left), None);
+        assert_eq!(sidestep_pad(total, ScoutDir::Left, false), None);
+        assert_eq!(sidestep_pad(u32::MAX, ScoutDir::Left, false), None);
     }
 
     #[test]
@@ -3244,5 +3678,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- W35-17: the second axis ----
+
+    fn two_axis_plan() -> ScoutPlan {
+        let mut p = plan(ScoutStrategy::Walk);
+        p.dirs = vec![
+            ScoutDir::Right,
+            ScoutDir::Left,
+            ScoutDir::Down,
+            ScoutDir::Up,
+        ];
+        p
+    }
+
+    #[test]
+    fn a_table_naming_both_axes_runs_both_in_every_scene() {
+        use ScoutDir::*;
+        let p = two_axis_plan();
+        assert!(p.two_axis());
+        // A scene scrolling either way gets the X passes first, then the Y ones.
+        assert_eq!(
+            p.passes_for(ScoutAxis::X, true),
+            vec![Right, Left, Down, Up]
+        );
+        assert_eq!(
+            p.passes_for(ScoutAxis::Y, true),
+            vec![Right, Left, Down, Up]
+        );
+        // A table of one axis is as it was: the scene's own axis, defaults on the other.
+        let mut one = plan(ScoutStrategy::Walk);
+        one.dirs = vec![Right, Left];
+        assert!(!one.two_axis());
+        assert_eq!(one.passes_for(ScoutAxis::X, true), vec![Right, Left]);
+        assert_eq!(one.passes_for(ScoutAxis::Y, true), vec![Down, Up]);
+        // A recipe that cannot move the second axis (no pad to hold, no Y word) keeps to its scene's.
+        let mut poke = two_axis_plan();
+        poke.strategy = ScoutStrategy::PlayerMove;
+        poke.player_x = vec![0x22];
+        assert_eq!(poke.passes_for(ScoutAxis::X, false), vec![Right, Left]);
+        assert_eq!(poke.passes_for(ScoutAxis::Y, false), vec![Down, Up]);
+        // ... but with a Y word it runs both.
+        poke.player_y = vec![0x20];
+        assert_eq!(
+            poke.passes_for(ScoutAxis::X, false),
+            vec![Right, Left, Down, Up]
+        );
+    }
+
+    #[test]
+    fn a_zigzag_can_start_downwards() {
+        let (up, down) = (ScoutDir::Up.nes_pad_bit(), ScoutDir::Down.nes_pad_bit());
+        assert_eq!(sidestep_pad(0, ScoutDir::Right, false), Some(up));
+        assert_eq!(sidestep_pad(0, ScoutDir::Right, true), Some(down));
+        // Both are spent at the same moment.
+        let total: u32 = (0..SIDESTEPS)
+            .map(|k| SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)
+            .sum();
+        assert_eq!(sidestep_pad(total, ScoutDir::Right, true), None);
+        assert!(sidestep_pad(total - 1, ScoutDir::Right, true).is_some());
+    }
+
+    #[test]
+    fn a_sweeps_canvas_is_cut_to_the_rows_of_its_screen() {
+        let cells: Vec<Option<PpuPixel>> = (0..4 * 6)
+            .map(|_| {
+                Some(PpuPixel {
+                    palette_index: 7,
+                    layer: rf_core_api::PixelLayer::Background(0),
+                    sprite_id: None,
+                    priority: 0,
+                })
+            })
+            .collect();
+        let c = Canvas::from_raw_parts(10, -3, 4, 6, cells);
+        let cut = clip_rows(&c, -1, 2);
+        assert_eq!((cut.origin(), cut.width(), cut.height()), ((10, -3), 4, 6));
+        for y in -3..3 {
+            let inside = (-1..2).contains(&y);
+            assert_eq!(cut.get(11, y).is_some(), inside, "row {y}");
+        }
+        assert_eq!(clip_rows(&Canvas::new(), 0, 1).width(), 0);
     }
 }

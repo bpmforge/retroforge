@@ -97,6 +97,8 @@ pub struct Rig {
     pub shown: u64,
     /// W35-11: the last frame's picture was one flat colour.
     pub flat: bool,
+    /// W35-17: the last frame's indexed picture (probes).
+    pub video: Vec<rf_core_api::PpuPixel>,
 }
 
 pub fn roms_dir() -> String {
@@ -154,6 +156,7 @@ impl Rig {
             last_events: Vec::new(),
             shown: 0,
             flat: false,
+            video: Vec::new(),
         })
     }
 
@@ -166,6 +169,7 @@ impl Rig {
         let bundle = self.sink.bundle.take(self.st.frame_count());
         self.shown = rf_enhance::scout_finder::picture_hash(&bundle.video);
         self.flat = retroforge::scout::picture_is_flat(&bundle.video);
+        self.video.clone_from(&bundle.video);
         let level = self
             .scene_key
             .as_ref()

@@ -82,8 +82,9 @@ pub use placement::{
 };
 
 pub use registration::{
-    gate_rows, guard_rows, Check, Confidence, AGREE_PERCENT, BAD_FRAMES_PER_STEP,
-    GOOD_FRAMES_PER_STEP, MAX_LEVEL, MAX_OFFSET, MIN_EVIDENCE, STALE_FRAMES,
+    gate_rows, guard_rows, guard_rows_scrolling, Check, Confidence, AGREE_PERCENT,
+    BAD_FRAMES_PER_STEP, FLIP_HOLD_FRAMES, FLIP_PX, GOOD_FRAMES_PER_STEP, MAX_LEVEL, MAX_OFFSET,
+    MIN_EVIDENCE, STALE_FRAMES,
 };
 
 use hud::{hud_layers, row_orders, Motion};
@@ -363,6 +364,10 @@ pub struct CanvasModel {
     /// stored beside the scenes, written by the next [`Self::flush`] (and by
     /// the drop that follows the model's last one). Newest wins per key.
     extras: Vec<(rf_cache::CacheKey, Vec<u8>)>,
+    /// W35-17: the last frame's primary band `(scene, world x, world y of picture row 0)`: how
+    /// fast the camera moved ([`registration::FLIP_PX`]).
+    prev_primary: Option<(u64, i64, i64)>,
+    flip_hold: u8,
 }
 
 impl Default for CanvasModel {
@@ -394,6 +399,8 @@ impl CanvasModel {
             edges_seen: 0,
             guard: true,
             extras: Vec::new(),
+            prev_primary: None,
+            flip_hold: 0,
         }
     }
 
@@ -500,6 +507,8 @@ impl CanvasModel {
             dirty,
             last,
             guard,
+            prev_primary,
+            flip_hold,
             ..
         } = self;
         let Some(set) = scenes.get_mut(&scene.0) else {
@@ -510,8 +519,37 @@ impl CanvasModel {
             Source::Bands => {
                 // The NES: the whole picture is layer 0, placed by bands.
                 let mut rows = band_rows(bands, bundle.video.len() / width);
+                // The largest band carries the level (the scroll tracker's own primary, whose
+                // world position it accumulates).
+                let primary = bands
+                    .iter()
+                    .filter(|(band, _)| band.end > band.start)
+                    .max_by_key(|(band, _)| band.end - band.start);
+                let at = primary.map(|(band, pos)| {
+                    (
+                        scene.0,
+                        pos.world_x,
+                        pos.world_y_at_start - i64::from(band.start),
+                    )
+                });
+                let moved_fast = match (*prev_primary, at) {
+                    // (vertically only: a game's horizontal scroll at that pace is a runner's, and
+                    // a camera that disagrees with the picture there is a fault to count)
+                    (Some((s0, _, y0)), Some((s1, _, y1))) if s0 == s1 => {
+                        (y1 - y0).abs() >= FLIP_PX
+                    }
+                    _ => false,
+                };
+                // A flip moves the camera every other frame: the frames between belong to it.
+                *flip_hold = if moved_fast {
+                    FLIP_HOLD_FRAMES
+                } else {
+                    flip_hold.saturating_sub(1)
+                };
+                let fast = *flip_hold > 0;
+                *prev_primary = at;
                 if *guard {
-                    guard_rows(
+                    guard_rows_scrolling(
                         &mut set.layers[0],
                         &mut set.candidates[0],
                         &mut set.confidence[0],
@@ -519,6 +557,7 @@ impl CanvasModel {
                         width,
                         &mut rows,
                         &Pick::Level,
+                        Some(fast),
                     );
                 }
                 place_rows(
@@ -874,6 +913,8 @@ impl CanvasModel {
             edges_seen: 0,
             guard: false,
             extras: Vec::new(),
+            prev_primary: None,
+            flip_hold: 0,
         }
     }
 
