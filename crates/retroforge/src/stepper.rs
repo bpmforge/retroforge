@@ -700,6 +700,19 @@ impl EmuStepper {
             .map_or(&EMPTY_OAM, rf_nes::NesBus::oam)
     }
 
+    /// W35-16: the SNES object table (544 bytes) and the `$2101` size select, borrowed (reads only).
+    /// `None` on a NES session.
+    #[must_use]
+    pub fn snes_oam_view(&self) -> Option<(&[u8], u8)> {
+        match &self.machine {
+            Machine::Snes(core) => {
+                let ppu = &core.system().bus.ppu;
+                Some((&ppu.oam[..], ppu.obj_size))
+            }
+            Machine::Nes(_) => None,
+        }
+    }
+
     /// Every memory the running console exposes, through the one
     /// accessor that answers for **both** cores (ticket W13-02a).
     ///

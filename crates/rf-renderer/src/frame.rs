@@ -51,7 +51,13 @@ pub struct FrameBuffer {
     /// no colour math touched it". `None` (the default) means capture is
     /// off: nothing is allocated or written.
     mode7_mask: Option<Vec<bool>>,
+    /// Ticket W35-16: per pixel, the OAM index of the sprite that won it, `NO_SPRITE` for none.
+    /// `None` (the default) means capture is off: nothing is allocated or written.
+    sprite_ids: Option<Vec<u8>>,
 }
+
+/// [`FrameBuffer::sprite_ids`] value for a dot no sprite won.
+pub const NO_SPRITE: u8 = 0xFF;
 
 impl FrameBuffer {
     /// A buffer pre-filled with opaque black, matching what an unbooted
@@ -80,6 +86,7 @@ impl FrameBuffer {
             palettes: vec![None; height],
             subs: vec![None; height],
             mode7_mask: None,
+            sprite_ids: None,
             width,
             height,
         }
@@ -129,6 +136,20 @@ impl FrameBuffer {
         self.mode7_mask.as_deref()
     }
 
+    /// Ticket W35-16: turn per-pixel sprite capture on or off. Off (the default) costs nothing; on,
+    /// every `video_scanline` also records which OAM entry won each dot. Turning it on starts
+    /// all-[`NO_SPRITE`].
+    pub fn set_sprite_id_capture(&mut self, on: bool) {
+        self.sprite_ids = on.then(|| vec![NO_SPRITE; self.width * self.height]);
+    }
+
+    /// Ticket W35-16: `width() * height()` OAM indices, row major, when capture is on
+    /// ([`NO_SPRITE`] where no sprite won the dot). Rows not yet drawn this frame keep last frame's.
+    #[must_use]
+    pub fn sprite_ids(&self) -> Option<&[u8]> {
+        self.sprite_ids.as_deref()
+    }
+
     /// Copy of [`Self::rgba`] for callers (e.g. a cross-thread channel)
     /// that need an owned, 'static buffer rather than a borrow tied to
     /// this `FrameBuffer`'s lifetime.
@@ -160,6 +181,16 @@ impl CoreSink for FrameBuffer {
         if let Some(mask) = &mut self.mode7_mask {
             // Pixels the core did not send this row are not BG1.
             mask[row * self.width..(row + 1) * self.width].fill(false);
+        }
+        if let Some(ids) = &mut self.sprite_ids {
+            // Dots the core did not send this row are no sprite's.
+            let row_ids = &mut ids[row * self.width..(row + 1) * self.width];
+            row_ids.fill(NO_SPRITE);
+            for (slot, pixel) in row_ids.iter_mut().zip(pixels) {
+                if pixel.layer == PixelLayer::Sprite {
+                    *slot = pixel.sprite_id.unwrap_or(NO_SPRITE);
+                }
+            }
         }
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             if let Some(mask) = &mut self.mode7_mask {
@@ -257,6 +288,53 @@ impl CoreSink for FrameBuffer {
 
 #[cfg(test)]
 mod tests {
+    /// Ticket W35-16: with sprite capture on, a dot records the OAM index of the sprite that won it
+    /// (255 for a background dot), and capture never changes the picture.
+    #[test]
+    fn sprite_capture_records_the_winner_and_leaves_the_picture_alone() {
+        let row = |sprite: Option<u8>| -> Vec<PpuPixel> {
+            (0..NES_WIDTH)
+                .map(|x| PpuPixel {
+                    palette_index: 0x20,
+                    layer: if sprite.is_some() && x % 2 == 0 {
+                        PixelLayer::Sprite
+                    } else {
+                        PixelLayer::Background(0)
+                    },
+                    sprite_id: sprite.filter(|_| x % 2 == 0),
+                    priority: 0,
+                })
+                .collect()
+        };
+        let mut plain = FrameBuffer::new();
+        let mut capturing = FrameBuffer::new();
+        assert!(capturing.sprite_ids().is_none(), "off by default");
+        capturing.set_sprite_id_capture(true);
+        for fb in [&mut plain, &mut capturing] {
+            fb.video_scanline(3, &row(Some(9)));
+            fb.video_scanline(4, &row(None));
+        }
+        assert_eq!(
+            plain.rgba(),
+            capturing.rgba(),
+            "capture must not touch the picture"
+        );
+        let ids = capturing.sprite_ids().expect("on");
+        assert_eq!(ids[3 * NES_WIDTH], 9);
+        assert_eq!(ids[3 * NES_WIDTH + 1], NO_SPRITE);
+        assert!(ids[4 * NES_WIDTH..5 * NES_WIDTH]
+            .iter()
+            .all(|&i| i == NO_SPRITE));
+        // A row redrawn without the sprite forgets it.
+        capturing.video_scanline(3, &row(None));
+        assert_eq!(
+            capturing.sprite_ids().expect("on")[3 * NES_WIDTH],
+            NO_SPRITE
+        );
+        capturing.set_sprite_id_capture(false);
+        assert!(capturing.sprite_ids().is_none());
+    }
+
     use super::*;
     use crate::palette::palette_index_to_rgb;
 

@@ -1688,6 +1688,8 @@ type MarginRows<'a> = (
     &'a [[u8; rf_enhance::canvas::LAYERS]],
     &'a [Option<rf_core_api::LineRegisters>],
     &'a [Option<u16>],
+    // Ticket W35-16: the margin-sprite mask (`FrameMsg::margin_sprites`), empty = paint none.
+    &'a [u8],
 );
 
 impl Drop for RetroForgeApp {
@@ -6105,6 +6107,12 @@ impl RetroForgeApp {
             &msg.layer_order,
             &msg.line_regs,
             &msg.sub_fill,
+            // The Diorama composes its own ground from this picture; sprites painted in would land in it.
+            if self.diorama_wanted {
+                &[]
+            } else {
+                &msg.margin_sprites
+            },
         );
         let narrow = usize::from(rf_enhance::widescreen::NARROW_WIDTH);
         let core_ids = msg
@@ -6192,6 +6200,7 @@ impl RetroForgeApp {
                 &msg.layer_order,
                 &msg.line_regs,
                 &msg.sub_fill,
+                &[],
             ),
             &msg.line_palettes,
             core_ids,
@@ -9564,6 +9573,17 @@ impl RetroForgeApp {
                 {
                     actions.settings_changed = true;
                     actions.widescreen_aspect_changed = true;
+                }
+                // Ticket W35-16: the game's own objects past the picture's edge.
+                if row.id == "widescreen_decoded"
+                    && row.enabled
+                    && crate::enhance_dock::margin_sprites_toggle(
+                        ui,
+                        &mut self.current_game_settings.margin_sprites,
+                    )
+                {
+                    actions.settings_changed = true;
+                    actions.margin_sprites_changed = true;
                 }
                 // Ticket W30-04: the lens effects, whenever the row can act.
                 if row.id == "hd2d_lens" && available {
@@ -13359,7 +13379,7 @@ impl RetroForgeApp {
         rgba: Vec<u8>,
         size: (usize, usize),
         layer_frames: Option<&rf_enhance::canvas::LayerFrames>,
-        (backdrops, order, line_regs, sub_fill): MarginRows<'_>,
+        (backdrops, order, line_regs, sub_fill, margin_sprites): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
         core_ids: Option<&[u8]>,
     ) -> (Vec<u8>, (usize, usize), Option<Vec<u8>>) {
@@ -13438,7 +13458,7 @@ impl RetroForgeApp {
         let keep =
             move |y: usize| hud.is_some_and(|r| u16::try_from(y).is_ok_and(|y| r.contains(y)));
         let mut canvas_layer_ids: Option<Vec<u8>> = None;
-        let filled = match (source, position) {
+        let mut filled = match (source, position) {
             (MarginSource::DecodedLevel, _) => {
                 let (cx, cy) = self.level_camera.unwrap_or((0, 0));
                 let Some((img, iw, ih)) = self.level_image.as_ref() else {
@@ -13503,6 +13523,19 @@ impl RetroForgeApp {
             }
             _ => fill_margins_keeping(&rgba, w, h, out_w, (0, 0), &|_, _| None, &keep, keep_w),
         };
+        // Ticket W35-16: an object the game itself placed past the picture's edge keeps the
+        // core's own dots in the margin (the fill above replaced them wherever a canvas knew it).
+        if !margin_sprites.is_empty() {
+            rf_enhance::margin_sprites::paint(
+                &mut filled,
+                out_w,
+                h,
+                &rgba,
+                w,
+                margin_sprites,
+                keep_w,
+            );
+        }
         // Where the canvas did not decide a dot, it keeps the core's: its
         // own layer id (the core records them for the 256 hardware dots, in
         // the middle of the picture), and the backdrop beyond them.
@@ -14607,6 +14640,7 @@ impl RetroForgeApp {
             last_scanline: None,
             bg_rgba: Vec::new(),
             sprite_rgba,
+            margin_sprites: Vec::new(),
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             snes: Some(Box::new(snes)),
@@ -15394,6 +15428,7 @@ impl RetroForgeApp {
             self.widescreen_decisions = [None; 4];
             self.send_command(CoreCommand::SetWidescreen(None));
             self.send_command(CoreCommand::SetScout(None));
+            self.sync_margin_sprites();
             return;
         }
         let mut policies = self
@@ -15464,6 +15499,24 @@ impl RetroForgeApp {
                     })
                 }),
         ));
+        self.sync_margin_sprites();
+    }
+
+    /// Ticket W35-16: tell the core whether to capture the margin-sprite mask: the toggle is on,
+    /// widescreen is, and the game is an SNES one (the NES core draws 256 dots only). Cheap and
+    /// idempotent.
+    fn sync_margin_sprites(&mut self) {
+        let want = self.widescreen_on
+            && self.current_game_settings.margin_sprites
+            && self.console_label == "SNES";
+        self.send_command(CoreCommand::SetMarginSprites(want));
+    }
+
+    /// Ticket W35-16: switch the margin sprites for a test.
+    #[doc(hidden)]
+    pub fn set_margin_sprites_for_test(&mut self, on: bool) {
+        self.current_game_settings.margin_sprites = on;
+        self.sync_margin_sprites();
     }
 
     /// Ticket W30-03: dots across the widescreen picture for `lines` lines
@@ -16908,6 +16961,9 @@ impl RetroForgeApp {
         } else if actions.widescreen_aspect_changed && self.widescreen_on {
             // Ticket W30-03: a new aspect is a new width for the core.
             self.set_widescreen(true);
+        }
+        if actions.margin_sprites_changed {
+            self.sync_margin_sprites();
         }
         if actions.settings_changed {
             self.save_current_game_settings();

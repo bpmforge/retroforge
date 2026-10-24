@@ -5110,6 +5110,169 @@ fn shot_smw_left(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W35-16: the script `script` cut into one-frame tokens, so a session can stop after `n`
+/// frames of it.
+fn frame_tokens(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for tok in script.split_whitespace() {
+        let split = tok.find(|c: char| c.is_ascii_digit()).expect("N");
+        let (b, n) = tok.split_at(split);
+        for _ in 0..n.parse::<u32>().expect("N") {
+            out.push(format!("{b}1"));
+        }
+    }
+    out
+}
+
+/// Ticket W35-16: dots that differ between two same-size pictures, split into those inside the
+/// column band `[lo, hi)` and those outside it.
+fn diff_dots(a: &Pic, b: &Pic, lo: usize, hi: usize) -> (usize, usize) {
+    let (mut inside, mut outside) = (0, 0);
+    for i in 0..a.w * a.h {
+        if a.rgba[i * 4..i * 4 + 3] != b.rgba[i * 4..i * 4 + 3] {
+            if (lo..hi).contains(&(i % a.w)) {
+                inside += 1;
+            } else {
+                outside += 1;
+            }
+        }
+    }
+    (inside, outside)
+}
+
+/// Ticket W35-16: one game at 32:9 from a saved moment, the same frame twice: "Objects past the edge" off,
+/// then on (the snapshot is re-applied and the same number of frames stepped, so the only difference is
+/// the toggle). Returns the pair and checks the contract: the 256 console dots never change, the dots
+/// that do change are in the margins, and a second off render equals the first (no residue).
+fn margin_sprites_pair(
+    path: &Path,
+    snap: &retroforge::stepper::MachineSnapshot,
+    steps: usize,
+) -> Option<(Pic, Pic, Pic)> {
+    let mut h = new_harness();
+    open_and_run(&mut h, path);
+    h.state_mut().set_scout_enabled_for_test(false);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    let take = |h: &mut H, on: bool| -> Option<Pic> {
+        h.state_mut().set_margin_sprites_for_test(on);
+        h.state().send_core_command_for_test(CoreCommand::Pause);
+        run_n(h, 20);
+        h.state()
+            .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(snap.clone())));
+        run_n(h, 30);
+        for _ in 0..steps {
+            step_from(h);
+        }
+        println!(
+            "MARGIN-SPRITES take on={on}: source {:?}, readout {:?}",
+            h.state().widescreen_source_for_test(),
+            h.state().margin_readout_for_test()
+        );
+        grab(h)
+    };
+    // Warm-up passes: the margins come from the stitched canvas only once the scene has settled and
+    // the core's snapshot of it has arrived, and the canvas keeps filling for a while. Re-applying
+    // the same moment keeps the scene; go on until two "off" passes in a row give the same picture
+    // from the canvas, so the "on" pass differs by the toggle alone.
+    let mut previous: Option<Pic> = None;
+    let mut off = None;
+    for _ in 0..10 {
+        run_n(&mut h, 150);
+        let pic = take(&mut h, false)?;
+        let settled = h.state().widescreen_source_for_test() == MarginSource::StitchedCanvas
+            && previous.as_ref().is_some_and(|p| p.rgba == pic.rgba);
+        previous = Some(pic.clone());
+        if settled {
+            off = Some(pic);
+            break;
+        }
+    }
+    let off = off?;
+    let on = take(&mut h, true)?;
+    let off_again = take(&mut h, false)?;
+    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+    Some((off, on, off_again))
+}
+
+/// Ticket W35-16: one game's "Objects past the edge" pair: the session `head` then the first `upto`
+/// frames of `play` are played in the rig, the snapshot is taken there, and the app steps `steps` frames
+/// from it with the toggle off and on. Shots `docs/screens/w35/margin-sprites-{tag}-{off,on}.png`.
+fn shot_margin_sprites(
+    readme: &mut Vec<String>,
+    tag: &str,
+    game: (&str, &str, &str),
+    (head, play, upto, steps): (&str, &str, usize, usize),
+) {
+    let name = format!("margin-sprites-{tag}");
+    if !wanted(&name) {
+        return;
+    }
+    let Some(path) = rom(game.0, game.1) else {
+        return skip(readme, &name, &format!("{} not found", game.1));
+    };
+    let Some(mut rig) = discovery::Rig::open(game.0, game.1, None) else {
+        return skip(readme, &name, "no rig");
+    };
+    rig.script(head);
+    for u in &frame_tokens(play)[..upto] {
+        rig.script(u);
+    }
+    let snap = rig.st.snapshot().expect("snapshot");
+    drop(rig);
+    let Some((off, on, off_again)) = margin_sprites_pair(&path, &snap, steps) else {
+        return skip(readme, &name, "no frame");
+    };
+    let centre = (off.w - 256) / 2;
+    let (inside, outside) = diff_dots(&off, &on, centre, centre + 256);
+    let (res_in, res_out) = diff_dots(&off, &off_again, 0, off.w);
+    println!(
+        "MARGIN-SPRITES {tag}: {}x{}; differing dots on vs off: {inside} in the 256 console dots, {outside} in the margins; off vs off-again: {}",
+        on.w,
+        on.h,
+        res_in + res_out
+    );
+    save(&w35_dir().join(format!("{name}-off.png")), &off.opaque());
+    save(&w35_dir().join(format!("{name}-on.png")), &on.opaque());
+    note(readme, format!("{name}|{}|{}x{}", game.1, on.w, on.h));
+    assert_eq!(inside, 0, "the console's own 256 dots changed");
+    assert!(outside > 0, "nothing was painted in the margins");
+    assert_eq!(res_in + res_out, 0, "switching back off left residue");
+}
+
+/// Ticket W35-16: Super Mario World's Banzai Bill coming in from the right. 686 frames into the play
+/// script it is 4 frames from being 15 px over the right edge.
+fn shot_margin_sprites_smw(readme: &mut Vec<String>) {
+    shot_margin_sprites(
+        readme,
+        "smw",
+        discovery::SMW,
+        (
+            &format!("{} w60", discovery::SMW_TO_LEVEL),
+            discovery::SMW_PLAY,
+            686,
+            4,
+        ),
+    );
+}
+
+/// Ticket W35-16: A Link to the Past's soldier standing over the right edge (the game's own
+/// sprites 16 px wide at X = 248), 3,905 frames into the road session.
+fn shot_margin_sprites_alttp(readme: &mut Vec<String>) {
+    shot_margin_sprites(
+        readme,
+        "alttp",
+        discovery::ALTTP,
+        (
+            &discovery::alttp_to_free_play(),
+            &discovery::alttp_play(),
+            3905,
+            8,
+        ),
+    );
+}
+
 /// Ticket W35-07: The Legend of Zelda (NES) with NO hand-made `[scout]` table. A scripted session
 /// on the first overworld screen (over its edges and back) finds one; the app's own "Save scout
 /// settings" writes it to the player's profile; the app, reading that profile, scouts the start
@@ -5330,6 +5493,8 @@ fn w30_w31_screens() {
     shot_sm_scout(&mut readme);
     shot_cv_scout(&mut readme);
     shot_smw_left(&mut readme);
+    shot_margin_sprites_smw(&mut readme);
+    shot_margin_sprites_alttp(&mut readme);
     shot_alttp_scout(&mut readme);
     shot_z1_scout(&mut readme);
     shot_persist(&mut readme);
