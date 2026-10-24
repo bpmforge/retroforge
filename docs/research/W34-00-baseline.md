@@ -231,3 +231,47 @@ differ. `a_still_scene_is_identical_double_buffered_and_creates_nothing`
 `dirty_rows_finds_the_first_and_last_changed_row` covers the row search. A
 ROM switch drops the pass (existing behaviour), so the held bytes go with it.
 Workspace: 3321 passing.
+
+## W35-18: switching games while the Diorama is on
+
+Tests the W35-13/15 work skipped (`tests/w35_18_rom_switch.rs`,
+`rf-renderer/tests/w35_18_pass_drop.rs`), with the Diorama and the HD-2D
+preset on, a real GPU, real `open_rom_path` / `close_rom`: SNES to SNES, SNES
+to NES (256x224 to 256x240), NES to SNES, a readback pending at every switch,
+quit to library and reopen the same ROM, 32:9 widescreen on, ten switches
+with real cores, and three commercial pairs (`--ignored`: SMW to ALttP, SMW
+to SMB, SMB to SMW).
+
+Method: the new game's first 8 Diorama frames after the switch are compared
+hash for hash with a reference session that never ran the old game (still
+scenes, so the double-buffered pass equals the synchronous one, W35-13), and
+none may be a frame the old game showed or have the old size. Live GPU
+resources are counted from construction to drop (`diorama::live_resources`:
+passes, staging buffers, kept textures): zero right after every open and
+after quit, one pass and its fixed pair of staging buffers while running.
+
+Causes of a wrong first frame, ranked and checked: (1) the pass or its
+in-flight readback surviving the open: ruled out, the pass is dropped (live
+counts 0 after open, no panic or wgpu error with a map pending, 12 rounds);
+(2) camera state kept across the open; (3) a stale picture or HUD kept. The
+trace for (2) showed the zoom ramp at 1.0 on the first frame after a switch
+and easing 0.96, 0.92 ... against a flat 0.0 in a fresh session (the glide
+and ramp were reset only when the camera was not following or the render was
+unusable).
+
+Bug fixed: `open_rom_path` and `close_rom` now share
+`reset_diorama_session`, which also resets the glide, the zoom ramp, the
+lensed copy, the HUD overlay, the fog density and window, and the heights
+readout. Before: 5 of the 6 switch cases failed (frames not equal to the new
+game's own); after: all pass. Deliberately not reset: the Diorama cost gate
+(`diorama_budget`), a machine-level measure that no case showed misleading.
+
+Settings rule (pinned by `diorama_settings_follow_the_per_game_rule`): a
+game's own SAVED settings load on open (Diorama, HD-2D preset, camera);
+unsaved edits (a camera change) die with the session; a game never saved opens
+at the defaults (Accuracy, Diorama off, no pass). Widescreen is per session
+and is off after any open. Resources: staging buffers and kept textures at
+baseline (0) after every switch; old core thread gone before the new one
+starts. RSS over 16 alternating switches with real cores (SNES fixture, NES
+decoded fixture): 72 MB after round 5, 78 MB after round 15 (limit 40 MB);
+commercial pairs peaked at 92 to 113 MB.

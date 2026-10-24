@@ -4328,12 +4328,7 @@ impl RetroForgeApp {
                 // it does not need to happen here directly.
                 // W35-13: and the pass itself, so no frame of the old game is
                 // still in flight to be shown as the new one's first.
-                self.diorama_pass = None;
-                self.diorama_render = None;
-                self.diorama_texture = None;
-                self.diorama_ground_rgba = None;
-                self.level_heights = None;
-                self.diorama_wanted = false;
+                self.reset_diorama_session();
                 // Ticket W16-14: same reset, for Mode 7 -- a new ROM has
                 // shown nothing yet, so the "mode7_ground" row must not
                 // still read Available from the PREVIOUS game's BG mode 7.
@@ -13593,12 +13588,7 @@ impl RetroForgeApp {
         self.ultrawide_texture = None;
         self.ultrawide_render = None;
         // Ticket W16-13: same reasoning as the ROM-load reset above.
-        self.diorama_pass = None;
-        self.diorama_render = None;
-        self.diorama_texture = None;
-        self.diorama_ground_rgba = None;
-        self.level_heights = None;
-        self.diorama_wanted = false;
+        self.reset_diorama_session();
         self.lens_shadows_wanted = false;
         self.running = false;
         self.position = None;
@@ -13610,6 +13600,31 @@ impl RetroForgeApp {
         // Ticket W21-04: back on the library, the global video settings.
         self.video = self.settings.video.clone();
         self.video_scope = crate::settings::VideoScope::Everything;
+    }
+
+    /// Ticket W35-18: everything the live Diorama keeps from one game that
+    /// must not reach the next (a ROM open, quit to library): the pass (its
+    /// in-flight readback and staging buffers), the picture and its texture,
+    /// and the camera. The glide and the zoom ramp were NOT reset before: a
+    /// game that had the camera closed in (ramp 1.0, glide at its player)
+    /// handed both to the next game, whose first frames then eased out from
+    /// the old game's framing (traced: ramp 1.0 on the first frame after the
+    /// switch, 0.96, 0.92 ... against a flat 0.0 in a fresh session).
+    fn reset_diorama_session(&mut self) {
+        self.diorama_pass = None;
+        self.diorama_render = None;
+        self.diorama_texture = None;
+        self.diorama_lensed_rgba = None;
+        self.diorama_hud = crate::diorama_layers::HudOverlay::default();
+        self.diorama_ground_rgba = None;
+        self.diorama_fog = None;
+        self.diorama_window = None;
+        self.level_heights = None;
+        self.heights_note = None;
+        self.diorama_smoother.reset();
+        self.diorama_zoom_ramp = 0.0;
+        self.diorama_follow_dbg = (None, (0.0, 0.0), 0.0);
+        self.diorama_wanted = false;
     }
 
     /// Ticket W21-04: load the video settings in force for the open game.
@@ -14204,6 +14219,21 @@ impl RetroForgeApp {
         self.save_current_game_settings();
     }
 
+    /// Ticket W35-18: whether decoded widescreen is on for the open game.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn widescreen_on_for_test(&self) -> bool {
+        self.widescreen_on
+    }
+
+    /// Ticket W35-18: persist the open game's settings as the Features rows
+    /// do, so a test can prove the REOPEN path restores them (and that a
+    /// game never saved opens at the defaults).
+    #[doc(hidden)]
+    pub fn save_game_settings_for_test(&mut self) {
+        self.save_current_game_settings();
+    }
+
     /// Ticket W16-06: switch the current game's mode exactly as the mode
     /// picker does, without going through egui.
     #[doc(hidden)]
@@ -14566,6 +14596,54 @@ impl RetroForgeApp {
         let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, 256, 224, snes, None);
         self.refresh_diorama_render(&msg);
         let msg = Self::synthetic_frame_msg(again.0, again.1, 256, 224, again.2, None);
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// Ticket W35-18: deliver exactly ONE synthetic SNES frame of the given
+    /// size (the pass is double-buffered, so what the app then shows is the
+    /// previous frame, as live) -- a test that watches the frames just after
+    /// a ROM switch needs each one separately.
+    #[doc(hidden)]
+    pub fn inject_one_snes_frame_for_test(
+        &mut self,
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        snes: core_thread::SnesDebugFrame,
+        size: (usize, usize),
+    ) {
+        let msg = Self::synthetic_frame_msg(rgba, sprite_rgba, size.0, size.1, snes, None);
+        self.refresh_diorama_render(&msg);
+    }
+
+    /// Ticket W35-18: [`Self::inject_one_snes_frame_for_test`] for the
+    /// console-free (learned) path, which is how an NES frame reaches the
+    /// Diorama.
+    #[doc(hidden)]
+    pub fn inject_one_learned_frame_for_test(
+        &mut self,
+        rgba: Vec<u8>,
+        sprite_rgba: Vec<u8>,
+        tile_grids: Vec<rf_enhance::heights::TileGrid>,
+        sprites: Vec<rf_enhance::heights::SpriteBox>,
+        heights: crate::live_learn::HeightsFrame,
+        size: (usize, usize),
+    ) {
+        let snes = core_thread::SnesDebugFrame {
+            vram: Vec::new(),
+            cgram: Vec::new(),
+            oam: Vec::new(),
+            ppu_regs: Vec::new(),
+            aram: Vec::new(),
+            mode7: rf_snes::ppu::mode7::Mode7::default(),
+            hdma_lanes: Vec::new(),
+            voices: Vec::new(),
+            bg_scroll: [(0, 0); 4],
+        };
+        let mut msg = Self::synthetic_frame_msg(rgba, sprite_rgba, size.0, size.1, snes, None);
+        msg.snes = None;
+        msg.tile_grids = tile_grids;
+        msg.sprites = sprites;
+        msg.heights = Some(Box::new(heights));
         self.refresh_diorama_render(&msg);
     }
 
