@@ -42,6 +42,11 @@ const SKIP_COLUMNS: usize = 8;
 pub const MIN_EVIDENCE: u32 = 32;
 /// A band agrees when at least this share of its samples match.
 pub const AGREE_PERCENT: u32 = 90;
+/// W35-17: the share of ALL known cells (a scout's too) that must match for a band to count as
+/// agreeing in the second opinion that spares a canvas ([`guard_rows_scrolling`]): a stale canvas
+/// is a different picture and matches by chance only, a canvas with a few stale rows matches the
+/// rest.
+pub const SCOUT_AGREE_PERCENT: u32 = 80;
 /// Consecutive disagreeing frames per confidence step down.
 pub const BAD_FRAMES_PER_STEP: u32 = 3;
 /// Consecutive frames without a disagreement per confidence step up (half a
@@ -56,6 +61,11 @@ pub const GOOD_FRAMES_PER_STEP: u32 = 30;
 /// margins would stay on VRAM until the game quit. A fade or a placement
 /// fault is not self-consistent, so it never gets here.
 pub const STALE_FRAMES: u32 = 45;
+/// W35-17: a camera that crosses this many pixels a frame vertically is a game's own scroll (a
+/// screen flip scrolls 4 px a frame; a walking player's camera, at most 2).
+pub const FLIP_PX: i64 = 3;
+/// Frames a flip keeps the camera's pace after its last big step (it steps every other frame).
+pub const FLIP_HOLD_FRAMES: u8 = 6;
 /// Full confidence: the margins may show history and scout cells.
 pub const MAX_LEVEL: u8 = 3;
 
@@ -311,8 +321,55 @@ pub fn guard_rows(
     rows: &mut [Option<RowPos>],
     pick: &Pick<'_>,
 ) {
+    guard_rows_scrolling(
+        canvas, candidate, confidence, video, width, rows, pick, None,
+    );
+}
+
+/// [`guard_rows`] for a console placed by the core's own scroll bands (the NES), which says whether
+/// the camera crossed this frame vertically at `fast` pace ([`FLIP_PX`] a frame or more: a game's
+/// own screen flip, W35-17); `None` is [`guard_rows`] exactly, the rules below not applied. The rows that disagree are withheld as ever, but
+/// the frame is no evidence about the canvas: a flip streams the new screen's rows in while it
+/// scrolls, and the tracker's world cannot place a band that crosses the seam between the two
+/// screens, so a canvas that is right (a scout's, or the screen before) disagrees with the whole
+/// flip, 44 frames of Zelda 1's, and the next static frames are the 45th: the canvas was thrown
+/// away at the end of every vertical flip. Such a frame moves neither the confidence nor the
+/// candidate.
+#[allow(clippy::too_many_arguments)] // `guard_rows` plus one flag; its callers hold all the rest
+pub fn guard_rows_scrolling(
+    canvas: &mut Canvas,
+    candidate: &mut Canvas,
+    confidence: &mut Confidence,
+    video: &[PpuPixel],
+    width: usize,
+    rows: &mut [Option<RowPos>],
+    pick: &Pick<'_>,
+    scrolling: Option<bool>,
+) {
     let wanted = rows.to_vec();
     let check = gate_rows(canvas, video, width, rows, pick);
+    // W35-17: the live cells of the rows in question may be few and stale (twenty rows of the
+    // game's first frames, stitched at a wrong scroll, sit above Zelda 1's first screen): when a
+    // scout's cells over the same rows agree with the picture, and the live cells are a minority
+    // of all those known (a quarter at most), the canvas is not stale, and the frame counts for it
+    // (its rows stay withheld: a live cell is never replaced here). Live cells that are most of
+    // the evidence and all disagree are a stale canvas whatever a scout's cells say (A Link to the
+    // Past's rain layer, whose live cells never agree twice).
+    if scrolling.is_some() && check.all_disagree() {
+        let mut again = wanted.clone();
+        let second = gate_rows_over(canvas, video, width, &mut again, pick, true);
+        if second.agrees() && check.compared * 4 <= second.compared {
+            confidence.observe(second);
+            if candidate.width() > 0 {
+                *candidate = Canvas::new();
+            }
+            confidence.candidate_run = 0;
+            return;
+        }
+    }
+    if scrolling == Some(true) && check.withheld_rows > 0 {
+        return;
+    }
     confidence.observe(check);
     if !check.all_disagree() {
         if candidate.width() > 0 {
@@ -358,6 +415,19 @@ pub fn gate_rows(
     rows: &mut [Option<RowPos>],
     pick: &Pick<'_>,
 ) -> Check {
+    gate_rows_over(canvas, video, width, rows, pick, false)
+}
+
+/// [`gate_rows`] over every known cell, a scout's too (`scouts`): W35-17, the second opinion
+/// [`guard_rows_scrolling`] asks before it lets a canvas be thrown away.
+fn gate_rows_over(
+    canvas: &Canvas,
+    video: &[PpuPixel],
+    width: usize,
+    rows: &mut [Option<RowPos>],
+    pick: &Pick<'_>,
+    scouts: bool,
+) -> Check {
     let mut check = Check::default();
     if width == 0 || canvas.width() == 0 {
         return check;
@@ -390,15 +460,22 @@ pub fn gate_rows(
                 }
             }
         }
-        let (agreed, compared) = score(canvas, &samples, 0);
+        let (agreed, compared) = score(canvas, &samples, 0, scouts);
         if compared >= MIN_EVIDENCE {
             check.judged_bands += 1;
             check.judged_rows += (end - start) as u32;
             check.agreed += agreed;
             check.compared += compared;
-            if agreed * 100 < compared * AGREE_PERCENT {
+            if agreed * 100
+                < compared
+                    * if scouts {
+                        SCOUT_AGREE_PERCENT
+                    } else {
+                        AGREE_PERCENT
+                    }
+            {
                 check.withheld_rows += (end - start) as u32;
-                check.residual = check.residual.or(best_offset(canvas, &samples));
+                check.residual = check.residual.or(best_offset(canvas, &samples, scouts));
                 for slot in &mut rows[start..end] {
                     *slot = None;
                 }
@@ -425,11 +502,16 @@ fn sample(pick: &Pick<'_>, sy: usize, c: usize, p: &PpuPixel) -> Option<PpuPixel
 }
 
 /// `(agreed, compared)` of `samples` against the canvas shifted by `dx`.
-fn score(canvas: &Canvas, samples: &[(i64, i64, u8)], dx: i64) -> (u32, u32) {
+fn score(canvas: &Canvas, samples: &[(i64, i64, u8)], dx: i64, scouts: bool) -> (u32, u32) {
     let (mut agreed, mut compared) = (0, 0);
     for &(x, y, idx) in samples {
-        // A scout cell is not evidence about a live frame (W33-06).
-        if let Some(cell) = canvas.get_live(x + dx, y) {
+        // A scout cell is not evidence about a live frame (W33-06), unless asked for.
+        let cell = if scouts {
+            canvas.get(x + dx, y)
+        } else {
+            canvas.get_live(x + dx, y)
+        };
+        if let Some(cell) = cell {
             compared += 1;
             agreed += u32::from(cell.palette_index == idx);
         }
@@ -440,10 +522,10 @@ fn score(canvas: &Canvas, samples: &[(i64, i64, u8)], dx: i64) -> (u32, u32) {
 /// Where, within `MAX_OFFSET` of the prediction, the samples agree with the
 /// canvas, if anywhere (nearest to the prediction on a tie). The result is
 /// the frame content's true x minus the predicted x.
-fn best_offset(canvas: &Canvas, samples: &[(i64, i64, u8)]) -> Option<i8> {
+fn best_offset(canvas: &Canvas, samples: &[(i64, i64, u8)], scouts: bool) -> Option<i8> {
     let mut best: Option<(u32, i64)> = None;
     for dx in -MAX_OFFSET..=MAX_OFFSET {
-        let (agreed, compared) = score(canvas, samples, dx);
+        let (agreed, compared) = score(canvas, samples, dx, scouts);
         if dx == 0 || compared < MIN_EVIDENCE || agreed * 100 < compared * AGREE_PERCENT {
             continue;
         }

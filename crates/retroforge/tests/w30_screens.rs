@@ -5468,6 +5468,254 @@ fn shot_z1_scout(readme: &mut Vec<String>) {
     );
 }
 
+/// Ticket W35-17: a top-down game scouted on both axes, then walked up. The finder's table (found
+/// by `find`, which also hands back a snapshot of the place and its frame count) goes through the
+/// card into the player's profile folder; the app, reading it, scouts that place at 32:9 (cold
+/// canvas cache), the player walks `walk`, and the shot is the 32:9 frame after it. A second visit
+/// over the same cache starts no scout.
+#[allow(clippy::too_many_arguments)]
+fn up_shot(
+    readme: &mut Vec<String>,
+    name: &str,
+    console: &str,
+    file: &str,
+    profile_rel: &str,
+    walk: &str,
+    png: &str,
+    find: &mut dyn FnMut() -> Option<(
+        Box<rf_enhance::scout_finder::Skeleton>,
+        retroforge::stepper::MachineSnapshot,
+        u64,
+    )>,
+) {
+    use egui_kittest::kittest::Queryable as _;
+    use std::sync::atomic::Ordering::Relaxed;
+    if !wanted(name) {
+        return;
+    }
+    let Some(path) = rom(console, file) else {
+        skip(readme, name, &format!("{file} not found"));
+        return;
+    };
+    let t0 = Instant::now();
+    let Some((skeleton, start, start_frame)) = find() else {
+        skip(readme, name, "no rig");
+        return;
+    };
+    println!(
+        "{name}-FIND: {:.1}s dirs {:?}\n{}",
+        t0.elapsed().as_secs_f32(),
+        skeleton.dirs,
+        skeleton.to_toml()
+    );
+    let cold = std::env::temp_dir().join(format!("rf_scout_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cold);
+    std::fs::create_dir_all(&cold).expect("cold cache dir");
+    // SAFETY: the harness is built after this and nothing else in this process reads the
+    // environment concurrently at this point.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("TMPDIR", &cold);
+    }
+    let config = PathBuf::from(
+        std::env::var("RETROFORGE_CONFIG_DIR").expect("w30_w31_screens sets the config dir"),
+    );
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../profiles")
+        .join(profile_rel)
+        .join("profile.toml");
+    let before = std::fs::read(&shipped).expect("the shipped profile");
+    let user = config
+        .join("retroforge/profiles")
+        .join(profile_rel)
+        .join("profile.toml");
+    let _ = std::fs::remove_file(&user);
+
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    h.state_mut().offer_scout_for_test((*skeleton).clone());
+    run_n(&mut h, 3);
+    h.get_by_label("Save scout settings").click();
+    run_n(&mut h, 3);
+    assert_eq!(
+        std::fs::read(&shipped).expect("still there"),
+        before,
+        "the shipped profile was written to"
+    );
+    let saved = std::fs::read_to_string(&user).expect("the player's profile");
+    let table = rf_profiles::load_str(&saved)
+        .expect("the saved profile loads")
+        .profile
+        .scout
+        .expect("a [scout] table");
+    println!("{name}-SAVED: dirs {:?}", table.dirs);
+    open_and_run(&mut h, &path);
+
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_widescreen(true);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(start.clone())));
+    let t1 = Instant::now();
+    while telemetry.started.load(Relaxed) == 0 && t1.elapsed() < Duration::from_secs(120) {
+        let t = h.state().frame_count_for_test() + 2;
+        run_frames(&mut h, t, Duration::from_secs(10));
+    }
+    h.state().send_core_command_for_test(CoreCommand::Pause);
+    let mut finished = false;
+    while t1.elapsed() < Duration::from_secs(900) {
+        std::thread::sleep(Duration::from_millis(200));
+        if telemetry.finished.load(Relaxed) + telemetry.gave_up.load(Relaxed) >= 1 {
+            finished = telemetry.finished.load(Relaxed) >= 1;
+            break;
+        }
+    }
+    h.state().send_core_command_for_test(CoreCommand::Resume);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+    let t = h.state().frame_count_for_test() + 90;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let at_start = h.state().margin_known_for_test();
+    let before_walk = grab(&h);
+    play_script(&mut h, walk);
+    let t = h.state().frame_count_for_test() + 150;
+    run_frames(&mut h, t, Duration::from_secs(60));
+    let after = h.state().margin_known_for_test();
+    let Some(on) = grab(&h) else {
+        skip(readme, name, "no frame");
+        return;
+    };
+    println!(
+        "{name}: finished {finished}; {} scout frames, {} cells merged; started {} finished {} aborted {}, passes ended {:?}; agreement {} over {} shared cells; margins at the start {at_start:?}, after {walk:?} {after:?}",
+        telemetry.frames.load(Relaxed),
+        telemetry.cells.load(Relaxed),
+        telemetry.started.load(Relaxed),
+        telemetry.finished.load(Relaxed),
+        telemetry.aborted.load(Relaxed),
+        telemetry.last_ends.lock().map(|e| e.clone()).unwrap_or_default(),
+        agreement_text(&telemetry),
+        telemetry.shared_cells.load(Relaxed),
+    );
+    save(&w35_dir().join(png), &on.opaque());
+    if let Some(b) = before_walk {
+        save(
+            &w35_dir().join(png.replace("-on.png", "-start.png")),
+            &b.opaque(),
+        );
+    }
+    note(readme, format!("{name}|{file}|{}x{}", on.w, on.h));
+    assert!(finished, "{name}: the scout did not finish");
+    h.state().send_core_command_for_test(CoreCommand::Shutdown);
+    std::thread::sleep(Duration::from_secs(3));
+    drop(h);
+
+    // The second visit: a new app over the same cache and profile folder.
+    let mut h = new_harness();
+    open_and_run(&mut h, &path);
+    let telemetry = h.state().scout_telemetry_for_test();
+    h.state_mut().set_scout_enabled_for_test(true);
+    h.state_mut()
+        .set_widescreen_aspect_for_test(Aspect::Wide32x9);
+    h.state_mut().set_measure_margins_for_test(true);
+    h.state_mut().set_widescreen(true);
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    h.state()
+        .send_core_command_for_test(CoreCommand::ApplySnapshot(Box::new(start)));
+    let mut samples: Vec<(i64, usize, usize)> = Vec::new();
+    for _ in 0..240 {
+        let t = h.state().frame_count_for_test() + 1;
+        run_frames(&mut h, t, Duration::from_secs(10));
+        if let Some((_, k, t, _)) = h.state().margin_known_for_test() {
+            // (frames since the snapshot went in; before it the counter is the old session's)
+            let at = h.state().frame_count_for_test().wrapping_sub(start_frame) as i64;
+            if at >= 0 {
+                samples.push((at, k, t));
+            }
+        }
+    }
+    let peak = samples.iter().map(|s| s.1).max().unwrap_or(0);
+    let full_at = samples
+        .iter()
+        .find(|s| s.1 >= peak - peak / 100)
+        .map(|s| s.0);
+    let line = format!(
+        "{name}-PERSIST: second visit: margins known at most {peak} of {}, full (99%) at live frame {full_at:?} after the snapshot; scouts started {} skipped {}",
+        samples.first().map_or(0, |s| s.2),
+        telemetry.started.load(Relaxed),
+        telemetry.skipped.load(Relaxed),
+    );
+    println!("{line}");
+    note(readme, line);
+    assert_eq!(
+        telemetry.started.load(Relaxed),
+        0,
+        "the second visit started a scout"
+    );
+    assert!(
+        telemetry.skipped.load(Relaxed) >= 1,
+        "the scout was not skipped"
+    );
+}
+
+/// Ticket W35-17: Zelda 1 walked one screen up at 32:9.
+fn shot_z1_up(readme: &mut Vec<String>) {
+    up_shot(
+        readme,
+        "z1-up",
+        "nes",
+        discovery::ZELDA1.1,
+        "nes/legend-of-zelda",
+        "U70 w100",
+        "zelda1-up-32x9-on.png",
+        &mut || {
+            let mut rig = discovery::Rig::open(discovery::ZELDA1.0, discovery::ZELDA1.1, None)?;
+            rig.script(discovery::Z1_TO_PLAY);
+            rig.script("w60");
+            let start = rig.st.snapshot().expect("snapshot");
+            let frame = rig.st.frame_count();
+            // The finder's trials start from the player's first idle after the session; the table
+            // here is the one found from the first screen (`discover_game` snapshots it there),
+            // which is where this scene is scouted.
+            let (skeleton, _, _) = discovery::discover_game(
+                discovery::ZELDA1,
+                discovery::Z1_TO_PLAY,
+                discovery::Z1_WALK,
+                false,
+            )?;
+            Some((Box::new(skeleton), start, frame))
+        },
+    );
+}
+
+/// Ticket W35-17: A Link to the Past walked up as far as the road lets it, at 32:9.
+fn shot_alttp_up(readme: &mut Vec<String>) {
+    up_shot(
+        readme,
+        "alttp-up",
+        "snes",
+        discovery::ALTTP.1,
+        "snes/the-legend-of-zelda-a-link-to-the-past",
+        "U150 w60",
+        "alttp-up-32x9-on.png",
+        &mut || {
+            let mut rig = discovery::Rig::open(discovery::ALTTP.0, discovery::ALTTP.1, None)?;
+            rig.script(&discovery::alttp_to_free_play());
+            let mut road = None;
+            let skeleton = discovery::alttp_find_table(&mut rig, 900, &mut |r| {
+                road = Some((r.st.snapshot().expect("snapshot"), r.st.frame_count()));
+            });
+            let (road, frame) = road.expect("the road");
+            Some((skeleton, road, frame))
+        },
+    );
+}
+
 #[test]
 #[ignore = "drives real ROMs and writes PNGs under docs/screens/w30-w31/; run deliberately"]
 fn w30_w31_screens() {
@@ -5497,6 +5745,8 @@ fn w30_w31_screens() {
     shot_margin_sprites_alttp(&mut readme);
     shot_alttp_scout(&mut readme);
     shot_z1_scout(&mut readme);
+    shot_z1_up(&mut readme);
+    shot_alttp_up(&mut readme);
     shot_persist(&mut readme);
     shot_confidence(&mut readme);
     shot_fps(&mut readme);

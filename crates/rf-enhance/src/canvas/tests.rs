@@ -2545,3 +2545,127 @@ fn a_candidate_learned_from_a_fade_is_restarted_and_the_settled_picture_replaces
     assert_eq!(conf.level(), MAX_LEVEL);
     assert_eq!(canvas.get(3, 0).map(|p| p.palette_index), Some(203));
 }
+
+/// W35-17: a game's own screen flip (the camera crosses 3 px or more a frame) streams the new screen
+/// in while it scrolls, so a canvas that is right disagrees with the whole flip; the next static
+/// frames used to be the 45th and the canvas was thrown away at the end of every flip. A flip's
+/// frames are no evidence, for or against.
+#[test]
+fn a_flips_frames_do_not_condemn_a_canvas() {
+    use crate::canvas::registration::{guard_rows, guard_rows_scrolling, Confidence, STALE_FRAMES};
+    let (w, h) = (64usize, 32usize);
+    let frame = |idx: u8| -> Vec<PpuPixel> {
+        (0..w * h)
+            .map(|i| px(PixelLayer::Background(0), idx.wrapping_add((i % 7) as u8)))
+            .collect()
+    };
+    let rows: Vec<Option<RowPos>> = (0..h).map(|y| Some(RowPos { x: 0, y: y as i64 })).collect();
+    let (mut canvas, mut cand, mut conf) = (Canvas::new(), Canvas::new(), Confidence::default());
+    let (settled, flipping) = (frame(10), frame(100));
+    // The canvas knows the settled picture.
+    let mut r = rows.clone();
+    guard_rows(
+        &mut canvas,
+        &mut cand,
+        &mut conf,
+        &settled,
+        w,
+        &mut r,
+        &Pick::Level,
+    );
+    place_rows(&mut canvas, &settled, w, &r, &Pick::Level, &mut None);
+    // A long flip: a different picture, every frame, at pace.
+    for _ in 0..STALE_FRAMES * 2 {
+        let mut r = rows.clone();
+        guard_rows_scrolling(
+            &mut canvas,
+            &mut cand,
+            &mut conf,
+            &flipping,
+            w,
+            &mut r,
+            &Pick::Level,
+            Some(true),
+        );
+        place_rows(&mut canvas, &flipping, w, &r, &Pick::Level, &mut None);
+    }
+    assert_eq!(conf.resets, 0, "the flip replaced nothing");
+    assert_eq!(conf.level(), MAX_LEVEL, "and cost no confidence");
+    assert_eq!(
+        canvas.get(3, 0).map(|p| p.palette_index),
+        Some(13),
+        "nor was written over"
+    );
+    // The same frames at rest are evidence as ever.
+    for _ in 0..STALE_FRAMES + 8 {
+        let mut r = rows.clone();
+        guard_rows_scrolling(
+            &mut canvas,
+            &mut cand,
+            &mut conf,
+            &flipping,
+            w,
+            &mut r,
+            &Pick::Level,
+            Some(false),
+        );
+        place_rows(&mut canvas, &flipping, w, &r, &Pick::Level, &mut None);
+    }
+    assert_eq!(
+        conf.resets, 1,
+        "a picture that stays replaces a stale canvas"
+    );
+}
+
+/// W35-17: on a console placed by bands (`Some`), a canvas whose live cells over the rows in question are few and stale (twenty rows of
+/// Zelda 1's first frames sit above its first screen) but whose scout cells agree with the picture
+/// is not stale: the picture's frames count for it, nothing is promoted.
+#[test]
+fn scout_cells_that_agree_spare_a_canvas_with_a_few_stale_rows() {
+    use crate::canvas::registration::{guard_rows_scrolling, Confidence, STALE_FRAMES};
+    let (w, h) = (128usize, 64usize);
+    let frame = |idx: u8| -> Vec<PpuPixel> {
+        (0..w * h)
+            .map(|i| px(PixelLayer::Background(0), idx.wrapping_add((i % 7) as u8)))
+            .collect()
+    };
+    let rows: Vec<Option<RowPos>> = (0..h).map(|y| Some(RowPos { x: 0, y: y as i64 })).collect();
+    let picture = frame(200);
+    let stale = frame(10);
+    let line = |v: &[PpuPixel], y: usize| -> Vec<Option<PpuPixel>> {
+        v[y * w..(y + 1) * w].iter().map(|p| Some(*p)).collect()
+    };
+    let mut canvas = Canvas::new();
+    for y in 0..56 {
+        canvas.blit_row_scout(0, y as i64, &line(&picture, y));
+    }
+    for y in 56..64 {
+        canvas.blit_row(0, y as i64, &line(&stale, y));
+    }
+    let (mut cand, mut conf) = (Canvas::new(), Confidence::default());
+    for _ in 0..STALE_FRAMES + 20 {
+        let mut r = rows.clone();
+        guard_rows_scrolling(
+            &mut canvas,
+            &mut cand,
+            &mut conf,
+            &picture,
+            w,
+            &mut r,
+            &Pick::Level,
+            Some(false),
+        );
+    }
+    assert_eq!(conf.resets, 0, "the canvas was kept");
+    assert_eq!(conf.level(), MAX_LEVEL, "and trusted");
+    assert_eq!(
+        canvas.get(3, 0).map(|p| p.palette_index),
+        Some(203),
+        "the scout cells stand"
+    );
+    assert_eq!(
+        canvas.get(3, 60).map(|p| p.palette_index),
+        Some(stale[60 * w + 3].palette_index),
+        "a live cell is not replaced"
+    );
+}
