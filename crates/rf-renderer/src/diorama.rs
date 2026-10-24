@@ -40,6 +40,7 @@
 //! budget-gate-reuse test.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::diorama_mesh::Vertex;
@@ -1244,6 +1245,50 @@ fn sample_count_ok(device: &wgpu::Device, format: wgpu::TextureFormat, count: u3
     pollster::block_on(scope.pop()).is_none()
 }
 
+/// Live GPU resources of the pass, counted from construction to drop (W35-18):
+/// `resource_counts` only counts creations, so it cannot show that a dropped
+/// pass gave its buffers and textures back.
+static LIVE_PASSES: AtomicUsize = AtomicUsize::new(0);
+static LIVE_READBACKS: AtomicUsize = AtomicUsize::new(0);
+static LIVE_SAMPLED: AtomicUsize = AtomicUsize::new(0);
+
+/// What is alive right now, across every [`DioramaPass`] in the process.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LiveResources {
+    /// Passes not yet dropped.
+    pub passes: usize,
+    /// Readback (staging) buffers held by live passes.
+    pub readback_buffers: usize,
+    /// Kept sampled textures (ground atlas, sprite layer) held by live passes.
+    pub sampled_textures: usize,
+}
+
+/// The process-wide live counts (W35-18).
+#[must_use]
+pub fn live_resources() -> LiveResources {
+    LiveResources {
+        passes: LIVE_PASSES.load(Ordering::Relaxed),
+        readback_buffers: LIVE_READBACKS.load(Ordering::Relaxed),
+        sampled_textures: LIVE_SAMPLED.load(Ordering::Relaxed),
+    }
+}
+
+/// Adds `n` to a live counter while it exists.
+struct Tally(&'static AtomicUsize, usize);
+
+impl Tally {
+    fn new(counter: &'static AtomicUsize, n: usize) -> Self {
+        counter.fetch_add(n, Ordering::Relaxed);
+        Self(counter, n)
+    }
+}
+
+impl Drop for Tally {
+    fn drop(&mut self) {
+        self.0.fetch_sub(self.1, Ordering::Relaxed);
+    }
+}
+
 /// A texture the pass samples, kept between frames and recreated only when
 /// its size changes.
 struct SampledTexture {
@@ -1253,6 +1298,7 @@ struct SampledTexture {
     /// The bytes the texture holds now (W35-15): the next frame uploads only
     /// the rows that differ from them, and nothing when none do.
     held: Vec<u8>,
+    _tally: Tally,
 }
 
 /// The first and last row (of `row_bytes` each) where `new` differs from
@@ -1289,6 +1335,7 @@ struct Target {
     /// double-buffered path alternates (one frame in flight).
     readbacks: [wgpu::Buffer; 2],
     padded_bytes_per_row: u32,
+    _tally: Tally,
 }
 
 /// A readback that has been submitted and mapped but not yet collected
@@ -1366,6 +1413,7 @@ pub struct DioramaPass {
     /// Whether the last render drew with a shadow map.
     shadow_map_used: std::sync::atomic::AtomicBool,
     async_readback: std::sync::atomic::AtomicBool,
+    _tally: Tally,
 }
 
 impl DioramaPass {
@@ -1683,6 +1731,7 @@ impl DioramaPass {
             shadow_gate: Mutex::new(ShadowGate::default()),
             shadow_map_used: std::sync::atomic::AtomicBool::new(false),
             async_readback: std::sync::atomic::AtomicBool::new(false),
+            _tally: Tally::new(&LIVE_PASSES, 1),
         }
     }
 
@@ -1965,6 +2014,7 @@ impl DioramaPass {
                     view,
                     size,
                     held: Vec::new(),
+                    _tally: Tally::new(&LIVE_SAMPLED, 1),
                 });
                 made.textures += 1;
                 rebind = true;
@@ -2426,6 +2476,7 @@ impl DioramaPass {
             depth_view,
             readbacks,
             padded_bytes_per_row,
+            _tally: Tally::new(&LIVE_READBACKS, 2),
         }
     }
 }
