@@ -30,6 +30,11 @@ rf-snes = { path = "../rf-snes" }
 rf-enhance = { path = "../rf-enhance" }
 rf-profiles = { path = "../rf-profiles" }
 rf-rebuild = { path = "../rf-rebuild" }
+# rf-state + rf-cart: the lockstep checker's repro bundle (ticket W36-04)
+# carries a shipped `.rfstate` container, built with rf-state's own envelope
+# and keyed by rf-cart's normalised ROM hash, like the app shell does.
+rf-state = { path = "../rf-state" }
+rf-cart = { path = "../rf-cart" }
 rf-cache = { path = "../rf-cache" }
 sha2 = "0.11"
 toml = "1"

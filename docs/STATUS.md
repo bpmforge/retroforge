@@ -4691,3 +4691,23 @@ stories, 10 decisions).
   leaves the multicart menu); with a second Start, real-play 1-1 covers 11,078
   PRG bytes (16.9%) and the atlas has 305 functions. Semantic IR moves to
   W36-12. Workspace: **3408 passing**.
+
+- **W36-04 — Lockstep checker** (2026-10-25). `rf_harness::lockstep::run`
+  steps a rebuilt and a plain NES core on the same input and compares CPU
+  state, cycles, WRAM, VRAM, CHR-RAM, OAM, palette, PRG-RAM and video/audio
+  hashes every frame; on divergence it re-runs the frame instruction by
+  instruction and writes a repro bundle (rf_state savestate before the frame,
+  input tail, executor trace ring with atlas function ids, diffs, WRAM dumps;
+  no ROM bytes). Injected WRAM and OAM pokes are caught at the right frame.
+  SMB: all 32 levels (entered test-side by writing world/level RAM through the
+  second Start) and 1-1 real play: 108,800 frames, 1.04 billion instructions,
+  0 divergence, 0.0072% fallback, 0 dispatch misses, one atlas from 64
+  recordings (389 functions, 25.3% of PRG). "Reached" means in play at frame
+  600, not completed; several runs lost all lives, so part of those frames is
+  game-over code. The all-levels test is `#[ignore]` (~12 min). Open: the
+  bundle savestate is decoded but not yet loaded through the app's loader,
+  and lockstep.rs copies save_state's REGION_TAGS table (fixed in W36-05 by
+  adding rf-harness as a retroforge dev-dependency). The rebuild core-thread
+  test now uses a per-process cache (plausible fix, cause unconfirmed).
+  `memory_editor_writes_the_machine` (unchanged since before W36) timed out in
+  2 of 6 full gates and never alone. Workspace: **3412 passing**.

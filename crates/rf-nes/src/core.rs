@@ -49,7 +49,7 @@ use rf_core_api::{
     Mos6502Regs,
 };
 
-use crate::rebuild::{Atlas, Delta, RebuildExec};
+use crate::rebuild::{Atlas, Delta, RebuildExec, TraceEntry};
 use rf_rebuild::Dispatch;
 
 use crate::{Cpu, NesBus};
@@ -233,7 +233,7 @@ impl NesCore {
         };
         let (nmi, irq) = self.cpu.pending_interrupt();
         if nmi || irq {
-            x.note_interrupt();
+            x.note_interrupt(self.cpu.pc);
             return RebuildBefore::Plain;
         }
         let pc = self.cpu.pc;
@@ -241,7 +241,7 @@ impl NesCore {
             .bus
             .prg_rom_offset(pc)
             .and_then(|o| u32::try_from(o).ok());
-        match x.dispatch(rom) {
+        match x.dispatch(pc, rom) {
             Dispatch::Atlas {
                 node,
                 indirect: true,
@@ -282,6 +282,29 @@ impl NesCore {
     #[must_use]
     pub fn rebuild_deltas(&self) -> &[Delta] {
         self.rebuild.as_deref().map_or(&[], RebuildExec::deltas)
+    }
+
+    /// Keep the last `capacity` executed steps on the rebuilt path (ticket
+    /// W36-04's repro bundles); `0` turns it off. No effect while Rebuild is
+    /// off.
+    pub fn set_rebuild_trace(&mut self, capacity: usize) {
+        if let Some(x) = self.rebuild.as_deref_mut() {
+            x.enable_trace(capacity);
+        }
+    }
+
+    /// The last executed steps with atlas function ids, oldest first.
+    #[must_use]
+    pub fn rebuild_trace(&self) -> Vec<TraceEntry> {
+        self.rebuild
+            .as_deref()
+            .map_or_else(Vec::new, RebuildExec::trace)
+    }
+
+    /// The installed atlas, for naming trace entries' functions.
+    #[must_use]
+    pub fn rebuild_atlas(&self) -> Option<&Atlas> {
+        self.rebuild.as_deref().map(RebuildExec::atlas)
     }
 
     /// A [`CodeAddr`] for `addr` under the bank state in force right now.

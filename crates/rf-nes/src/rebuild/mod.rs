@@ -15,8 +15,8 @@
 
 use rf_core_api::coverage::CoverageLog;
 pub use rf_rebuild::{
-    build_atlas as build_generic_atlas, entry, Atlas, Delta, Provenance, RebuildExec, CACHE_ASSET,
-    CACHE_PRODUCER, CACHE_SETTINGS,
+    build_atlas as build_generic_atlas, entry, Atlas, Delta, Provenance, RebuildExec, TraceEntry,
+    TraceKind, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS,
 };
 use rf_rebuild::{DecodeMode, Decoded, Flow, Isa};
 

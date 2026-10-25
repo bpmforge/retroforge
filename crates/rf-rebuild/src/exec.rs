@@ -28,6 +28,8 @@ use crate::isa::Flow;
 pub const MAX_DELTAS: usize = 4096;
 
 const NO_NODE: u32 = u32::MAX;
+/// Trace-ring marker: the step was an NMI/IRQ sequence, not an instruction.
+const TRACE_INTERRUPT: u32 = u32::MAX - 1;
 const NO_SITE: u32 = u32::MAX;
 /// Set on a target key that is a CPU address (outside PRG ROM) rather than a
 /// ROM offset.
@@ -38,6 +40,29 @@ const CPU_KEY: u32 = 1 << 31;
 pub struct Delta {
     pub site: CodeAddr,
     pub target: CodeAddr,
+}
+
+/// One executed step as the trace ring remembers it (ticket W36-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceEntry {
+    /// CPU address the step started at (the interrupted `pc` for an
+    /// interrupt entry).
+    pub cpu: u16,
+    pub kind: TraceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceKind {
+    /// In the atlas; `function` is the index of the first function owning
+    /// the block, `None` when no function does.
+    Atlas {
+        function: Option<u32>,
+        prov: Provenance,
+    },
+    /// No atlas node: plain interpreter.
+    Fallback,
+    /// An NMI/IRQ sequence ran instead of the instruction at `cpu`.
+    Interrupt,
 }
 
 /// What the atlas says about one instruction.
@@ -86,6 +111,12 @@ pub struct RebuildExec {
     stats: RebuildStats,
     deltas: Vec<Delta>,
     seen: HashSet<Delta>,
+    /// Ticket W36-04: ring of the last executed steps, empty (and untouched
+    /// by the per-instruction path beyond one `is_empty`) until
+    /// [`RebuildExec::enable_trace`]. `(cpu, node)`, power-of-two length.
+    trace: Vec<(u16, u32)>,
+    trace_next: usize,
+    trace_total: u64,
 }
 
 impl RebuildExec {
@@ -154,7 +185,64 @@ impl RebuildExec {
             stats,
             deltas: Vec::with_capacity(MAX_DELTAS),
             seen: HashSet::new(),
+            trace: Vec::new(),
+            trace_next: 0,
+            trace_total: 0,
         }
+    }
+
+    /// Keep the last `capacity` steps (rounded up to a power of two; `0`
+    /// turns the trace off and clears it).
+    pub fn enable_trace(&mut self, capacity: usize) {
+        self.trace_next = 0;
+        self.trace_total = 0;
+        self.trace = if capacity == 0 {
+            Vec::new()
+        } else {
+            vec![(0, NO_NODE); capacity.next_power_of_two()]
+        };
+    }
+
+    #[inline]
+    fn trace_push(&mut self, cpu: u16, node: u32) {
+        let mask = self.trace.len().wrapping_sub(1);
+        if let Some(slot) = self.trace.get_mut(self.trace_next & mask) {
+            *slot = (cpu, node);
+            self.trace_next = (self.trace_next + 1) & mask;
+            self.trace_total += 1;
+        }
+    }
+
+    /// The last executed steps, oldest first (empty when the trace is off).
+    #[must_use]
+    pub fn trace(&self) -> Vec<TraceEntry> {
+        let len = self.trace.len();
+        let kept = usize::try_from(self.trace_total).map_or(len, |t| t.min(len));
+        // `trace_next` is the oldest slot once the ring has wrapped, 0 before.
+        let start = if kept == len { self.trace_next } else { 0 };
+        (0..kept)
+            .filter_map(|i| self.trace.get((start + i) % len.max(1)))
+            .map(|&(cpu, node)| TraceEntry {
+                cpu,
+                kind: match node {
+                    NO_NODE => TraceKind::Fallback,
+                    TRACE_INTERRUPT => TraceKind::Interrupt,
+                    n => self
+                        .nodes
+                        .get(n as usize)
+                        .map_or(TraceKind::Fallback, |nd| TraceKind::Atlas {
+                            function: (nd.function != u32::MAX).then_some(nd.function),
+                            prov: nd.prov,
+                        }),
+                },
+            })
+            .collect()
+    }
+
+    /// Steps executed since the trace was enabled (not bounded by capacity).
+    #[must_use]
+    pub fn trace_total(&self) -> u64 {
+        self.trace_total
     }
 
     #[must_use]
@@ -168,15 +256,19 @@ impl RebuildExec {
         self.nodes.get(node as usize)
     }
 
-    /// Look up the instruction about to run, at PRG offset `rom` (`None` when
-    /// the CPU address is not PRG ROM right now), and count it.
+    /// Look up the instruction about to run at CPU address `pc`, at PRG
+    /// offset `rom` (`None` when the CPU address is not PRG ROM right now),
+    /// and count it.
     #[inline]
-    pub fn dispatch(&mut self, rom: Option<u32>) -> Dispatch {
+    pub fn dispatch(&mut self, pc: u16, rom: Option<u32>) -> Dispatch {
         let node = rom
             .and_then(|r| self.slot.get(r as usize))
             .copied()
             .filter(|&n| n != NO_NODE)
-            .and_then(|n| self.nodes.get(n as usize).map(|nd| (n, nd)));
+            .and_then(|n| self.nodes.get(n as usize).map(|nd| (n, *nd)));
+        if !self.trace.is_empty() {
+            self.trace_push(pc, node.map_or(NO_NODE, |(n, _)| n));
+        }
         match node {
             Some((n, nd)) => {
                 match nd.prov {
@@ -197,8 +289,11 @@ impl RebuildExec {
 
     /// An NMI/IRQ sequence ran instead of an instruction.
     #[inline]
-    pub fn note_interrupt(&mut self) {
+    pub fn note_interrupt(&mut self, pc: u16) {
         self.stats.interrupt_entries += 1;
+        if !self.trace.is_empty() {
+            self.trace_push(pc, TRACE_INTERRUPT);
+        }
     }
 
     /// After an indirect transfer at `site` (the `node` dispatch returned),
@@ -313,17 +408,20 @@ mod tests {
     fn dispatch_counts_observed_inferred_and_fallback() {
         let mut x = RebuildExec::new(atlas());
         assert!(matches!(
-            x.dispatch(Some(0)),
+            x.dispatch(0x8000, Some(0)),
             Dispatch::Atlas {
                 indirect: false,
                 ..
             }
         ));
-        assert!(matches!(x.dispatch(Some(1)), Dispatch::Atlas { .. }));
-        assert_eq!(x.dispatch(Some(5)), Dispatch::Fallback);
-        assert_eq!(x.dispatch(None), Dispatch::Fallback);
+        assert!(matches!(
+            x.dispatch(0x8000, Some(1)),
+            Dispatch::Atlas { .. }
+        ));
+        assert_eq!(x.dispatch(0x8000, Some(5)), Dispatch::Fallback);
+        assert_eq!(x.dispatch(0x8000, None), Dispatch::Fallback);
         assert_eq!(
-            x.dispatch(Some(0x1000)),
+            x.dispatch(0x8000, Some(0x1000)),
             Dispatch::Fallback,
             "past the image"
         );
@@ -336,7 +434,7 @@ mod tests {
     #[test]
     fn recorded_targets_hit_and_new_ones_miss_once_in_the_delta_list() {
         let mut x = RebuildExec::new(atlas());
-        let Dispatch::Atlas { node, indirect } = x.dispatch(Some(2)) else {
+        let Dispatch::Atlas { node, indirect } = x.dispatch(0x8000, Some(2)) else {
             panic!("site is in the atlas");
         };
         assert!(indirect);
@@ -362,9 +460,45 @@ mod tests {
     }
 
     #[test]
+    fn the_trace_ring_keeps_the_last_steps_with_function_ids() {
+        let mut x = RebuildExec::new(atlas());
+        assert!(x.trace().is_empty(), "off until enabled");
+        x.dispatch(0x8000, Some(0));
+        assert_eq!(x.trace_total(), 0);
+        x.enable_trace(3); // rounds up to 4
+        x.dispatch(0x8000, Some(0));
+        x.dispatch(0x8001, Some(1));
+        x.note_interrupt(0x8002);
+        x.dispatch(0x0300, None);
+        let t = x.trace();
+        assert_eq!(t.len(), 4);
+        assert_eq!(t[0].cpu, 0x8000);
+        assert!(matches!(
+            t[0].kind,
+            TraceKind::Atlas {
+                function: Some(0),
+                prov: Provenance::Observed
+            }
+        ));
+        assert_eq!(t[2].kind, TraceKind::Interrupt);
+        assert_eq!(t[3].kind, TraceKind::Fallback);
+        // Wrap: two more steps push the two oldest out, order stays oldest first.
+        x.dispatch(0x8002, Some(2));
+        x.dispatch(0x9000, None);
+        let t = x.trace();
+        assert_eq!(
+            t.iter().map(|e| e.cpu).collect::<Vec<_>>(),
+            [0x8002, 0x0300, 0x8002, 0x9000]
+        );
+        assert_eq!(x.trace_total(), 6);
+        x.enable_trace(0);
+        assert!(x.trace().is_empty());
+    }
+
+    #[test]
     fn the_delta_list_is_bounded() {
         let mut x = RebuildExec::new(atlas());
-        let Dispatch::Atlas { node, .. } = x.dispatch(Some(2)) else {
+        let Dispatch::Atlas { node, .. } = x.dispatch(0x8000, Some(2)) else {
             panic!()
         };
         let site = addr(0x8002, Some(2));
