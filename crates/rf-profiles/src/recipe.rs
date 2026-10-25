@@ -20,7 +20,11 @@
 //! exact_hash = "0xfedcba9876543210"    # optional: raises confidence
 //! address_hint = 0x8E19                # optional: CPU entry on the observed dump
 //! hooks = ["entry", "exit"]            # which sides a hook may attach to
+//! confidence = 90                      # optional, percent: machine-made names
 //! source = "observed: NMI vector target of a 1-1 recording"   # required
+//! # Names proposed by the understand pass (ticket W36-09) say where they came
+//! # from: source = "rule:read_controllers" or source = "ai:<model>", with a
+//! # confidence. Names people wrote (any other source) win over them.
 //!
 //! [[ram]]
 //! addr = 0x075A
@@ -84,6 +88,11 @@ pub enum RecipeError {
         why: &'static str,
     },
     DuplicatePatch(String),
+    /// A `confidence` above 100 (it is a percentage).
+    BadConfidence {
+        function: String,
+        value: u8,
+    },
 }
 
 impl std::fmt::Display for RecipeError {
@@ -114,6 +123,10 @@ impl std::fmt::Display for RecipeError {
             Self::DuplicateFunction(n) => write!(f, "function `{n}` appears twice"),
             Self::BadPatch { patch, why } => write!(f, "[[patch]] `{patch}`: {why}"),
             Self::DuplicatePatch(n) => write!(f, "patch `{n}` appears twice"),
+            Self::BadConfidence { function, value } => write!(
+                f,
+                "function `{function}`: confidence {value} is not a percentage (0-100)"
+            ),
         }
     }
 }
@@ -151,6 +164,7 @@ struct FunctionRow {
     #[serde(default)]
     hooks: Vec<String>,
     source: Option<String>,
+    confidence: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -238,7 +252,14 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
                 }
             }
         }
+        if let Some(c) = row.confidence.filter(|&c| c > 100) {
+            return Err(RecipeError::BadConfidence {
+                function: row.name,
+                value: c,
+            });
+        }
         functions.push(RecipeFunction {
+            confidence: row.confidence,
             shape_hash: parse_hash(&row.name, "shape_hash", &row.shape_hash)?,
             exact_hash: row
                 .exact_hash
@@ -349,6 +370,9 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
             hooks.push("\"exit\"");
         }
         let _ = writeln!(out, "hooks = [{}]", hooks.join(", "));
+        if let Some(c) = f.confidence {
+            let _ = writeln!(out, "confidence = {c}");
+        }
         let _ = writeln!(out, "source = {}", quote(&f.source));
     }
     for r in &recipe.ram {
@@ -399,6 +423,20 @@ mod tests {
         shape_hash = "0x12"
         source = "observed"
 
+        [[function]]
+        name = "read_controllers"
+        shape_hash = "0x34"
+        exact_hash = "0x56"
+        address_hint = 0x8E80
+        confidence = 92
+        source = "rule:read_controllers"
+
+        [[function]]
+        name = "vram_upload_c3a1"
+        shape_hash = "0x78"
+        confidence = 70
+        source = "ai:claude-opus-5-5"
+
         [[ram]]
         addr = 0x075A
         name = "lives"
@@ -422,6 +460,10 @@ mod tests {
         assert_eq!(r.functions[0].address_hint, Some(0x8E19));
         assert!(r.functions[0].hooks.entry && !r.functions[0].hooks.exit);
         assert_eq!(r.functions[1].exact_hash, None);
+        assert_eq!(r.functions[1].confidence, None);
+        assert_eq!(r.functions[2].confidence, Some(92));
+        assert_eq!(r.functions[2].source, "rule:read_controllers");
+        assert_eq!(r.functions[3].source, "ai:claude-opus-5-5");
         assert!(r.functions[1].hooks.entry && r.functions[1].hooks.exit);
         assert_eq!((r.ram[0].addr, r.ram[0].width), (0x75A, 1));
         assert_eq!(r.patches.len(), 1);
@@ -445,6 +487,14 @@ mod tests {
         assert!(matches!(
             with("format = 1", "format = 2"),
             Err(RecipeError::Format { found: 2, .. })
+        ));
+        assert!(matches!(
+            with("confidence = 92", "confidence = 101"),
+            Err(RecipeError::BadConfidence { value: 101, .. })
+        ));
+        assert!(matches!(
+            with("confidence = 92", "confidence = -1"),
+            Err(RecipeError::Parse(_))
         ));
         assert!(matches!(
             with("\"0x12\"", "\"12\""),

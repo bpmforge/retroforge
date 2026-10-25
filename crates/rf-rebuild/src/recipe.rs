@@ -41,8 +41,12 @@ pub struct RecipeFunction {
     /// on; breaks ties between equal shapes.
     pub address_hint: Option<u32>,
     pub hooks: HookPoints,
-    /// Where the row came from (observation, never a disassembly).
+    /// Where the row came from (observation, never a disassembly). Machine
+    /// proposals say `rule:<rule>` or `ai:<model>` (ticket W36-09).
     pub source: String,
+    /// How sure the source is, 0-100; `None` for facts people established
+    /// (ticket W36-09).
+    pub confidence: Option<u8>,
 }
 
 /// What a RAM byte (or run) means.

@@ -31,6 +31,7 @@ fn session() -> ModSession {
             id: "super-mario-bros".to_string(),
             engine: "smb1".to_string(),
             functions: vec![RecipeFunction {
+                confidence: None,
                 name: "enemy_update".to_string(),
                 shape_hash: 1,
                 exact_hash: Some(0x6c18_ff48_7cf1_0e09),

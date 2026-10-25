@@ -91,6 +91,7 @@ fn func_at(a: &Atlas, rom: u32) -> &rf_rebuild::Function {
 
 fn row(name: &str, f: &rf_rebuild::Function, exact: bool, hint: Option<u32>) -> RecipeFunction {
     RecipeFunction {
+        confidence: None,
         name: name.to_string(),
         shape_hash: f.shape_hash,
         exact_hash: exact.then_some(f.byte_hash),

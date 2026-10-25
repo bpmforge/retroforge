@@ -10,7 +10,10 @@
 pub mod atlas;
 mod build;
 pub mod exec;
+pub mod hw;
 pub mod isa;
+pub mod naming;
+pub mod profile;
 pub mod recipe;
 pub mod superset;
 pub mod windows;
@@ -25,6 +28,7 @@ pub use exec::{
     Delta, Dispatch, Fetch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,
 };
+pub use hw::{HwClass, Platform};
 pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 pub use recipe::{
     match_recipe, resolve_patches, Confidence, HookPoints, Match, MatchReport, PatchRefusal,
