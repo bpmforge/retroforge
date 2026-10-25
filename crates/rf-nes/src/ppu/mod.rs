@@ -876,6 +876,10 @@ pub struct Ppu {
     /// serialize it and a save state cannot silently carry someone else's
     /// watchpoints into your session.
     watches: rf_core_api::WatchTable,
+    /// Ticket W36-09: the CPU-bus accesses since the last clear, while
+    /// [`rf_core_api::WatchTable::set_observe`] is on. Empty (and never
+    /// pushed to) otherwise; session observation, not part of a savestate.
+    access_log: Vec<rf_core_api::BusAccess>,
     /// Events queued since the last [`Ppu::drain`], oldest first — the
     /// `CoreEvent` sibling of `completed` (module doc). Holds BOTH this
     /// PPU's own tick/register-write-driven events AND, pushed via
@@ -989,6 +993,7 @@ impl Ppu {
             pending_a12_edges: 0,
             event_mask: EventMask::NONE,
             watches: rf_core_api::WatchTable::new(),
+            access_log: Vec::new(),
             events: Vec::new(),
         }
     }
@@ -1156,6 +1161,15 @@ impl Ppu {
         self.watches = watches;
     }
 
+    /// The CPU-bus accesses logged since the last [`Self::clear_access_log`].
+    pub(crate) fn access_log(&self) -> &[rf_core_api::BusAccess] {
+        &self.access_log
+    }
+
+    pub(crate) fn clear_access_log(&mut self) {
+        self.access_log.clear();
+    }
+
     /// The installed watchpoints — read by both buses on every access,
     /// which is why `WatchTable::is_armed` is checked first.
     pub(crate) fn watches(&self) -> &rf_core_api::WatchTable {
@@ -1172,6 +1186,13 @@ impl Ppu {
         addr: u32,
         value: u8,
     ) {
+        if self.watches.observes() && space == rf_core_api::WatchSpace::Cpu {
+            self.access_log.push(rf_core_api::BusAccess {
+                addr,
+                value,
+                write: access == rf_core_api::WatchAccess::Write,
+            });
+        }
         if !self.watches.is_armed() || !self.event_mask().is_subscribed(EventMask::MEM_WATCH) {
             return;
         }

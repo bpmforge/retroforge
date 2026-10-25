@@ -145,6 +145,10 @@ pub const MAX_WATCHES: usize = 8;
 pub struct WatchTable {
     entries: [Option<MemWatch>; MAX_WATCHES],
     armed: bool,
+    /// Ticket W36-09: log every CPU-bus access (see [`crate::observe`]).
+    /// Independent of the watch entries: [`WatchTable::set`] and
+    /// [`WatchTable::clear`] leave it alone.
+    observe: bool,
 }
 
 impl WatchTable {
@@ -153,7 +157,22 @@ impl WatchTable {
         WatchTable {
             entries: [None; MAX_WATCHES],
             armed: false,
+            observe: false,
         }
+    }
+
+    /// Ticket W36-09: switch the CPU-bus access log on or off. While on,
+    /// [`Self::is_armed`] is true, so the cores' existing "is anything
+    /// watching" test sends every access through their watch hook, which
+    /// appends it to the core's log. With it off the cost is what it was.
+    pub fn set_observe(&mut self, on: bool) {
+        self.observe = on;
+    }
+
+    /// Whether the access log is on.
+    #[must_use]
+    pub const fn observes(&self) -> bool {
+        self.observe
     }
 
     /// Replace the whole table.
@@ -182,7 +201,7 @@ impl WatchTable {
     /// bothers to look at an access at all.
     #[must_use]
     pub const fn is_armed(&self) -> bool {
-        self.armed
+        self.armed || self.observe
     }
 
     /// The id of the first watch this access trips, or `None`.

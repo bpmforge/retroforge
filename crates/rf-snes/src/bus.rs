@@ -166,6 +166,9 @@ pub struct SnesBus {
     /// Ticket W13-02e's watchpoints, evaluated here because only a bus
     /// can see an access.
     watches: rf_core_api::WatchTable,
+    /// Ticket W36-09: CPU-bus accesses since the last clear while
+    /// [`rf_core_api::WatchTable::set_observe`] is on; session observation.
+    access_log: Vec<rf_core_api::BusAccess>,
     /// Ticket W13-02c: which HDMA channels transferred on each hardware
     /// line of the frame in progress, one bit per channel.
     ///
@@ -289,6 +292,18 @@ impl SnesBus {
         self.event_mask.is_subscribed(bit)
     }
 
+    /// The CPU-bus accesses logged since the last [`Self::clear_access_log`]
+    /// (ticket W36-09).
+    #[must_use]
+    pub fn access_log(&self) -> &[rf_core_api::BusAccess] {
+        &self.access_log
+    }
+
+    /// Empty the access log.
+    pub fn clear_access_log(&mut self) {
+        self.access_log.clear();
+    }
+
     /// Report a watch hit, if this access trips one and anyone is
     /// listening. Observation only.
     fn note_watch_access(
@@ -298,6 +313,13 @@ impl SnesBus {
         addr: u32,
         value: u8,
     ) {
+        if self.watches.observes() {
+            self.access_log.push(rf_core_api::BusAccess {
+                addr,
+                value,
+                write: access == rf_core_api::WatchAccess::Write,
+            });
+        }
         if !self.watches.is_armed() || !self.wants(rf_core_api::EventMask::MEM_WATCH) {
             return;
         }
@@ -330,6 +352,7 @@ impl SnesBus {
             events: Vec::new(),
             event_mask: rf_core_api::EventMask::NONE,
             watches: rf_core_api::WatchTable::new(),
+            access_log: Vec::new(),
             hdma_lanes: vec![0; 262],
             rom,
             sram: vec![0; sram_len],

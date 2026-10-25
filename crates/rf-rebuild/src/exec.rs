@@ -356,6 +356,38 @@ impl RebuildExec {
             .collect()
     }
 
+    /// Whether the trace ring is on.
+    #[must_use]
+    pub fn trace_enabled(&self) -> bool {
+        !self.trace.is_empty()
+    }
+
+    /// What the most recent step was, from the trace ring (ticket W36-09:
+    /// the understand pass attributes bus accesses to the function this
+    /// names). `None` when the trace is off or empty. Compare
+    /// [`Self::trace_total`] before and after a step to know whether it
+    /// pushed one.
+    #[must_use]
+    pub fn last_step(&self) -> Option<rf_core_api::StepFacts> {
+        if self.trace_total == 0 {
+            return None;
+        }
+        let mask = self.trace.len().checked_sub(1)?;
+        let (_, node) = *self.trace.get(self.trace_next.wrapping_sub(1) & mask)?;
+        let mut facts = rf_core_api::StepFacts::default();
+        match node {
+            TRACE_INTERRUPT => facts.interrupt = true,
+            NO_NODE | TRACE_WIDTH => {}
+            n => {
+                if let Some(nd) = self.nodes.get(n as usize) {
+                    facts.function = (nd.function != u32::MAX).then_some(nd.function);
+                    facts.entry_of = (nd.entry_of != u32::MAX).then_some(nd.entry_of);
+                }
+            }
+        }
+        Some(facts)
+    }
+
     /// Steps executed since the trace was enabled (not bounded by capacity).
     #[must_use]
     pub fn trace_total(&self) -> u64 {

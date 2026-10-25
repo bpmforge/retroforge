@@ -374,4 +374,21 @@ pub trait EmulatorCore {
     fn rebuild_stats(&self) -> Option<crate::RebuildStats> {
         None
     }
+
+    /// Ticket W36-09: run one frame exactly as [`Self::run_frame`] does, and
+    /// call `observer` after every instruction with the atlas function it ran
+    /// in and the CPU-bus accesses it made (see [`crate::observe`]). Returns
+    /// `false`, having run nothing, when the core does not support it.
+    ///
+    /// Analysis only: much slower than `run_frame`, never on the frame path.
+    /// The machine afterwards is bit-identical to one that ran `run_frame`.
+    fn run_frame_observed(
+        &mut self,
+        input: &InputFrame,
+        sink: &mut dyn CoreSink,
+        observer: &mut dyn crate::StepObserver,
+    ) -> bool {
+        let _ = (input, sink, observer);
+        false
+    }
 }

@@ -561,6 +561,18 @@ impl NesBus {
         self.ppu.set_watches(watches);
     }
 
+    /// The CPU-bus accesses logged since the last clear while the access
+    /// log is on (ticket W36-09; [`rf_core_api::WatchTable::set_observe`]).
+    #[must_use]
+    pub fn access_log(&self) -> &[rf_core_api::BusAccess] {
+        self.ppu.access_log()
+    }
+
+    /// Empty the access log.
+    pub fn clear_access_log(&mut self) {
+        self.ppu.clear_access_log();
+    }
+
     pub fn set_event_mask(&mut self, mask: EventMask) {
         self.ppu.set_event_mask(mask);
     }

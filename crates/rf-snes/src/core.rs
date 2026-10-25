@@ -752,33 +752,16 @@ impl SnesCore {
     }
 }
 
-impl EmulatorCore for SnesCore {
-    fn load(&mut self, cart: CartImage<'_>) -> Result<(), CoreError> {
-        // An atlas describes one cartridge, and so do the function ids hooked
-        // in it (the new system below starts without an executor).
-        self.hook_ids.clear();
-        // A recording survives a load (fresh, for the new cartridge), like the
-        // NES core's: it is a session setting, not cartridge state.
-        let recording = self.system.coverage.is_some();
-        self.system =
-            SnesSystem::load(cart.rom).map_err(|e| CoreError::InvalidImage(format!("{e:?}")))?;
-        if recording {
-            self.system.set_coverage(true);
-            self.system.coverage_note_reset();
-        }
-        Ok(())
-    }
-
-    fn reset(&mut self, _kind: ResetKind) {
-        self.system.reset();
-    }
-
-    fn run_frame(&mut self, input: &InputFrame, sink: &mut dyn CoreSink) {
-        let _ = input; // Controller wiring is W11-12's; see the notes there.
-        let _ = self.step(Step::Frame, sink);
-    }
-
-    fn step(&mut self, granularity: Step, sink: &mut dyn CoreSink) -> StepResult {
+impl SnesCore {
+    /// [`EmulatorCore::step`] with `each` called after every instruction
+    /// (ticket W36-09's observed frame). Generic, not `dyn`, so the
+    /// ordinary `step` (a no-op closure) compiles to the code it had.
+    fn step_with<F: FnMut(&mut Self)>(
+        &mut self,
+        granularity: Step,
+        sink: &mut dyn CoreSink,
+        mut each: F,
+    ) -> StepResult {
         // Ticket W13-02h/W13-02e: `CoreConfig` is the documented path a
         // consumer configures a core through, and this is what makes that
         // true here. Pushed on entry rather than on a setter so there is
@@ -809,6 +792,7 @@ impl EmulatorCore for SnesCore {
                 // reports the halt opcode, and the debugger wants to see
                 // that state rather than have it swallowed.
                 let _ = self.step_system(sink);
+                each(self);
                 instructions = 1;
                 frame_complete = self.system.bus.timing.frame != start_frame;
             }
@@ -816,7 +800,9 @@ impl EmulatorCore for SnesCore {
                 // Run to a settled vblank and out the other side, which
                 // is what makes composition safe on this machine.
                 while !self.system.bus.timing.in_vblank() && instructions < self.budget {
-                    if self.step_system(sink).is_err() {
+                    let stepped = self.step_system(sink);
+                    each(self);
+                    if stepped.is_err() {
                         break;
                     }
                     instructions += 1;
@@ -825,7 +811,9 @@ impl EmulatorCore for SnesCore {
                     || self.system.bus.timing.frame == start_frame)
                     && instructions < self.budget
                 {
-                    if self.step_system(sink).is_err() {
+                    let stepped = self.step_system(sink);
+                    each(self);
+                    if stepped.is_err() {
                         break;
                     }
                     instructions += 1;
@@ -872,6 +860,37 @@ impl EmulatorCore for SnesCore {
             cycles: instructions,
             frame_complete,
         }
+    }
+}
+
+impl EmulatorCore for SnesCore {
+    fn load(&mut self, cart: CartImage<'_>) -> Result<(), CoreError> {
+        // An atlas describes one cartridge, and so do the function ids hooked
+        // in it (the new system below starts without an executor).
+        self.hook_ids.clear();
+        // A recording survives a load (fresh, for the new cartridge), like the
+        // NES core's: it is a session setting, not cartridge state.
+        let recording = self.system.coverage.is_some();
+        self.system =
+            SnesSystem::load(cart.rom).map_err(|e| CoreError::InvalidImage(format!("{e:?}")))?;
+        if recording {
+            self.system.set_coverage(true);
+            self.system.coverage_note_reset();
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self, _kind: ResetKind) {
+        self.system.reset();
+    }
+
+    fn run_frame(&mut self, input: &InputFrame, sink: &mut dyn CoreSink) {
+        let _ = input; // Controller wiring is W11-12's; see the notes there.
+        let _ = self.step(Step::Frame, sink);
+    }
+
+    fn step(&mut self, granularity: Step, sink: &mut dyn CoreSink) -> StepResult {
+        self.step_with(granularity, sink, |_| {})
     }
 
     fn save_state(&self, _w: &mut dyn StateWriter) -> Result<(), StateError> {
@@ -961,6 +980,60 @@ impl EmulatorCore for SnesCore {
             .rebuild
             .as_deref()
             .map(rf_rebuild::RebuildExec::stats)
+    }
+
+    /// Ticket W36-09: `Step::Frame` with the access log on and the observer
+    /// called after every instruction (`step_with`'s hook). The pad is NOT
+    /// latched here, exactly as `run_frame` does not: the caller writes
+    /// `bus.joypads.ports` first. The `observed_frame_is_run_frame` test
+    /// holds this equal to `run_frame`.
+    fn run_frame_observed(
+        &mut self,
+        input: &InputFrame,
+        sink: &mut dyn CoreSink,
+        observer: &mut dyn rf_core_api::StepObserver,
+    ) -> bool {
+        let _ = input;
+        self.config.watches.set_observe(true);
+        let own_trace = self
+            .system
+            .rebuild
+            .as_deref()
+            .is_some_and(|x| !x.trace_enabled());
+        if own_trace {
+            self.set_rebuild_trace(2);
+        }
+        let mut seen = self
+            .system
+            .rebuild
+            .as_deref()
+            .map_or(0, rf_rebuild::RebuildExec::trace_total);
+        self.system.bus.set_watches(self.config.watches);
+        self.pushed_watches = self.config.watches;
+        self.system.bus.clear_access_log();
+        let _ = self.step_with(Step::Frame, sink, |core| {
+            let facts = core
+                .system
+                .rebuild
+                .as_deref()
+                .map_or_else(Default::default, |x| {
+                    if x.trace_total() == seen {
+                        return rf_core_api::StepFacts::default();
+                    }
+                    seen = x.trace_total();
+                    x.last_step().unwrap_or_default()
+                });
+            observer.step(facts, core.system.bus.access_log());
+            core.system.bus.clear_access_log();
+        });
+        observer.frame_end();
+        if own_trace {
+            self.set_rebuild_trace(0);
+        }
+        self.config.watches.set_observe(false);
+        self.system.bus.set_watches(self.config.watches);
+        self.pushed_watches = self.config.watches;
+        true
     }
 
     fn peek(&self, addr: u32) -> u8 {
