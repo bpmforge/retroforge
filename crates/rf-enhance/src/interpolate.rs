@@ -102,6 +102,9 @@ pub struct Stats {
     pub rows_built: usize,
     /// OAM entries drawn at a moved position.
     pub sprites_moved: usize,
+    /// Of the moved ones, how many took the median movement of an object's entries (a recipe anchor)
+    /// rather than their own.
+    pub sprites_grouped: usize,
     /// OAM entries drawn where frame N had them (no counterpart in N+1, or too far).
     pub sprites_held: usize,
 }
@@ -204,10 +207,14 @@ fn entry_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIE
 }
 
 /// The movement each OAM entry of `prev` is drawn with, after grouping entries near one anchor.
-fn group_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIES] {
+fn group_deltas(
+    prev: &Layers,
+    next: &Layers,
+) -> ([Option<(i32, i32)>; OAM_ENTRIES], [bool; OAM_ENTRIES]) {
     let own = entry_deltas(prev, next);
+    let mut grouped = [false; OAM_ENTRIES];
     if prev.anchors.is_empty() {
-        return own;
+        return (own, grouped);
     }
     let boxes_n = boxes(prev);
     // Which anchor owns each entry: the nearest whose reach contains the entry's centre.
@@ -246,16 +253,17 @@ fn group_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIE
         let shared = (median(&mut dx), median(&mut dy));
         for i in members() {
             out[i] = Some(shared);
+            grouped[i] = true;
         }
     }
-    out
+    (out, grouped)
 }
 
 /// Whether the layers describe the picture they came with: the background colour under every dot no
 /// sprite won must be the colour the console frame shows there. A frame captured part-way (a state just
 /// loaded, a rendering toggle) or drawn through a colour effect the layers cannot see (greyscale,
 /// emphasis, a mid-frame palette fade) fails it, and is refused rather than rebuilt wrongly.
-fn describes_its_picture(l: &Layers, resolve: &dyn Fn(u8) -> [u8; 3]) -> bool {
+pub fn describes_its_picture(l: &Layers, resolve: &dyn Fn(u8) -> [u8; 3]) -> bool {
     let (mut total, mut bad) = (0usize, 0usize);
     for ((&idx, &id), px) in l.bg.iter().zip(&l.ids).zip(l.rgba.chunks_exact(4)) {
         if id != NO_SPRITE {
@@ -286,14 +294,32 @@ pub fn compose(
     resolve: &dyn Fn(u8) -> [u8; 3],
     out: &mut Vec<u8>,
 ) -> Result<Stats, Refusal> {
+    if !prev.is_well_formed() || !next.is_well_formed() {
+        return Err(Refusal::Malformed);
+    }
+    if !describes_its_picture(prev, resolve) || !describes_its_picture(next, resolve) {
+        return Err(Refusal::Malformed);
+    }
+    compose_verified(prev, next, alpha, resolve, out)
+}
+
+/// [`compose`] for layers the caller has already checked with [`describes_its_picture`] (once per console
+/// frame rather than once per composed picture, which is the cost that matters at 120 Hz and above).
+///
+/// # Errors
+/// As [`compose`].
+pub fn compose_verified(
+    prev: &Layers,
+    next: &Layers,
+    alpha: u8,
+    resolve: &dyn Fn(u8) -> [u8; 3],
+    out: &mut Vec<u8>,
+) -> Result<Stats, Refusal> {
     if !prev.is_well_formed()
         || !next.is_well_formed()
         || prev.width != next.width
         || prev.height != next.height
     {
-        return Err(Refusal::Malformed);
-    }
-    if !describes_its_picture(prev, resolve) || !describes_its_picture(next, resolve) {
         return Err(Refusal::Malformed);
     }
     let (w, h) = (prev.width, prev.height);
@@ -394,7 +420,7 @@ pub fn compose(
     }
 
     // The sprites: frame N's own pixels at their moved places, lowest OAM index on top.
-    let moves = group_deltas(prev, next);
+    let (moves, grouped) = group_deltas(prev, next);
     let mut claimed = vec![NO_SPRITE; w * h];
     let mut drawn = [false; OAM_ENTRIES];
     for (i, &id) in prev.ids.iter().enumerate() {
@@ -430,6 +456,7 @@ pub fn compose(
         if *was_drawn {
             if moves[entry].is_some() {
                 stats.sprites_moved += 1;
+                stats.sprites_grouped += usize::from(grouped[entry]);
             } else {
                 stats.sprites_held += 1;
             }
@@ -569,7 +596,7 @@ mod tests {
             vec![201, 1, 2],
             "the unmatched entry moved with its object"
         );
-        assert_eq!(s.sprites_moved, 2);
+        assert_eq!((s.sprites_moved, s.sprites_grouped), (2, 2));
     }
 
     /// An entry that has no counterpart in N+1 and no anchor stays where it was.

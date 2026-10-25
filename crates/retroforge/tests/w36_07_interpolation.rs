@@ -120,6 +120,7 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
     let mut out = Vec::new();
     let mut sample: Option<(Layers, Layers)> = None;
     let mut sprites_moved = 0usize;
+    let mut sprites_grouped = 0usize;
     let mut cams: Vec<i32> = Vec::new();
     let mut pal_prev = [0u8; 32];
     let mut pal_changed: std::collections::BTreeMap<usize, u32> = Default::default();
@@ -166,6 +167,7 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
                             steady_ok += 1;
                         }
                         sprites_moved += stats.sprites_moved;
+                        sprites_grouped += stats.sprites_grouped;
                         out = candidate;
                         // HUD rows: identical across N, the intermediate and N+1 (when N and N+1 agree).
                         let hud = interpolate::detect_hud(&p, &l);
@@ -240,7 +242,7 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
         "still pairs rebuilt byte-exact from the layers: {}/{}",
         static_exact.0, static_exact.1
     );
-    println!("moved sprites drawn over all pairs: {sprites_moved}");
+    println!("moved sprites drawn over all pairs: {sprites_moved}, of which moved with a recipe object group: {sprites_grouped}");
     assert!(
         all_n > 1000 && steady_n > 200,
         "the script played: {all_n} / {steady_n}"
@@ -264,8 +266,18 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
     for i in 0..runs {
         let _ = interpolate::compose(&p, &n, (i % 250 + 1) as u8, &resolve, &mut buf);
     }
+    let per_full = t.elapsed() / runs;
+    let t = Instant::now();
+    for i in 0..runs {
+        let _ = interpolate::compose_verified(&p, &n, (i % 250 + 1) as u8, &resolve, &mut buf);
+    }
     let per = t.elapsed() / runs;
-    println!("cost of one intermediate frame (256x240, compose only): {per:?}");
+    let t = Instant::now();
+    for _ in 0..runs {
+        let _ = interpolate::describes_its_picture(&p, &resolve);
+    }
+    let per_check = t.elapsed() / runs;
+    println!("cost per console frame: layer check {per_check:?}; per intermediate frame: compose {per:?} (with both checks {per_full:?}); 256x240, compose only");
 
     let share = f64::from(steady_ok) / f64::from(steady_n.max(1));
     assert!(

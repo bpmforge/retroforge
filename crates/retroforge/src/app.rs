@@ -4768,8 +4768,6 @@ impl RetroForgeApp {
             .as_ref()
             .map(|(density, w, h)| (density.clone(), (*w, *h)));
         if let Some(mut msg) = latest_frame {
-            // Ticket W36-07: show the previous console frame, one frame late, when interpolating.
-            self.present_delayed(&mut msg, fog_source.is_some());
             self.camera_search = msg.camera_search;
             self.item_values.clone_from(&msg.items);
             // Ticket W2-14: a stepped frame has now been consumed.
@@ -4806,6 +4804,10 @@ impl RetroForgeApp {
                     height: h,
                 })
             });
+            // Ticket W36-07: show the previous console frame, one frame late, when interpolating. After
+            // the HUD watch and the compare pair above, which pair this frame's pixels with this
+            // frame's events and its accuracy-exact twin; only the picture painted below is late.
+            self.present_delayed(&mut msg, fog_source.is_some());
             if self.screenshot_pending {
                 self.screenshot_pending = false;
                 self.write_screenshots(ctx);

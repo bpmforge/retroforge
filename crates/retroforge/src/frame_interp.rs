@@ -114,6 +114,10 @@ pub struct Presenter {
     /// The frame on screen (older) and the one that arrived last (newer), with their pixels.
     prev: Option<Layers>,
     cur: Option<Layers>,
+    /// Whether each describes its own picture ([`interpolate::describes_its_picture`]), checked once
+    /// per console frame when it arrives.
+    prev_ok: bool,
+    cur_ok: bool,
     /// When `cur` arrived, and the running estimate of the gap between arrivals.
     arrived: Option<Instant>,
     period_us: u64,
@@ -189,6 +193,8 @@ impl Presenter {
         layers.rgba = rgba.to_vec();
         self.cached = None;
         // The first frame has nothing before it: shown as it comes, with no gap to fill yet.
+        self.prev_ok = self.cur_ok;
+        self.cur_ok = interpolate::describes_its_picture(&layers, &resolve);
         let Some(shown) = self.cur.replace(layers) else {
             self.prev = None;
             return rgba.to_vec();
@@ -223,7 +229,12 @@ impl Presenter {
         if self.cached == Some((prev.index, step)) {
             return None; // that picture (or the repeat of a refusal) is already on screen
         }
-        match interpolate::compose(prev, cur, alpha.max(1), &resolve, &mut self.scratch) {
+        let composed = if self.prev_ok && self.cur_ok {
+            interpolate::compose_verified(prev, cur, alpha.max(1), &resolve, &mut self.scratch)
+        } else {
+            Err(Refusal::Malformed)
+        };
+        match composed {
             Ok(_) => {
                 self.tried = Some(true);
                 self.cached = Some((prev.index, step));
