@@ -1520,6 +1520,9 @@ impl EmuStepper {
             }
             Machine::Snes(core) => {
                 crate::snes_save_state::load_state(core.system_mut(), rom, &snap.container)?;
+                // The executor's hooked-call stack described the machine
+                // that was just replaced (ticket W36-08b).
+                core.reset_hook_frames();
             }
         }
         self.frames = snap.frames;
@@ -1800,7 +1803,9 @@ impl EmuStepper {
             Machine::Nes(c) => c
                 .rebuild_atlas()
                 .map(|a| rf_rebuild::match_recipe(a, recipe)),
-            Machine::Snes(_) => None,
+            Machine::Snes(c) => c
+                .rebuild_atlas()
+                .map(|a| rf_rebuild::match_recipe(a, recipe)),
         };
         host.resolve(&|name| report.as_ref().and_then(|r| r.function_of(name)));
         self.machine
@@ -1811,8 +1816,9 @@ impl EmuStepper {
     /// Forget in-flight hooked calls after the machine was replaced under
     /// the executor (a state load; ticket W36-05).
     pub fn reset_hook_frames(&mut self) {
-        if let Machine::Nes(c) = &mut self.machine {
-            c.reset_hook_frames();
+        match &mut self.machine {
+            Machine::Nes(c) => c.reset_hook_frames(),
+            Machine::Snes(c) => c.reset_hook_frames(),
         }
     }
 
