@@ -4782,3 +4782,14 @@ stories, 10 decisions).
   targets; every executed opcode is an atlas instruction start at its width.
   Hashes ignore width (W36-10 recipes add entry mode). Workspace: **3523
   passing**.
+
+- **W36-08b — SNES executor and lockstep; SMW pilot** (2026-10-25). The
+  executor dispatches on (ROM offset, width mode) with fallbacks counted by
+  reason (width mismatch, no node, work RAM, other); hooks follow JSR/JSL and
+  RTS/RTL returns on 24 bits. Lockstep is generic over a machine trait; the
+  SNES side compares registers, cycles, WRAM, VRAM, OAM, CGRAM, SRAM, APU and
+  PPU state and video/audio hashes every frame. SMW Yoshi's Island 1, two
+  different scripts (5,069 and 5,188 frames): zero divergence; fallback 0.46%
+  and 0.29%, all work-RAM code; 0 width mismatches. The Rebuild toggle builds
+  the 65816 atlas in the app (tested on a synthetic LoROM, not SMW through the
+  GUI). SA-1/S-DD1 bank switching not covered. Workspace: **3537 passing**.
