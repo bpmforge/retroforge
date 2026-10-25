@@ -4758,3 +4758,15 @@ stories, 10 decisions).
   redraw off with a badge. Screenshot: docs/screens/w36/. Sprite priority is
   ignored; margin terrain still comes from the scout canvas. Workspace:
   **3469 passing**.
+
+- **W36-07 — Interpolated 120 Hz (SMB)** (2026-10-25; D-028). Layer-level
+  intermediate frames on the presentation path: frame N's background (from the
+  bg-under capture) shifted per line by the fractional scroll delta (new
+  per-line PPU scroll capture; camera RAM lags the picture by a frame), sprites
+  moved by their picture-measured delta, grouped by recipe object slots; HUD
+  bands found from scroll evidence stay fixed; refusals repeat the frame.
+  SMB 1-1: 91.3% of 1,999 pairs interpolated (steady running 91.6%; the rest is
+  palette cycling, refused by design); ~186 us per intermediate. "Smoother
+  motion" setting, NES only, off by default, absent from Accuracy Mode, labelled
+  with the one-frame delay. Passes through when widescreen or other layers are
+  on (W37-06). Screens in docs/screens/w36/. Workspace: **3489 passing**.

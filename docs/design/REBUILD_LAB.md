@@ -189,7 +189,8 @@ lockstep are.
 | W36-06 | First Super Enhanced mod, simulation: SMB enemies stay active in the 32:9 margins (recipe-relative ROM patch) | Activity measured in the margins; mod off byte-identical; lockstep green on the patched image |
 | W36-06b | Same mod, presentation: draw margin enemies in the NES pad; mod writes in savestates; run-ahead parity | Screenshot; original mode byte-identical |
 | W36-07 | Interpolated 60+ fps for objects and scroll (SMB) | Smooth at 120 Hz; simulation untouched (mode-invariant test) |
-| W36-08 | 65816 lift with recorded M/X; SMW pilot | SMW Yoshi's Island 1 replay zero divergence |
+| W36-08 | SNES recorder (bank, M, X, E), 65816 ISA, SMW atlas | Every executed SMW opcode in the atlas |
+| W36-08b | SNES executor + lockstep; SMW pilot | SMW Yoshi's Island 1 replay zero divergence |
 | W36-09 | Understand pass + opt-in AI naming | Names exported as recipe facts; lockstep green |
 | W36-10 | ROM-hack support: recipe matching on a Lunar Magic SMW hack | Hack boots rebuilt; matched functions get Super Enhanced features |
 | W36-11 | Public guide: how Rebuild works | In docs/site |
