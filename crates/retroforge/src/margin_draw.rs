@@ -59,7 +59,6 @@ struct Map {
     left_page: u32,
     left_x: u32,
     right_page: u32,
-    right_x: u32,
     player_x: Option<u32>,
     player_y: Option<u32>,
 }
@@ -79,7 +78,6 @@ impl Map {
             left_page: addr("screen_left_page")?,
             left_x: addr("screen_left_x")?,
             right_page: addr("screen_right_page")?,
-            right_x: addr("screen_right_x")?,
             player_x: addr("player_screen_x"),
             player_y: addr("player_y"),
         })
@@ -400,8 +398,8 @@ impl MarginDrawer {
         let map = &self.map;
         let before: Vec<Slot> = slots(map, &|a| shadow.peek_bus(a));
         // Move the camera one page toward the object: both edges, as the game keeps them.
-        for (page, low) in [(map.left_page, map.left_x), (map.right_page, map.right_x)] {
-            let _ = low;
+        // A whole page, so the low bytes (and with them every 8-bit sprite X) stay as they are.
+        for page in [map.left_page, map.right_page] {
             let moved = shadow.peek_bus(page).wrapping_add(side.page_step());
             shadow.poke_bus(u16::try_from(page).ok()?, moved);
         }

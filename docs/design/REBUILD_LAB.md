@@ -220,8 +220,7 @@ dots back to the background colour the PPU computed under them (`Ppu::bg_under`,
 capture, off by default).
 
 **Recipe vocabulary** read by the redraw (names, not titles): `enemy_flag` (width = slot count),
-`enemy_x_page`, `enemy_x`, `enemy_y`, `screen_left_page`, `screen_left_x`, `screen_right_page`,
-`screen_right_x`, optional `player_screen_x`, `player_y`.
+`enemy_x_page`, `enemy_x`, `enemy_y`, `screen_left_page`, `screen_left_x`, `screen_right_page`, optional `player_screen_x`, `player_y`.
 
 **Cost.** Release build, M2 Max, 1-1 unhurt 3,200 frames: the real frame 1.8 ms, the redraw 3.4 ms on
 average and 12.3 ms at worst (three replayed frames per side).
