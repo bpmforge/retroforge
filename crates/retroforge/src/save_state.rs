@@ -381,6 +381,9 @@ impl EmuStepper {
         // it was describing. `golden_fixture_loads_and_drives_the_machine_identically`
         // caught it immediately.
         self.resync_frame_count();
+        // The executor's hooked-call stack described the machine that was
+        // just replaced (ticket W36-05).
+        self.reset_hook_frames();
         Ok(warnings)
     }
 }

@@ -132,6 +132,9 @@ struct CountingSink<'a> {
     /// which also keeps `docs/evidence/local-gate.json` from going stale
     /// over a status-bar feature.
     last_scanline: Option<u16>,
+    /// Ticket W36-05: the session's function-hook host, if any. An `Rc`
+    /// handle on the core thread (the host is never `Send`).
+    hooks: Option<rf_plugin_sdk::HookHost>,
 }
 
 impl CoreSink for CountingSink<'_> {
@@ -198,6 +201,18 @@ impl CoreSink for CountingSink<'_> {
 
     fn event(&mut self, ev: rf_core_api::CoreEvent) {
         self.inner.event(ev);
+    }
+
+    /// Ticket W36-05: function hooks end here, at the hook host (the inner
+    /// sink is a picture and knows nothing of them).
+    fn function_event(
+        &mut self,
+        ev: rf_core_api::FunctionEvent,
+        ctx: &mut dyn rf_core_api::HookCtx,
+    ) {
+        if let Some(h) = &self.hooks {
+            h.dispatch(ev, ctx);
+        }
     }
 }
 
@@ -426,6 +441,9 @@ pub struct EmuStepper {
     /// (ticket W2-15). `None` until the first visible line completes.
     /// See [`Self::last_scanline`] for the deliberate limitation.
     last_scanline: Option<u16>,
+    /// Ticket W36-05: the function-hook host (Lua and Rust hooks on a rebuilt
+    /// core), or `None`. Created on the core thread and never leaves it.
+    hooks: Option<rf_plugin_sdk::HookHost>,
     /// Ticket W30-02: HD Mode 7 options while the Enhanced-only row is on
     /// (`None` = off). Presentation only: nothing here touches the machine.
     hd_mode7: Option<rf_snes::ppu::hd_mode7::HdMode7Options>,
@@ -493,6 +511,7 @@ impl EmuStepper {
             state: RunState::Paused,
             cycle_budget: CYCLE_BUDGET,
             last_scanline: None,
+            hooks: None,
             hd_mode7: None,
             mode7_latched: false,
             widescreen_args: None,
@@ -533,6 +552,7 @@ impl EmuStepper {
             cycle_budget: CYCLE_BUDGET,
             rom_sha256,
             last_scanline: None,
+            hooks: None,
             hd_mode7: None,
             mode7_latched: false,
             widescreen_args: None,
@@ -1669,6 +1689,7 @@ impl EmuStepper {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
+            hooks: self.hooks.clone(),
         };
         let result = self.advance(rf_core_api::Step::Instruction, &mut counting);
         self.last_scanline = counting.last_scanline;
@@ -1710,6 +1731,49 @@ impl EmuStepper {
         atlas: Option<Box<dyn std::any::Any + Send>>,
     ) -> Result<(), rf_core_api::CoreError> {
         self.machine.as_core().set_rebuild_atlas(atlas)
+    }
+
+    /// Install (or drop) the function-hook host and tell the core which atlas
+    /// functions to report (ticket W36-05). The ids come from
+    /// [`rf_plugin_sdk::HookHost::function_ids`], so resolve the host against
+    /// the installed atlas first ([`Self::resolve_hooks`]).
+    pub fn set_hook_host(&mut self, host: Option<rf_plugin_sdk::HookHost>) {
+        let ids = host.as_ref().map_or_else(Vec::new, |h| h.function_ids());
+        self.machine.as_core().set_function_hooks(&ids);
+        self.hooks = host;
+    }
+
+    #[must_use]
+    pub fn hook_host(&self) -> Option<&rf_plugin_sdk::HookHost> {
+        self.hooks.as_ref()
+    }
+
+    /// Match `recipe` against the installed atlas, resolve the hook host's
+    /// names to function ids and hand the ids to the core. Without an atlas
+    /// every name resolves to nothing (all hooks inactive). Call again when
+    /// the atlas changes.
+    pub fn resolve_hooks(&mut self, recipe: &rf_rebuild::Recipe) {
+        let Some(host) = self.hooks.clone() else {
+            return;
+        };
+        let report = match &self.machine {
+            Machine::Nes(c) => c
+                .rebuild_atlas()
+                .map(|a| rf_rebuild::match_recipe(a, recipe)),
+            Machine::Snes(_) => None,
+        };
+        host.resolve(&|name| report.as_ref().and_then(|r| r.function_of(name)));
+        self.machine
+            .as_core()
+            .set_function_hooks(&host.function_ids());
+    }
+
+    /// Forget in-flight hooked calls after the machine was replaced under
+    /// the executor (a state load; ticket W36-05).
+    pub fn reset_hook_frames(&mut self) {
+        if let Machine::Nes(c) = &mut self.machine {
+            c.reset_hook_frames();
+        }
     }
 
     /// The executor's counters, `None` while Rebuild is off (ticket W36-03).
@@ -1761,6 +1825,7 @@ impl EmuStepper {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
+            hooks: self.hooks.clone(),
         };
         self.advance(rf_core_api::Step::Scanline, &mut counting);
         let n = counting.scanlines;
@@ -1795,6 +1860,9 @@ impl EmuStepper {
         granularity: rf_core_api::Step,
         sink: &mut dyn CoreSink,
     ) -> rf_core_api::StepResult {
+        if let Some(h) = &self.hooks {
+            h.set_frame(self.frames);
+        }
         let result = self.machine.as_core().step(granularity, sink);
         if result.frame_complete {
             self.frames += 1;
@@ -1968,6 +2036,7 @@ impl EmuStepper {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
+            hooks: self.hooks.clone(),
         };
         let mut advanced = 0;
         // Ticket W11-10: `Step::Instruction` through the trait, one at a
@@ -2021,6 +2090,7 @@ impl EmuStepper {
             inner: sink,
             scanlines: 0,
             last_scanline: self.last_scanline,
+            hooks: self.hooks.clone(),
         };
         // Ticket W11-10: one call through the trait. The loop, its
         // deadline, and the per-instruction video/audio drains are the

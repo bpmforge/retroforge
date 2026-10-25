@@ -3211,6 +3211,7 @@ impl RetroForgeApp {
                 armed: false,
                 rebuild: crate::rebuild::RebuildStatus::Off,
                 rebuild_request: None,
+                hooks: Vec::new(),
             })
         });
         if let Some(on) = panel.rebuild_request.take() {
@@ -4799,6 +4800,9 @@ impl RetroForgeApp {
                 }
                 if let Some(r) = &msg.rebuild {
                     cov.rebuild = r.clone();
+                }
+                if let Some(h) = &msg.hooks {
+                    cov.hooks.clone_from(h);
                 }
             }
             // Ticket W4-06d: live VRAM/palette for the nametable and
@@ -14772,6 +14776,7 @@ impl RetroForgeApp {
             audio_traces: Vec::new(),
             coverage: None,
             rebuild: None,
+            hooks: None,
             snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),

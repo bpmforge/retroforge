@@ -1,0 +1,18 @@
+[recipe]
+format = 1
+id = "super-mario-bros"
+engine = "smb1"
+
+[[function]]
+name = "nmi"
+shape_hash = "0x3f3d315a776a77dd"
+exact_hash = "0xf25cac5c834aa9ee"
+address_hint = 0x8082
+hooks = ["entry", "exit"]
+source = "observed: the atlas function the NMI vector targets in a recording"
+
+[[ram]]
+addr = 0x075a
+width = 1
+name = "lives"
+source = "profiles/nes/super-mario-bros/profile.toml [[memory_map]] lives"

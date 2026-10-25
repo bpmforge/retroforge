@@ -26,6 +26,13 @@ impl Isa for Toy {
     fn addr_mask(&self) -> u32 {
         0xFFFF
     }
+    fn masked_operand(&self, insn: &[u8], _m: DecodeMode) -> std::ops::Range<usize> {
+        if insn.len() == 3 {
+            1..3
+        } else {
+            0..0
+        }
+    }
     fn decode(&self, b: &[u8], cpu: u32, _m: DecodeMode) -> Option<Decoded> {
         let op = *b.first()? & 0x0F;
         let len = match op {

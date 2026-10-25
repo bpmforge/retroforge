@@ -10,6 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# rf-core-api: the function-hook types a hook host receives on the core
+# thread (`FunctionEvent`, `HookCtx`, `CoreSink::function_event`, ticket
+# W36-05). Plain data and traits; the SDK still names no console core.
+rf-core-api = { path = "../rf-core-api" }
 # Scripting host. Sanctioned in docs/TECH_STACK.md §2 ("Scripting" row:
 # mlua 0.12.0 — "Lua = emulator-community lingua franca (BizHawk/Mesen);
 # in-process, ~zero per-frame overhead; sandbox knobs").

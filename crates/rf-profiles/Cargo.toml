@@ -21,3 +21,8 @@ serde = { version = "1", features = ["derive"] }
 # say a profile matches by ANY of rf-cart's already-computed hash families;
 # this crate consumes those types rather than recomputing hashes itself.
 rf-cart = { path = "../rf-cart" }
+# rf-rebuild: the recipe data types (ticket W36-05). A recipe is a profile-
+# style data file whose rows are matched against a code atlas; the types live
+# beside the matcher in rf-rebuild (core layer, which this crate may depend
+# on) and this crate owns the TOML text.
+rf-rebuild = { path = "../rf-rebuild" }

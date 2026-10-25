@@ -4,7 +4,7 @@
 //! why this lives here rather than in `rf-rebuild`.
 //!
 //! The cache entry is keyed `(rom_sha256, "code-atlas", "rf-rebuild",
-//! "code-atlas-v1")`: one atlas per normalised ROM hash, next to the
+//! "code-atlas-v2")`: one atlas per normalised ROM hash, next to the
 //! scout's canvas chunks, with the format version in the name so another
 //! version is a clean miss.
 

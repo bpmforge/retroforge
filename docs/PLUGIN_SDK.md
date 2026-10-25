@@ -67,8 +67,9 @@ direction of an out-of-date manifest is always *less* access.
 
 Capabilities (`manifest::Capabilities`): `read_memory`, `read_ppu`,
 `frame_events`, `scanline_events`, `draw_overlay`, `replace_layers`,
-`write_memory`, `input_bindings`, and `filesystem` (`none` | `cache_dir`
-— never raw filesystem access; an unrecognised value denies).
+`write_memory`, `input_bindings`, `function_hooks` (Rebuild-mode entry/exit
+hooks, W36-05; `write_memory` too for any poke), and `filesystem` (`none` |
+`cache_dir` — never raw filesystem access; an unrecognised value denies).
 
 `Capabilities::granted_summary()` returns the enable-time list
 most-dangerous-first, because a user skimming a prompt stops after a few

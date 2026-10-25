@@ -1,14 +1,15 @@
 //! Turning Rebuild on for the current ROM (ticket W36-03): find or build the
 //! code atlas, off the core thread.
 //!
-//! The atlas comes from the per-ROM cache (`code-atlas-v1`) when present,
+//! The atlas comes from the per-ROM cache (`code-atlas-v2`) when present,
 //! otherwise from the coverage the session has recorded so far, and is then
 //! stored for next time. If there is neither, the answer is
 //! [`RebuildBuild::NeedCoverage`] and the panel says to record first.
 //!
-//! The cache key is built here from `rf_nes::rebuild`'s re-exported names
-//! because this crate does not depend on `rf-harness`, whose
-//! `atlas::atlas_cache_key` is the same four strings. Keep the two in step.
+//! The cache key is built here from `rf_rebuild`'s constants. The harness's
+//! `atlas::atlas_cache_key` builds the same four strings from the same
+//! constants (it is a dev-dependency of this crate, so it cannot be called
+//! from non-test code); a unit test asserts the two keys are equal.
 //! The cache lives in its own directory: the canvas cache is open on the core
 //! thread, and two handles on one index file could race.
 
@@ -16,7 +17,8 @@ use std::path::PathBuf;
 
 use rf_cache::{Cache, CacheKey};
 use rf_core_api::{CoverageLog, RebuildStats};
-use rf_nes::rebuild::{Atlas, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS};
+use rf_nes::rebuild::Atlas;
+use rf_rebuild::{CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS};
 
 const ATLAS_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -30,6 +32,17 @@ pub enum RebuildStatus {
     NeedCoverage,
     Failed(String),
     On(RebuildStats),
+}
+
+/// What the UI asks the core thread to load as function hooks (ticket
+/// W36-05): a Lua script and the recipe its hook names resolve against.
+/// Plain data, so it can cross the command channel; the Lua state itself is
+/// created on the core thread and stays there (it is not `Send`).
+pub struct HookSetup {
+    pub manifest: rf_plugin_sdk::Manifest,
+    /// The script that calls `rf.on_enter` / `rf.on_exit`.
+    pub lua_source: String,
+    pub recipe: rf_rebuild::Recipe,
 }
 
 /// Result of the background build.
@@ -128,6 +141,14 @@ mod tests {
         log.mark_prg(0, OPCODE);
         log.instructions_recorded = 1;
         log
+    }
+
+    /// The shell's key is the harness's key (one cache entry per ROM, written
+    /// by either side, read by the other).
+    #[test]
+    fn the_cache_key_is_the_harness_key() {
+        let sha = "ab".repeat(32);
+        assert_eq!(key(&sha), rf_harness::atlas::atlas_cache_key(&sha));
     }
 
     #[test]

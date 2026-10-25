@@ -226,6 +226,16 @@ pub trait CoreSink {
     /// [`crate::EventMask`] bit before constructing `ev` — see
     /// [`crate::EventMask`] (FR-CORE-006).
     fn event(&mut self, ev: CoreEvent);
+
+    /// Ticket W36-05: a hooked function (see
+    /// [`EmulatorCore::set_function_hooks`]) was entered or left. Called
+    /// synchronously on the core thread at an instruction boundary; `ctx`
+    /// lends the machine for this call only.
+    ///
+    /// Defaulted to a no-op, and a core with no hooks installed never calls
+    /// it. A sink that WRAPS another must forward it explicitly, or hooks
+    /// silently never fire behind that wrapper.
+    fn function_event(&mut self, _ev: crate::FunctionEvent, _ctx: &mut dyn crate::HookCtx) {}
 }
 
 /// The contract every emulator core implements (ARCHITECTURE §5;
@@ -344,6 +354,20 @@ pub trait EmulatorCore {
             None => Ok(()),
             Some(_) => Err(CoreError::Other("rebuild is not supported".to_string())),
         }
+    }
+
+    /// Ticket W36-05: choose which atlas functions emit
+    /// [`CoreSink::function_event`]; `function_ids` index the installed
+    /// atlas's function list (an empty slice turns hooks off). An unhooked
+    /// function costs one array load at a call landing and nothing is
+    /// tracked at all with no hooks. Default no-op for a core without an
+    /// executor.
+    ///
+    /// Hooks are session observation like the atlas: never saved, and
+    /// dropped when a cartridge is loaded. A hook that pokes memory is
+    /// mod-tier (NON_GOALS 13); the sink side ledgers it.
+    fn set_function_hooks(&mut self, function_ids: &[u32]) {
+        let _ = function_ids;
     }
 
     /// The executor's counters, `None` when no atlas is installed.

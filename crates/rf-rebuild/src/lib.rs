@@ -11,6 +11,7 @@ pub mod atlas;
 mod build;
 pub mod exec;
 pub mod isa;
+pub mod recipe;
 pub mod superset;
 pub mod windows;
 
@@ -21,9 +22,12 @@ pub use atlas::{
 };
 pub use build::build_atlas;
 pub use exec::{
-    Delta, Dispatch, FunctionEvent, FunctionHook, Node, RebuildExec, TraceEntry, TraceKind,
-    MAX_DELTAS,
+    Delta, Dispatch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
+    MAX_SHADOW_DEPTH,
 };
 pub use isa::{DecodeMode, Decoded, Flow, Isa};
+pub use recipe::{
+    match_recipe, Confidence, HookPoints, Match, MatchReport, RamMeaning, Recipe, RecipeFunction,
+};
 pub use superset::{superset_decode, Superset};
 pub use windows::WindowIndex;

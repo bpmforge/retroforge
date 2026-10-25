@@ -3926,10 +3926,12 @@ dependencies = [
  "rf-core-api",
  "rf-debugger",
  "rf-enhance",
+ "rf-harness",
  "rf-input",
  "rf-nes",
  "rf-plugin-sdk",
  "rf-profiles",
+ "rf-rebuild",
  "rf-renderer",
  "rf-snes",
  "rf-state",
@@ -4063,6 +4065,7 @@ name = "rf-plugin-sdk"
 version = "0.9.1"
 dependencies = [
  "mlua",
+ "rf-core-api",
  "wasmtime",
  "wat",
 ]
@@ -4072,6 +4075,7 @@ name = "rf-profiles"
 version = "0.9.1"
 dependencies = [
  "rf-cart",
+ "rf-rebuild",
  "serde",
  "toml",
 ]

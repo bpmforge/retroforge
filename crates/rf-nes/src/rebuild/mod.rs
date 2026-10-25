@@ -77,6 +77,19 @@ impl Isa for Mos6502 {
         };
         Some(Decoded { len, flow })
     }
+
+    /// Every 3-byte 6502 instruction is an absolute-family one: absolute,
+    /// absolute,X, absolute,Y, `JMP (a)`, `JSR`, `JMP a` and the unofficial
+    /// copies of those modes. Every 1-2 byte one is implied, accumulator,
+    /// immediate, zero page (indexed or indirect) or relative, which stay
+    /// (nesdev, "CPU addressing modes"). So the rule is by length.
+    fn masked_operand(&self, insn: &[u8], _mode: DecodeMode) -> std::ops::Range<usize> {
+        if insn.len() == 3 {
+            1..3
+        } else {
+            0..0
+        }
+    }
 }
 
 #[cfg(test)]

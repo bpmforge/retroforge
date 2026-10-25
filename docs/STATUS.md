@@ -4711,3 +4711,21 @@ stories, 10 decisions).
   test now uses a per-process cache (plausible fix, cause unconfirmed).
   `memory_editor_writes_the_machine` (unchanged since before W36) timed out in
   2 of 6 full gates and never alone. Workspace: **3412 passing**.
+
+- **W36-05 — Function hooks and recipes** (2026-10-25). Entry/exit events
+  cross the push boundary (`CoreSink::function_event` with a `HookCtx`: regs,
+  peek, ledgered poke); the Lua hook state lives on the core thread (mlua
+  `send` stays off). Exit comes from a shadow call stack (calls and
+  interrupts push their return; RTS/RTI to it pops; RTS tricks leave it).
+  Atlas `code-atlas-v2` adds a shape hash (6502: 3-byte operands masked) so a
+  recipe row matches a moved function; recipe TOML in rf-profiles, data types
+  in rf-rebuild; `function_hooks` capability, pokes need `write_memory` and go
+  through `WriteLedger`. SMB recipe (`profiles/nes/super-mario-bros/recipe.toml`)
+  matches the NMI handler exactly; a lives poke hook at frame 700 is caught by
+  the lockstep checker at frame 700 (`wram` $075A), a read-only Lua hook
+  counted all 1,487 NMIs with zero divergence. retroforge now depends on
+  rf-rebuild and dev-depends on rf-harness; a repro bundle loads through
+  `save_state::apply_container`. The rebuild core-thread test's flake was the
+  test not acknowledging frames (confirmed). Open for W36-06: no UI path loads
+  hooks, run-ahead does not run hooks, hook writes are not yet in savestates.
+  Workspace: **3444 passing** (code-atlas-v1 above is now v2).
