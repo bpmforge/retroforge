@@ -4770,3 +4770,15 @@ stories, 10 decisions).
   motion" setting, NES only, off by default, absent from Accuracy Mode, labelled
   with the one-frame delay. Passes through when widescreen or other layers are
   on (W37-06). Screens in docs/screens/w36/. Workspace: **3489 passing**.
+
+- **W36-08 — SNES recorder and 65816 atlas** (2026-10-25). The SNES core
+  records bank, PC and width mode (emulation plus the four M/X native modes)
+  per executed instruction with ROM offsets through LoROM/HiROM mapping;
+  armed vs unarmed bit-identical (3,836 SMW frames). The 65816 ISA decodes by
+  mode, tracks REP/SEP widths statically and stops at XCE/PLP unless the
+  recording saw the code run; atlas nodes are (offset, mode), format 3,
+  cache `code-atlas-v3` (NES too). SMW Yoshi's Island 1 (1,533 level frames):
+  770 functions, 30,112 instructions (12,190 observed), 62 unresolved static
+  targets; every executed opcode is an atlas instruction start at its width.
+  Hashes ignore width (W36-10 recipes add entry mode). Workspace: **3523
+  passing**.
