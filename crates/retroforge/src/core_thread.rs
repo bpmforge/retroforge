@@ -1759,6 +1759,9 @@ fn core_thread_main(
         // discarded the result. The emulator stepped; the user just never
         // saw it.
         let mut stepped = false;
+        // Ticket W36-06b: whether this iteration kept the state before the frame it runs (a running
+        // frame or a single-step frame; a scanline step does not run a whole frame).
+        let mut margin_pre_taken = false;
         for cmd in cmd_rx.try_iter() {
             match cmd {
                 CoreCommand::Pause => stepper.pause(),
@@ -1776,6 +1779,12 @@ fn core_thread_main(
                 // ignored — which is precisely the case a debugger user
                 // steps a frame to inspect.
                 CoreCommand::StepFrame => {
+                    if let Some(d) = margin_drawer.as_mut() {
+                        if widescreen.is_some() && !crate::margin_draw::blocked_by_hooks(&stepper) {
+                            d.before_frame(&stepper, input.load());
+                            margin_pre_taken = true;
+                        }
+                    }
                     stepper.latch_and_advance_frame(
                         input.load(),
                         &mut FanoutSink {
@@ -2264,6 +2273,7 @@ fn core_thread_main(
         if margin_wanted && !stepper.is_paused() {
             if let Some(d) = margin_drawer.as_mut() {
                 d.before_frame(&stepper, frame_input);
+                margin_pre_taken = true;
             }
         }
         let ran = match trace.as_mut() {
@@ -2839,7 +2849,7 @@ fn core_thread_main(
             msg.copies_refused_by_hooks = hooks_block && (run_ahead > 0 || margin_drawer.is_some());
             // Ticket W36-06b: the objects past the picture's edge, drawn for the picture on screen
             // (the speculative one when run-ahead replaced it).
-            if ran && !stepped && margin_wanted {
+            if margin_pre_taken && (ran || stepped) && margin_wanted {
                 if let Some(d) = margin_drawer.as_mut() {
                     let real_oam = d.oam_of_current_picture();
                     let (ahead, oam, ids, bg) = match &spec_shown {
