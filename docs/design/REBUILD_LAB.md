@@ -178,10 +178,10 @@ by default while a game is unproven and switches off once it is proven.
 
 | Phase | Wave | What | Gate |
 |---|---|---|---|
-| B, generic runtime | W37 | Input-movie coverage import (.fm2, .bk2, .lsmv; a desync is a compatibility report), Rebuild for any ROM with a coverage/tier/verification panel, scout and fuzz as recorder sources, shadow-core lockstep. W37-00 ships generic interpolated 60+ fps from OAM deltas early, latency labelled | Census reaches first-screen hashes through the generic tier with zero regressions |
-| C, recipes and finders | W38 | Culling, tick, object-table and camera finders; data-region and collision-table finder so Diorama heights derive per engine; engine recipes in showcase order; recipe RAM maps to and from cheats and RetroAchievements | 20 random SMW hacks boot rebuilt with live margins, no per-hack work |
-| D, Super Enhanced rendering | W39 | No-latency interpolation, object-aware Diorama, HD-2D render plugin API over recipe facts (Triangle Strategy-style tilt, shadows, depth of field on one engine), object-renderer demo | Original mode byte-identical |
-| E, community | W40 | Recipe hub with the checker as referee, SA-1 lifting, AI naming documented | Moderation rule approved by Brad |
+| B, generic runtime | W37 | Input-movie coverage import (.fm2, .lsmv, .bk2; a desync is a compatibility report), Cranelift as the default generic tier, portable fallback tier, Rebuild for any ROM with a coverage/tier/verification panel, shadow-core lockstep, savestate fuzz, savestates across tiers. W37-06 ships generic interpolated 60/120 fps from OAM deltas early, latency labelled | Census reaches first-screen hashes through the generic tier with zero regressions |
+| C, recipes and finders | W38 | Recipe format v1 with grades; data-region, object-table and collision-table finders (Diorama heights derive per engine); widescreen checklist finders so widescreen fixes come from recipes, not per-game code; engine recipes Zelda 1, Super Metroid, Castlevania, Mega Man 2 and X; recipe RAM maps to and from cheats and RetroAchievements | 20 random SMW hacks boot rebuilt with live margins, no per-hack work |
+| D, Super Enhanced rendering | W39 | Plugin surface (logic, fact, render), no-latency interpolation, object-aware Diorama, baked level geometry, HD-2D render plugin (Triangle Strategy-style tilt, shadows, depth of field on one engine), MetalFX temporal upscaling, local AI HD asset pass over the tile cache, shader presets | Original mode byte-identical |
+| E, community | W40 | Recipe hub with the checker as referee, local on-device naming model, SA-1 lifting (the public guide is W36-11) | Moderation rule approved by Brad |
 
 Plugin kinds over the recorded "living decomp": logic plugins (hooks,
 overrides) run under the lockstep checker; fact plugins (names, RAM maps,
