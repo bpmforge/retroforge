@@ -96,6 +96,10 @@ pub struct NesCore {
     /// a state load leaves it alone (`state load` goes through
     /// [`NesCore::parts_mut`], which never touches it).
     rebuild: Option<Box<RebuildExec>>,
+    /// Ticket W36-05: the atlas function ids asked to emit
+    /// [`CoreSink::function_event`], kept so a freshly installed atlas gets
+    /// them. Session observation: not saved, dropped by `load`.
+    hook_ids: Vec<u32>,
     /// `coverage.is_some() || rebuild.is_some()`: the single flag the hot
     /// path in [`NesCore::tick`] tests.
     observing: bool,
@@ -119,6 +123,7 @@ impl NesCore {
             coverage: None,
             window_cache: WindowMap::EMPTY,
             rebuild: None,
+            hook_ids: Vec::new(),
             observing: false,
         })
     }
@@ -195,7 +200,7 @@ impl NesCore {
     /// drain costs one branch when nothing is queued.
     fn tick(&mut self, sink: &mut dyn CoreSink, start_frame: u64) -> bool {
         if self.observing {
-            self.step_observed();
+            self.step_observed(sink);
         } else {
             self.cpu.step(&mut self.bus);
         }
@@ -209,15 +214,18 @@ impl NesCore {
     /// step and read `pc` after it, so the instruction itself is always the
     /// plain `Cpu::step`.
     #[inline(never)]
-    fn step_observed(&mut self) {
+    fn step_observed(&mut self, sink: &mut dyn CoreSink) {
         let cov = self.coverage.is_some().then(|| self.coverage_before());
         let reb = self.rebuild_before();
         self.cpu.step(&mut self.bus);
-        if let RebuildBefore::Indirect { node, site } = reb {
+        if let Some((node, site)) = reb.indirect {
             let target = self.code_addr(self.cpu.pc);
             if let Some(x) = self.rebuild.as_deref_mut() {
                 x.check_target(node, site, target);
             }
+        }
+        if reb.hook != HookStep::None {
+            self.hook_after(reb.hook, sink);
         }
         if let Some(before) = cov {
             self.coverage_after(before);
@@ -229,27 +237,97 @@ impl NesCore {
     /// sequence, not the instruction at `pc`.
     fn rebuild_before(&mut self) -> RebuildBefore {
         let Some(x) = self.rebuild.as_deref_mut() else {
-            return RebuildBefore::Plain;
+            return RebuildBefore::PLAIN;
         };
+        let hooks = x.hooks_active();
         let (nmi, irq) = self.cpu.pending_interrupt();
         if nmi || irq {
             x.note_interrupt(self.cpu.pc);
-            return RebuildBefore::Plain;
+            // The interrupt returns to the instruction it interrupted.
+            return RebuildBefore {
+                indirect: None,
+                hook: if hooks {
+                    HookStep::Enter {
+                        ret: self.cpu.pc.into(),
+                    }
+                } else {
+                    HookStep::None
+                },
+            };
         }
         let pc = self.cpu.pc;
         let rom = self
             .bus
             .prg_rom_offset(pc)
             .and_then(|o| u32::try_from(o).ok());
-        match x.dispatch(pc, rom) {
+        let indirect = match x.dispatch(pc, rom) {
             Dispatch::Atlas {
                 node,
                 indirect: true,
-            } => RebuildBefore::Indirect {
-                node,
-                site: CodeAddr { cpu: pc, rom },
-            },
-            _ => RebuildBefore::Plain,
+            } => Some((node, CodeAddr { cpu: pc, rom })),
+            _ => None,
+        };
+        // Peeked, not taken from the atlas node: a call from code the atlas
+        // has no node for (RAM code) still pushes a frame.
+        let hook = if hooks {
+            match self.bus.peek(pc) {
+                // JSR returns to the next instruction, BRK skips its padding
+                // byte (nesdev, "CPU interrupts").
+                0x20 => HookStep::Enter {
+                    ret: u32::from(pc.wrapping_add(3)),
+                },
+                0x00 => HookStep::Enter {
+                    ret: u32::from(pc.wrapping_add(2)),
+                },
+                0x60 | 0x40 => HookStep::Return,
+                _ => HookStep::None,
+            }
+        } else {
+            HookStep::None
+        };
+        RebuildBefore { indirect, hook }
+    }
+
+    /// Hooks, post-step half (ticket W36-05): tell the executor where the
+    /// call, interrupt or return landed, then hand any Enter/Exit events to
+    /// `sink` with the machine lent through a [`NesHookCtx`]. Runs at an
+    /// instruction boundary, on the core thread.
+    #[inline(never)]
+    fn hook_after(&mut self, step: HookStep, sink: &mut dyn CoreSink) {
+        let pc = self.cpu.pc;
+        let rom = match step {
+            HookStep::Enter { .. } => self
+                .bus
+                .prg_rom_offset(pc)
+                .and_then(|o| u32::try_from(o).ok()),
+            _ => None,
+        };
+        let Some(x) = self.rebuild.as_deref_mut() else {
+            return;
+        };
+        match step {
+            HookStep::Enter { ret } => x.landed(rom, ret & 0xFFFF),
+            HookStep::Return => x.returned(u32::from(pc)),
+            HookStep::None => {}
+        }
+        let events = x.take_events();
+        for ev in events.iter().copied() {
+            let mut ctx = NesHookCtx {
+                cpu: &self.cpu,
+                bus: &mut self.bus,
+            };
+            sink.function_event(ev, &mut ctx);
+        }
+        x.recycle_events(events);
+    }
+
+    /// Forget the in-flight hooked calls (ticket W36-05). A machine reset
+    /// does it itself; a caller that restores a savestate through
+    /// [`NesCore::parts_mut`] must call this, because the call stack the
+    /// executor remembered belongs to the machine that was replaced.
+    pub fn reset_hook_frames(&mut self) {
+        if let Some(x) = self.rebuild.as_deref_mut() {
+            x.reset_frames();
         }
     }
 
@@ -272,7 +350,11 @@ impl NesCore {
                 )));
             }
         }
-        self.rebuild = atlas.map(|a| Box::new(RebuildExec::new(a)));
+        self.rebuild = atlas.map(|a| {
+            let mut x = Box::new(RebuildExec::new(a));
+            x.set_hooked(&self.hook_ids);
+            x
+        });
         self.refresh_observing();
         Ok(())
     }
@@ -432,11 +514,59 @@ impl NesCore {
     }
 }
 
-/// What the executor found before a step (ticket W36-03).
+/// What the executor found before a step (tickets W36-03, W36-05).
 #[derive(Clone, Copy)]
-enum RebuildBefore {
-    Plain,
-    Indirect { node: u32, site: CodeAddr },
+struct RebuildBefore {
+    /// An indirect transfer to compare with the atlas's recorded targets.
+    indirect: Option<(u32, CodeAddr)>,
+    hook: HookStep,
+}
+
+impl RebuildBefore {
+    const PLAIN: Self = Self {
+        indirect: None,
+        hook: HookStep::None,
+    };
+}
+
+/// What the step about to run does to the hooked call stack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookStep {
+    None,
+    /// `JSR`, `BRK` or an interrupt entry; `ret` is where its return lands.
+    Enter {
+        ret: u32,
+    },
+    /// `RTS` or `RTI`.
+    Return,
+}
+
+/// The machine lent to a hook for one event: registers, a non-perturbing
+/// peek, and a clock-free poke into work RAM and cartridge RAM.
+struct NesHookCtx<'a> {
+    cpu: &'a Cpu,
+    bus: &'a mut NesBus,
+}
+
+impl rf_core_api::HookCtx for NesHookCtx<'_> {
+    fn regs(&self) -> CpuRegs {
+        CpuRegs::Mos6502(Mos6502Regs {
+            a: self.cpu.a,
+            x: self.cpu.x,
+            y: self.cpu.y,
+            s: self.cpu.s,
+            pc: self.cpu.pc,
+            p: self.cpu.p,
+        })
+    }
+
+    fn peek(&self, addr: u32) -> u8 {
+        self.bus.peek(u16::try_from(addr & 0xFFFF).unwrap_or(0))
+    }
+
+    fn poke(&mut self, addr: u32, value: u8) -> bool {
+        u16::try_from(addr).is_ok_and(|a| self.bus.poke(a, value))
+    }
 }
 
 /// What the recorder saw before a step, carried to the after-step half.
@@ -461,8 +591,10 @@ impl EmulatorCore for NesCore {
             self.window_cache = WindowMap::EMPTY;
             self.coverage_note_reset();
         }
-        // An atlas describes one cartridge.
+        // An atlas describes one cartridge, and so do the function ids hooked
+        // in it.
         self.rebuild = None;
+        self.hook_ids.clear();
         self.refresh_observing();
         Ok(())
     }
@@ -475,6 +607,7 @@ impl EmulatorCore for NesCore {
         // power-on pattern) `rf-nes` does not model separately today.
         self.cpu = Cpu::power_on(&mut self.bus);
         self.coverage_note_reset();
+        self.reset_hook_frames();
     }
 
     fn run_frame(&mut self, input: &InputFrame, sink: &mut dyn CoreSink) {
@@ -619,6 +752,13 @@ impl EmulatorCore for NesCore {
         self.set_rebuild(atlas)
     }
 
+    fn set_function_hooks(&mut self, function_ids: &[u32]) {
+        self.hook_ids = function_ids.to_vec();
+        if let Some(x) = self.rebuild.as_deref_mut() {
+            x.set_hooked(function_ids);
+        }
+    }
+
     fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
         self.rebuild.as_deref().map(RebuildExec::stats)
     }
@@ -658,5 +798,15 @@ impl CoreSink for ScanlineCounter<'_> {
 
     fn event(&mut self, event: rf_core_api::CoreEvent) {
         self.inner.event(event);
+    }
+
+    /// Forwarded explicitly: `run_frame` goes through this wrapper, so a
+    /// default here would mean hooks never fire in normal play (W36-05).
+    fn function_event(
+        &mut self,
+        ev: rf_core_api::FunctionEvent,
+        ctx: &mut dyn rf_core_api::HookCtx,
+    ) {
+        self.inner.function_event(ev, ctx);
     }
 }

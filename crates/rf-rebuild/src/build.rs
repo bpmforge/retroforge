@@ -368,11 +368,16 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
             .collect();
         bytes.sort_unstable();
         let mut hash = FNV_OFFSET;
+        let mut shape = FNV_OFFSET;
         let mut byte_len = 0u32;
         for &(_, rom, len) in &bytes {
             let s = rom as usize;
-            for &b in &prg[s..(s + usize::from(len)).min(prg.len())] {
+            let insn = &prg[s..(s + usize::from(len)).min(prg.len())];
+            let masked = isa.masked_operand(insn, DecodeMode::default());
+            for (i, &b) in insn.iter().enumerate() {
                 hash = (hash ^ u64::from(b)).wrapping_mul(FNV_PRIME);
+                let kept = if masked.contains(&i) { 0 } else { b };
+                shape = (shape ^ u64::from(kept)).wrapping_mul(FNV_PRIME);
             }
             byte_len += u32::from(len);
         }
@@ -384,6 +389,7 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
             insn_count: bytes.len() as u32,
             byte_len,
             byte_hash: hash,
+            shape_hash: shape,
         }
     };
     for (&rom, &kinds) in &entry_flags {

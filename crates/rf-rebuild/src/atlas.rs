@@ -25,14 +25,14 @@ use crate::isa::Flow;
 
 /// Bumped on any change to the encoded shape. Part of the cache name
 /// ([`CACHE_SETTINGS`]); a different number is a clean cache miss.
-pub const ATLAS_FORMAT_VERSION: u32 = 1;
+pub const ATLAS_FORMAT_VERSION: u32 = 2;
 /// `rf-cache` key `producer` component.
 pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
 pub const CACHE_ASSET: &str = "code-atlas";
 /// `rf-cache` key `settings_hash` component, `-vN` like rf-cache's other
 /// users (e.g. `canvas-chunk-v3`).
-pub const CACHE_SETTINGS: &str = "code-atlas-v1";
+pub const CACHE_SETTINGS: &str = "code-atlas-v2";
 
 const MAGIC: [u8; 4] = *b"RFAT";
 /// Upper bound on what `from_bytes` will allocate, so a corrupt cache entry
@@ -157,8 +157,16 @@ pub struct Function {
     pub insn_count: u32,
     pub byte_len: u32,
     /// FNV-1a 64 over the function's instruction bytes in (cpu, rom)
-    /// address order, gaps skipped. Recipes (W36-05) match on this.
+    /// address order, gaps skipped. Raises a recipe match's confidence
+    /// (W36-05); changes when the function is moved and re-linked.
     pub byte_hash: u64,
+    /// FNV-1a 64 over the same instructions with every absolute-address
+    /// operand masked out (opcode bytes and the other operands kept; the
+    /// rule is [`crate::Isa::masked_operand`]). Stable across a move that
+    /// re-points absolute operands, which is what recipes match on
+    /// (W36-05). Masked bytes are hashed as zero so the instruction
+    /// lengths still count.
+    pub shape_hash: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]

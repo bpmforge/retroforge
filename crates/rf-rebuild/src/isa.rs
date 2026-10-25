@@ -61,4 +61,19 @@ pub trait Isa {
     /// value must otherwise decode to something: an undefined opcode is
     /// still an instruction that occupies bytes.
     fn decode(&self, bytes: &[u8], cpu: u32, mode: DecodeMode) -> Option<Decoded>;
+
+    /// The shape-hash mask rule (ticket W36-05). `insn` is one whole
+    /// instruction, opcode first. Returns the range of `insn` holding an
+    /// operand that names an **absolute address** (absolute, absolute
+    /// indexed, indirect, long): bytes that change when the code is moved or
+    /// the surrounding build is re-linked, so the function's shape hash
+    /// ignores them. Zero-page, immediate and relative operands are kept (a
+    /// relative branch is the same after a move; an immediate or a
+    /// zero-page address is the game's own constant). An empty range masks
+    /// nothing.
+    ///
+    /// The ISA decides because it knows its addressing modes: the 65816
+    /// masks 16- and 24-bit absolute and long operands but keeps immediates
+    /// of the same width, a distinction only the decode mode can make.
+    fn masked_operand(&self, insn: &[u8], mode: DecodeMode) -> std::ops::Range<usize>;
 }

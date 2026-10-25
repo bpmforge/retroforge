@@ -835,6 +835,29 @@ impl NesBus {
         }
     }
 
+    /// A write with no clock, PPU or APU side effect, for function hooks
+    /// (ticket W36-05): work RAM (`$0000-$1FFF`, mirrored) and cartridge RAM
+    /// (`$6000-$7FFF`). Anything else changes nothing and returns `false`:
+    /// a hook is not a way to drive PPU/APU registers or the mapper.
+    ///
+    /// Unlike a CPU write this leaves `open_bus` alone, so the only machine
+    /// state it changes is the byte itself.
+    pub fn poke(&mut self, addr: u16, value: u8) -> bool {
+        match addr {
+            0x0000..=0x1FFF => self.ram[(addr as usize) & (RAM_SIZE - 1)] = value,
+            0x6000..=0x7FFF => {
+                let len = self.prg_ram.len();
+                if len == 0 {
+                    return false;
+                }
+                let off = self.mapper.wram_offset(addr) % len;
+                self.prg_ram[off] = value;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// PRG ROM byte offset a CPU read of `addr` returns right now, or
     /// `None` for anything that is not PRG ROM (RAM, I/O, PRG RAM, a
     /// RAM-selected MMC5 window) or that the mapper does not report
