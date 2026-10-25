@@ -173,7 +173,9 @@ From the Rebuild Player Guide answers (2026-10-25): engine recipes after SMB
 and SMW follow Brad's showcase order, Zelda, then Super Metroid, then
 Castlevania, then Mega Man; SA-1 lifting is in scope for the vision (same
 65816 lifter, second recorded core); a public recipe hub may accept
-community recipes, with the lockstep checker as referee. Generic
+community recipes, with the lockstep checker as referee. Shadow-core
+lockstep (a second interpreted core checking rebuilt play) is on by default
+while a game is unproven. Generic
 interpolated 60 fps from OAM deltas (one frame of latency, labelled) is a
 PPU-side feature outside this wave.
 
