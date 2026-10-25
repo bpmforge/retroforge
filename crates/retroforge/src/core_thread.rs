@@ -373,6 +373,10 @@ pub struct FrameMsg {
     /// the PRG map) so the UI thread never touches core state (law 4) and
     /// only a few hundred bytes cross the channel.
     pub coverage: Option<Box<rf_debugger::coverage_view::CoverageSummary>>,
+    /// Ticket W36-03: where Rebuild stands (with the executor's counters
+    /// while on). Sent every [`COVERAGE_REFRESH_FRAMES`] frames while it is
+    /// not `Off`, and on the next frame after any change; `None` otherwise.
+    pub rebuild: Option<crate::rebuild::RebuildStatus>,
     /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, read via
     /// `NesBus::vram()`/`palette()` — plain non-observing borrows, so
     /// snapshotting them here cannot perturb A12 edge timing (see
@@ -722,6 +726,64 @@ fn coverage_refresh(
         .map(|log| Box::new(rf_debugger::coverage_view::CoverageSummary::from_log(log)))
 }
 
+/// Take what the recorder holds into `acc` (ticket W36-03: also done before
+/// disarming and before an atlas build, so the 15-frame refresh cadence does
+/// not leave a tail behind).
+fn coverage_merge(stepper: &mut EmuStepper, acc: &mut Option<rf_core_api::CoverageLog>) {
+    let Some(taken) = stepper.take_coverage() else {
+        return;
+    };
+    match acc {
+        Some(total) => {
+            total.merge(&taken);
+        }
+        None => *acc = Some(taken),
+    }
+}
+
+/// Advance Rebuild's state by one frame and say what the panel should hear
+/// (ticket W36-03): finish a background build by installing the atlas on
+/// this thread, refresh the counters every [`COVERAGE_REFRESH_FRAMES`]
+/// frames, and report any change once. `None` while off and unchanged.
+fn rebuild_report(
+    stepper: &mut EmuStepper,
+    status: &mut crate::rebuild::RebuildStatus,
+    job: &mut Option<Receiver<crate::rebuild::RebuildBuild>>,
+    dirty: &mut bool,
+) -> Option<crate::rebuild::RebuildStatus> {
+    use crate::rebuild::{RebuildBuild, RebuildStatus};
+    if let Some(rx) = job.as_ref() {
+        match rx.try_recv() {
+            Ok(done) => {
+                *job = None;
+                *dirty = true;
+                *status = match done {
+                    RebuildBuild::Ready(atlas) => match stepper.set_rebuild_atlas(Some(atlas)) {
+                        Ok(()) => RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default()),
+                        Err(e) => RebuildStatus::Failed(e.to_string()),
+                    },
+                    RebuildBuild::NeedCoverage => RebuildStatus::NeedCoverage,
+                    RebuildBuild::Failed(e) => RebuildStatus::Failed(e),
+                };
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *job = None;
+                *dirty = true;
+                *status = RebuildStatus::Failed("atlas build thread ended".to_string());
+            }
+        }
+    }
+    let tick = stepper
+        .frame_count()
+        .is_multiple_of(COVERAGE_REFRESH_FRAMES);
+    if matches!(status, RebuildStatus::On(_)) && tick {
+        *status = RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default());
+        *dirty = true;
+    }
+    std::mem::take(dirty).then(|| status.clone())
+}
+
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
 ///
 /// Not `Clone` or `Debug`: `ArmTrace` carries a `TraceProducer`, which is
@@ -968,6 +1030,9 @@ pub enum CoreCommand {
     /// Ticket W36-01: arm or disarm the code-coverage recorder. Off by
     /// default; arming starts a fresh log, disarming discards it.
     SetCoverage(bool),
+    /// Ticket W36-03: turn the block executor on for this ROM (find or build
+    /// the atlas in the background, install it here) or off. Off by default.
+    SetRebuild(bool),
     /// Ticket W15-06 (FR-ENH-008): disable frame pacing entirely while
     /// held — the App-hotkey fast-forward. `false` runs the loop flat-out
     /// (`crate::pacer::FramePacer::set_enabled`'s own doc); `true`
@@ -1496,6 +1561,12 @@ fn core_thread_main(
     // log merged from every take since arming.
     let mut coverage_on = false;
     let mut coverage_acc: Option<rf_core_api::CoverageLog> = None;
+    // Ticket W36-03: Rebuild's status, the background atlas build (if one is
+    // running) and whether the panel has yet to hear of a change.
+    let mut rebuild_status = crate::rebuild::RebuildStatus::Off;
+    let mut rebuild_job: Option<Receiver<crate::rebuild::RebuildBuild>> = None;
+    let mut rebuild_dirty = false;
+    let rebuild_sha = rom_sha256.clone();
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -1900,9 +1971,40 @@ fn core_thread_main(
                     audio_capture = on;
                 }
                 CoreCommand::SetCoverage(on) => {
+                    // Disarming keeps what was recorded, so "record, stop,
+                    // then turn Rebuild on" has coverage to build from.
+                    // Arming starts a fresh accumulator.
+                    if coverage_on && !on {
+                        coverage_merge(&mut stepper, &mut coverage_acc);
+                    }
                     stepper.set_coverage_recording(on);
                     coverage_on = on;
-                    coverage_acc = None;
+                    if on {
+                        coverage_acc = None;
+                    }
+                }
+                CoreCommand::SetRebuild(on) => {
+                    rebuild_job = None;
+                    let _ = stepper.set_rebuild_atlas(None);
+                    rebuild_dirty = true;
+                    if on {
+                        if coverage_on {
+                            coverage_merge(&mut stepper, &mut coverage_acc);
+                        }
+                        // Built off this thread: a big ROM's atlas should not
+                        // stall frames. Installing stays here (law 4).
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let (ines, sha, log) =
+                            (rom.clone(), rebuild_sha.clone(), coverage_acc.clone());
+                        thread::spawn(move || {
+                            let _ =
+                                tx.send(crate::rebuild::find_or_build(&ines, &sha, log.as_ref()));
+                        });
+                        rebuild_job = Some(rx);
+                        rebuild_status = crate::rebuild::RebuildStatus::Building;
+                    } else {
+                        rebuild_status = crate::rebuild::RebuildStatus::Off;
+                    }
                 }
                 // Ticket W15-06 (FR-ENH-008): the fast-forward hotkey,
                 // held. `pacer.set_enabled` alone is not the whole story —
@@ -2495,6 +2597,12 @@ fn core_thread_main(
                 } else {
                     None
                 },
+                rebuild: rebuild_report(
+                    &mut stepper,
+                    &mut rebuild_status,
+                    &mut rebuild_job,
+                    &mut rebuild_dirty,
+                ),
                 audio_traces: if audio_capture {
                     // ~64 points is more than a 32-pixel-tall scope can
                     // resolve; reducing here keeps a frame's 5x735
@@ -2851,6 +2959,7 @@ mod tests {
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             coverage: None,
+            rebuild: None,
             snes: None,
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
@@ -3666,6 +3775,61 @@ mod tests {
             .expect("a stepped frame must still be delivered after toggling the overlay");
         assert!(matches!(evt, CoreEvent::Frame(_)));
 
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W36-03: record, stop recording, turn Rebuild on: the atlas is
+    /// built from what the session recorded, installed on the core thread,
+    /// and its counters come back on frame messages; off drops it.
+    #[test]
+    fn rebuild_builds_from_recorded_coverage_installs_and_reports() {
+        use crate::rebuild::RebuildStatus;
+        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        let send = |c| core.cmd_tx.send(c).expect("accepted");
+        send(CoreCommand::SetCoverage(true));
+        for _ in 0..3 {
+            send(CoreCommand::StepFrame);
+        }
+        send(CoreCommand::SetCoverage(false));
+        send(CoreCommand::SetRebuild(true));
+        let mut last = None;
+        for _ in 0..400 {
+            send(CoreCommand::StepFrame);
+            let CoreEvent::Frame(msg) = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("frame")
+            else {
+                continue;
+            };
+            if let Some(r) = msg.rebuild {
+                last = Some(r);
+                if matches!(last, Some(RebuildStatus::On(_))) {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(last, Some(RebuildStatus::On(_))),
+            "never turned on: {last:?}"
+        );
+        send(CoreCommand::SetRebuild(false));
+        send(CoreCommand::StepFrame);
+        let off = loop {
+            let CoreEvent::Frame(msg) = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("frame")
+            else {
+                continue;
+            };
+            if msg.rebuild.is_some() {
+                break msg.rebuild;
+            }
+        };
+        assert_eq!(off, Some(RebuildStatus::Off));
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
         let _ = core.join_handle.join();
     }

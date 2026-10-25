@@ -1,0 +1,146 @@
+//! Turning Rebuild on for the current ROM (ticket W36-03): find or build the
+//! code atlas, off the core thread.
+//!
+//! The atlas comes from the per-ROM cache (`code-atlas-v1`) when present,
+//! otherwise from the coverage the session has recorded so far, and is then
+//! stored for next time. If there is neither, the answer is
+//! [`RebuildBuild::NeedCoverage`] and the panel says to record first.
+//!
+//! The cache key is built here from `rf_nes::rebuild`'s re-exported names
+//! because this crate does not depend on `rf-harness`, whose
+//! `atlas::atlas_cache_key` is the same four strings. Keep the two in step.
+//! The cache lives in its own directory: the canvas cache is open on the core
+//! thread, and two handles on one index file could race.
+
+use std::path::PathBuf;
+
+use rf_cache::{Cache, CacheKey};
+use rf_core_api::{CoverageLog, RebuildStats};
+use rf_nes::rebuild::{Atlas, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS};
+
+const ATLAS_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Where the Rebuild button stands, as the panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RebuildStatus {
+    #[default]
+    Off,
+    Building,
+    /// No cached atlas and no recorded coverage to build one from.
+    NeedCoverage,
+    Failed(String),
+    On(RebuildStats),
+}
+
+/// Result of the background build.
+pub enum RebuildBuild {
+    Ready(Box<Atlas>),
+    NeedCoverage,
+    Failed(String),
+}
+
+fn cache_root() -> PathBuf {
+    std::env::temp_dir().join("retroforge-atlas-cache")
+}
+
+fn key(rom_sha256: &str) -> CacheKey {
+    CacheKey {
+        rom_sha256: rom_sha256.to_string(),
+        asset_hash: CACHE_ASSET.to_string(),
+        producer: CACHE_PRODUCER.to_string(),
+        settings_hash: CACHE_SETTINGS.to_string(),
+    }
+}
+
+/// Cached atlas, else one built from `coverage`, else `NeedCoverage`.
+/// Blocking; run it on its own thread.
+#[must_use]
+pub fn find_or_build(
+    ines: &[u8],
+    rom_sha256: &str,
+    coverage: Option<&CoverageLog>,
+) -> RebuildBuild {
+    find_or_build_in(&cache_root(), ines, rom_sha256, coverage)
+}
+
+fn find_or_build_in(
+    root: &std::path::Path,
+    ines: &[u8],
+    rom_sha256: &str,
+    coverage: Option<&CoverageLog>,
+) -> RebuildBuild {
+    let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
+    let cached = cache
+        .as_mut()
+        .and_then(|c| c.get(&key(rom_sha256)).ok().flatten())
+        .and_then(|b| Atlas::from_bytes(&b).ok());
+    if let Some(atlas) = cached {
+        return RebuildBuild::Ready(Box::new(atlas));
+    }
+    let Some(log) = coverage.filter(|l| l.instructions_recorded > 0) else {
+        return RebuildBuild::NeedCoverage;
+    };
+    let rom = match rf_nes::NesRom::from_ines_bytes(ines) {
+        Ok(r) => r,
+        Err(e) => return RebuildBuild::Failed(format!("not an NES image: {e:?}")),
+    };
+    let atlas = rf_nes::rebuild::build_atlas(rom.prg_rom(), log);
+    if let Some(c) = cache.as_mut() {
+        // A cache that cannot be written only costs the next build.
+        let _ = c.put(&key(rom_sha256), &atlas.to_bytes());
+    }
+    RebuildBuild::Ready(Box::new(atlas))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rf_core_api::coverage::{WindowMap, OPCODE};
+
+    fn tiny_ines() -> Vec<u8> {
+        let mut d = vec![0u8; 16];
+        d[0..4].copy_from_slice(b"NES\x1a");
+        d[4] = 1;
+        d.extend(vec![0xEAu8; 0x4000]);
+        d
+    }
+
+    fn log() -> CoverageLog {
+        let mut log = CoverageLog::new(0x4000);
+        let mut m = WindowMap::EMPTY;
+        for (p, s) in m.0.iter_mut().enumerate() {
+            *s = (p as u32 % 4) * 0x1000;
+        }
+        log.note_windows(m);
+        log.mark_prg(0, OPCODE);
+        log.instructions_recorded = 1;
+        log
+    }
+
+    #[test]
+    fn needs_coverage_then_builds_then_hits_the_cache() {
+        let dir = std::env::temp_dir().join(format!("rf-rebuild-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ines = tiny_ines();
+        let sha = "ef".repeat(32);
+        assert!(matches!(
+            find_or_build_in(&dir, &ines, &sha, None),
+            RebuildBuild::NeedCoverage
+        ));
+        let empty = CoverageLog::new(0x4000);
+        assert!(matches!(
+            find_or_build_in(&dir, &ines, &sha, Some(&empty)),
+            RebuildBuild::NeedCoverage
+        ));
+        assert!(matches!(
+            find_or_build_in(&dir, &ines, &sha, Some(&log())),
+            RebuildBuild::Ready(_)
+        ));
+        // Stored: no coverage needed any more.
+        assert!(matches!(
+            find_or_build_in(&dir, &ines, &sha, None),
+            RebuildBuild::Ready(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

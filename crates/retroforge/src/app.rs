@@ -3209,9 +3209,26 @@ impl RetroForgeApp {
                 summary: None,
                 request: None,
                 armed: false,
+                rebuild: crate::rebuild::RebuildStatus::Off,
+                rebuild_request: None,
             })
         });
-        let Some(on) = panel.request.take() else {
+        if let Some(on) = panel.rebuild_request.take() {
+            if !on {
+                panel.rebuild = crate::rebuild::RebuildStatus::Off;
+            }
+            self.send_command(CoreCommand::SetRebuild(on));
+        }
+        let Some(on) = self
+            .debug_panels
+            .data
+            .coverage
+            .as_mut()
+            .and_then(|p| p.request.take())
+        else {
+            return;
+        };
+        let Some(panel) = self.debug_panels.data.coverage.as_mut() else {
             return;
         };
         panel.armed = on;
@@ -4779,6 +4796,9 @@ impl RetroForgeApp {
             if let Some(cov) = self.debug_panels.data.coverage.as_mut() {
                 if cov.armed && msg.coverage.is_some() {
                     cov.summary = msg.coverage.clone();
+                }
+                if let Some(r) = &msg.rebuild {
+                    cov.rebuild = r.clone();
                 }
             }
             // Ticket W4-06d: live VRAM/palette for the nametable and
@@ -14751,6 +14771,7 @@ impl RetroForgeApp {
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             coverage: None,
+            rebuild: None,
             snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),

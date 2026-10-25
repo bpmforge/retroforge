@@ -1699,6 +1699,25 @@ impl EmuStepper {
         self.machine.as_core().take_coverage()
     }
 
+    /// Install or drop the block executor's code atlas (ticket W36-03).
+    /// Off by default; behaviour-neutral by construction. Errors on cores
+    /// that cannot run an executor or when the atlas is for another cart.
+    ///
+    /// # Errors
+    /// See [`rf_core_api::EmulatorCore::set_rebuild_atlas`].
+    pub fn set_rebuild_atlas(
+        &mut self,
+        atlas: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<(), rf_core_api::CoreError> {
+        self.machine.as_core().set_rebuild_atlas(atlas)
+    }
+
+    /// The executor's counters, `None` while Rebuild is off (ticket W36-03).
+    #[must_use]
+    pub fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
+        self.machine.as_core_ref().rebuild_stats()
+    }
+
     /// Drain the per-channel scope streams captured since the last call.
     pub fn take_audio_channel_samples(&mut self) -> [Vec<i16>; rf_nes::apu::CHANNEL_COUNT] {
         self.machine.take_channel_samples().unwrap_or_default()
