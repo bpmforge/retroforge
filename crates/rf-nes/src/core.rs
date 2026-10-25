@@ -200,6 +200,7 @@ impl NesCore {
     /// `cpu.step` is about to do and mark the instruction's bytes. Peeks
     /// only (`NesBus::peek` is side-effect-free), so the emulated machine
     /// cannot tell it ran.
+    #[inline(never)]
     fn coverage_before(&mut self) -> CoverageBefore {
         let pc = self.cpu.pc;
         let (nmi, irq) = self.cpu.pending_interrupt();
@@ -234,6 +235,7 @@ impl NesCore {
 
     /// Recorder, post-step half: the indirect edge or interrupt entry the
     /// step just completed, with its target read off the new `pc`.
+    #[inline(never)]
     fn coverage_after(&mut self, before: CoverageBefore) {
         let target = self.code_addr(self.cpu.pc);
         let Some(log) = self.coverage.as_deref_mut() else {

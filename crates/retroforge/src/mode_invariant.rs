@@ -341,8 +341,13 @@ pub fn hash_indexed_video(pixels: &[PpuPixel]) -> String {
 /// Run one corpus entry through `frames` frames, in accuracy or enhanced
 /// configuration, returning one [`FrameHashes`] pair per frame plus the
 /// input log driven (today always empty — see module doc).
-fn run(entry: &CorpusEntry, enhanced: bool) -> (Vec<FrameHashes>, Vec<rf_core_api::InputFrame>) {
+fn run(
+    entry: &CorpusEntry,
+    enhanced: bool,
+    coverage: bool,
+) -> (Vec<FrameHashes>, Vec<rf_core_api::InputFrame>) {
     let mut stepper = EmuStepper::open(&(entry.rom)()).expect("corpus ROM must be a valid image");
+    stepper.set_coverage_recording(coverage);
     let mut builder = rf_core_api::FrameBundleBuilder::new(
         rf_renderer::frame::NES_WIDTH as u16,
         rf_renderer::frame::NES_HEIGHT as u16,
@@ -395,8 +400,8 @@ fn build_replay_slice(
 /// `entry.frames` frames matched on both.
 #[must_use]
 pub fn check(entry: &CorpusEntry) -> Option<Divergence> {
-    let (accuracy, _accuracy_inputs) = run(entry, false);
-    let (enhanced, enhanced_inputs) = run(entry, true);
+    let (accuracy, _accuracy_inputs) = run(entry, false, false);
+    let (enhanced, enhanced_inputs) = run(entry, true, false);
     let n = entry.frames.min(accuracy.len()).min(enhanced.len());
     for i in 0..n {
         if accuracy[i] != enhanced[i] {
@@ -411,6 +416,25 @@ pub fn check(entry: &CorpusEntry) -> Option<Divergence> {
         }
     }
     None
+}
+
+/// Ticket W36-01: the same comparison with the **code-coverage recorder**
+/// armed on the second run instead of the enhancement. The recorder is
+/// observation only (`rf_core_api::coverage`), so every per-frame state and
+/// video hash must match the unarmed run; the returned [`Divergence`]'s
+/// `enhanced` side is the armed run.
+#[must_use]
+pub fn check_with_coverage(entry: &CorpusEntry) -> Option<Divergence> {
+    let (plain, _) = run(entry, false, false);
+    let (armed, armed_inputs) = run(entry, false, true);
+    let n = entry.frames.min(plain.len()).min(armed.len());
+    (0..n).find(|&i| plain[i] != armed[i]).map(|i| Divergence {
+        entry_name: entry.name,
+        frame: i,
+        accuracy: plain[i].clone(),
+        enhanced: armed[i].clone(),
+        replay_slice_rfreplay: build_replay_slice(&(entry.rom)(), &armed_inputs, i),
+    })
 }
 
 /// Write CI-artifact evidence for `div` under `out_dir` (criterion 4,
