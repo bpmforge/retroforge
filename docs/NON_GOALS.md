@@ -27,6 +27,9 @@ requires a design doc, not a ticket.
    from libretro-thumbnails or similar community sources as an opt-in,
    off-by-default Settings toggle, no accounts — the same posture as any
    other external provider under this item.
+   *Amended 2026-10-25 (D-026, Brad):* the Rebuild lab's naming pass may
+   call a cloud model (e.g. Claude) when the user turns it on; off by
+   default, and nothing else depends on it.
 
 ## Technical non-goals
 
@@ -45,6 +48,9 @@ requires a design doc, not a ticket.
    ESRGAN-class models cost tens of ms/frame (`docs/research/prior-art.md`
    §7), so a real-time pass ships only behind a measured budget gate, a
    one-frame latency disclosure, and the honesty badge.
+   *Amended 2026-10-25 (D-026, Brad):* cloud AI is allowed for the Rebuild
+   lab's opt-in naming pass only (docs/design/REBUILD_LAB.md); it never
+   runs in the frame path, and a fresh install still boots AI-free.
 9. **No libretro core in v1.** The single-framebuffer API cannot carry the
    scene-graph output, multi-panel debugger, or authoring UX (§5 of
    prior-art). A flattened libretro export (wide geometry + core options) is

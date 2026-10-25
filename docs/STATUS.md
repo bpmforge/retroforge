@@ -4643,3 +4643,12 @@ stories, 10 decisions).
   36,330-frame SMW soak at 4x never tripped the gate (p95 2.2-3.9 ms). The canvas
   world axes restart at a non-continuous scene cut (the 32:9-on-at-the-map offset).
   Workspace: **3272 passing**.
+
+- **W36-00 — Rebuild lab design** (2026-10-25). `docs/design/REBUILD_LAB.md` R1
+  lands Brad's 2026-10-25 rulings: recipes rebuilt on the player's machine
+  (D-024), reading exception for MIT/Apache recompilers with PolyForm and GPL
+  docs-only or excluded (D-025), opt-in cloud AI naming amending NON_GOALS 6
+  and 8 (D-026). One change from the draft: no Rust toolchain on players'
+  machines, so lifted code runs as pre-decoded blocks in the core; Rust
+  emission is a developer tool. New crate `rf-rebuild` (core layer) planned for
+  W36-02. Tickets W36-01..W36-11 in plan.json; SMB pilot first, then SMW.
