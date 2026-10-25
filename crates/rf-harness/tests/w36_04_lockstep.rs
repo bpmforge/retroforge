@@ -6,7 +6,7 @@
 
 use rf_core_api::{EmulatorCore, InputFrame, ResetKind};
 use rf_harness::atlas::build_nes_atlas;
-use rf_harness::lockstep::{run, Options};
+use rf_harness::lockstep::{run, Options, Side};
 use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
 use rf_state::Container;
@@ -73,8 +73,8 @@ fn an_injected_difference_is_caught_localised_and_bundled() {
     let atlas = atlas_for(&ines);
     let dir = std::env::temp_dir().join(format!("rf-lockstep-bundle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mut poke = |frame: u32, core: &mut NesCore| {
-        if frame == 9 {
+    let mut poke = |frame: u32, side: Side, core: &mut NesCore| {
+        if frame == 9 && side == Side::Rebuilt {
             core.bus_mut().write(0x0300, 0x5A);
         }
     };
@@ -161,8 +161,8 @@ fn a_non_cpu_poke_is_still_caught() {
     // changes OAM (and the cycle count, a bus write costs one).
     let ines = tiny_ines();
     let atlas = atlas_for(&ines);
-    let mut poke = |frame: u32, core: &mut NesCore| {
-        if frame == 3 {
+    let mut poke = |frame: u32, side: Side, core: &mut NesCore| {
+        if frame == 3 && side == Side::Rebuilt {
             core.bus_mut().write(0x2003, 0x10);
             core.bus_mut().write(0x2004, 0x77);
         }

@@ -59,10 +59,30 @@ const REGION_TAGS: [(StateRegion, [u8; 4]); 9] = [
     (StateRegion::Cart, *b"CART"),
 ];
 
-/// A per-frame hook applied to the REBUILT core only, before the frame runs.
-/// It exists so a test can inject a difference; it must be deterministic
-/// (the investigation re-run calls it again for the same frames).
-pub type BeforeFrame<'a> = &'a mut dyn FnMut(u32, &mut NesCore);
+/// Which of the two cores a [`BeforeFrame`] call is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Plain,
+    Rebuilt,
+}
+
+/// A per-frame hook called for each core before the frame runs (plain first).
+/// It exists so a test can set up state identically on both cores (a level
+/// to start in) or inject a difference on one; it must be deterministic (the
+/// investigation re-run calls it again for the same frames).
+pub type BeforeFrame<'a> = &'a mut dyn FnMut(u32, Side, &mut NesCore);
+
+fn apply_hook(
+    hook: &mut Option<BeforeFrame<'_>>,
+    frame: u32,
+    plain: &mut NesCore,
+    rebuilt: &mut NesCore,
+) {
+    if let Some(h) = hook.as_deref_mut() {
+        h(frame, Side::Plain, plain);
+        h(frame, Side::Rebuilt, rebuilt);
+    }
+}
 
 pub struct Options<'a> {
     /// Steps the rebuilt core's trace ring keeps (rounded up to 2^n).
@@ -323,9 +343,7 @@ fn run_pair_frame(
     rebuilt: &mut NesCore,
     hook: &mut Option<BeforeFrame<'_>>,
 ) -> (HashSink, HashSink) {
-    if let Some(h) = hook.as_deref_mut() {
-        h(frame, rebuilt);
-    }
+    apply_hook(hook, frame, plain, rebuilt);
     let (mut hp, mut hr) = (HashSink::new(), HashSink::new());
     plain.run_frame(input, &mut hp);
     rebuilt.run_frame(input, &mut hr);
@@ -436,9 +454,7 @@ fn investigate(
     let mut fine = None;
     if let Some(input) = inputs.get(frame as usize) {
         if opts.fine {
-            if let Some(h) = opts.before_frame.as_deref_mut() {
-                h(frame, &mut rebuilt);
-            }
+            apply_hook(&mut opts.before_frame, frame, &mut plain, &mut rebuilt);
             fine = fine_pass(&mut plain, &mut rebuilt, input);
         } else {
             let _ = run_pair_frame(
@@ -591,9 +607,8 @@ fn write_bundle(
     let mut files_errors = (files, errors);
     let mut put = |name: &str, data: &[u8]| put_file(dir, name, data, &mut files_errors);
 
-    match &inv.state {
-        Ok(b) => put("plain_state_before_frame.rfstate", b),
-        Err(_) => {}
+    if let Ok(b) = &inv.state {
+        put("plain_state_before_frame.rfstate", b);
     }
     let first = (d.frame as usize).saturating_sub(opts.input_tail);
     let mut text = String::from("frame port0 port1 (hex)\n");
