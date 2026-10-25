@@ -3798,7 +3798,7 @@ mod tests {
             send(CoreCommand::StepFrame);
             let CoreEvent::Frame(msg) = core
                 .evt_rx
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("frame")
             else {
                 continue;
@@ -3816,19 +3816,24 @@ mod tests {
             "never turned on: {last:?}"
         );
         send(CoreCommand::SetRebuild(false));
-        send(CoreCommand::StepFrame);
-        let off = loop {
+        // One step per wait, bounded, with a generous timeout: under a
+        // loaded test run a single frame can take seconds (gate run
+        // 2026-10-25 timed out here at 5 s with one step outstanding).
+        let mut off = None;
+        for _ in 0..100 {
+            send(CoreCommand::StepFrame);
             let CoreEvent::Frame(msg) = core
                 .evt_rx
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("frame")
             else {
                 continue;
             };
             if msg.rebuild.is_some() {
-                break msg.rebuild;
+                off = msg.rebuild;
+                break;
             }
-        };
+        }
         assert_eq!(off, Some(RebuildStatus::Off));
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
         let _ = core.join_handle.join();
