@@ -353,6 +353,29 @@ impl EmuStepper {
         )
     }
 
+    /// [`Self::save_state`] plus the `PROF` chunk of a modded session (ticket W36-06b, NON_GOALS 13):
+    /// the recipe mods that made the code, their patch rows (function hashes, offsets, values) and
+    /// the hook host's write ledger. An unmodified session with no hook writes gets exactly
+    /// [`Self::save_state`]'s container.
+    ///
+    /// # Errors
+    /// See [`build_container`]; also a chunk the container refuses.
+    pub fn save_state_with_mods(
+        &self,
+        timestamp: u64,
+        session: Option<&crate::mod_chunk::ModSession>,
+    ) -> Result<Container, SaveStateError> {
+        let mut container = self.save_state(timestamp)?;
+        let ledger = self
+            .hook_host()
+            .map(rf_plugin_sdk::HookHost::ledger_entries)
+            .unwrap_or_default();
+        if let Some(chunk) = crate::mod_chunk::session_chunk(session, &ledger) {
+            crate::mod_chunk::attach_chunk(&mut container, &chunk)?;
+        }
+        Ok(container)
+    }
+
     /// Restore this machine from a container, refusing one saved against a
     /// different ROM (FR-STATE-003) and reporting skipped optional chunks
     /// (FR-STATE-007).
@@ -369,7 +392,7 @@ impl EmuStepper {
         let Some((cpu, bus)) = self.machine_for_state() else {
             return Err(SaveStateError::UnsupportedConsole);
         };
-        let warnings = apply_container(cpu, bus, container)?;
+        let mut warnings = apply_container(cpu, bus, container)?;
         // Ticket W11-12: **a restored machine restores its frame count
         // too.** The shell counts frames itself now (one counter, both
         // consoles — see `EmuStepper::advance`), and a save state is the
@@ -384,6 +407,16 @@ impl EmuStepper {
         // The executor's hooked-call stack described the machine that was
         // just replaced (ticket W36-05).
         self.reset_hook_frames();
+        // Ticket W36-06b: the writes that shaped the saved machine are part of this session's
+        // history now. Only a session with a hook host has a ledger to put them in; without one
+        // the `PROF` stays an unconsumed chunk and the load says so.
+        if let (Some(host), Some(chunk)) = (self.hook_host(), container.chunk(*b"PROF")) {
+            if let Ok(prof) = crate::mod_chunk::decode(&chunk.payload) {
+                host.restore_ledger(crate::mod_chunk::ledger_of(&prof));
+                warnings
+                    .retain(|w| !matches!(w, LoadWarning::UnknownChunk { tag } if tag == b"PROF"));
+            }
+        }
         Ok(warnings)
     }
 }

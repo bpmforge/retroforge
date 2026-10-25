@@ -1250,6 +1250,15 @@ pub struct RetroForgeApp {
     /// ROM (names), and what applying the enabled ones said.
     mod_choices: Vec<String>,
     mod_messages: Vec<String>,
+    /// Ticket W36-06b: the recipe of the open game's profile, kept while a mod from it is applied
+    /// (the core thread stamps its patch rows into save states and draws the objects the mod keeps
+    /// alive in the margins).
+    mod_recipe: Option<rf_rebuild::Recipe>,
+    /// Whether the open core has been told the session's mods (`CoreCommand::SetModSession`).
+    mod_session_sent: bool,
+    /// Ticket W36-06b: the last frame said run-ahead and the margin redraw are off because a hook
+    /// script writes memory (badge text).
+    copies_refused_by_hooks: bool,
     /// The current game's settings, loaded on open and written back the
     /// moment one changes.
     current_game_settings: crate::game_settings::GameSettings,
@@ -1705,6 +1714,9 @@ type MarginRows<'a> = (
     &'a [Option<u16>],
     // Ticket W35-16: the margin-sprite mask (`FrameMsg::margin_sprites`), empty = paint none.
     &'a [u8],
+    // Ticket W36-06b: the objects a recipe mod keeps alive past the picture's edge, drawn from the
+    // game's own sprite data (`FrameMsg::margin_draw`).
+    Option<&'a rf_enhance::margin_draw::MarginDraw>,
 );
 
 impl Drop for RetroForgeApp {
@@ -2078,6 +2090,9 @@ impl RetroForgeApp {
             patch_messages: Vec::new(),
             mod_choices: Vec::new(),
             mod_messages: Vec::new(),
+            mod_recipe: None,
+            mod_session_sent: false,
+            copies_refused_by_hooks: false,
             current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
             awaiting_key: None,
@@ -3983,6 +3998,12 @@ impl RetroForgeApp {
                 // line: a warning only visible in a modal the user is
                 // about to close is a warning they will not read.
                 self.state_warnings = crate::state_slots::warning_lines(&warnings);
+                // Ticket W36-06b: a state saved under mods this session does not run (or the other way
+                // round) restores memory the code here did not make.
+                self.state_warnings.extend(crate::mod_chunk::mismatch_lines(
+                    &container,
+                    &self.soft_patch.mods,
+                ));
                 self.status = if self.state_warnings.is_empty() {
                     format!("Loaded {}", slot.label())
                 } else {
@@ -4127,6 +4148,7 @@ impl RetroForgeApp {
             return bytes;
         };
         self.mod_choices = recipe.mods().iter().map(|m| (*m).to_owned()).collect();
+        self.mod_recipe = Some(recipe.clone());
         let enabled = match &self.config_root {
             Some(root) => crate::game_settings::load(root, &hashes.sha256).mods_enabled,
             None => Vec::new(),
@@ -4196,6 +4218,8 @@ impl RetroForgeApp {
         self.patch_messages.clear();
         self.mod_choices.clear();
         self.mod_messages.clear();
+        self.mod_recipe = None;
+        self.mod_session_sent = false;
         let bytes = if let Some(base_sha) = &base_sha {
             self.patch_discovery =
                 crate::soft_patch::discover(path, self.config_root.as_deref(), base_sha);
@@ -4288,6 +4312,7 @@ impl RetroForgeApp {
         self.loading_sent = None;
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
+        self.mod_session_sent = false;
         self.hd_mode7_sent = None;
         self.superfx_hd_sent = None;
         self.superfx_hd.clear();
@@ -4953,6 +4978,7 @@ impl RetroForgeApp {
                     audio.traces = msg.audio_traces.clone();
                 }
             }
+            self.copies_refused_by_hooks = msg.copies_refused_by_hooks;
             if let Some(cov) = self.debug_panels.data.coverage.as_mut() {
                 if cov.armed && msg.coverage.is_some() {
                     cov.summary = msg.coverage.clone();
@@ -5403,9 +5429,15 @@ impl RetroForgeApp {
             badge
         };
         // Ticket W32-01: a patched game is not the cartridge (law 6).
-        match self.soft_patch.badge() {
+        let badge = match self.soft_patch.badge() {
             Some(patched) if self.core.is_some() => format!("{badge} · {patched}"),
             _ => badge,
+        };
+        // Ticket W36-06b: why run-ahead and the margin objects are not running.
+        if self.copies_refused_by_hooks && self.core.is_some() {
+            format!("{badge} · run-ahead and margin objects off (a hook writes memory)")
+        } else {
+            badge
         }
     }
 
@@ -6320,6 +6352,11 @@ impl RetroForgeApp {
             } else {
                 &msg.margin_sprites
             },
+            if self.diorama_wanted {
+                None
+            } else {
+                msg.margin_draw.as_deref()
+            },
         );
         let narrow = usize::from(rf_enhance::widescreen::NARROW_WIDTH);
         let core_ids = msg
@@ -6408,6 +6445,7 @@ impl RetroForgeApp {
                 &msg.line_regs,
                 &msg.sub_fill,
                 &[],
+                None,
             ),
             &msg.line_palettes,
             core_ids,
@@ -13627,7 +13665,7 @@ impl RetroForgeApp {
         rgba: Vec<u8>,
         size: (usize, usize),
         layer_frames: Option<&rf_enhance::canvas::LayerFrames>,
-        (backdrops, order, line_regs, sub_fill, margin_sprites): MarginRows<'_>,
+        (backdrops, order, line_regs, sub_fill, margin_sprites, margin_draw): MarginRows<'_>,
         palettes: &[Option<rf_renderer::LinePalette>],
         core_ids: Option<&[u8]>,
     ) -> (Vec<u8>, (usize, usize), Option<Vec<u8>>) {
@@ -13783,6 +13821,14 @@ impl RetroForgeApp {
                 margin_sprites,
                 keep_w,
             );
+        }
+        // Ticket W36-06b: objects the game keeps alive past the edge, drawn from its own sprite data
+        // (additive over the pad; drawing ignores a sprite's behind-background priority), and the
+        // wrapped copies of them taken off the real picture.
+        if let Some(draw) = margin_draw {
+            let resolve = |i: u8| rf_renderer::resolve_index(i, None);
+            draw.paint_pad(&mut filled, out_w, h, &resolve);
+            draw.remove_ghosts(&mut filled, out_w, h, &resolve);
         }
         // Where the canvas did not decide a dot, it keeps the core's: its
         // own layer id (the core records them for the 256 hardware dots, in
@@ -14972,6 +15018,8 @@ impl RetroForgeApp {
             bg_rgba: Vec::new(),
             sprite_rgba,
             margin_sprites: Vec::new(),
+            margin_draw: None,
+            copies_refused_by_hooks: false,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             coverage: None,
@@ -17441,6 +17489,24 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W36-06b: tell a new core which recipe mods the session runs (once per core): the live
+    /// save path stamps them into states and, with widescreen on, the margin redraw draws the objects
+    /// they keep alive.
+    fn sync_mod_session(&mut self) {
+        if self.core.is_none() || self.mod_session_sent {
+            return;
+        }
+        self.mod_session_sent = true;
+        let session = match (&self.mod_recipe, self.soft_patch.mods.is_empty()) {
+            (Some(recipe), false) => Some(Box::new(crate::mod_chunk::ModSession {
+                mods: self.soft_patch.mods.clone(),
+                recipe: recipe.clone(),
+            })),
+            _ => None,
+        };
+        self.send_command(CoreCommand::SetModSession(session));
+    }
+
     /// Ticket W30-09: keep the core's S-DSP interpolation matching the
     /// row's EFFECTIVE state (Enhanced mode, SNES, toggle on); hardware
     /// Gaussian otherwise. Sends only on a change.
@@ -18478,6 +18544,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
+        self.sync_mod_session();
         self.sync_patch_widescreen();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.

@@ -346,6 +346,15 @@ pub struct FrameMsg {
     /// game placed past the picture's edge), only while "Sprites past the edge" is on and widescreen
     /// is; empty otherwise (the UI then paints nothing). `rf_enhance::margin_sprites`.
     pub margin_sprites: Vec<u8>,
+    /// Ticket W36-06b: the objects a recipe mod keeps alive past the picture's edge, drawn for this
+    /// frame from the game's own sprite data (`crate::margin_draw`): the strips for the pad and the
+    /// dots of the real picture that were a wrapped copy of one. `None` when nothing needs drawing,
+    /// the layer is off, or a write-capable hook host makes a private copy of the machine untrue.
+    pub margin_draw: Option<Box<rf_enhance::margin_draw::MarginDraw>>,
+    /// Ticket W36-06b: run-ahead and the margin redraw run on private copies of the machine, which have no
+    /// hooks; a hook host that holds `write_memory` changes the machine in ways they cannot reproduce, so
+    /// both are off. The UI shows this on the badge so the player knows why.
+    pub copies_refused_by_hooks: bool,
     /// Ticket W4-06a: the same frame's full 256-byte OAM
     /// (`EmuStepper::oam`, a side-effect-free `&self` read — never
     /// perturbs the core, same "read-only is a hard requirement" posture
@@ -923,6 +932,10 @@ pub enum CoreCommand {
     /// observing execution. The shell sends non-zero only while the
     /// Enhanced-only "Run-ahead" row is effective.
     SetRunAhead(u8),
+    /// Ticket W36-06b: the recipe mods this session runs (`None` for none): what the live save path
+    /// stamps into a state's `PROF` chunk, and, while widescreen is on, what the margin redraw draws
+    /// objects for (`crate::margin_draw`, needs the recipe's object-table RAM meanings).
+    SetModSession(Option<Box<crate::mod_chunk::ModSession>>),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -1720,6 +1733,12 @@ fn core_thread_main(
     // multipliers they chose.
     let mut clocks = crate::clock_governor::ClockGovernors::default();
     let mut speculator = crate::run_ahead::Speculator::new();
+    // Ticket W36-06b: the session's recipe mods, and the redraw of the objects they keep alive in the
+    // pad (built when the recipe describes an object table).
+    let mut mod_session: Option<crate::mod_chunk::ModSession> = None;
+    let mut margin_drawer: Option<crate::margin_draw::MarginDrawer> = None;
+    // Whether the captures the redraw needs (per-dot sprite ids, the background under each dot) are on.
+    let mut margin_capture = false;
     let mut watches_armed = false;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
     // (see the `pending_frames` check at the send site below) since the
@@ -1811,6 +1830,14 @@ fn core_thread_main(
                 CoreCommand::SetRunAhead(frames) => {
                     run_ahead = frames.min(crate::run_ahead::MAX_RUN_AHEAD);
                 }
+                CoreCommand::SetModSession(session) => {
+                    margin_drawer = session
+                        .as_deref()
+                        .filter(|s| !s.mods.is_empty())
+                        .and_then(|s| crate::margin_draw::MarginDrawer::new(&rom, &s.recipe));
+                    mod_session = session.map(|s| *s);
+                    margin_capture = false;
+                }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
                 }
@@ -1879,7 +1906,7 @@ fn core_thread_main(
                 }
                 CoreCommand::SetMarginSprites(on) => {
                     margin_sprites = on;
-                    sink.set_sprite_id_capture(on);
+                    sink.set_sprite_id_capture(on || margin_capture);
                 }
                 CoreCommand::SetTileCapture(on) => {
                     hd_capture = on;
@@ -1936,6 +1963,7 @@ fn core_thread_main(
                         );
                     }
                     widescreen = request;
+                    margin_capture = false;
                     // Ticket W33-01: the bundle keeps the sub-screen and the
                     // per-line registers only while widescreen is on.
                     bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
@@ -2003,7 +2031,7 @@ fn core_thread_main(
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
-                    match stepper.save_state(timestamp) {
+                    match stepper.save_state_with_mods(timestamp, mod_session.as_ref()) {
                         Ok(container) => {
                             let Ok(bytes) = container.encode() else {
                                 continue;
@@ -2027,10 +2055,16 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
+                    if let Some(d) = margin_drawer.as_mut() {
+                        d.reset();
+                    }
                     clocks.resync();
                 }
                 CoreCommand::ApplySnapshot(snapshot) => {
                     let _ = stepper.restore(&snapshot);
+                    if let Some(d) = margin_drawer.as_mut() {
+                        d.reset();
+                    }
                     clocks.resync();
                 }
                 CoreCommand::SetRewind(config) => {
@@ -2042,6 +2076,9 @@ fn core_thread_main(
                         .and_then(|ring| ring.step_back().ok().flatten())
                         .and_then(|(_, bytes)| rf_state::Container::decode_default(&bytes).ok())
                         .is_some_and(|(container, _)| stepper.load_state(&container).is_ok());
+                    if let Some(d) = margin_drawer.as_mut() {
+                        d.reset();
+                    }
                     if restored {
                         clocks.resync();
                         stepper.latch_and_advance_frame(
@@ -2214,6 +2251,21 @@ fn core_thread_main(
         // speculative ones, so run-ahead assumes the player keeps holding
         // exactly what they hold now.
         let frame_input = input.load();
+        // Ticket W36-06b: the redraw needs per-dot sprite ids and the background under each dot from
+        // the real machine, and the state from just before each frame. Not under a hook host that
+        // writes memory: the copies it runs on have no hooks.
+        let hooks_block = crate::margin_draw::blocked_by_hooks(&stepper);
+        let margin_wanted = widescreen.is_some() && margin_drawer.is_some() && !hooks_block;
+        if margin_wanted != margin_capture {
+            stepper.set_bg_under_capture(margin_wanted);
+            sink.set_sprite_id_capture(margin_wanted || margin_sprites);
+            margin_capture = margin_wanted;
+        }
+        if margin_wanted && !stepper.is_paused() {
+            if let Some(d) = margin_drawer.as_mut() {
+                d.before_frame(&stepper, frame_input);
+            }
+        }
         let ran = match trace.as_mut() {
             None => stepper.tick_running_with_input(
                 frame_input,
@@ -2684,6 +2736,8 @@ fn core_thread_main(
                 } else {
                     Vec::new()
                 },
+                margin_draw: None,
+                copies_refused_by_hooks: false,
                 oam: Box::new(*stepper.oam()),
                 coverage: if coverage_on {
                     coverage_refresh(&mut stepper, &mut coverage_acc)
@@ -2750,6 +2804,7 @@ fn core_thread_main(
             // loading or user fast-forward, the debugger's layer and
             // audio-scope captures, an HD pack or the Upscale Studio capture,
             // and de-flicker (its history must only see real frames).
+            let mut spec_shown: Option<(u8, Box<[u8; 256]>, Option<Vec<u8>>, Vec<u8>)> = None;
             if run_ahead > 0
                 && ran
                 && !stepped
@@ -2759,6 +2814,7 @@ fn core_thread_main(
                 && pacer.is_enabled()
                 && !layers_enabled
                 && !margin_sprites
+                && !hooks_block
                 && !audio_capture
                 && !hd_capture
                 && !studio_capture
@@ -2772,10 +2828,34 @@ fn core_thread_main(
                     run_ahead,
                     (msg.width, msg.height),
                     overlay_capture.is_some(),
+                    margin_wanted,
                 ) {
                     msg.rgba = spec.rgba;
                     msg.line_palettes = spec.line_palettes;
                     msg.hd_mode7 = spec.hd_mode7;
+                    spec_shown = Some((run_ahead, spec.oam, spec.sprite_ids, spec.bg_under));
+                }
+            }
+            msg.copies_refused_by_hooks = hooks_block && (run_ahead > 0 || margin_drawer.is_some());
+            // Ticket W36-06b: the objects past the picture's edge, drawn for the picture on screen
+            // (the speculative one when run-ahead replaced it).
+            if ran && !stepped && margin_wanted {
+                if let Some(d) = margin_drawer.as_mut() {
+                    let real_oam = d.oam_of_current_picture();
+                    let (ahead, oam, ids, bg) = match &spec_shown {
+                        Some((a, o, i, b)) => (*a, &**o, i.as_deref(), b.as_slice()),
+                        None => (0, &real_oam, sink.sprite_ids(), stepper.bg_under()),
+                    };
+                    msg.margin_draw = d.frame(
+                        &stepper,
+                        frame_input,
+                        &crate::margin_draw::Shown {
+                            ahead,
+                            oam,
+                            ids,
+                            bg_under: bg,
+                        },
+                    );
                 }
             }
             if publish_frame(
@@ -3051,6 +3131,8 @@ mod tests {
             bg_rgba: Vec::new(),
             sprite_rgba: Vec::new(),
             margin_sprites: Vec::new(),
+            margin_draw: None,
+            copies_refused_by_hooks: false,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
             coverage: None,

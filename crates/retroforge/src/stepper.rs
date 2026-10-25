@@ -987,9 +987,7 @@ impl EmuStepper {
     /// just run (`256 * 240` palette indices); empty when capture is off.
     #[must_use]
     pub fn bg_under(&self) -> &[u8] {
-        self.machine
-            .nes_bus()
-            .map_or(&[], rf_nes::NesBus::bg_under)
+        self.machine.nes_bus().map_or(&[], rf_nes::NesBus::bg_under)
     }
 
     /// The NES cartridge's CHR, for a pack rule keyed on tile bytes.

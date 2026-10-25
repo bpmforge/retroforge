@@ -64,6 +64,7 @@ fn a_state_records_the_mods_that_were_active_when_it_was_taken() {
             profile_id: "rf-scroller".to_string(),
             revision: "W5-02c".to_string(),
             mods: vec!["fast-text".to_string()],
+            ..ProfChunk::default()
         }
     );
 }
@@ -175,6 +176,7 @@ fn a_payload_with_trailing_bytes_is_refused_rather_than_partly_believed() {
         profile_id: "p".to_string(),
         revision: "r".to_string(),
         mods: vec!["fast-text".to_string()],
+        ..ProfChunk::default()
     });
     bytes.push(0);
     assert_eq!(mod_chunk::decode(&bytes), Err(ProfError::TrailingBytes(1)));
@@ -206,4 +208,99 @@ fn a_real_profile_on_disk_offers_its_patch_switched_off() {
         "FR-ENH-009: a profile may OFFER a patch, only a user may enable it"
     );
     assert!(engine.is_accuracy_mode());
+}
+
+// ---- W36-06b: recipe mods and the hook ledger ride in PROF ------------------------------
+
+fn session() -> mod_chunk::ModSession {
+    use rf_rebuild::{HookPoints, PatchRow, RecipeFunction};
+    mod_chunk::ModSession {
+        mods: vec!["live-enemies".to_string()],
+        recipe: rf_rebuild::Recipe {
+            id: "super-mario-bros".to_string(),
+            engine: "smb1".to_string(),
+            functions: vec![RecipeFunction {
+                name: "enemy_update".to_string(),
+                shape_hash: 1,
+                exact_hash: Some(0x6c18_ff48_7cf1_0e09),
+                address_hint: None,
+                hooks: HookPoints::default(),
+                source: "test".to_string(),
+            }],
+            ram: Vec::new(),
+            patches: vec![PatchRow {
+                name: "cull-left".to_string(),
+                mod_name: "live-enemies".to_string(),
+                function: "enemy_update".to_string(),
+                offset: 59,
+                value: 0xff,
+                source: "test".to_string(),
+            }],
+        },
+    }
+}
+
+fn ledger() -> Vec<rf_plugin_sdk::LedgerEntry> {
+    vec![rf_plugin_sdk::LedgerEntry {
+        frame: 12,
+        addr: 0x075a,
+        value: 9,
+        plugin: "lives-hook".to_string(),
+    }]
+}
+
+#[test]
+fn the_tail_round_trips_and_a_payload_without_one_is_still_v1() {
+    let chunk = mod_chunk::session_chunk(Some(&session()), &ledger()).expect("a modded session");
+    assert_eq!(chunk.mods, vec!["live-enemies".to_string()]);
+    assert_eq!(chunk.patches.len(), 1);
+    assert_eq!(chunk.patches[0].exact_hash, 0x6c18_ff48_7cf1_0e09);
+    assert_eq!(
+        mod_chunk::decode(&mod_chunk::encode(&chunk)),
+        Ok(chunk.clone())
+    );
+    // Without patches or writes the payload is byte-for-byte the v1 one.
+    let plain = ProfChunk {
+        profile_id: "p".into(),
+        revision: "r".into(),
+        mods: vec!["m".into()],
+        ..ProfChunk::default()
+    };
+    let v1 = mod_chunk::encode(&plain);
+    assert_eq!(mod_chunk::decode(&v1), Ok(plain));
+    assert_eq!(mod_chunk::ledger_of(&chunk)[0].addr, 0x075a);
+    // A cut tail is refused, not half believed.
+    let bytes = mod_chunk::encode(&chunk);
+    assert!(matches!(
+        mod_chunk::decode(&bytes[..bytes.len() - 3]),
+        Err(ProfError::Truncated | ProfError::NotUtf8)
+    ));
+}
+
+#[test]
+fn an_unmodified_session_without_hook_writes_writes_no_chunk() {
+    assert_eq!(mod_chunk::session_chunk(None, &[]), None);
+    let empty = mod_chunk::ModSession::default();
+    assert_eq!(mod_chunk::session_chunk(Some(&empty), &[]), None);
+    // Hook writes alone are enough to stamp one.
+    assert!(mod_chunk::session_chunk(None, &ledger()).is_some());
+}
+
+#[test]
+fn loading_a_modded_state_into_an_unmodded_session_says_so() {
+    let mut c = Container::new(0, [0; 32], "t", 0);
+    let chunk = mod_chunk::session_chunk(Some(&session()), &ledger()).unwrap();
+    mod_chunk::attach_chunk(&mut c, &chunk).unwrap();
+    let lines = mod_chunk::mismatch_lines(&c, &[]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("mod live-enemies"), "{}", lines[0]);
+    assert!(lines[0].contains("1 hook write"), "{}", lines[0]);
+    // The same mods on both sides: nothing to say. An unmodded state into a modded session: say so.
+    assert!(mod_chunk::mismatch_lines(&c, &["live-enemies".to_string()]).is_empty());
+    let plain = Container::new(0, [0; 32], "t", 0);
+    assert!(mod_chunk::mismatch_lines(&plain, &[]).is_empty());
+    assert_eq!(
+        mod_chunk::mismatch_lines(&plain, &["live-enemies".to_string()]).len(),
+        1
+    );
 }

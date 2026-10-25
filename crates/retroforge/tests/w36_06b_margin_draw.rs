@@ -63,7 +63,8 @@ fn strips_appear_for_margin_enemies_and_only_there_and_sit_at_the_slots_spot() {
     let image = mod_image(&raw);
     let mut st = EmuStepper::open(&image).expect("opens");
     let mut drawer = MarginDrawer::new(&image, &recipe()).expect("the recipe has an object table");
-    let (mut deep, mut deep_drawn, mut drawn, mut drawn_without_margin_slot) = (0u32, 0u32, 0u32, 0u32);
+    let (mut deep, mut deep_drawn, mut drawn, mut drawn_without_margin_slot) =
+        (0u32, 0u32, 0u32, 0u32);
     let (mut pixels, mut pixels_off_spot) = (0u64, 0u64);
     let mut history: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut cost = [0f64; 4];
@@ -119,7 +120,11 @@ fn strips_appear_for_margin_enemies_and_only_there_and_sit_at_the_slots_spot() {
                         let off = !near_a_slot(&table, right, (i % 256) as i32, (i / 256) as i32);
                         pixels_off_spot += u64::from(off);
                         if off && pixels_off_spot % 400 == 1 {
-                            println!("f{f} right={right} col {} row {} slots {table:?}", i % 256, i / 256);
+                            println!(
+                                "f{f} right={right} col {} row {} slots {table:?}",
+                                i % 256,
+                                i / 256
+                            );
                         }
                     }
                 }
@@ -141,14 +146,26 @@ fn strips_appear_for_margin_enemies_and_only_there_and_sit_at_the_slots_spot() {
         cost[3] * 1000.0
     );
     assert!(deep > 500, "the run exercised the deep margins: {deep}");
-    assert!(deep_drawn * 100 >= deep * 97, "deep slots are drawn: {deep_drawn}/{deep}");
-    assert_eq!(drawn_without_margin_slot, 0, "nothing is drawn when no object is outside the picture");
-    assert_eq!(pixels_off_spot, 0, "every drawn pixel is at a slot's expected spot");
+    assert!(
+        deep_drawn * 100 >= deep * 97,
+        "deep slots are drawn: {deep_drawn}/{deep}"
+    );
+    assert_eq!(
+        drawn_without_margin_slot, 0,
+        "nothing is drawn when no object is outside the picture"
+    );
+    assert_eq!(
+        pixels_off_spot, 0,
+        "every drawn pixel is at a slot's expected spot"
+    );
 }
 
 /// A machine's drawn tiles in a comparable order.
 fn sorted(mut t: Vec<rf_enhance::margin_draw::Tile>) -> Vec<(u8, i16, i16, u8)> {
-    let mut v: Vec<_> = t.drain(..).map(|t| (t.oam_index, t.x, t.y, t.tile)).collect();
+    let mut v: Vec<_> = t
+        .drain(..)
+        .map(|t| (t.oam_index, t.x, t.y, t.tile))
+        .collect();
     v.sort_unstable();
     v
 }
@@ -186,5 +203,8 @@ fn the_unmoved_replay_reproduces_the_real_pictures_sprites() {
     }
     println!("{frames} frames compared ({nonempty} with sprites): identical {same}");
     assert!(frames > 800 && nonempty > 800, "the comparison ran");
-    assert_eq!(same, frames, "the replay reproduces the real picture's sprites exactly");
+    assert_eq!(
+        same, frames,
+        "the replay reproduces the real picture's sprites exactly"
+    );
 }

@@ -43,6 +43,13 @@ pub struct SpecFrame {
     pub line_palettes: Vec<Option<rf_renderer::LinePalette>>,
     /// The HD Mode 7 composite of that frame, when HD Mode 7 is on.
     pub hd_mode7: Option<Box<HdMode7Frame>>,
+    /// Ticket W36-06b: the OAM that drew that frame (the shadow's OAM before its last speculative
+    /// frame ran), for the margin redraw's wrapped-copy check.
+    pub oam: Box<[u8; 256]>,
+    /// The OAM index that won each dot of that frame, when `margin` was asked for.
+    pub sprite_ids: Option<Vec<u8>>,
+    /// The background colour under each dot of that frame, when `margin` was asked for.
+    pub bg_under: Vec<u8>,
 }
 
 /// The shadow machine and the buffers speculative frames are drawn into,
@@ -93,6 +100,7 @@ impl Speculator {
         frames: u8,
         real_size: (usize, usize),
         overlay_on: bool,
+        margin: bool,
     ) -> Option<SpecFrame> {
         if self.shadow.is_none() {
             self.shadow = Some(EmuStepper::open(rom).ok()?);
@@ -108,9 +116,15 @@ impl Speculator {
             overlay_on,
             shadow.hd_mode7_on(),
         );
+        // Ticket W36-06b: what the margin redraw needs of the shown frame.
+        self.sink.set_sprite_id_capture(margin);
+        shadow.set_bg_under_capture(margin);
+        let mut oam = Box::new(*shadow.oam());
 
         // Terminates: a bounded `for` over at most MAX_RUN_AHEAD frames.
         for _ in 0..frames.clamp(1, MAX_RUN_AHEAD) {
+            // The OAM before this frame runs is the one that draws it.
+            *oam = *shadow.oam();
             let ran = shadow.latch_and_advance_frame(
                 input,
                 &mut FanoutSink {
@@ -136,6 +150,9 @@ impl Speculator {
             hd_mode7: hd_mode7_frame(shadow, &self.sink, &rgba),
             line_palettes: self.sink.line_palettes().to_vec(),
             rgba,
+            oam,
+            sprite_ids: self.sink.sprite_ids().map(<[u8]>::to_vec),
+            bg_under: shadow.bg_under().to_vec(),
         })
     }
 }
@@ -341,6 +358,7 @@ mod tests {
                         ahead,
                         (probe.frame.width(), probe.frame.height()),
                         false,
+                        false,
                     )
                     .expect("a speculative frame")
                     .rgba
@@ -464,7 +482,7 @@ mod tests {
                 let size = (probe.frame.width(), probe.frame.height());
                 shown.push(
                     speculator
-                        .run(&stepper, shadow, input, 1, size, false)
+                        .run(&stepper, shadow, input, 1, size, false, false)
                         .map(|s| s.rgba),
                 );
             }
@@ -506,7 +524,7 @@ mod tests {
             for k in 0..40 {
                 let input = pad(false, held_at(k));
                 assert!(stepper.tick_running_with_input(input, &mut Probe::new()));
-                let _ = sp.run(&stepper, &rom, input, 200, (256, 240), false);
+                let _ = sp.run(&stepper, &rom, input, 200, (256, 240), false, false);
                 hashes.push(stepper.snapshot().unwrap().state_hash());
             }
             hashes
@@ -538,7 +556,7 @@ mod tests {
         let t = std::time::Instant::now();
         for _ in 0..n {
             stepper.tick_running_with_input(input, &mut sink);
-            let _ = speculator.run(&stepper, &rom, input, 2, (256, 240), false);
+            let _ = speculator.run(&stepper, &rom, input, 2, (256, 240), false, false);
         }
         let with = t.elapsed() / n;
         println!("run-ahead cost, SNES synthetic ROM: plain {plain:?}/frame, +2 {with:?}/frame");
