@@ -15891,6 +15891,16 @@ impl RetroForgeApp {
                     if let Some(step) = self.scout_step_override {
                         plan.step_px = step;
                     }
+                    // W36-06c: a session that runs a recipe mod scouts with no objects alive.
+                    if let (Some(recipe), false) =
+                        (&self.mod_recipe, self.soft_patch.mods.is_empty())
+                    {
+                        plan.hold.extend(
+                            crate::margin_draw::object_flag_addrs(recipe)
+                                .into_iter()
+                                .map(|addr| (addr, 0)),
+                        );
+                    }
                     // W35-09: the margin the picture's aspect asks of the scout, each side.
                     plan.reach_px = u32::try_from(
                         self.widescreen_out_width(WIDESCREEN_LINES)

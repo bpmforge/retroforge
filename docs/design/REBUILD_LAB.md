@@ -233,6 +233,52 @@ restores the ledger into the host and warns when the session's mods differ from 
 **Copies and hooks.** Run-ahead's shadow and the redraw machine are built from the session's image but
 carry no hook host, so a host holding `write_memory` turns both off, with a badge.
 
+### W36-06c: the margin enemies over the level scout's scenery (built 2026-10-25)
+
+**The first screenshot was sky-only because the capture never ran a scout** (a saved scene loaded into
+the app has no canvas for the margins). Reproduced the shipped path headlessly: the cart's profile has no
+`[scout]` table, so the table is the finder's (`discover_game` on 1-1 gives `walk`, 1 px, both ways, 823 px);
+widescreen 32:9, the scout starting by itself, the live-enemies image booted, Mario unhurt.
+
+**Cause, measured offline and in the app.** On the mod's image the scout's player never moves the
+camera: the mod has the level's first Goomba alive from the first frame and walking at him, and the
+scout's player is killed 180 frames in (`$0E` = 0B, then 06). Same snapshot, same plan, 2,500 frames:
+unmodified image 172,634 canvas extent over 1,503 frames, mod image 53,504 (nothing beyond the first
+screen). In the app, with Mario's injury timer low enough not to carry the scout through (an earlier
+shape of `w36_06c_screens`, the hold switched off by hand): 127,948 cells over 1,594 frames, both passes
+SceneChanged, against 147,652 over 2,062 frames with the fix. It was not the session sha (the scout
+and the canvas cache take the image the core booted; the profile, atlas and settings take the base
+identity), and the margin draw composites over the canvas (`paint_pad` writes only the enemy's own
+dots; the compose test below found 0 other margin dots changed).
+
+**Fix.** A session that runs a recipe mod builds the scout's plan with the recipe's object-slot flag
+bytes held at 0 (`margin_draw::object_flag_addrs`, added to `plan.hold`, which the scout pokes every
+frame): the scout wants the level, not the enemies the mod keeps alive. The mod only changes how far
+enemies live, so the scout machine runs the same image as the session. Layer order is unchanged:
+canvas fill, then the game's own off-picture sprites (`margin_sprites`), then the redrawn margin
+objects, then the ghost removal; the HUD rows stay the game's.
+
+**What the picture shows, and its limits** (`docs/screens/w36/smb-1-1-32x9-scenery-margin-objects-*.png`,
+32:9, frame 79 of a run from the level start). Both margins: ground, hills, bushes, a pipe, blocks,
+clouds; with the objects on, a Goomba in the right margin at 779 px, 57 px past where the canvas ends.
+- SMB's camera never scrolls back, so the left margin is what the player has walked past (the live
+  canvas), not something a scout can add.
+- The scout's player only walks, so it stops at the first pipe (world x about 448): the canvas ends
+  there, about 580 px into the level. No enemy of the first stretch stands on ground the scout reached
+  (the first group is at about 640), so the right-hand enemy stands at the canvas's edge, on the
+  level's background colour.
+- The finder reports a stack byte (`$01F7` = 175) as a start condition: it read 175 on every level
+  frame of its own session and on 0 of 2,600 level frames of the W36-06 script, so with it the scout
+  hardly starts for another player. The test drops that row; the finder's gate scoring is a separate
+  problem. The other rows (`$0795` in 1..8) read as in a level only while Mario moves, so the scout
+  starts when the player walks, not while he stands at the level's start.
+
+**Test** (`w36_06c_screens`, ROM-gated): the same eight game frames rendered from one state with the
+margin objects on, off and on; the 256-px picture identical (0 dots differ), every margin dot outside
+the enemies' boxes identical to the canvas-only capture (0 differ), the enemies' dots (180) differ,
+both margins carry scenery (6,864 and 7,490 non-sky dots), the source is the stitched canvas.
+`w36_06c_scout_hold` (no ROM): the hold rows are the recipe's five slot flags.
+
 ### W36-08: the SNES recorder and the 65816 atlas (built 2026-10-25)
 
 **Width model.** The 65816's instruction length depends on `M` (accumulator
