@@ -112,9 +112,12 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
                     *entry_flags.entry(rom).or_insert(0) |= entry::INDIRECT;
                 }
             }
+            // An RTI resumes the code an interrupt cut into: a point in
+            // the middle of some function, not the start of one. It is
+            // still a decode seed (above) and a block leader, never an
+            // entry.
             IndirectKind::Rti => {
                 rti_targets.insert(rom);
-                *entry_flags.entry(rom).or_insert(0) |= entry::INDIRECT;
             }
         }
     }
@@ -223,6 +226,13 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
     // ---- 4. leaders and blocks --------------------------------------------------
     let mut leader = vec![false; nodes.len()];
     let mut plain_in = vec![false; nodes.len()];
+    // RTI targets cut blocks (control arrives there from outside) without
+    // being entries; see the indirect-edge loop above.
+    for &rom in &rti_targets {
+        if let Some(&i) = idx.get(rom as usize).filter(|&&i| i != NONE) {
+            leader[i as usize] = true;
+        }
+    }
     for &rom in entry_flags.keys() {
         leader[idx[rom as usize] as usize] = true;
     }
