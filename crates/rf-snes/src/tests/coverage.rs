@@ -4,7 +4,7 @@
 use rf_cart::SnesMapMode;
 use rf_core_api::coverage::{mode_bit, MODE_BITS, OPCODE, OPERAND};
 use rf_core_api::{CoverageLog, IndirectKind, InterruptKind};
-use rf_rebuild::{EdgeKind, Flow, Provenance, SiteKind, Target, Why};
+use rf_rebuild::{EdgeKind, Flow, Provenance, Target, Why};
 
 use crate::rebuild::{build_atlas, Wdc65816};
 use crate::system::SnesSystem;
@@ -662,7 +662,6 @@ fn long_calls_and_jumps_resolve_through_the_cartridge_map() {
         rf_rebuild::Isa::rom_offset(&ctx, 0x80_9000),
         rf_rebuild::Isa::rom_offset(&ctx, 0x00_9000)
     );
-    let _ = SiteKind::Rts;
 }
 
 #[test]

@@ -57,9 +57,15 @@ pub(crate) struct CoverageBefore {
 }
 
 impl SnesSystem {
-    /// Arm or disarm the recorder; arming starts a fresh log.
+    /// Arm or disarm the recorder; arming starts a fresh log. A machine that
+    /// has not run yet is still at its reset vector, so arming notes the
+    /// Reset entry (a recorder armed after `load` would otherwise never see
+    /// it).
     pub(crate) fn set_coverage(&mut self, on: bool) {
         self.coverage = on.then(|| self.fresh_log());
+        if on && self.master_cycles == 0 {
+            self.coverage_note_reset();
+        }
     }
 
     fn fresh_log(&self) -> Box<CoverageLog> {
