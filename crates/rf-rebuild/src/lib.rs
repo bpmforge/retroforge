@@ -20,7 +20,10 @@ pub use atlas::{
     CACHE_PRODUCER, CACHE_SETTINGS,
 };
 pub use build::build_atlas;
-pub use exec::{Delta, Dispatch, FunctionEvent, FunctionHook, Node, RebuildExec, MAX_DELTAS};
+pub use exec::{
+    Delta, Dispatch, FunctionEvent, FunctionHook, Node, RebuildExec, TraceEntry, TraceKind,
+    MAX_DELTAS,
+};
 pub use isa::{DecodeMode, Decoded, Flow, Isa};
 pub use superset::{superset_decode, Superset};
 pub use windows::WindowIndex;
