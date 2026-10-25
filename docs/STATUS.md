@@ -4665,3 +4665,14 @@ stories, 10 decisions).
   Bench (loaded machine): off within noise of base, on ~+9%. Debugger
   Coverage tab (unverified by eye). Workspace: **3363 passing** (two
   load-only flakes passed when rerun alone).
+
+- **W36-02 — Code atlas** (2026-10-25). New core-layer crate `rf-rebuild`
+  (rf-core-api only; in validate-arch CORE_CRATES and the determinism lint):
+  ISA trait, worklist CFG builder with step budgets, superset decode, per-ROM
+  cache `code-atlas-v1` (structure + FNV-1a byte hashes, no ROM bytes). The
+  recorder now logs CPU-window-to-PRG snapshots so static JSR/JMP targets in
+  unseen bytes resolve by bank. 6502 ISA in `rf-nes::rebuild` (lengths from
+  trace.rs). SMB 1-1: 300 functions, 2,671 blocks, 8,324 instructions (4,675
+  observed, 3,649 inferred), 8 unresolved static targets; every executed
+  opcode is an atlas instruction start. Armed recorder cost after the
+  snapshot change not re-measured. Workspace: **3396 passing**.
