@@ -476,9 +476,51 @@ fn confirm_y(
     })
 }
 
+/// W35-19: frames of the sideways walk that moves a vertical trial's start off a blocked place.
+pub const SIDESTEP_FRAMES: u32 = 120;
+
 /// W35-17: whether `plan`'s walker goes one way along Y as far as the floor from where `scout`
 /// stands, and then the opposite way as far from where that left it.
+///
+/// W35-19: a trial that fails there may only have started blocked (a tree line above the place the
+/// player first stood still), which says nothing about the camera. So the same trials run again
+/// from where a short walk right, and then left, leaves the machine; the verdict is the first
+/// start that grows both ways.
 fn walk_vertically(
+    scout: &mut Scout,
+    plan: &ScoutPlan,
+    floor: usize,
+    ctx: &Context<'_>,
+    report: &mut Report,
+) -> Result<bool, DiscoveryError> {
+    if walk_vertically_from(scout, plan, floor, ctx, report)? {
+        return Ok(true);
+    }
+    for side in [ScoutDir::Right, ScoutDir::Left] {
+        let mut step = plan.clone();
+        step.dirs = vec![side];
+        step.frame_budget = SIDESTEP_FRAMES;
+        step.reach_px = 1;
+        let o = run(scout, step.clone(), ctx)?;
+        report.trials.push(format!(
+            "{:?} no hold, {side:?} sidestep before Y: extent {} died {} after {} frames",
+            plan.strategy, o.extent, o.died, o.frames
+        ));
+        if o.died {
+            continue;
+        }
+        let mut aside = scout
+            .start_from_here(ctx.rom, step, ctx.size)
+            .map_err(|e| DiscoveryError::Machine(format!("{e:?}")))?;
+        if walk_vertically_from(&mut aside, plan, floor, ctx, report)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// One start's trials for [`walk_vertically`].
+fn walk_vertically_from(
     scout: &mut Scout,
     plan: &ScoutPlan,
     floor: usize,

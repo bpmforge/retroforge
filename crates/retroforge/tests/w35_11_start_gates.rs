@@ -466,6 +466,7 @@ fn z1_in_app_start_gate() {
         .cmd_tx
         .send(CoreCommand::FindScout(true))
         .expect("send");
+    let find_from = std::time::Instant::now();
     app.run(&c.play, |_| {});
     // Standing still until the trials answer (bounded: 90 s of frames).
     for _ in 0..180 {
@@ -474,6 +475,10 @@ fn z1_in_app_start_gate() {
         }
         app.run("w30", |_| {});
     }
+    println!(
+        "IN-APP FIND answered {:.1}s after Find was pressed",
+        find_from.elapsed().as_secs_f32()
+    );
     let skeleton = app
         .found
         .take()
@@ -486,6 +491,8 @@ fn z1_in_app_start_gate() {
     );
     drop(app);
     assert!(!rows.is_empty(), "the app's finder found no gate");
+    // W35-19: the saved table scouts up and down as well as sideways.
+    assert_eq!(skeleton.dirs, ["right", "left", "down", "up"]);
 
     let mut app = App::open(&c).expect("app");
     let mut plan = plan_of(&skeleton);
