@@ -67,6 +67,7 @@ fn smb_level_one_coverage_matches_an_independent_pc_oracle() {
     let mut fetched = vec![false; prg_len];
     let mut oracle_instructions = 0u64;
     let mut sink = Null;
+    let mut start_x = 0u8;
     for frame in 0..(230 + 1500) {
         core.bus_mut().set_controller_buttons(0, buttons(frame));
         loop {
@@ -82,7 +83,27 @@ fn smb_level_one_coverage_matches_an_independent_pc_oracle() {
                 break;
             }
         }
+        // Proof the run is in World 1-1, from the observed RAM facts in
+        // profiles/nes/super-mario-bros/profile.toml ($075F world, $0760
+        // level, both zero-indexed; $0086 Mario's on-screen x, 0x28 at the
+        // start of play).
+        if frame == 700 {
+            assert_eq!(
+                (core.peek(0x075F), core.peek(0x0760)),
+                (0, 0),
+                "not in World 1-1 at frame 700"
+            );
+            start_x = core.peek(0x0086);
+        }
     }
+    let end_x = core.peek(0x0086);
+    println!("Mario x: frame 700 {start_x:#04x}, end {end_x:#04x}");
+    assert_eq!(
+        (core.peek(0x075F), core.peek(0x0760)),
+        (0, 0),
+        "left World 1-1 during the run"
+    );
+    assert!(end_x > start_x, "Mario never moved right in 1-1");
 
     let log = core.take_coverage().expect("armed");
     let opcode_flagged = log

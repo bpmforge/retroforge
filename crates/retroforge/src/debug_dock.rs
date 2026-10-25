@@ -1566,34 +1566,37 @@ fn coverage_ui(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
         s.instructions, s.indirect_edges, s.interrupt_entries, s.ram_executed_bytes
     ));
     ui.separator();
-    ui.label("Per 16 KiB PRG bank (green: opcode run, amber: operand only, grey: never seen)");
-    let cell = 6.0;
-    for (n, bank) in s.banks.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.monospace(format!("{n:>3}"));
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(cell * bank.cells.len() as f32, 10.0),
-                egui::Sense::hover(),
-            );
-            let painter = ui.painter_at(rect);
-            for (i, state) in bank.cells.iter().enumerate() {
-                let color = match state {
-                    CellState::Opcode => egui::Color32::from_rgb(0x40, 0xB0, 0x60),
-                    CellState::OperandOnly => egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
-                    CellState::Never => egui::Color32::from_gray(60),
-                };
-                let x = rect.left() + cell * i as f32;
-                painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(x, rect.top()),
-                        egui::vec2(cell - 1.0, 10.0),
-                    ),
-                    0.0,
-                    color,
+    // A 4 MiB cart is 256 bank rows: always scrollable.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label("Per 16 KiB PRG bank (green: opcode run, amber: operand only, grey: never seen)");
+        let cell = 6.0;
+        for (n, bank) in s.banks.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.monospace(format!("{n:>3}"));
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(cell * bank.cells.len() as f32, 10.0),
+                    egui::Sense::hover(),
                 );
-            }
-        });
-    }
+                let painter = ui.painter_at(rect);
+                for (i, state) in bank.cells.iter().enumerate() {
+                    let color = match state {
+                        CellState::Opcode => egui::Color32::from_rgb(0x40, 0xB0, 0x60),
+                        CellState::OperandOnly => egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+                        CellState::Never => egui::Color32::from_gray(60),
+                    };
+                    let x = rect.left() + cell * i as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, rect.top()),
+                            egui::vec2(cell - 1.0, 10.0),
+                        ),
+                        0.0,
+                        color,
+                    );
+                }
+            });
+        }
+    });
 }
 
 /// What the Audio tab needs (ticket W4-10b).
