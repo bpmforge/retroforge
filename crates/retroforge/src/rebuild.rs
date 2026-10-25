@@ -78,6 +78,30 @@ fn key(rom_sha256: &str) -> CacheKey {
     }
 }
 
+/// The cached atlas of the image with this hash, if one was stored (ticket
+/// W36-06: a recipe mod resolves its patch rows against it when a game opens,
+/// before any core exists). `None` on a miss, an unreadable cache or an entry
+/// of another format. Blocking file I/O.
+#[must_use]
+pub fn cached_atlas(rom_sha256: &str) -> Option<Atlas> {
+    cached_atlas_in(&cache_root(), rom_sha256)
+}
+
+/// Store `atlas` where [`cached_atlas`] looks, as the Rebuild panel does after
+/// a build (for tests that stand in for that step).
+#[doc(hidden)]
+pub fn store_atlas_for_test(rom_sha256: &str, atlas: &Atlas) {
+    if let Ok(mut cache) = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES) {
+        let _ = cache.put(&key(rom_sha256), &atlas.to_bytes());
+    }
+}
+
+fn cached_atlas_in(root: &std::path::Path, rom_sha256: &str) -> Option<Atlas> {
+    let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok()?;
+    let bytes = cache.get(&key(rom_sha256)).ok().flatten()?;
+    Atlas::from_bytes(&bytes).ok()
+}
+
 /// Cached atlas, else one built from `coverage`, else `NeedCoverage`.
 /// Blocking; run it on its own thread.
 #[must_use]
@@ -175,6 +199,9 @@ mod tests {
             find_or_build_in(&dir, &ines, &sha, None),
             RebuildBuild::Ready(_)
         ));
+        // And a mod can fetch it without a build (W36-06); another ROM misses.
+        assert!(cached_atlas_in(&dir, &sha).is_some());
+        assert!(cached_atlas_in(&dir, &"cd".repeat(32)).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

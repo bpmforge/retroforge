@@ -155,6 +155,17 @@ pub fn convention_out_width(
     }
 }
 
+/// Ticket W36-06: how a recipe mod's name reads in the Mods list
+/// (`live-enemies` -> `Live enemies (mod)`). Generic: the label comes from the
+/// recipe's own name, never from a table of games.
+fn mod_label(name: &str) -> String {
+    let mut words = name.replace(['-', '_'], " ");
+    if let Some(first) = words.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    format!("{words} (mod)")
+}
+
 /// Ticket W30-03: the visible SNES lines the widescreen width is computed
 /// from (NTSC, no overscan).
 const WIDESCREEN_LINES: usize = 224;
@@ -1235,6 +1246,10 @@ pub struct RetroForgeApp {
     /// Ticket W32-01: what applying the enabled patches said (failures,
     /// header notes), shown under the Patches list.
     patch_messages: Vec<String>,
+    /// Ticket W36-06: the recipe mods the matched profile offers for the open
+    /// ROM (names), and what applying the enabled ones said.
+    mod_choices: Vec<String>,
+    mod_messages: Vec<String>,
     /// The current game's settings, loaded on open and written back the
     /// moment one changes.
     current_game_settings: crate::game_settings::GameSettings,
@@ -2061,6 +2076,8 @@ impl RetroForgeApp {
             soft_patch: crate::soft_patch::SoftPatchSession::default(),
             patch_discovery: crate::soft_patch::Discovery::default(),
             patch_messages: Vec::new(),
+            mod_choices: Vec::new(),
+            mod_messages: Vec::new(),
             current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
             awaiting_key: None,
@@ -3212,8 +3229,15 @@ impl RetroForgeApp {
                 rebuild: crate::rebuild::RebuildStatus::Off,
                 rebuild_request: None,
                 hooks: Vec::new(),
+                hook_request: None,
             })
         });
+        if let Some(req) = panel.hook_request.take() {
+            self.handle_hook_request(req);
+        }
+        let Some(panel) = self.debug_panels.data.coverage.as_mut() else {
+            return;
+        };
         if let Some(on) = panel.rebuild_request.take() {
             if !on {
                 panel.rebuild = crate::rebuild::RebuildStatus::Off;
@@ -3235,6 +3259,79 @@ impl RetroForgeApp {
         panel.armed = on;
         panel.summary = None;
         self.send_command(CoreCommand::SetCoverage(on));
+    }
+
+    /// Ticket W36-06: the Coverage tab's hook buttons -- the UI entry for
+    /// `CoreCommand::SetHooks`. Loading picks a Lua script and pairs it with
+    /// the recipe next to the matched profile; the hooks are observation only
+    /// from here (the manifest grants function events and memory reads, never
+    /// writes: a hook that writes is a mod and ships with a manifest of its
+    /// own, NON_GOALS 13).
+    fn handle_hook_request(&mut self, req: crate::debug_dock::HookRequest) {
+        use crate::debug_dock::HookRequest;
+        let say = |app: &mut Self, line: String| {
+            if let Some(p) = app.debug_panels.data.coverage.as_mut() {
+                p.hooks = vec![line];
+            }
+        };
+        match req {
+            HookRequest::Unload => {
+                self.send_command(CoreCommand::SetHooks(None));
+                if let Some(p) = self.debug_panels.data.coverage.as_mut() {
+                    p.hooks.clear();
+                }
+            }
+            HookRequest::LoadScript => {
+                let Some(recipe) = self
+                    .current_game_hashes
+                    .clone()
+                    .and_then(|h| self.recipe_for_rom(&h))
+                else {
+                    say(
+                        self,
+                        "No recipe found for this game (a recipe.toml next to its profile).".into(),
+                    );
+                    return;
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Lua script", &["lua"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        say(self, format!("Could not read {}: {e}", path.display()));
+                        return;
+                    }
+                };
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("hooks")
+                    .to_owned();
+                let manifest = rf_plugin_sdk::Manifest {
+                    id,
+                    version: "0.0.0".into(),
+                    api: "0.1".into(),
+                    license: "unspecified".into(),
+                    provenance: format!("loaded by the player from {}", path.display()),
+                    capabilities: rf_plugin_sdk::Capabilities {
+                        function_hooks: true,
+                        read_memory: true,
+                        ..rf_plugin_sdk::Capabilities::default()
+                    },
+                };
+                self.send_command(CoreCommand::SetHooks(Some(Box::new(
+                    crate::rebuild::HookSetup {
+                        manifest,
+                        lua_source: source,
+                        recipe,
+                    },
+                ))));
+            }
+        }
     }
 
     /// Refresh the slot listing and open the manager (ticket W4-11).
@@ -4007,6 +4104,61 @@ impl RetroForgeApp {
         took
     }
 
+    /// Ticket W36-06: the recipe next to the profile that claims the open
+    /// ROM, if it has one.
+    fn recipe_for_rom(&self, hashes: &rf_cart::RomHashes) -> Option<rf_rebuild::Recipe> {
+        let (_, profile_path) = self.find_profile(hashes)?;
+        rf_profiles::load_recipe_file(&profile_path.with_file_name("recipe.toml")).ok()
+    }
+
+    /// Ticket W36-06: list the matched profile's recipe mods and apply the
+    /// ones the player turned on for this game, in memory, on top of whatever
+    /// the soft patches left. A mod is resolved against the atlas of the
+    /// ORIGINAL image (found in the per-ROM cache: turn Rebuild on once), so
+    /// when a patch file also changed the image the mod is not applied.
+    /// Returns the image to boot.
+    fn apply_recipe_mods(
+        &mut self,
+        bytes: Vec<u8>,
+        raw_sha: &str,
+        base: Option<&rf_cart::RomHashes>,
+    ) -> Vec<u8> {
+        let Some((hashes, recipe)) = base.and_then(|h| Some((h, self.recipe_for_rom(h)?))) else {
+            return bytes;
+        };
+        self.mod_choices = recipe.mods().iter().map(|m| (*m).to_owned()).collect();
+        let enabled = match &self.config_root {
+            Some(root) => crate::game_settings::load(root, &hashes.sha256).mods_enabled,
+            None => Vec::new(),
+        };
+        if enabled.is_empty() {
+            return bytes;
+        }
+        if !self.soft_patch.is_reference() {
+            self.mod_messages
+                .push("Mods need the original image: not applied on top of a patch file.".into());
+            return bytes;
+        }
+        let atlas = crate::rebuild::cached_atlas(raw_sha);
+        let outcome = crate::soft_patch::apply_mods(bytes, atlas.as_ref(), &recipe, &enabled);
+        self.mod_messages = outcome.failures.clone();
+        if let Some(first) = outcome.failures.first() {
+            self.status = first.clone();
+        }
+        if !outcome.applied.is_empty() {
+            let session_sha = match rf_cart::Cartridge::load(&outcome.image) {
+                Ok(
+                    rf_cart::Cartridge::Nes { identity, .. }
+                    | rf_cart::Cartridge::Snes { identity, .. },
+                ) => identity.normalized.sha256,
+                Err(_) => crate::hash::sha256_hex(&outcome.image),
+            };
+            self.soft_patch.mods = outcome.applied;
+            self.soft_patch.session_sha256 = session_sha;
+        }
+        outcome.image
+    }
+
     pub fn open_rom_path(&mut self, path: &std::path::Path) {
         // Ticket W20-09: an HD pack belongs to the game it was loaded
         // for. Kept across a ROM change it went quietly dead — the new
@@ -4023,6 +4175,9 @@ impl RetroForgeApp {
                 return;
             }
         };
+        // Ticket W36-06: the atlas cache is keyed by the hash of the image as
+        // loaded, before any patch (the core thread keys it the same way).
+        let raw_sha = crate::hash::sha256_hex(&bytes);
         // Ticket W32-01: identify the BASE rom first, then apply whichever
         // soft patches the player enabled for it, in memory. Settings and
         // profile matching below still name the base; only the bytes the
@@ -4039,6 +4194,8 @@ impl RetroForgeApp {
             crate::soft_patch::SoftPatchSession::unpatched(base_sha.as_deref().unwrap_or_default());
         self.patch_discovery = crate::soft_patch::Discovery::default();
         self.patch_messages.clear();
+        self.mod_choices.clear();
+        self.mod_messages.clear();
         let bytes = if let Some(base_sha) = &base_sha {
             self.patch_discovery =
                 crate::soft_patch::discover(path, self.config_root.as_deref(), base_sha);
@@ -4072,6 +4229,7 @@ impl RetroForgeApp {
                         base_sha256: base_sha.clone(),
                         session_sha256: session_sha,
                         applied: outcome.applied,
+                        mods: Vec::new(),
                         widescreen_convention: outcome.widescreen,
                     };
                 }
@@ -4080,6 +4238,7 @@ impl RetroForgeApp {
         } else {
             bytes
         };
+        let bytes = self.apply_recipe_mods(bytes, &raw_sha, base_identity.as_ref());
         // Ticket W4-06a: extract CHR *before* `bytes` moves into
         // `core_thread::spawn` below — the pattern viewer's only in-scope
         // data path (`rf_debugger::pattern`'s module doc: rf-debugger may
@@ -8647,6 +8806,9 @@ impl RetroForgeApp {
                             if self.patches_section(ui) {
                                 changed = true;
                             }
+                            if self.mods_section(ui) {
+                                changed = true;
+                            }
                             if changed {
                                 // No Apply button anywhere in this app's settings —
                                 // see `save_current_game_settings`'s own doc.
@@ -8688,6 +8850,44 @@ impl RetroForgeApp {
             ui.label("Takes effect the next time this game is opened.");
         }
         for m in &self.patch_messages {
+            ui.label(m);
+        }
+        changed
+    }
+
+    /// Ticket W36-06: the Mods list -- recipe mods the matched profile offers
+    /// for this game, each off by default and persisted per game. A mod
+    /// changes what the game computes (NON_GOALS 13), so it makes a patched
+    /// session with its own save states; it applies the next time the game is
+    /// opened. Returns whether the list changed.
+    fn mods_section(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.core.is_none() || self.mod_choices.is_empty() {
+            return false;
+        }
+        ui.separator();
+        ui.strong("Mods");
+        ui.label(
+            "A mod edits the game's own code in memory (never your ROM file). \
+             It is not the original cartridge and keeps its own save states.",
+        );
+        let mut changed = false;
+        for name in self.mod_choices.clone() {
+            let mut on = self.current_game_settings.mods_enabled.contains(&name);
+            let label = mod_label(&name);
+            if ui.checkbox(&mut on, label).changed() {
+                let list = &mut self.current_game_settings.mods_enabled;
+                list.retain(|k| k != &name);
+                if on {
+                    list.push(name.clone());
+                }
+                changed = true;
+            }
+        }
+        ui.label(
+            "Needs the game's code atlas: record some play in the Coverage tab and \
+             turn Rebuild on once. Takes effect the next time this game is opened.",
+        );
+        for m in &self.mod_messages {
             ui.label(m);
         }
         changed

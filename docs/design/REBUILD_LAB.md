@@ -92,6 +92,17 @@ catch up at hardware accesses (sync points). The NES core ticks devices on
 every bus cycle, so that is a scheduling change, not an executor feature. It
 will be decided once the lockstep checker (W36-04) can prove it.
 
+**W36-06 as built (2026-10-25):** the NES widescreen enemy mod is three
+recipe patch rows (`rf_rebuild::PatchRow`; TOML `[[patch]]`; stream index plus
+new byte), not a hook and not a replacement function. Resolved against the
+unpatched atlas, applied in memory through the W32-01 session (badge, own
+saves), loaded by the app from the Mods list in the game settings
+(`GameSettings::mods_enabled`, atlas from the per-ROM cache). The Coverage tab
+also gets a "Load hook script" entry for `CoreCommand::SetHooks` (read-only
+manifest). Run-ahead's shadow machine is opened from the same `Vec` the real
+core is, so a patched image is predicted correctly (test in `run_ahead`); hook
+writes in savestates and the margin drawing stay W36-06b.
+
 Speed is not the goal (the interpreter already runs far above real time);
 named, hookable, replaceable functions and checking real compiled code in
 lockstep are.

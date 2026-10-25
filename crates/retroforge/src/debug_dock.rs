@@ -1528,6 +1528,18 @@ pub struct CoveragePanelData {
     /// inactive hooks, the host's state, the mod write ledger). Empty when no
     /// hooks are loaded.
     pub hooks: Vec<String>,
+    /// Ticket W36-06: set by the panel's hook buttons, acted on by the app.
+    pub hook_request: Option<HookRequest>,
+}
+
+/// What the Coverage tab's hook buttons ask the app for (ticket W36-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookRequest {
+    /// Pick a Lua script and load it as function hooks against the recipe
+    /// next to the game's profile.
+    LoadScript,
+    /// Drop the loaded hooks.
+    Unload,
 }
 
 /// The Coverage tab: arm/disarm, PRG coverage, a strip per PRG bank, and
@@ -1581,6 +1593,18 @@ fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
             ));
         }
     }
+    ui.horizontal(|ui| {
+        if ui.button("Load hook script\u{2026}").clicked() {
+            data.hook_request = Some(HookRequest::LoadScript);
+        }
+        if !data.hooks.is_empty() && ui.button("Unload hooks").clicked() {
+            data.hook_request = Some(HookRequest::Unload);
+        }
+        ui.label(
+            "a Lua script that calls rf.on_enter / rf.on_exit by recipe function name; \
+             read-only here (needs Rebuild on)",
+        );
+    });
     for line in &data.hooks {
         ui.label(line);
     }
