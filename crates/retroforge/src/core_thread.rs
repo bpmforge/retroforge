@@ -3899,6 +3899,12 @@ mod tests {
             else {
                 continue;
             };
+            // This test is the UI: acknowledge every frame it takes, or the
+            // core drops frames once MAX_PENDING_FRAMES are unconsumed and
+            // the next wait times out (the real cause of this test's
+            // load-only failures: a slow atlas build needed more frames
+            // than the two the channel would carry unacknowledged).
+            core.pending_frames.fetch_sub(1, Ordering::AcqRel);
             if let Some(r) = msg.rebuild {
                 last = Some(r);
                 if matches!(last, Some(RebuildStatus::On(_))) {
@@ -3925,6 +3931,12 @@ mod tests {
             else {
                 continue;
             };
+            // This test is the UI: acknowledge every frame it takes, or the
+            // core drops frames once MAX_PENDING_FRAMES are unconsumed and
+            // the next wait times out (the real cause of this test's
+            // load-only failures: a slow atlas build needed more frames
+            // than the two the channel would carry unacknowledged).
+            core.pending_frames.fetch_sub(1, Ordering::AcqRel);
             if msg.rebuild.is_some() {
                 off = msg.rebuild;
                 break;
