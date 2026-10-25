@@ -43,9 +43,13 @@ impl CoreSink for Null {
 fn buttons(frame: u32) -> u8 {
     match frame {
         0..=199 => 0,
-        200..=204 => START,
-        205..=229 => 0,
-        f if (f - 230) % 60 < 12 => RIGHT | A,
+        // The first Start leaves the multicart's game select; the second
+        // leaves SMB's title before it idles into the attract demo (which
+        // ignores the pad). Found by observation in W36-03: with one Start
+        // the run was the demo.
+        200..=204 | 400..=404 => START,
+        205..=399 | 405..=499 => 0,
+        f if (f - 500) % 60 < 12 => RIGHT | A,
         _ => RIGHT,
     }
 }
@@ -63,7 +67,7 @@ fn smb_level_one_atlas_covers_every_executed_opcode() {
     core.reset(ResetKind::Hard);
     let mut sink = Null;
     let mut input = InputFrame::empty();
-    for frame in 0..(230 + 1500) {
+    for frame in 0..(500 + 1500) {
         input.ports[0] = u16::from(buttons(frame));
         core.run_frame(&input, &mut sink);
         if frame == 700 {
