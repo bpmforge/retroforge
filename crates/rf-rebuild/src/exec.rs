@@ -13,6 +13,16 @@
 //! core calls `dispatch` once, steps once, calls
 //! [`RebuildExec::check_target`] once.
 //!
+//! ## Modes (ticket W36-08b)
+//!
+//! A node is keyed `(ROM offset, mode)`: the same bytes entered in two
+//! 65816 widths are two instructions. `slot` holds, per ROM offset, the head
+//! of a short chain of the nodes at that offset (at most `mode_count`, so at
+//! most five), which keeps the table `4 * prg_len` bytes whatever the ISA.
+//! A lookup that finds the offset but not the mode is a **width mismatch**:
+//! the core still runs its own instruction, the executor only counts it
+//! ([`RebuildStats::fallback_width`]). The 6502 has one mode (0).
+//!
 //! Everything is looked up in tables built once at install ([`RebuildExec::new`]);
 //! the per-instruction path allocates nothing. Only a new dispatch miss
 //! allocates (deduplicated, bounded by [`MAX_DELTAS`]).
@@ -52,10 +62,33 @@ pub const MAX_SHADOW_DEPTH: usize = 64;
 const NO_NODE: u32 = u32::MAX;
 /// Trace-ring marker: the step was an NMI/IRQ sequence, not an instruction.
 const TRACE_INTERRUPT: u32 = u32::MAX - 1;
+/// Trace-ring marker: the offset is in the atlas, but not in this mode.
+const TRACE_WIDTH: u32 = u32::MAX - 2;
 const NO_SITE: u32 = u32::MAX;
 /// Set on a target key that is a CPU address (outside PRG ROM) rather than a
-/// ROM offset.
-const CPU_KEY: u32 = 1 << 31;
+/// `(ROM offset, mode)` pair.
+const CPU_KEY: u64 = 1 << 63;
+
+/// Key of a recorded or observed landing in PRG ROM.
+fn rom_key(rom: u32, mode: u8) -> u64 {
+    (u64::from(rom) << 8) | u64::from(mode)
+}
+
+/// Key of a landing outside PRG ROM: the full 24-bit CPU address.
+fn cpu_key(pbr: u8, cpu: u32) -> u64 {
+    CPU_KEY | (u64::from(pbr) << 16) | u64::from(cpu & 0xFF_FFFF)
+}
+
+/// Where the next instruction is fetched from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fetch {
+    /// Cartridge ROM at this offset.
+    Rom(u32),
+    /// RAM (NES: RAM or registers; SNES: work RAM). Volatile code.
+    Ram,
+    /// Memory a coprocessor owns, or anything else that is not ROM or RAM.
+    Other,
+}
 
 /// A recorded indirect transfer the atlas did not know about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,6 +103,10 @@ pub struct TraceEntry {
     /// CPU address the step started at (the interrupted `pc` for an
     /// interrupt entry).
     pub cpu: u16,
+    /// Program bank (always 0 on the 6502).
+    pub bank: u8,
+    /// Decode mode in force (always 0 on the 6502).
+    pub mode: u8,
     pub kind: TraceKind,
 }
 
@@ -83,6 +120,9 @@ pub enum TraceKind {
     },
     /// No atlas node: plain interpreter.
     Fallback,
+    /// The offset is in the atlas, but only in other decode modes: plain
+    /// interpreter.
+    WidthMismatch,
     /// An NMI/IRQ sequence ran instead of the instruction at `cpu`.
     Interrupt,
 }
@@ -101,7 +141,11 @@ pub struct Node {
     /// The function whose entry is this instruction, `u32::MAX` when none
     /// (ticket W36-05: where a hooked call lands).
     pub entry_of: u32,
+    /// Decode mode the node was decoded in.
+    pub mode: u8,
     site: u32,
+    /// Next node at the same ROM offset (another mode), `NO_NODE` at the end.
+    next: u32,
 }
 
 /// One hooked call in flight: the function and where it should return to.
@@ -116,6 +160,9 @@ struct Frame {
 pub enum Dispatch {
     /// No node (RAM, unmapped, never decoded): plain interpreter.
     Fallback,
+    /// The offset has nodes, but not for this decode mode: plain
+    /// interpreter, counted apart.
+    WidthMismatch,
     /// Found; `indirect` says the caller should call
     /// [`RebuildExec::check_target`] after the step.
     Atlas { node: u32, indirect: bool },
@@ -123,11 +170,12 @@ pub enum Dispatch {
 
 pub struct RebuildExec {
     atlas: Atlas,
-    /// PRG offset to index into `nodes`, `NO_NODE` when unknown.
+    /// PRG offset to the first node at that offset, `NO_NODE` when unknown;
+    /// the rest are chained through [`Node::next`].
     slot: Vec<u32>,
     nodes: Vec<Node>,
     /// Per indirect site, sorted unique target keys.
-    site_targets: Vec<Vec<u32>>,
+    site_targets: Vec<Vec<u64>>,
     /// Ticket W36-05: bitset over function ids of the hooked entries.
     hooked: Vec<u64>,
     hooked_count: u32,
@@ -141,7 +189,8 @@ pub struct RebuildExec {
     /// Ticket W36-04: ring of the last executed steps, empty (and untouched
     /// by the per-instruction path beyond one `is_empty`) until
     /// [`RebuildExec::enable_trace`]. `(cpu, node)`, power-of-two length.
-    trace: Vec<(u16, u32)>,
+    /// `(bank << 16 | pc | mode << 24, node)`.
+    trace: Vec<(u32, u32)>,
     trace_next: usize,
     trace_total: u64,
 }
@@ -160,11 +209,11 @@ impl RebuildExec {
                 }
             }
         }
-        let site_targets: Vec<Vec<u32>> = atlas
+        let site_targets: Vec<Vec<u64>> = atlas
             .indirect_sites
             .iter()
             .map(|s| {
-                let mut keys: Vec<u32> = s.targets.iter().map(target_key).collect();
+                let mut keys: Vec<u64> = s.targets.iter().map(target_key).collect();
                 keys.sort_unstable();
                 keys.dedup();
                 keys
@@ -176,21 +225,37 @@ impl RebuildExec {
                 .binary_search_by_key(&rom, |s| s.site_rom)
                 .map_or(NO_SITE, |i| i as u32)
         };
-        let mut entry_fn: HashMap<u32, u32> = HashMap::with_capacity(atlas.functions.len());
+        let mut entry_fn: HashMap<(u32, u8), u32> = HashMap::with_capacity(atlas.functions.len());
         for (fi, f) in atlas.functions.iter().enumerate() {
-            entry_fn.entry(f.entry_rom).or_insert(fi as u32);
+            entry_fn
+                .entry((f.entry_rom, f.entry_mode))
+                .or_insert(fi as u32);
         }
         let mut slot = vec![NO_NODE; atlas.prg_len as usize];
-        let mut nodes = Vec::new();
+        let mut nodes: Vec<Node> = Vec::new();
         for (bi, block) in atlas.blocks.iter().enumerate() {
             for insn in &block.insns {
-                let Some(s) = slot.get_mut(insn.rom as usize) else {
+                let Some(head) = slot.get(insn.rom as usize).copied() else {
                     continue;
                 };
-                if *s != NO_NODE {
+                // One node per (offset, mode): walk the (at most
+                // `mode_count`) nodes already at this offset.
+                let mut at = head;
+                let mut have = false;
+                // Terminates: `at` moves to `next` on every pass, chains are
+                // built by prepending so they are acyclic, and `NO_NODE` is
+                // past the end of `nodes`.
+                while let Some(n) = nodes.get(at as usize) {
+                    if n.mode == insn.mode {
+                        have = true;
+                        break;
+                    }
+                    at = n.next;
+                }
+                if have {
                     continue;
                 }
-                *s = nodes.len() as u32;
+                slot[insn.rom as usize] = nodes.len() as u32;
                 nodes.push(Node {
                     block: bi as u32,
                     function: function_of[bi],
@@ -204,8 +269,13 @@ impl RebuildExec {
                             | Flow::ReturnInterrupt
                             | Flow::Break
                     ),
-                    entry_of: entry_fn.get(&insn.rom).copied().unwrap_or(u32::MAX),
+                    entry_of: entry_fn
+                        .get(&(insn.rom, insn.mode))
+                        .copied()
+                        .unwrap_or(u32::MAX),
+                    mode: insn.mode,
                     site: site_of(insn.rom),
+                    next: head,
                 });
             }
         }
@@ -245,10 +315,13 @@ impl RebuildExec {
     }
 
     #[inline]
-    fn trace_push(&mut self, cpu: u16, node: u32) {
+    fn trace_push(&mut self, bank: u8, cpu: u16, mode: u8, node: u32) {
         let mask = self.trace.len().wrapping_sub(1);
         if let Some(slot) = self.trace.get_mut(self.trace_next & mask) {
-            *slot = (cpu, node);
+            *slot = (
+                (u32::from(mode) << 24) | (u32::from(bank) << 16) | u32::from(cpu),
+                node,
+            );
             self.trace_next = (self.trace_next + 1) & mask;
             self.trace_total += 1;
         }
@@ -263,11 +336,14 @@ impl RebuildExec {
         let start = if kept == len { self.trace_next } else { 0 };
         (0..kept)
             .filter_map(|i| self.trace.get((start + i) % len.max(1)))
-            .map(|&(cpu, node)| TraceEntry {
-                cpu,
+            .map(|&(packed, node)| TraceEntry {
+                cpu: packed as u16,
+                bank: (packed >> 16) as u8,
+                mode: (packed >> 24) as u8,
                 kind: match node {
                     NO_NODE => TraceKind::Fallback,
                     TRACE_INTERRUPT => TraceKind::Interrupt,
+                    TRACE_WIDTH => TraceKind::WidthMismatch,
                     n => self
                         .nodes
                         .get(n as usize)
@@ -291,24 +367,64 @@ impl RebuildExec {
         &self.atlas
     }
 
+    /// The node for `(rom, mode)`, if the atlas has one.
+    fn node_at(&self, rom: u32, mode: u8) -> Option<&Node> {
+        let mut at = self.slot.get(rom as usize).copied()?;
+        // Terminates: see `new`.
+        while let Some(nd) = self.nodes.get(at as usize) {
+            if nd.mode == mode {
+                return Some(nd);
+            }
+            at = nd.next;
+        }
+        None
+    }
+
     /// The node record for a [`Dispatch::Atlas`] answer.
     #[must_use]
     pub fn node(&self, node: u32) -> Option<&Node> {
         self.nodes.get(node as usize)
     }
 
-    /// Look up the instruction about to run at CPU address `pc`, at PRG
-    /// offset `rom` (`None` when the CPU address is not PRG ROM right now),
-    /// and count it.
+    /// Look up the instruction about to run at CPU address `pc` (6502: one
+    /// mode, bank 0), at PRG offset `rom` (`None` when the CPU address is not
+    /// PRG ROM right now), and count it.
     #[inline]
     pub fn dispatch(&mut self, pc: u16, rom: Option<u32>) -> Dispatch {
-        let node = rom
-            .and_then(|r| self.slot.get(r as usize))
-            .copied()
-            .filter(|&n| n != NO_NODE)
-            .and_then(|n| self.nodes.get(n as usize).map(|nd| (n, *nd)));
+        self.dispatch_at(0, pc, rom.map_or(Fetch::Ram, Fetch::Rom), 0)
+    }
+
+    /// [`Self::dispatch`] for an ISA with banks and decode modes: the
+    /// instruction at `bank:pc`, fetched from `fetch`, with the decode mode
+    /// `mode` in force. A ROM offset the atlas knows only in other modes is
+    /// [`Dispatch::WidthMismatch`].
+    #[inline]
+    pub fn dispatch_at(&mut self, bank: u8, pc: u16, fetch: Fetch, mode: u8) -> Dispatch {
+        let mut mismatch = false;
+        let node = match fetch {
+            Fetch::Rom(rom) => {
+                let mut at = self.slot.get(rom as usize).copied().unwrap_or(NO_NODE);
+                let mut found = None;
+                // Terminates: see `new` (acyclic chain, `NO_NODE` is out of range).
+                while let Some(nd) = self.nodes.get(at as usize) {
+                    if nd.mode == mode {
+                        found = Some((at, *nd));
+                        break;
+                    }
+                    mismatch = true;
+                    at = nd.next;
+                }
+                found
+            }
+            Fetch::Ram | Fetch::Other => None,
+        };
         if !self.trace.is_empty() {
-            self.trace_push(pc, node.map_or(NO_NODE, |(n, _)| n));
+            let marker = match node {
+                Some((n, _)) => n,
+                None if mismatch => TRACE_WIDTH,
+                None => NO_NODE,
+            };
+            self.trace_push(bank, pc, mode, marker);
         }
         match node {
             Some((n, nd)) => {
@@ -323,7 +439,17 @@ impl RebuildExec {
             }
             None => {
                 self.stats.fallback += 1;
-                Dispatch::Fallback
+                if mismatch {
+                    self.stats.fallback_width += 1;
+                    Dispatch::WidthMismatch
+                } else {
+                    match fetch {
+                        Fetch::Rom(_) => self.stats.fallback_no_node += 1,
+                        Fetch::Ram => self.stats.fallback_ram += 1,
+                        Fetch::Other => self.stats.fallback_other += 1,
+                    }
+                    Dispatch::Fallback
+                }
             }
         }
     }
@@ -331,9 +457,15 @@ impl RebuildExec {
     /// An NMI/IRQ sequence ran instead of an instruction.
     #[inline]
     pub fn note_interrupt(&mut self, pc: u16) {
+        self.note_interrupt_at(0, pc, 0);
+    }
+
+    /// [`Self::note_interrupt`] with the interrupted bank and mode.
+    #[inline]
+    pub fn note_interrupt_at(&mut self, bank: u8, pc: u16, mode: u8) {
         self.stats.interrupt_entries += 1;
         if !self.trace.is_empty() {
-            self.trace_push(pc, TRACE_INTERRUPT);
+            self.trace_push(bank, pc, mode, TRACE_INTERRUPT);
         }
     }
 
@@ -342,7 +474,10 @@ impl RebuildExec {
     /// counted and appended to the delta list; it never changes behaviour.
     pub fn check_target(&mut self, node: u32, site: CodeAddr, target: CodeAddr) {
         self.stats.indirect_checked += 1;
-        let key = target.rom.unwrap_or(CPU_KEY | u32::from(target.cpu));
+        let key = target.rom.map_or_else(
+            || cpu_key(target.pbr, u32::from(target.cpu)),
+            |rom| rom_key(rom, target.mode),
+        );
         let known = self
             .nodes
             .get(node as usize)
@@ -410,9 +545,16 @@ impl RebuildExec {
     /// its frame and queue Enter.
     #[inline]
     pub fn landed(&mut self, rom: Option<u32>, ret: u32) {
+        self.landed_at(rom, 0, ret);
+    }
+
+    /// [`Self::landed`] with the decode mode the landing is entered in (a
+    /// function's identity is its entry offset *and* mode). `ret` is the
+    /// full address the return should reach (65816: `pbr << 16 | pc`).
+    #[inline]
+    pub fn landed_at(&mut self, rom: Option<u32>, mode: u8, ret: u32) {
         let Some(function) = rom
-            .and_then(|r| self.slot.get(r as usize))
-            .and_then(|&n| self.nodes.get(n as usize))
+            .and_then(|r| self.node_at(r, mode))
             .map(|nd| nd.entry_of)
             .filter(|&f| f != u32::MAX && self.is_hooked(f))
         else {
@@ -481,10 +623,10 @@ impl RebuildExec {
     }
 }
 
-fn target_key(t: &Target) -> u32 {
+fn target_key(t: &Target) -> u64 {
     match *t {
-        Target::Rom { rom, .. } => rom,
-        Target::Unresolved { cpu, .. } => CPU_KEY | cpu,
+        Target::Rom { rom, mode, .. } => rom_key(rom, mode),
+        Target::Unresolved { cpu, .. } => cpu_key((cpu >> 16) as u8, cpu),
     }
 }
 
@@ -810,5 +952,143 @@ mod tests {
         assert_eq!(s.delta_len as usize, MAX_DELTAS);
         assert_eq!(s.delta_dropped, 10);
         assert_eq!(s.dispatch_misses, MAX_DELTAS as u64 + 10);
+    }
+
+    /// The same bytes in two decode modes (65816 widths): two functions at
+    /// one ROM offset, each with its own entry; an indirect site at offset 4
+    /// recorded as landing on `(0, mode 1)` only.
+    fn mode_atlas() -> Atlas {
+        let at = |rom: u32, flow, mode: u8| InsnRec {
+            rom,
+            cpu: 0x8000 + rom,
+            len: 1,
+            flow,
+            prov: Provenance::Observed,
+            mode,
+        };
+        let block = |mode: u8| Block {
+            start_rom: 0,
+            start_cpu: 0x8000,
+            start_mode: mode,
+            insns: vec![at(0, Flow::Fall, mode), at(4, Flow::Return, mode)],
+            edges: vec![],
+        };
+        let func = |mode: u8, block: u32| Function {
+            entry_rom: 0,
+            entry_cpu: 0x8000,
+            entry_mode: mode,
+            entry_kinds: 0,
+            blocks: vec![block],
+            insn_count: 2,
+            byte_len: 2,
+            byte_hash: 0,
+            shape_hash: 0,
+        };
+        Atlas {
+            prg_len: 0x10,
+            mode_count: 5,
+            blocks: vec![block(1), block(4)],
+            functions: vec![func(1, 0), func(4, 1)],
+            indirect_sites: vec![IndirectSite {
+                site_rom: 4,
+                site_cpu: 0x8004,
+                kind: SiteKind::Rts,
+                targets: vec![Target::Rom {
+                    cpu: 0x8000,
+                    rom: 0,
+                    mode: 1,
+                }],
+            }],
+            volatile: vec![],
+            stats: Stats::default(),
+        }
+    }
+
+    #[test]
+    fn nodes_are_keyed_by_offset_and_mode_and_a_wrong_mode_is_counted_apart() {
+        let mut x = RebuildExec::new(mode_atlas());
+        x.enable_trace(8);
+        let hit = |d: Dispatch| matches!(d, Dispatch::Atlas { .. });
+        assert!(hit(x.dispatch_at(0, 0x8000, Fetch::Rom(0), 1)));
+        assert!(hit(x.dispatch_at(0, 0x8000, Fetch::Rom(0), 4)));
+        assert_eq!(
+            x.dispatch_at(0, 0x8000, Fetch::Rom(0), 2),
+            Dispatch::WidthMismatch
+        );
+        assert_eq!(
+            x.dispatch_at(0, 0x8000, Fetch::Rom(0), 0),
+            Dispatch::WidthMismatch,
+            "emulation mode is a mode too"
+        );
+        assert_eq!(
+            x.dispatch_at(0, 0x8001, Fetch::Rom(1), 1),
+            Dispatch::Fallback,
+            "no node at the offset in any mode"
+        );
+        assert_eq!(
+            x.dispatch_at(0x7E, 0x2000, Fetch::Ram, 1),
+            Dispatch::Fallback
+        );
+        assert_eq!(
+            x.dispatch_at(0x00, 0x3000, Fetch::Other, 1),
+            Dispatch::Fallback
+        );
+        let s = x.stats();
+        assert_eq!((s.observed, s.fallback), (2, 5));
+        assert_eq!(
+            (
+                s.fallback_width,
+                s.fallback_no_node,
+                s.fallback_ram,
+                s.fallback_other
+            ),
+            (2, 1, 1, 1),
+            "the parts add up to the total"
+        );
+        let t = x.trace();
+        assert_eq!(t[2].kind, TraceKind::WidthMismatch);
+        assert_eq!((t[2].mode, t[5].bank, t[5].cpu), (2, 0x7E, 0x2000));
+    }
+
+    #[test]
+    fn hook_entries_and_indirect_targets_are_per_mode() {
+        let mut x = RebuildExec::new(mode_atlas());
+        x.set_hooked(&[1]); // only the mode-4 function
+        x.landed_at(Some(0), 1, 0x80_9000);
+        assert!(drain(&mut x).is_empty(), "mode 1 is function 0: not hooked");
+        x.landed_at(Some(0), 2, 0x80_9000);
+        assert!(drain(&mut x).is_empty(), "no function in mode 2");
+        x.landed_at(Some(0), 4, 0x80_9003);
+        assert_eq!(drain(&mut x), [enter(1)]);
+        x.returned(0x00_9003);
+        assert!(drain(&mut x).is_empty(), "the bank is part of the address");
+        x.returned(0x80_9003);
+        assert_eq!(drain(&mut x), [exit(1)]);
+
+        let Dispatch::Atlas { node, indirect } = x.dispatch_at(0, 0x8004, Fetch::Rom(4), 1) else {
+            panic!("site is in the atlas");
+        };
+        assert!(indirect);
+        let site = addr(0x8004, Some(4));
+        let to = |mode| CodeAddr {
+            mode,
+            ..addr(0x8000, Some(0))
+        };
+        x.check_target(node, site, to(1));
+        assert_eq!(x.stats().dispatch_misses, 0);
+        x.check_target(node, site, to(4));
+        assert_eq!(
+            x.stats().dispatch_misses,
+            1,
+            "same offset in another width is an unrecorded landing"
+        );
+        // A landing outside ROM is keyed by its full 24-bit address.
+        let ram = |pbr| CodeAddr {
+            pbr,
+            ..addr(0x2000, None)
+        };
+        x.check_target(node, site, ram(0x7E));
+        x.check_target(node, site, ram(0x7F));
+        assert_eq!(x.stats().dispatch_misses, 3);
     }
 }

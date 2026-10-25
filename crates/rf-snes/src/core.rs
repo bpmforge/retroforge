@@ -49,6 +49,46 @@ use crate::SnesSystem;
 /// being drained — worse than the crash FM-01 exists to contain.
 pub const FRAME_INSTRUCTION_BUDGET: u64 = 4_000_000;
 
+/// The machine lent to a function hook for one event (ticket W36-08b):
+/// registers, a non-perturbing peek, and a clock-free poke into work RAM and
+/// cartridge RAM.
+struct SnesHookCtx<'a> {
+    system: &'a mut SnesSystem,
+}
+
+impl rf_core_api::HookCtx for SnesHookCtx<'_> {
+    fn regs(&self) -> CpuRegs {
+        let c = &self.system.cpu;
+        CpuRegs::Wdc65816(Wdc65816Regs {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            d: c.d,
+            dbr: c.dbr,
+            pbr: c.pbr,
+            pc: c.pc,
+            p: c.p,
+            e: c.e,
+        })
+    }
+
+    fn peek(&self, addr: u32) -> u8 {
+        crate::cpu::CpuBus::peek(&self.system.bus, addr & 0xFF_FFFF)
+    }
+
+    fn poke(&mut self, addr: u32, value: u8) -> bool {
+        use crate::mapping::Target;
+        let bus = &mut self.system.bus;
+        let slot = match bus.target(addr & 0xFF_FFFF) {
+            Target::Wram(o) => bus.wram.get_mut(o),
+            Target::Sram(o) => bus.sram.get_mut(o),
+            _ => None,
+        };
+        slot.map(|b| *b = value).is_some()
+    }
+}
+
 /// The SNES as an [`EmulatorCore`].
 /// Registers `$2100`-`$213F`, the range `StateView::ppu_regs` covers
 /// (ticket W13-02a).
@@ -125,6 +165,10 @@ pub struct SnesCore {
     /// Ticket W7-22: the S-DSP's 32 kHz stereo turned into the 48 kHz mono
     /// stream every core hands `CoreSink::audio`.
     audio: AudioConverter,
+    /// Ticket W36-08b: the atlas function ids asked to emit
+    /// [`CoreSink::function_event`], kept so a freshly installed atlas gets
+    /// them. Session observation: not saved, dropped by `load`.
+    hook_ids: Vec<u32>,
 }
 
 /// The S-DSP outputs stereo at 32 kHz (fullsnes "SNES APU DSP": one
@@ -220,6 +264,7 @@ impl SnesCore {
             interpolation: crate::apu::dsp::Interpolation::default(),
             gsu_poly: None,
             audio: AudioConverter::default(),
+            hook_ids: Vec::new(),
         })
     }
 
@@ -420,6 +465,118 @@ impl SnesCore {
         self.budget = budget;
     }
 
+    /// Install (`Some`) or drop (`None`) a code atlas for the block executor
+    /// (ticket W36-08b). Counters start from zero.
+    ///
+    /// # Errors
+    /// The atlas was built for a ROM of another size (wrong cartridge) or
+    /// for an ISA without the five 65816 decode modes.
+    pub fn set_rebuild(&mut self, atlas: Option<rf_rebuild::Atlas>) -> Result<(), CoreError> {
+        if let Some(a) = &atlas {
+            if a.prg_len as usize != self.system.bus.rom.len() {
+                return Err(CoreError::Other(format!(
+                    "atlas is for a {}-byte ROM, this cartridge has {}",
+                    a.prg_len,
+                    self.system.bus.rom.len()
+                )));
+            }
+            if a.mode_count != 5 {
+                return Err(CoreError::Other(format!(
+                    "atlas has {} decode modes, the 65816 has 5",
+                    a.mode_count
+                )));
+            }
+        }
+        self.system.rebuild = atlas.map(|a| {
+            let mut x = Box::new(rf_rebuild::RebuildExec::new(a));
+            x.set_hooked(&self.hook_ids);
+            x
+        });
+        Ok(())
+    }
+
+    /// The installed atlas, for naming trace entries' functions.
+    #[must_use]
+    pub fn rebuild_atlas(&self) -> Option<&rf_rebuild::Atlas> {
+        self.system
+            .rebuild
+            .as_deref()
+            .map(rf_rebuild::RebuildExec::atlas)
+    }
+
+    /// Dispatch misses seen so far (distinct, first-seen order); empty when
+    /// Rebuild is off.
+    #[must_use]
+    pub fn rebuild_deltas(&self) -> &[rf_rebuild::Delta] {
+        self.system
+            .rebuild
+            .as_deref()
+            .map_or(&[], rf_rebuild::RebuildExec::deltas)
+    }
+
+    /// Keep the last `capacity` executed steps on the rebuilt path (repro
+    /// bundles); `0` turns it off. No effect while Rebuild is off.
+    pub fn set_rebuild_trace(&mut self, capacity: usize) {
+        if let Some(x) = self.system.rebuild.as_deref_mut() {
+            x.enable_trace(capacity);
+        }
+    }
+
+    /// The last executed steps with atlas function ids, oldest first.
+    #[must_use]
+    pub fn rebuild_trace(&self) -> Vec<rf_rebuild::TraceEntry> {
+        self.system
+            .rebuild
+            .as_deref()
+            .map_or_else(Vec::new, rf_rebuild::RebuildExec::trace)
+    }
+
+    /// Hooked calls currently in flight (0 while Rebuild is off).
+    #[must_use]
+    pub fn rebuild_shadow_depth(&self) -> usize {
+        self.system
+            .rebuild
+            .as_deref()
+            .map_or(0, rf_rebuild::RebuildExec::shadow_depth)
+    }
+
+    /// Forget the in-flight hooked calls. A machine reset does it itself; a
+    /// caller that restores a savestate into [`Self::system_mut`] must call
+    /// this, because the call stack the executor remembered belongs to the
+    /// machine that was replaced.
+    pub fn reset_hook_frames(&mut self) {
+        if let Some(x) = self.system.rebuild.as_deref_mut() {
+            x.reset_frames();
+        }
+    }
+
+    /// One instruction, then (only with hooks installed) the function events
+    /// it raised, delivered at this instruction boundary.
+    fn step_system(&mut self, sink: &mut dyn CoreSink) -> Result<(), u8> {
+        let result = self.system.step();
+        if self.system.hooks_active() {
+            self.deliver_function_events(sink);
+        }
+        result
+    }
+
+    #[inline(never)]
+    fn deliver_function_events(&mut self, sink: &mut dyn CoreSink) {
+        let Some(x) = self.system.rebuild.as_deref_mut() else {
+            return;
+        };
+        let events = x.take_events();
+        for ev in events.iter().copied() {
+            let mut ctx = SnesHookCtx {
+                system: &mut self.system,
+            };
+            sink.function_event(ev, &mut ctx);
+        }
+        if let Some(x) = self.system.rebuild.as_deref_mut() {
+            x.recycle_events(events);
+        }
+    }
+
     /// Replay the settled frame into `sink`, line by line.
     ///
     /// Both the picture and the dropped-sprite overlay: `Scanline`
@@ -597,6 +754,9 @@ impl SnesCore {
 
 impl EmulatorCore for SnesCore {
     fn load(&mut self, cart: CartImage<'_>) -> Result<(), CoreError> {
+        // An atlas describes one cartridge, and so do the function ids hooked
+        // in it (the new system below starts without an executor).
+        self.hook_ids.clear();
         // A recording survives a load (fresh, for the new cartridge), like the
         // NES core's: it is a session setting, not cartridge state.
         let recording = self.system.coverage.is_some();
@@ -648,7 +808,7 @@ impl EmulatorCore for SnesCore {
                 // A halted CPU is not an error here: `SnesSystem::step`
                 // reports the halt opcode, and the debugger wants to see
                 // that state rather than have it swallowed.
-                let _ = self.system.step();
+                let _ = self.step_system(sink);
                 instructions = 1;
                 frame_complete = self.system.bus.timing.frame != start_frame;
             }
@@ -656,7 +816,7 @@ impl EmulatorCore for SnesCore {
                 // Run to a settled vblank and out the other side, which
                 // is what makes composition safe on this machine.
                 while !self.system.bus.timing.in_vblank() && instructions < self.budget {
-                    if self.system.step().is_err() {
+                    if self.step_system(sink).is_err() {
                         break;
                     }
                     instructions += 1;
@@ -665,7 +825,7 @@ impl EmulatorCore for SnesCore {
                     || self.system.bus.timing.frame == start_frame)
                     && instructions < self.budget
                 {
-                    if self.system.step().is_err() {
+                    if self.step_system(sink).is_err() {
                         break;
                     }
                     instructions += 1;
@@ -773,6 +933,34 @@ impl EmulatorCore for SnesCore {
 
     fn take_coverage(&mut self) -> Option<rf_core_api::CoverageLog> {
         self.system.take_coverage()
+    }
+
+    fn set_rebuild_atlas(
+        &mut self,
+        atlas: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<(), CoreError> {
+        let atlas = match atlas {
+            None => None,
+            Some(b) => Some(
+                *b.downcast::<rf_rebuild::Atlas>()
+                    .map_err(|_| CoreError::Other("not an rf-rebuild atlas".to_string()))?,
+            ),
+        };
+        self.set_rebuild(atlas)
+    }
+
+    fn set_function_hooks(&mut self, function_ids: &[u32]) {
+        self.hook_ids = function_ids.to_vec();
+        if let Some(x) = self.system.rebuild.as_deref_mut() {
+            x.set_hooked(function_ids);
+        }
+    }
+
+    fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
+        self.system
+            .rebuild
+            .as_deref()
+            .map(rf_rebuild::RebuildExec::stats)
     }
 
     fn peek(&self, addr: u32) -> u8 {

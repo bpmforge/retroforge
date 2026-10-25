@@ -1,6 +1,10 @@
 //! Turning Rebuild on for the current ROM (ticket W36-03): find or build the
 //! code atlas, off the core thread.
 //!
+//! Works for either console (ticket W36-08b): an iNES image is built with the
+//! 6502 ISA, anything else with the 65816 ISA (`rf_snes::rebuild`), and both
+//! land in the same cache under the ROM's hash.
+//!
 //! The atlas comes from the per-ROM cache (`code-atlas-v3`) when present,
 //! otherwise from the coverage the session has recorded so far, and is then
 //! stored for next time. If there is neither, the answer is
@@ -103,19 +107,20 @@ fn cached_atlas_in(root: &std::path::Path, rom_sha256: &str) -> Option<Atlas> {
 }
 
 /// Cached atlas, else one built from `coverage`, else `NeedCoverage`.
-/// Blocking; run it on its own thread.
+/// `image` is the cartridge as opened (iNES, or a SNES image with or without
+/// a copier header). Blocking; run it on its own thread.
 #[must_use]
 pub fn find_or_build(
-    ines: &[u8],
+    image: &[u8],
     rom_sha256: &str,
     coverage: Option<&CoverageLog>,
 ) -> RebuildBuild {
-    find_or_build_in(&cache_root(), ines, rom_sha256, coverage)
+    find_or_build_in(&cache_root(), image, rom_sha256, coverage)
 }
 
 fn find_or_build_in(
     root: &std::path::Path,
-    ines: &[u8],
+    image: &[u8],
     rom_sha256: &str,
     coverage: Option<&CoverageLog>,
 ) -> RebuildBuild {
@@ -130,11 +135,17 @@ fn find_or_build_in(
     let Some(log) = coverage.filter(|l| l.instructions_recorded > 0) else {
         return RebuildBuild::NeedCoverage;
     };
-    let rom = match rf_nes::NesRom::from_ines_bytes(ines) {
-        Ok(r) => r,
-        Err(e) => return RebuildBuild::Failed(format!("not an NES image: {e:?}")),
+    let atlas = if image.starts_with(b"NES\x1a") {
+        match rf_nes::NesRom::from_ines_bytes(image) {
+            Ok(r) => rf_nes::rebuild::build_atlas(r.prg_rom(), log),
+            Err(e) => return RebuildBuild::Failed(format!("not an NES image: {e:?}")),
+        }
+    } else {
+        match rf_snes::rebuild::build_atlas_from_image(image, log) {
+            Ok(a) => a,
+            Err(e) => return RebuildBuild::Failed(format!("not a SNES image: {e}")),
+        }
     };
-    let atlas = rf_nes::rebuild::build_atlas(rom.prg_rom(), log);
     if let Some(c) = cache.as_mut() {
         // A cache that cannot be written only costs the next build.
         let _ = c.put(&key(rom_sha256), &atlas.to_bytes());
@@ -202,6 +213,39 @@ mod tests {
         // And a mod can fetch it without a build (W36-06); another ROM misses.
         assert!(cached_atlas_in(&dir, &sha).is_some());
         assert!(cached_atlas_in(&dir, &"cd".repeat(32)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ticket W36-08b: the same flow for a SNES image (any copier header).
+    #[test]
+    fn a_snes_image_builds_with_the_65816_isa_and_hits_the_cache() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0] = 0x80; // BRA *
+        rom[1] = 0xFE;
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFD] = 0x80;
+        let dir =
+            std::env::temp_dir().join(format!("rf-rebuild-shell-snes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sha = "12".repeat(32);
+        assert!(matches!(
+            find_or_build_in(&dir, &rom, &sha, None),
+            RebuildBuild::NeedCoverage
+        ));
+        let mut log = CoverageLog::with_volatile_len(rom.len(), 128 * 1024);
+        log.mark_prg(0, OPCODE | rf_core_api::coverage::mode_bit(0));
+        log.mark_prg(1, rf_core_api::coverage::OPERAND);
+        log.instructions_recorded = 1;
+        let RebuildBuild::Ready(atlas) = find_or_build_in(&dir, &rom, &sha, Some(&log)) else {
+            panic!("builds from the recording");
+        };
+        assert_eq!(atlas.mode_count, 5, "built with the 65816 ISA");
+        assert!(atlas.insns().any(|i| i.rom == 0 && i.mode == 0));
+        assert!(matches!(
+            find_or_build_in(&dir, &rom, &sha, None),
+            RebuildBuild::Ready(_)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

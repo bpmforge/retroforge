@@ -36,6 +36,7 @@ mod golden_frame;
 mod json;
 pub mod level_decode_evidence;
 pub mod lockstep;
+pub mod lockstep_snes;
 mod manifest;
 pub mod mode_diff;
 pub mod nes6502_evidence;

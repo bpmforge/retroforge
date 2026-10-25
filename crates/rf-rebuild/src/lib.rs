@@ -22,7 +22,7 @@ pub use atlas::{
 };
 pub use build::build_atlas;
 pub use exec::{
-    Delta, Dispatch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
+    Delta, Dispatch, Fetch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,
 };
 pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};

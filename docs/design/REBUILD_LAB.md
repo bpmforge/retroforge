@@ -277,6 +277,61 @@ the core: 128 KiB of WRAM offsets on the SNES). Fetches from coprocessor memory
 non-ROM, non-WRAM fetches in `other_exec`; the coprocessors' own CPUs are never
 recorded. One `Option::is_some` per instruction when off.
 
+### W36-08b: the SNES executor and lockstep (built 2026-10-25)
+
+**Executor.** `rf_snes::executor` is the NES design on the 65816: around
+`SnesSystem::step`, peek-only, the core's own `Cpu::step` runs unchanged.
+`rf_rebuild::RebuildExec` now keys nodes by `(ROM offset, mode)`: `slot[rom]`
+heads a chain of at most five nodes (the modes), so the table stays
+`4 * prg_len` bytes and the 6502 (one mode) is the degenerate case. Per
+instruction the SNES glue resolves `PBR:PC` through the live bus (`target()`),
+takes the mode from `E`/`M`/`X` (`coverage::mode_index`), and asks
+`dispatch_at(bank, pc, fetch, mode)`. Answers: an atlas hit (observed or
+inferred); a **width mismatch** (the offset is in the atlas, only in other
+modes); no node; work-RAM code; or non-ROM, non-RAM code (coprocessor memory,
+SRAM). `RebuildStats::fallback` is the total and `fallback_width`,
+`fallback_no_node`, `fallback_ram`, `fallback_other` partition it. A halted
+`WAI`/`STP` step fetches nothing and is not counted. Indirect transfers
+(`JMP (a)`/`(a,X)`/`[a]`, `JML [a]`, `JSR (a,X)`, `RTS`, `RTL`, `RTI`, `BRK`,
+`COP`) are compared after the step, before any interrupt dispatch, with the
+recorded `(rom, mode)` targets (non-ROM landings by full 24-bit address); a
+miss is counted and logged. Nothing is ever acted on.
+
+**Hook frames.** `JSR`/`JSR (a,X)` return to `PBR:pc+3`, `JSL` to `PBR:pc+4`,
+`BRK`/`COP` to `pc+2`, an NMI/IRQ to the interrupted `pc`; `RTS`/`RTL`/`RTI`
+pop frames whose 24-bit address they land on. In emulation mode the interrupt
+sequence pushes no PBR and clears it, so those returns are bank 0 (as
+`Cpu::interrupt` and `RTI` do). Events queue in the executor and are
+delivered by `SnesCore` (which has the sink) after each instruction, through
+a `HookCtx` (registers, non-perturbing peek, WRAM/SRAM poke). No SNES Lua UI.
+
+**Lockstep.** `rf_harness::lockstep` is generic over `LockstepMachine`; the NES
+instantiation is unchanged and `lockstep_snes::run` is the SNES one. Per frame
+it compares the 65816 registers, master cycles, WRAM, VRAM, OAM, CGRAM, SRAM,
+the serialised CPU-bus state (timing, IRQ/NMI latches, maths unit, DMA/HDMA),
+PPU registers, whole APU (SPC700 registers and RAM, timers, ports, DSP voices,
+echo ring) and mapper/cart chunks (all through `save_region`, the savestate
+path, so nothing is read through a side-effecting register), and the video and
+audio hashes. The fine pass re-runs the diverging frame an instruction at a
+time comparing registers, cycles and WRAM; a difference only in the other
+memories or the hashes is reported at frame level. The bundle holds a SNES
+`.rfstate` (console 1). It cannot see a bug the executor and the interpreter
+share (same PPU/APU/bus code on both sides), and the coprocessors' own CPUs
+are covered only through their serialised state.
+
+**SMW pilot (release, 2026-10-25).** Yoshi's Island 1, atlas built from the
+W36-08 script (5,069 frames, 72.55 M instructions recorded; 770 functions,
+30,112 insns, 12,190 observed / 17,922 inferred), lockstep over that script
+and over a different one (5,188 frames, other jumps, runs, a crouch, a pause;
+1,652 frames in the level, camera span 248): **zero divergence in both**.
+Script A: 72.55 M instructions, 72.22 M observed / 0 inferred dispatch,
+fallback 0.455 % (all work-RAM code, 330,330), no width mismatch, 7,189
+interrupt entries, 618,271 indirect transfers checked, 0 dispatch misses.
+Script B: 75.29 M instructions, 75.08 M observed / 371 inferred, fallback
+0.287 % (all work-RAM code, 215,930), no width mismatch, 7,852 interrupt
+entries, 454,576 indirect transfers checked, 136 misses (100 distinct). Test:
+`crates/retroforge/tests/w36_08b_lockstep_smw.rs` (`--ignored`, 275 s).
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

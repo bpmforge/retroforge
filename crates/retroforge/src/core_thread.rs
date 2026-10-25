@@ -4022,8 +4022,31 @@ mod tests {
     /// and its counters come back on frame messages; off drops it.
     #[test]
     fn rebuild_builds_from_recorded_coverage_installs_and_reports() {
+        rebuild_toggle_round_trip(synthetic_nrom());
+    }
+
+    /// Ticket W36-08b: the same toggle on a SNES cartridge. The core thread
+    /// builds the 65816 atlas from the session's recording, installs it, and
+    /// turns it off again; a fresh session starts with Rebuild off.
+    #[test]
+    fn rebuild_toggle_works_for_a_snes_cartridge() {
+        rebuild_toggle_round_trip(synthetic_lorom());
+    }
+
+    /// 32 KiB LoROM whose reset vector points at `BRA *`.
+    fn synthetic_lorom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0] = 0x80; // BRA *
+        rom[1] = 0xFE;
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFD] = 0x80;
+        rom
+    }
+
+    fn rebuild_toggle_round_trip(image: Vec<u8>) {
         use crate::rebuild::RebuildStatus;
-        let core = spawn(synthetic_nrom()).expect("synthetic NROM must spawn a core thread");
+        let core = spawn(image).expect("synthetic cartridge must spawn a core thread");
         let send = |c| core.cmd_tx.send(c).expect("accepted");
         send(CoreCommand::SetCoverage(true));
         for _ in 0..3 {
