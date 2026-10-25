@@ -37,7 +37,9 @@
 //! ever being drained. That is worse than the crash FM-01 exists to
 //! contain.
 
-use rf_core_api::coverage::{OPCODE, OPERAND};
+use rf_core_api::coverage::{
+    WindowMap, OPCODE, OPERAND, WINDOW_BASE, WINDOW_PAGES, WINDOW_PAGE_SHIFT,
+};
 use rf_core_api::{
     CartImage, CoreConfig, CoreError, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind,
     StateError, StateReader, StateView, StateWriter, Step, StepResult,
@@ -81,6 +83,11 @@ pub struct NesCore {
     /// not touched by a state load. Boxed so the off case adds one pointer
     /// to the struct and one `is_some` to [`NesCore::tick`].
     coverage: Option<Box<CoverageLog>>,
+    /// Ticket W36-02: the window map as of the last snapshot the recorder
+    /// took. An executing instruction whose page maps somewhere else than
+    /// this says the banking changed and triggers a fresh snapshot. Cleared
+    /// whenever the log is replaced, so a new log always starts with one.
+    window_cache: WindowMap,
 }
 
 impl NesCore {
@@ -99,6 +106,7 @@ impl NesCore {
             cycle_budget: CYCLE_BUDGET,
             pushed_watches: rf_core_api::WatchTable::new(),
             coverage: None,
+            window_cache: WindowMap::EMPTY,
         })
     }
 
@@ -221,6 +229,9 @@ impl NesCore {
             *slot = (addr, self.bus.prg_rom_offset(addr), flag);
         }
         let site = self.code_addr(pc);
+        if let Some(o) = marks[0].1 {
+            self.coverage_note_window(pc, o);
+        }
         if let Some(log) = self.coverage.as_deref_mut() {
             log.instructions_recorded += 1;
             for &(addr, rom, flag) in marks.iter().take(usize::from(len)) {
@@ -231,6 +242,45 @@ impl NesCore {
             }
         }
         CoverageBefore::Instruction { opcode, site }
+    }
+
+    /// Recorder, window half (ticket W36-02): `pc` executes from PRG offset
+    /// `rom`. Costs one compare per instruction; only when that page's base
+    /// differs from the cached map (first sight of a bank, or a bank switch)
+    /// does it peek all eight windows and log the whole simultaneous
+    /// mapping. Pages that never execute are still captured by that
+    /// snapshot, which is how an unexecuted call target's bank is learned.
+    #[inline]
+    fn coverage_note_window(&mut self, pc: u16, rom: usize) {
+        let Some(page) = WindowMap::page_of(pc) else {
+            return;
+        };
+        let Some(base) = rom
+            .checked_sub(usize::from(pc) & ((1 << WINDOW_PAGE_SHIFT) - 1))
+            .and_then(|b| u32::try_from(b).ok())
+        else {
+            return;
+        };
+        if self.window_cache.0[page] == base {
+            return;
+        }
+        self.coverage_snapshot_windows();
+    }
+
+    /// Peek every window's current PRG base into the cache and the log.
+    #[inline(never)]
+    fn coverage_snapshot_windows(&mut self) {
+        let mut map = WindowMap::EMPTY;
+        for (page, slot) in map.0.iter_mut().enumerate().take(WINDOW_PAGES) {
+            let addr = WINDOW_BASE + ((page as u16) << WINDOW_PAGE_SHIFT);
+            if let Some(o) = self.bus.prg_rom_offset(addr) {
+                *slot = u32::try_from(o).unwrap_or(rf_core_api::coverage::NO_ROM);
+            }
+        }
+        self.window_cache = map;
+        if let Some(log) = self.coverage.as_deref_mut() {
+            log.note_windows(map);
+        }
     }
 
     /// Recorder, post-step half: the indirect edge or interrupt entry the
@@ -287,6 +337,7 @@ impl EmulatorCore for NesCore {
         // recording, from scratch.
         if self.coverage.is_some() {
             self.coverage = Some(Box::new(CoverageLog::new(self.bus.prg_rom_len())));
+            self.window_cache = WindowMap::EMPTY;
             self.coverage_note_reset();
         }
         Ok(())
@@ -426,11 +477,13 @@ impl EmulatorCore for NesCore {
 
     fn set_coverage_recording(&mut self, on: bool) {
         self.coverage = on.then(|| Box::new(CoverageLog::new(self.bus.prg_rom_len())));
+        self.window_cache = WindowMap::EMPTY;
     }
 
     fn take_coverage(&mut self) -> Option<CoverageLog> {
         let log = self.coverage.as_deref_mut()?;
         let fresh = CoverageLog::new(log.prg_flags.len());
+        self.window_cache = WindowMap::EMPTY;
         Some(std::mem::replace(log, fresh))
     }
 }

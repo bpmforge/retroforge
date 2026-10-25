@@ -37,6 +37,13 @@
 //!   bytes: `JMP (ind)`, `RTS`, `RTI`, `BRK`. These are exactly the edges
 //!   static disassembly cannot follow.
 //! * `interrupts` — Reset / NMI / IRQ entries and where they landed.
+//! * `windows` — snapshots of the whole CPU-window to PRG-ROM mapping, taken
+//!   whenever an executing instruction shows the mapping changed (ticket
+//!   W36-02). A static `JSR`/`JMP` target is only a CPU address; which ROM
+//!   bytes it names depends on the bank state in force, and the atlas can
+//!   only recover that from mappings the recording actually saw. A snapshot
+//!   is one *simultaneous* state, so "these two pages were mapped together"
+//!   is a fact in the log, not an inference.
 //!
 //! ## Extending to the 65816
 //!
@@ -54,6 +61,22 @@ use std::collections::BTreeSet;
 pub const OPCODE: u8 = 0b01;
 /// `prg_flags`/`ram_exec` bit: operand byte of an executed instruction.
 pub const OPERAND: u8 = 0b10;
+
+/// First CPU address covered by [`WindowMap`] (PRG ROM starts at `$8000` on
+/// every board the NES core models).
+pub const WINDOW_BASE: u16 = 0x8000;
+/// log2 of one [`WindowMap`] page. 4 KiB is finer than every PRG banking
+/// granule the NES mappers use (8/16/32 KiB, nesdev "Mapper" pages), so a
+/// page always lies inside one bank and the map is mapper-agnostic.
+pub const WINDOW_PAGE_SHIFT: u32 = 12;
+/// Pages in a [`WindowMap`]: the 32 KiB `$8000-$FFFF` in 4 KiB steps.
+pub const WINDOW_PAGES: usize = 8;
+/// [`WindowMap`] entry for a page that is not PRG ROM right now.
+pub const NO_ROM: u32 = u32::MAX;
+/// Hard cap on [`CoverageLog::windows`]. A game thrashing banks cannot grow
+/// the log without bound; snapshots past the cap are dropped (the atlas then
+/// falls back to the weaker "unique base" rule for the pages involved).
+pub const MAX_WINDOW_MAPS: usize = 1 << 16;
 
 /// Size of [`CoverageLog::ram_exec`]: one flag byte per 6502 CPU address.
 pub const RAM_EXEC_LEN: usize = 0x1_0000;
@@ -107,6 +130,24 @@ pub struct InterruptEntry {
     pub target: CodeAddr,
 }
 
+/// One simultaneous CPU-window mapping: for each 4 KiB page of
+/// `$8000-$FFFF`, the PRG ROM offset of that page's first byte, or
+/// [`NO_ROM`] (PRG RAM, an unmapped window, a mapper that does not report).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowMap(pub [u32; WINDOW_PAGES]);
+
+impl WindowMap {
+    /// A map with every page [`NO_ROM`].
+    pub const EMPTY: Self = Self([NO_ROM; WINDOW_PAGES]);
+
+    /// Page index (`0..8`) of CPU address `cpu`, `None` below `$8000`.
+    #[must_use]
+    pub fn page_of(cpu: u16) -> Option<usize> {
+        cpu.checked_sub(WINDOW_BASE)
+            .map(|d| usize::from(d >> WINDOW_PAGE_SHIFT))
+    }
+}
+
 /// Everything a recording session observed. See the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageLog {
@@ -119,6 +160,8 @@ pub struct CoverageLog {
     pub indirect: Vec<IndirectEdge>,
     /// Deduplicated, sorted by `Ord`.
     pub interrupts: Vec<InterruptEntry>,
+    /// Deduplicated, sorted by `Ord`, at most [`MAX_WINDOW_MAPS`] long.
+    pub windows: Vec<WindowMap>,
     /// Instructions executed while recording (interrupt entries are not
     /// instructions and are not counted).
     pub instructions_recorded: u64,
@@ -133,6 +176,7 @@ impl CoverageLog {
             ram_exec: vec![0; RAM_EXEC_LEN],
             indirect: Vec::new(),
             interrupts: Vec::new(),
+            windows: Vec::new(),
             instructions_recorded: 0,
         }
     }
@@ -168,6 +212,16 @@ impl CoverageLog {
         }
     }
 
+    /// Insert a window snapshot, keeping `windows` sorted, duplicate-free
+    /// and under [`MAX_WINDOW_MAPS`].
+    pub fn note_windows(&mut self, map: WindowMap) {
+        if let Err(at) = self.windows.binary_search(&map) {
+            if self.windows.len() < MAX_WINDOW_MAPS {
+                self.windows.insert(at, map);
+            }
+        }
+    }
+
     /// Union `other` into `self` (flags OR'd, edge sets united, instruction
     /// counts added). Returns `false` and changes nothing when the two logs
     /// are for different PRG sizes — they describe different cartridges.
@@ -197,6 +251,8 @@ impl CoverageLog {
             .copied()
             .collect();
         self.interrupts = ints.into_iter().collect();
+        let maps: BTreeSet<_> = self.windows.iter().chain(&other.windows).copied().collect();
+        self.windows = maps.into_iter().take(MAX_WINDOW_MAPS).collect();
         self.instructions_recorded += other.instructions_recorded;
         true
     }
@@ -275,6 +331,29 @@ mod tests {
         l.note_interrupt(i);
         l.note_interrupt(i);
         assert_eq!(l.interrupts.len(), 1);
+    }
+
+    #[test]
+    fn window_snapshots_dedupe_sort_and_merge() {
+        let map = |b: u32| {
+            let mut m = WindowMap::EMPTY;
+            m.0[0] = b;
+            m
+        };
+        let mut a = CoverageLog::new(0);
+        a.note_windows(map(0x4000));
+        a.note_windows(map(0x2000));
+        a.note_windows(map(0x4000));
+        assert_eq!(a.windows, vec![map(0x2000), map(0x4000)]);
+        let mut b = CoverageLog::new(0);
+        b.note_windows(map(0x6000));
+        b.note_windows(map(0x2000));
+        assert!(a.merge(&b));
+        assert_eq!(a.windows.len(), 3);
+        assert!(a.windows.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(WindowMap::page_of(0x7FFF), None);
+        assert_eq!(WindowMap::page_of(0x8000), Some(0));
+        assert_eq!(WindowMap::page_of(0xFFFF), Some(7));
     }
 
     #[test]
