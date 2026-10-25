@@ -167,17 +167,27 @@ lockstep are.
 | W36-11 | Public guide: how Rebuild works | In docs/site |
 | W36-12 | Cranelift JIT tier behind the block interface; spike vs block executor | SMB plays on the JIT in lockstep; compile time and frame cost measured for both tiers |
 
-## 9. After W36 (vision, not ticketed)
+## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
-From the Rebuild Player Guide answers (2026-10-25): engine recipes after SMB
-and SMW follow Brad's showcase order, Zelda, then Super Metroid, then
-Castlevania, then Mega Man; SA-1 lifting is in scope for the vision (same
-65816 lifter, second recorded core); a public recipe hub may accept
-community recipes, with the lockstep checker as referee. Shadow-core
-lockstep (a second interpreted core checking rebuilt play) is on by default
-while a game is unproven. Generic
-interpolated 60 fps from OAM deltas (one frame of latency, labelled) is a
-PPU-side feature outside this wave.
+Brad approved the follow-on path ("ok do this") from the Rebuild Player
+Guide. Answers folded in: engine recipes after SMB and SMW follow his
+showcase order, Zelda, Super Metroid, Castlevania, Mega Man; SA-1 lifting is
+in scope; a community recipe hub is approved once a moderation rule exists;
+shadow-core lockstep (a second interpreted core checking rebuilt play) is on
+by default while a game is unproven and switches off once it is proven.
+
+| Phase | Wave | What | Gate |
+|---|---|---|---|
+| B, generic runtime | W37 | Input-movie coverage import (.fm2, .bk2, .lsmv; a desync is a compatibility report), Rebuild for any ROM with a coverage/tier/verification panel, scout and fuzz as recorder sources, shadow-core lockstep. W37-00 ships generic interpolated 60+ fps from OAM deltas early, latency labelled | Census reaches first-screen hashes through the generic tier with zero regressions |
+| C, recipes and finders | W38 | Culling, tick, object-table and camera finders; data-region and collision-table finder so Diorama heights derive per engine; engine recipes in showcase order; recipe RAM maps to and from cheats and RetroAchievements | 20 random SMW hacks boot rebuilt with live margins, no per-hack work |
+| D, Super Enhanced rendering | W39 | No-latency interpolation, object-aware Diorama, HD-2D render plugin API over recipe facts (Triangle Strategy-style tilt, shadows, depth of field on one engine), object-renderer demo | Original mode byte-identical |
+| E, community | W40 | Recipe hub with the checker as referee, SA-1 lifting, AI naming documented | Moderation rule approved by Brad |
+
+Plugin kinds over the recorded "living decomp": logic plugins (hooks,
+overrides) run under the lockstep checker; fact plugins (names, RAM maps,
+tile semantics) change nothing at run time; render plugins only read and
+draw. Out of scope throughout: standalone executables, lifting Super FX,
+DSP, Cx4 or SPC700, and anything that ships game code.
 
 ## 10. Risks
 
