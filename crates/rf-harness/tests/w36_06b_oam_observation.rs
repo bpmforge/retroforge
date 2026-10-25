@@ -15,7 +15,6 @@ use rf_core_api::coverage::CoverageLog;
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_enhance::patch::prg::apply_prg_bytes;
 use rf_harness::atlas::build_nes_atlas;
-use rf_harness::lockstep::{run, Options, Side};
 use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
 use rf_rebuild::{resolve_patches, Atlas, Recipe, ResolvedPatch};
@@ -26,11 +25,6 @@ const A: u8 = 1 << 0;
 const B: u8 = 1 << 1;
 const RIGHT: u8 = 1 << 7;
 const MOD: &str = "live-enemies";
-/// Pixels of margin each side at 32:9 over the NES's 240-line picture:
-/// (856 - 256) / 2, from `Aspect::Wide32x9.output_width(240, 1.0)`.
-const MARGIN: i64 = 300;
-/// Where mod-off SMB never has an enemy: beyond right edge + 80 / left of -80.
-
 fn rom_path() -> Option<PathBuf> {
     let root = std::env::var("RF_SCREENS_ROMS_DIR")
         .unwrap_or_else(|_| "/Users/bmatthews/Games/Roms".to_string());

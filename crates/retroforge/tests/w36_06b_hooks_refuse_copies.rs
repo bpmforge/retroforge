@@ -45,7 +45,10 @@ fn setup(write: bool) -> Box<HookSetup> {
 fn flags(core: &CoreHandle, n: usize) -> Vec<bool> {
     let mut out = Vec::new();
     while out.len() < n {
-        if let CoreEvent::Frame(m) = core.evt_rx.recv_timeout(Duration::from_secs(30)).expect("a frame")
+        if let CoreEvent::Frame(m) = core
+            .evt_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a frame")
         {
             core.pending_frames
                 .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -63,13 +66,23 @@ fn a_write_capable_hook_host_refuses_the_copies_and_a_read_only_one_does_not() {
     // No host: nothing refused.
     assert!(flags(&core, 5).iter().all(|f| !f));
     // A read-only host: run-ahead is allowed.
-    core.cmd_tx.send(CoreCommand::SetHooks(Some(setup(false)))).unwrap();
+    core.cmd_tx
+        .send(CoreCommand::SetHooks(Some(setup(false))))
+        .unwrap();
     let _ = flags(&core, 3);
-    assert!(flags(&core, 5).iter().all(|f| !f), "read-only hooks leave run-ahead on");
+    assert!(
+        flags(&core, 5).iter().all(|f| !f),
+        "read-only hooks leave run-ahead on"
+    );
     // A host that holds write_memory: refused, on every frame once it is loaded.
-    core.cmd_tx.send(CoreCommand::SetHooks(Some(setup(true)))).unwrap();
+    core.cmd_tx
+        .send(CoreCommand::SetHooks(Some(setup(true))))
+        .unwrap();
     let _ = flags(&core, 3);
-    assert!(flags(&core, 5).iter().all(|f| *f), "write_memory refuses the copies");
+    assert!(
+        flags(&core, 5).iter().all(|f| *f),
+        "write_memory refuses the copies"
+    );
     // Dropping the host brings run-ahead back.
     core.cmd_tx.send(CoreCommand::SetHooks(None)).unwrap();
     let _ = flags(&core, 3);

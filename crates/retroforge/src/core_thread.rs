@@ -2814,7 +2814,7 @@ fn core_thread_main(
             // loading or user fast-forward, the debugger's layer and
             // audio-scope captures, an HD pack or the Upscale Studio capture,
             // and de-flicker (its history must only see real frames).
-            let mut spec_shown: Option<(u8, Box<[u8; 256]>, Option<Vec<u8>>, Vec<u8>)> = None;
+            let mut spec_shown: Option<(u8, crate::run_ahead::SpecMargin)> = None;
             if run_ahead > 0
                 && ran
                 && !stepped
@@ -2843,7 +2843,7 @@ fn core_thread_main(
                     msg.rgba = spec.rgba;
                     msg.line_palettes = spec.line_palettes;
                     msg.hd_mode7 = spec.hd_mode7;
-                    spec_shown = Some((run_ahead, spec.oam, spec.sprite_ids, spec.bg_under));
+                    spec_shown = Some((run_ahead, spec.margin));
                 }
             }
             msg.copies_refused_by_hooks = hooks_block && (run_ahead > 0 || margin_drawer.is_some());
@@ -2853,7 +2853,9 @@ fn core_thread_main(
                 if let Some(d) = margin_drawer.as_mut() {
                     let real_oam = d.oam_of_current_picture();
                     let (ahead, oam, ids, bg) = match &spec_shown {
-                        Some((a, o, i, b)) => (*a, &**o, i.as_deref(), b.as_slice()),
+                        Some((a, m)) => {
+                            (*a, &*m.oam, m.sprite_ids.as_deref(), m.bg_under.as_slice())
+                        }
                         None => (0, &real_oam, sink.sprite_ids(), stepper.bg_under()),
                     };
                     msg.margin_draw = d.frame(

@@ -176,17 +176,14 @@ fn the_live_save_path_writes_the_chunk_through_the_core_thread() {
     core.cmd_tx.send(CoreCommand::StepFrame).unwrap();
     // The commands are handled in order; wait for the stepped frame, then save.
     loop {
-        match core
+        if let CoreEvent::Frame(_) = core
             .evt_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("a frame")
         {
-            CoreEvent::Frame(_) => {
-                core.pending_frames
-                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                break;
-            }
-            _ => {}
+            core.pending_frames
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            break;
         }
     }
     core.cmd_tx

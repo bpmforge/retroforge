@@ -19,18 +19,6 @@ impl CoreSink for Discard {
     fn event(&mut self, _e: CoreEvent) {}
 }
 
-/// Camera-relative x of each active slot of `st`.
-fn rels(st: &EmuStepper) -> Vec<(u32, i32)> {
-    let cam = i32::from(st.peek_bus(0x071A)) * 256 + i32::from(st.peek_bus(0x071C));
-    (0..5u32)
-        .filter(|k| st.peek_bus(0x0F + k) != 0)
-        .map(|k| {
-            let x = i32::from(st.peek_bus(0x6E + k)) * 256 + i32::from(st.peek_bus(0x87 + k));
-            (k, x - cam)
-        })
-        .collect()
-}
-
 /// Slots as `(rel, y)` of `st` (rel = camera-relative x).
 fn slot_table(st: &EmuStepper) -> Vec<(i32, i32)> {
     let cam = i32::from(st.peek_bus(0x071A)) * 256 + i32::from(st.peek_bus(0x071C));
@@ -106,7 +94,7 @@ fn strips_appear_for_margin_enemies_and_only_there_and_sit_at_the_slots_spot() {
         let is_deep = history
             .last()
             .is_some_and(|t| t.iter().any(|&(r, _)| r >= 336 || (-300..-80).contains(&r)));
-        let margin_slot = table.iter().any(|&(r, _)| r >= 240 || r < 16);
+        let margin_slot = table.iter().any(|&(r, _)| !(16..240).contains(&r));
         let has = md.as_ref().is_some_and(|m| !m.is_empty());
         deep += u32::from(is_deep);
         deep_drawn += u32::from(is_deep && has);
@@ -367,9 +355,9 @@ fn play_with_run_ahead(
                 inp,
                 &Shown {
                     ahead,
-                    oam: &spec.oam,
-                    ids: spec.sprite_ids.as_deref(),
-                    bg_under: &spec.bg_under,
+                    oam: &spec.margin.oam,
+                    ids: spec.margin.sprite_ids.as_deref(),
+                    bg_under: &spec.margin.bg_under,
                 },
             );
             out.push((spec.rgba, md.map(|m| *m)));
@@ -407,8 +395,17 @@ fn run_ahead_with_the_mod_predicts_the_real_frame_and_its_margin_draw() {
             "run-ahead +{ahead}: {compared} windows; shown picture is the real frame +{ahead}: {same_picture}; \
              its margin draw equal: {same_draw} (the real frame had one in {drawn})"
         );
-        assert!(compared > 500 && drawn > 100, "the comparison ran: {compared}/{drawn}");
-        assert_eq!(same_picture, compared, "+{ahead}: prediction matches with the mod on");
-        assert_eq!(same_draw, compared, "+{ahead}: the margin draw is the shown frame's");
+        assert!(
+            compared > 500 && drawn > 100,
+            "the comparison ran: {compared}/{drawn}"
+        );
+        assert_eq!(
+            same_picture, compared,
+            "+{ahead}: prediction matches with the mod on"
+        );
+        assert_eq!(
+            same_draw, compared,
+            "+{ahead}: the margin draw is the shown frame's"
+        );
     }
 }

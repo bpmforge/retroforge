@@ -43,12 +43,18 @@ pub struct SpecFrame {
     pub line_palettes: Vec<Option<rf_renderer::LinePalette>>,
     /// The HD Mode 7 composite of that frame, when HD Mode 7 is on.
     pub hd_mode7: Option<Box<HdMode7Frame>>,
-    /// Ticket W36-06b: the OAM that drew that frame (the shadow's OAM before its last speculative
-    /// frame ran), for the margin redraw's wrapped-copy check.
+    /// Ticket W36-06b: what the margin redraw needs of that frame.
+    pub margin: SpecMargin,
+}
+
+/// What the margin redraw (`crate::margin_draw`) reads of a speculative frame.
+pub struct SpecMargin {
+    /// The OAM that drew the frame (the shadow's OAM before its last speculative frame ran), for the
+    /// wrapped-copy check.
     pub oam: Box<[u8; 256]>,
-    /// The OAM index that won each dot of that frame, when `margin` was asked for.
+    /// The OAM index that won each dot of the frame, when `margin` was asked for.
     pub sprite_ids: Option<Vec<u8>>,
-    /// The background colour under each dot of that frame, when `margin` was asked for.
+    /// The background colour under each dot of the frame, when `margin` was asked for.
     pub bg_under: Vec<u8>,
 }
 
@@ -92,6 +98,9 @@ impl Speculator {
     /// `real` is only read. `None` when a snapshot cannot be taken or
     /// loaded, or a speculative frame did not complete; the caller then
     /// shows the real frame.
+    // The run-ahead frame count, the sizes and the three picture options are all genuinely separate
+    // inputs of one call from one place; a struct for them would only rename the arguments.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &mut self,
         real: &EmuStepper,
@@ -150,9 +159,11 @@ impl Speculator {
             hd_mode7: hd_mode7_frame(shadow, &self.sink, &rgba),
             line_palettes: self.sink.line_palettes().to_vec(),
             rgba,
-            oam,
-            sprite_ids: self.sink.sprite_ids().map(<[u8]>::to_vec),
-            bg_under: shadow.bg_under().to_vec(),
+            margin: SpecMargin {
+                oam,
+                sprite_ids: self.sink.sprite_ids().map(<[u8]>::to_vec),
+                bg_under: shadow.bg_under().to_vec(),
+            },
         })
     }
 }
