@@ -24,8 +24,10 @@
 //! container (`rf_state::Container`), not a second format. The region to tag
 //! table below is a copy of `retroforge::save_state`'s `REGION_TAGS`: the app
 //! crate cannot be a dependency of the harness, and `rf-nes` may not name
-//! chunk tags. The two must stay in step; a test in this crate's integration
-//! tests loads the bundle state back through the app's own loader.
+//! chunk tags (`rf-state` cannot name `rf-nes` and `rf-nes` cannot name
+//! `rf-state`, so no lower crate can host the table either). The two must stay
+//! in step; `crates/retroforge/tests/w36_05_bundle_state.rs` loads a bundle
+//! state back through the app's own loader.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

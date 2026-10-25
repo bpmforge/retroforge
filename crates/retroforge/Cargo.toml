@@ -71,6 +71,10 @@ rf-debugger = { path = "../rf-debugger" }
 # both the core's regions and rf-state's chunks in one place.
 rf-snes = { path = "../rf-snes" }
 rf-profiles = { path = "../rf-profiles" }
+# rf-rebuild: the code atlas's cache-key constants and, since W36-05, the
+# recipe matcher (the shell is the layer that pairs a recipe with the atlas
+# it installs). Core layer crate, so scripts/validate-arch.sh allows the edge.
+rf-rebuild = { path = "../rf-rebuild" }
 # rf-plugin-sdk: the Lua script host (ticket W4-04). The shell owns the
 # REPL panel and the capability/ledger surfaces; the SDK owns the sandbox.
 rf-plugin-sdk = { path = "../rf-plugin-sdk" }
@@ -138,6 +142,9 @@ serde = { version = "1", features = ["derive"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
 
 [dev-dependencies]
+# rf-harness: W36-05's SMB acceptance drives the lockstep checker, and the
+# repro-bundle test loads its `.rfstate` through this crate's own loader.
+rf-harness = { path = "../rf-harness" }
 
 # egui_kittest: the headless UI-test harness for ticket W4-09's CI smoke
 # flow. Same repo and release train as egui itself (emilk/egui), published
