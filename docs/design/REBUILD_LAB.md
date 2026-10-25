@@ -79,6 +79,19 @@ Rebuild Player Guide). So R1 splits the roles into tiers that share one IR:
   Output stays local and gitignored; it is never committed for a commercial
   game. Shipped Rust is only code we own (tier 3 replacement functions).
 
+**W36-03 as built (2026-10-25):** the block executor is the interpreter with
+a map. Per instruction it resolves `pc` to a PRG offset and an atlas node and
+runs the core's own cycle-exact instruction code, so every bus cycle, dummy
+read and interrupt poll is identical by construction; no node means plain
+interpreter fallback. The semantic IR (explicit flags, ALU ops) and the Rust
+emitter move to W36-12, whose JIT is their first executing consumer.
+
+**Known tension, undecided:** a faster tier (W37-02's 3x, the guide's
+"3 to 5 times") needs compiled code to run CPU-only while the PPU and APU
+catch up at hardware accesses (sync points). The NES core ticks devices on
+every bus cycle, so that is a scheduling change, not an executor feature. It
+will be decided once the lockstep checker (W36-04) can prove it.
+
 Speed is not the goal (the interpreter already runs far above real time);
 named, hookable, replaceable functions and checking real compiled code in
 lockstep are.
@@ -156,7 +169,7 @@ lockstep are.
 | W36-00 | This design doc + D-024..D-026 + NON_GOALS amendment | Merged; rulings cited |
 | W36-01 | Coverage recorder (NES) + coverage view in debugger (SNES recording moves to W36-08) | SMB 1-1 recording lists every executed address; zero cost when off (bench) |
 | W36-02 | `rf-rebuild` crate: code atlas + superset decode + per-ROM cache | SMB atlas covers 100% of recorded code; unseen bytes decoded without crash |
-| W36-03 | 6502 IR + block executor + interpreter fallback (SMB cart, mapper 66: no standalone NROM dump on hand) | SMB boots and plays through the rebuilt path; fallback rate reported |
+| W36-03 | Block executor over the atlas + interpreter fallback (SMB cart, mapper 66: no standalone NROM dump on hand) | SMB boots and plays through the rebuilt path; fallback rate reported |
 | W36-04 | Lockstep checker + repro bundles | SMB 1-1 to 8-4 replay, zero divergence; fallback rate reported |
 | W36-05 | Function hooks (Lua + Rust), recipe format with byte-hash matching | A hook mod changes one behaviour; recipe survives a relocated function |
 | W36-06 | First Super Enhanced mod: SMB live enemies at 32:9 | Enemies stay active in margins; original mode byte-identical |
