@@ -21,6 +21,7 @@ pub mod core;
 pub mod cpu;
 pub mod mappers;
 pub mod ppu;
+pub mod rebuild;
 pub mod state;
 pub mod system;
 pub mod trace;

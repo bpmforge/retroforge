@@ -28,6 +28,7 @@
 //! Do not add public API here without a ticket in plan.json.
 
 mod accuracy;
+pub mod atlas;
 mod blargg;
 pub mod blargg_evidence;
 mod fetch;
