@@ -1,6 +1,8 @@
 //! The lockstep checker (ticket W36-04; `docs/design/REBUILD_LAB.md` section
 //! 5, step 4): two NES cores fed identical input, one with Rebuild on (an
-//! atlas installed) and one plain, compared after every frame.
+//! atlas installed) and one plain, compared after every frame. The engine is
+//! generic over [`LockstepMachine`]; this module instantiates it for the NES
+//! ([`run`]) and `crate::lockstep_snes` for the SNES (W36-08b).
 //!
 //! Per frame: CPU registers, cycle and frame counters, WRAM, nametable VRAM
 //! (plus CHR-RAM when the cartridge has it), OAM, palette RAM, PRG-RAM, and
@@ -72,13 +74,13 @@ pub enum Side {
 /// It exists so a test can set up state identically on both cores (a level
 /// to start in) or inject a difference on one; it must be deterministic (the
 /// investigation re-run calls it again for the same frames).
-pub type BeforeFrame<'a> = &'a mut dyn FnMut(u32, Side, &mut NesCore);
+pub type BeforeFrame<'a, M = NesCore> = &'a mut dyn FnMut(u32, Side, &mut M);
 
-fn apply_hook(
-    hook: &mut Option<BeforeFrame<'_>>,
+fn apply_hook<M>(
+    hook: &mut Option<BeforeFrame<'_, M>>,
     frame: u32,
-    plain: &mut NesCore,
-    rebuilt: &mut NesCore,
+    plain: &mut M,
+    rebuilt: &mut M,
 ) {
     if let Some(h) = hook.as_deref_mut() {
         h(frame, Side::Plain, plain);
@@ -86,7 +88,7 @@ fn apply_hook(
     }
 }
 
-pub struct Options<'a> {
+pub struct Options<'a, M = NesCore> {
     /// Steps the rebuilt core's trace ring keeps (rounded up to 2^n).
     pub trace_len: usize,
     /// Input frames before the diverging one that go in the bundle.
@@ -95,7 +97,7 @@ pub struct Options<'a> {
     pub fine: bool,
     /// Where to write the repro bundle on divergence (`None`: no bundle).
     pub bundle_dir: Option<PathBuf>,
-    pub before_frame: Option<BeforeFrame<'a>>,
+    pub before_frame: Option<BeforeFrame<'a, M>>,
     /// Atlas function ids to hook on the rebuilt core (ticket W36-05); the
     /// plain core never has hooks.
     pub function_hooks: Vec<u32>,
@@ -108,7 +110,7 @@ pub struct Options<'a> {
 /// See [`Options::hook_sink`].
 pub type HookSinkFactory<'a> = Box<dyn FnMut() -> Box<dyn CoreSink> + 'a>;
 
-impl Default for Options<'_> {
+impl<M> Default for Options<'_, M> {
     fn default() -> Self {
         Self {
             trace_len: 256,
@@ -140,9 +142,10 @@ pub struct FineDivergence {
     /// 0-based index of the instruction within the frame after which the
     /// cores differ.
     pub instruction: u32,
-    /// `pc` of both cores before that instruction ran (the plain core's;
-    /// the cores agreed up to here).
-    pub pc_before: u16,
+    /// Program counter of both cores before that instruction ran (the plain
+    /// core's; the cores agreed up to here). On the SNES it is the 24-bit
+    /// `PBR:PC`.
+    pub pc_before: u32,
     pub fields: Vec<FieldDiff>,
 }
 
@@ -176,6 +179,8 @@ pub struct Report {
 #[derive(Debug)]
 pub enum LockstepError {
     Rom(NesLoadError),
+    /// The SNES cartridge image was refused (rf-cart's diagnostic).
+    SnesRom(String),
     Atlas(String),
 }
 
@@ -183,6 +188,7 @@ impl std::fmt::Display for LockstepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rom(e) => write!(f, "ROM did not load: {e:?}"),
+            Self::SnesRom(e) => write!(f, "ROM did not load: {e}"),
             Self::Atlas(e) => write!(f, "atlas rejected: {e}"),
         }
     }
@@ -191,9 +197,9 @@ impl std::fmt::Display for LockstepError {
 impl std::error::Error for LockstepError {}
 
 /// FNV-1a over what a frame put on the sinks.
-struct HashSink<'a> {
-    video: u64,
-    audio: u64,
+pub(crate) struct HashSink<'a> {
+    pub(crate) video: u64,
+    pub(crate) audio: u64,
     /// The rebuilt core's hook sink, if any (W36-05).
     hooks: Option<&'a mut dyn CoreSink>,
 }
@@ -263,36 +269,55 @@ impl CoreSink for NullSink<'_> {
     }
 }
 
-fn regs(core: &NesCore) -> Mos6502Regs {
-    match core.state_view().cpu_regs {
-        CpuRegs::Mos6502(r) => r,
-        _ => Mos6502Regs::default(),
-    }
+/// What a frame put on the video and audio sinks, as FNV hashes.
+#[derive(Clone, Copy)]
+pub(crate) struct Hashes {
+    pub(crate) video: u64,
+    pub(crate) audio: u64,
 }
 
-fn power_on(raw: &[u8]) -> Result<NesCore, LockstepError> {
-    let mut core = NesCore::from_ines_bytes(raw).map_err(LockstepError::Rom)?;
-    core.reset(ResetKind::Hard);
-    Ok(core)
+/// One executed step of the rebuilt core as the bundle prints it.
+pub(crate) type TraceLine = rf_nes::rebuild::TraceEntry;
+
+/// The console-specific half of the checker: how to build a core, feed it,
+/// compare it and serialise it. Everything else (the frame loop, the
+/// instruction-level re-run, the bundle) is shared.
+pub(crate) trait LockstepMachine: EmulatorCore + Sized {
+    /// Console word for the bundle README.
+    const CONSOLE: &'static str;
+    /// Whether trace lines carry a bank and a decode mode.
+    const BANKED: bool;
+    /// Instructions the fine pass may run in one frame before giving up (a
+    /// bound, not a target).
+    const FINE_STEP_LIMIT: u32;
+
+    /// A core at power-on for this image.
+    fn power_on(raw: &[u8]) -> Result<Self, LockstepError>;
+    /// Install `atlas`, the trace ring and the hooks on the rebuilt core.
+    fn install(
+        &mut self,
+        atlas: &Atlas,
+        trace_len: usize,
+        hook_ids: &[u32],
+    ) -> Result<(), LockstepError>;
+    /// Latch `input` into the controller ports.
+    fn feed(&mut self, input: &InputFrame);
+    /// Program counter for the fine pass's report.
+    fn pc(&self) -> u32;
+    /// Registers, cycle counter and work RAM: what the fine pass checks
+    /// after every instruction.
+    fn compare_cpu(plain: &Self, rebuilt: &Self) -> Vec<FieldDiff>;
+    /// Everything compared once a frame ends.
+    fn compare_frame(plain: &Self, rebuilt: &Self, hp: Hashes, hr: Hashes) -> Vec<FieldDiff>;
+    /// The shipped `.rfstate` bytes at a frame boundary.
+    fn snapshot(&self, raw: &[u8]) -> Result<Vec<u8>, String>;
+    fn wram(&self) -> Vec<u8>;
+    fn trace(&self) -> Vec<TraceLine>;
+    /// Normalised ROM hash for the README.
+    fn rom_sha256(raw: &[u8]) -> String;
 }
 
-fn pair(
-    raw: &[u8],
-    atlas: &Atlas,
-    trace_len: usize,
-    hook_ids: &[u32],
-) -> Result<(NesCore, NesCore), LockstepError> {
-    let plain = power_on(raw)?;
-    let mut rebuilt = power_on(raw)?;
-    rebuilt
-        .set_rebuild(Some(atlas.clone()))
-        .map_err(|e| LockstepError::Atlas(format!("{e:?}")))?;
-    rebuilt.set_rebuild_trace(trace_len);
-    rebuilt.set_function_hooks(hook_ids);
-    Ok((plain, rebuilt))
-}
-
-fn scalar(
+pub(crate) fn scalar(
     out: &mut Vec<FieldDiff>,
     field: &'static str,
     plain: impl Into<u64>,
@@ -309,7 +334,13 @@ fn scalar(
     }
 }
 
-fn bytes(out: &mut Vec<FieldDiff>, field: &'static str, plain: &[u8], rebuilt: &[u8]) {
+pub(crate) fn bytes(out: &mut Vec<FieldDiff>, field: &'static str, plain: &[u8], rebuilt: &[u8]) {
+    // Slice equality is a memcmp; the position search below is a per-byte
+    // loop, which the 128 KiB SNES work RAM cannot afford after every
+    // instruction of the fine pass.
+    if plain == rebuilt {
+        return;
+    }
     if let Some((i, (&p, &r))) = plain
         .iter()
         .zip(rebuilt)
@@ -332,47 +363,16 @@ fn bytes(out: &mut Vec<FieldDiff>, field: &'static str, plain: &[u8], rebuilt: &
     }
 }
 
-/// CPU registers, counters and WRAM: the part the fine pass checks after
-/// every instruction.
-fn compare_cpu(plain: &NesCore, rebuilt: &NesCore) -> Vec<FieldDiff> {
-    let (a, b) = (regs(plain), regs(rebuilt));
-    let mut out = Vec::new();
-    scalar(&mut out, "cpu.a", a.a, b.a);
-    scalar(&mut out, "cpu.x", a.x, b.x);
-    scalar(&mut out, "cpu.y", a.y, b.y);
-    scalar(&mut out, "cpu.s", a.s, b.s);
-    scalar(&mut out, "cpu.p", a.p, b.p);
-    scalar(&mut out, "cpu.pc", a.pc, b.pc);
-    scalar(
-        &mut out,
-        "cycles",
-        plain.bus().master_cycle(),
-        rebuilt.bus().master_cycle(),
-    );
-    bytes(&mut out, "wram", plain.bus().ram(), rebuilt.bus().ram());
-    out
-}
-
-/// Everything compared once a frame ends.
-fn compare_frame(plain: &NesCore, rebuilt: &NesCore, hp: Hashes, hr: Hashes) -> Vec<FieldDiff> {
-    let mut out = compare_cpu(plain, rebuilt);
-    scalar(
-        &mut out,
-        "frame_count",
-        plain.bus().frame_count(),
-        rebuilt.bus().frame_count(),
-    );
-    let (pb, rb) = (plain.bus(), rebuilt.bus());
-    bytes(&mut out, "vram", pb.vram(), rb.vram());
-    if pb.chr_is_ram() || rb.chr_is_ram() {
-        bytes(&mut out, "chr_ram", pb.chr(), rb.chr());
-    }
-    bytes(&mut out, "oam", pb.oam(), rb.oam());
-    bytes(&mut out, "palette", pb.palette(), rb.palette());
-    bytes(&mut out, "prg_ram", pb.prg_ram(), rb.prg_ram());
-    scalar(&mut out, "video_hash", hp.video, hr.video);
-    scalar(&mut out, "audio_hash", hp.audio, hr.audio);
-    out
+fn pair<M: LockstepMachine>(
+    raw: &[u8],
+    atlas: &Atlas,
+    trace_len: usize,
+    hook_ids: &[u32],
+) -> Result<(M, M), LockstepError> {
+    let plain = M::power_on(raw)?;
+    let mut rebuilt = M::power_on(raw)?;
+    rebuilt.install(atlas, trace_len, hook_ids)?;
+    Ok((plain, rebuilt))
 }
 
 /// Lend the hook sink for one pass. A function rather than `as_deref_mut`
@@ -382,23 +382,18 @@ fn hooks_of(sink: &mut Option<Box<dyn CoreSink>>) -> Option<&mut dyn CoreSink> {
     sink.as_mut().map(|b| &mut **b as &mut dyn CoreSink)
 }
 
-/// What a frame put on the video and audio sinks, as FNV hashes.
-#[derive(Clone, Copy)]
-struct Hashes {
-    video: u64,
-    audio: u64,
-}
-
-fn run_pair_frame(
+fn run_pair_frame<M: LockstepMachine>(
     frame: u32,
     input: &InputFrame,
-    plain: &mut NesCore,
-    rebuilt: &mut NesCore,
-    hook: &mut Option<BeforeFrame<'_>>,
+    plain: &mut M,
+    rebuilt: &mut M,
+    hook: &mut Option<BeforeFrame<'_, M>>,
     rebuilt_hooks: Option<&mut dyn CoreSink>,
 ) -> (Hashes, Hashes) {
     apply_hook(hook, frame, plain, rebuilt);
     let (mut hp, mut hr) = (HashSink::new(None), HashSink::new(rebuilt_hooks));
+    plain.feed(input);
+    rebuilt.feed(input);
     plain.run_frame(input, &mut hp);
     rebuilt.run_frame(input, &mut hr);
     (
@@ -426,10 +421,19 @@ pub fn run(
     raw: &[u8],
     atlas: &Atlas,
     inputs: impl IntoIterator<Item = InputFrame>,
-    mut opts: Options<'_>,
+    opts: Options<'_, NesCore>,
+) -> Result<Report, LockstepError> {
+    run_machine::<NesCore>(raw, atlas, inputs, opts)
+}
+
+pub(crate) fn run_machine<M: LockstepMachine>(
+    raw: &[u8],
+    atlas: &Atlas,
+    inputs: impl IntoIterator<Item = InputFrame>,
+    mut opts: Options<'_, M>,
 ) -> Result<Report, LockstepError> {
     let inputs: Vec<InputFrame> = inputs.into_iter().collect();
-    let (mut plain, mut rebuilt) = pair(raw, atlas, opts.trace_len, &opts.function_hooks)?;
+    let (mut plain, mut rebuilt) = pair::<M>(raw, atlas, opts.trace_len, &opts.function_hooks)?;
     let mut hook_sink = opts.hook_sink.as_mut().map(|make| make());
     let mut frames_run = 0u32;
     let mut found: Option<(u32, Vec<FieldDiff>)> = None;
@@ -443,7 +447,7 @@ pub fn run(
             hooks_of(&mut hook_sink),
         );
         frames_run = frame + 1;
-        let diffs = compare_frame(&plain, &rebuilt, hp, hr);
+        let diffs = M::compare_frame(&plain, &rebuilt, hp, hr);
         if !diffs.is_empty() {
             found = Some((frame, diffs));
             break;
@@ -470,7 +474,7 @@ pub fn run(
         let inv = investigate(raw, atlas, &inputs, frame, &mut opts);
         divergence.fine = inv.fine.clone();
         if let Some(dir) = opts.bundle_dir.clone() {
-            let (files, errs) = write_bundle(&dir, raw, &inputs, &divergence, &inv, &opts);
+            let (files, errs) = write_bundle::<M>(&dir, raw, &inputs, &divergence, &inv, &opts);
             bundle_errors = errs;
             bundle = Some(BundleFiles { dir, files });
         }
@@ -490,17 +494,17 @@ struct Investigation {
     state: Result<Vec<u8>, String>,
     fine: Option<FineDivergence>,
     /// The rebuilt core's last executed steps at the point of divergence.
-    trace: Vec<(u16, TraceKind)>,
+    trace: Vec<TraceLine>,
     wram_plain: Vec<u8>,
     wram_rebuilt: Vec<u8>,
 }
 
-fn investigate(
+fn investigate<M: LockstepMachine>(
     raw: &[u8],
     atlas: &Atlas,
     inputs: &[InputFrame],
     frame: u32,
-    opts: &mut Options<'_>,
+    opts: &mut Options<'_, M>,
 ) -> Investigation {
     let empty = |msg: String| Investigation {
         state: Err(msg),
@@ -509,7 +513,7 @@ fn investigate(
         wram_plain: Vec::new(),
         wram_rebuilt: Vec::new(),
     };
-    let Ok((mut plain, mut rebuilt)) = pair(raw, atlas, opts.trace_len, &opts.function_hooks)
+    let Ok((mut plain, mut rebuilt)) = pair::<M>(raw, atlas, opts.trace_len, &opts.function_hooks)
     else {
         return empty("investigation re-run could not rebuild the cores".to_string());
     };
@@ -525,7 +529,7 @@ fn investigate(
             hooks_of(&mut hook_sink),
         );
     }
-    let state = snapshot(&plain, raw);
+    let state = plain.snapshot(raw);
     let mut fine = None;
     if let Some(input) = inputs.get(frame as usize) {
         if opts.fine {
@@ -542,44 +546,35 @@ fn investigate(
             );
         }
     }
-    let trace = rebuilt
-        .rebuild_trace()
-        .into_iter()
-        .map(|e| (e.cpu, e.kind))
-        .collect();
     Investigation {
         state,
         fine,
-        trace,
-        wram_plain: plain.bus().ram().to_vec(),
-        wram_rebuilt: rebuilt.bus().ram().to_vec(),
+        trace: rebuilt.trace(),
+        wram_plain: plain.wram(),
+        wram_rebuilt: rebuilt.wram(),
     }
 }
 
 /// Step both cores one instruction at a time through one frame; the first
 /// instruction after which registers, cycle count or WRAM differ is the
 /// answer. Law 8: the loop is a bounded `for`.
-fn fine_pass(
-    plain: &mut NesCore,
-    rebuilt: &mut NesCore,
+fn fine_pass<M: LockstepMachine>(
+    plain: &mut M,
+    rebuilt: &mut M,
     input: &InputFrame,
     rebuilt_hooks: Option<&mut dyn CoreSink>,
 ) -> Option<FineDivergence> {
-    for core in [&mut *plain, &mut *rebuilt] {
-        core.bus_mut()
-            .set_controller_buttons(0, input.ports[0] as u8);
-        core.bus_mut()
-            .set_controller_buttons(1, input.ports[1] as u8);
-    }
+    plain.feed(input);
+    rebuilt.feed(input);
     let mut plain_sink = NullSink { hooks: None };
     let mut rebuilt_sink = NullSink {
         hooks: rebuilt_hooks,
     };
-    for n in 0..FINE_STEP_LIMIT {
-        let pc_before = regs(plain).pc;
+    for n in 0..M::FINE_STEP_LIMIT {
+        let pc_before = plain.pc();
         let a = plain.step(Step::Instruction, &mut plain_sink);
         let b = rebuilt.step(Step::Instruction, &mut rebuilt_sink);
-        let mut fields = compare_cpu(plain, rebuilt);
+        let mut fields = M::compare_cpu(plain, rebuilt);
         if a.frame_complete != b.frame_complete {
             scalar(
                 &mut fields,
@@ -603,7 +598,7 @@ fn fine_pass(
 }
 
 #[derive(Default)]
-struct PayloadBuf(Vec<u8>);
+pub(crate) struct PayloadBuf(pub(crate) Vec<u8>);
 
 impl StateWriter for PayloadBuf {
     fn write_all(&mut self, buf: &[u8]) -> Result<(), StateError> {
@@ -612,29 +607,14 @@ impl StateWriter for PayloadBuf {
     }
 }
 
-/// The shipped `.rfstate` bytes of `core` (see the module doc). Only valid
-/// at a frame boundary, which is where the investigation takes it.
-fn snapshot(core: &NesCore, raw: &[u8]) -> Result<Vec<u8>, String> {
-    let sha = rf_cart::hash::identity_nes(raw).normalized.sha256;
+/// The 32-byte ROM hash a container header carries, from rf-cart's hex form.
+pub(crate) fn rom_hash_bytes(sha: &str) -> Result<[u8; 32], String> {
     let mut hash = [0u8; 32];
     for (i, slot) in hash.iter_mut().enumerate() {
         let pair = sha.get(i * 2..i * 2 + 2).ok_or("short rom hash")?;
         *slot = u8::from_str_radix(pair, 16).map_err(|e| e.to_string())?;
     }
-    let mut container = Container::new(CONSOLE_NES, hash, env!("CARGO_PKG_VERSION"), 0);
-    for (region, tag) in REGION_TAGS {
-        let mut payload = PayloadBuf::default();
-        core.bus()
-            .save_region(core.cpu(), region, &mut payload)
-            .map_err(|e| format!("{e:?}"))?;
-        let version = rf_state::tag_info(tag)
-            .ok_or_else(|| format!("tag {} not in the registry", String::from_utf8_lossy(&tag)))?
-            .current_version;
-        container
-            .add_chunk(tag, version, payload.0)
-            .map_err(|e| format!("{e:?}"))?;
-    }
-    container.encode().map_err(|e| format!("{e:?}"))
+    Ok(hash)
 }
 
 fn put_file(dir: &Path, name: &str, data: &[u8], acc: &mut (Vec<String>, Vec<String>)) {
@@ -663,21 +643,20 @@ fn describe(fields: &[FieldDiff]) -> String {
 /// - `inputs.txt`: `frame port0 port1` (hex) for the tail and the diverging
 ///   frame (marked `<-- diverging`);
 /// - `trace.txt`: the rebuilt core's last executed steps, oldest first, with
-///   atlas function ids and entry addresses;
+///   atlas function ids (and, on the SNES, bank and decode mode);
 /// - `diff.txt`: which fields differed, first differing offsets, the fine
 ///   pass result;
 /// - `wram_plain.bin`, `wram_rebuilt.bin`: work RAM at the end of the pass;
 /// - `README.txt`.
 ///
-/// No PRG/CHR ROM bytes. Returns the files written and the parts that
-/// failed.
-fn write_bundle(
+/// No ROM bytes. Returns the files written and the parts that failed.
+fn write_bundle<M: LockstepMachine>(
     dir: &Path,
     raw: &[u8],
     inputs: &[InputFrame],
     d: &Divergence,
     inv: &Investigation,
-    opts: &Options<'_>,
+    opts: &Options<'_, M>,
 ) -> (Vec<String>, Vec<String>) {
     let files = Vec::new();
     let errors = Vec::new();
@@ -712,14 +691,19 @@ fn write_bundle(
     put("inputs.txt", text.as_bytes());
 
     let mut text = String::from("rebuilt core, oldest first: cpu_addr kind [function entry_cpu]\n");
-    for (cpu, kind) in &inv.trace {
-        let _ = match kind {
-            TraceKind::Interrupt => writeln!(text, "{cpu:04x} interrupt-entry"),
-            TraceKind::Fallback => writeln!(text, "{cpu:04x} fallback"),
-            TraceKind::WidthMismatch => writeln!(text, "{cpu:04x} width-mismatch"),
+    for e in &inv.trace {
+        let at = if M::BANKED {
+            format!("{:02x}:{:04x} m{}", e.bank, e.cpu, e.mode)
+        } else {
+            format!("{:04x}", e.cpu)
+        };
+        let _ = match &e.kind {
+            TraceKind::Interrupt => writeln!(text, "{at} interrupt-entry"),
+            TraceKind::Fallback => writeln!(text, "{at} fallback"),
+            TraceKind::WidthMismatch => writeln!(text, "{at} width-mismatch"),
             TraceKind::Atlas { function, prov } => match function {
-                Some(f) => writeln!(text, "{cpu:04x} atlas({prov:?}) function {f}"),
-                None => writeln!(text, "{cpu:04x} atlas({prov:?}) no-function"),
+                Some(f) => writeln!(text, "{at} atlas({prov:?}) function {f}"),
+                None => writeln!(text, "{at} atlas({prov:?}) no-function"),
             },
         };
     }
@@ -751,7 +735,7 @@ fn write_bundle(
         put("wram_rebuilt.bin", &inv.wram_rebuilt);
     }
     let readme = format!(
-        "RetroForge lockstep repro bundle (ticket W36-04)\n\
+        "RetroForge lockstep repro bundle (ticket W36-04, {})\n\
          ROM sha256 (normalised): {}\n\
          Diverging frame: {} (0-based, counted from power-on, Hard reset)\n\n\
          plain_state_before_frame.rfstate  the plain core at the start of that frame (.rfstate)\n\
@@ -762,7 +746,8 @@ fn write_bundle(
          Replay: load the state in the app against the same ROM, feed inputs.txt from the\n\
          diverging frame with an atlas installed, and compare against a plain core.\n\
          No ROM bytes are in this bundle.\n",
-        rf_cart::hash::identity_nes(raw).normalized.sha256,
+        M::CONSOLE,
+        M::rom_sha256(raw),
         d.frame,
         opts.input_tail,
         opts.trace_len.next_power_of_two(),
@@ -772,4 +757,125 @@ fn write_bundle(
         files_errors.1.push(format!("savestate: {e}"));
     }
     files_errors
+}
+
+// ---- the NES instantiation -----------------------------------------------------------------
+
+fn regs(core: &NesCore) -> Mos6502Regs {
+    match core.state_view().cpu_regs {
+        CpuRegs::Mos6502(r) => r,
+        _ => Mos6502Regs::default(),
+    }
+}
+
+impl LockstepMachine for NesCore {
+    const CONSOLE: &'static str = "NES";
+    const BANKED: bool = false;
+    const FINE_STEP_LIMIT: u32 = FINE_STEP_LIMIT;
+
+    fn power_on(raw: &[u8]) -> Result<Self, LockstepError> {
+        let mut core = NesCore::from_ines_bytes(raw).map_err(LockstepError::Rom)?;
+        core.reset(ResetKind::Hard);
+        Ok(core)
+    }
+
+    fn install(
+        &mut self,
+        atlas: &Atlas,
+        trace_len: usize,
+        hook_ids: &[u32],
+    ) -> Result<(), LockstepError> {
+        self.set_rebuild(Some(atlas.clone()))
+            .map_err(|e| LockstepError::Atlas(format!("{e:?}")))?;
+        self.set_rebuild_trace(trace_len);
+        self.set_function_hooks(hook_ids);
+        Ok(())
+    }
+
+    fn feed(&mut self, input: &InputFrame) {
+        self.bus_mut()
+            .set_controller_buttons(0, input.ports[0] as u8);
+        self.bus_mut()
+            .set_controller_buttons(1, input.ports[1] as u8);
+    }
+
+    fn pc(&self) -> u32 {
+        u32::from(regs(self).pc)
+    }
+
+    /// CPU registers, counters and WRAM: the part the fine pass checks after
+    /// every instruction.
+    fn compare_cpu(plain: &Self, rebuilt: &Self) -> Vec<FieldDiff> {
+        let (a, b) = (regs(plain), regs(rebuilt));
+        let mut out = Vec::new();
+        scalar(&mut out, "cpu.a", a.a, b.a);
+        scalar(&mut out, "cpu.x", a.x, b.x);
+        scalar(&mut out, "cpu.y", a.y, b.y);
+        scalar(&mut out, "cpu.s", a.s, b.s);
+        scalar(&mut out, "cpu.p", a.p, b.p);
+        scalar(&mut out, "cpu.pc", a.pc, b.pc);
+        scalar(
+            &mut out,
+            "cycles",
+            plain.bus().master_cycle(),
+            rebuilt.bus().master_cycle(),
+        );
+        bytes(&mut out, "wram", plain.bus().ram(), rebuilt.bus().ram());
+        out
+    }
+
+    fn compare_frame(plain: &Self, rebuilt: &Self, hp: Hashes, hr: Hashes) -> Vec<FieldDiff> {
+        let mut out = Self::compare_cpu(plain, rebuilt);
+        scalar(
+            &mut out,
+            "frame_count",
+            plain.bus().frame_count(),
+            rebuilt.bus().frame_count(),
+        );
+        let (pb, rb) = (plain.bus(), rebuilt.bus());
+        bytes(&mut out, "vram", pb.vram(), rb.vram());
+        if pb.chr_is_ram() || rb.chr_is_ram() {
+            bytes(&mut out, "chr_ram", pb.chr(), rb.chr());
+        }
+        bytes(&mut out, "oam", pb.oam(), rb.oam());
+        bytes(&mut out, "palette", pb.palette(), rb.palette());
+        bytes(&mut out, "prg_ram", pb.prg_ram(), rb.prg_ram());
+        scalar(&mut out, "video_hash", hp.video, hr.video);
+        scalar(&mut out, "audio_hash", hp.audio, hr.audio);
+        out
+    }
+
+    /// The shipped `.rfstate` bytes of the core (see the module doc). Only
+    /// valid at a frame boundary, which is where the investigation takes it.
+    fn snapshot(&self, raw: &[u8]) -> Result<Vec<u8>, String> {
+        let hash = rom_hash_bytes(&rf_cart::hash::identity_nes(raw).normalized.sha256)?;
+        let mut container = Container::new(CONSOLE_NES, hash, env!("CARGO_PKG_VERSION"), 0);
+        for (region, tag) in REGION_TAGS {
+            let mut payload = PayloadBuf::default();
+            self.bus()
+                .save_region(self.cpu(), region, &mut payload)
+                .map_err(|e| format!("{e:?}"))?;
+            let version = rf_state::tag_info(tag)
+                .ok_or_else(|| {
+                    format!("tag {} not in the registry", String::from_utf8_lossy(&tag))
+                })?
+                .current_version;
+            container
+                .add_chunk(tag, version, payload.0)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        container.encode().map_err(|e| format!("{e:?}"))
+    }
+
+    fn wram(&self) -> Vec<u8> {
+        self.bus().ram().to_vec()
+    }
+
+    fn trace(&self) -> Vec<TraceLine> {
+        self.rebuild_trace()
+    }
+
+    fn rom_sha256(raw: &[u8]) -> String {
+        rf_cart::hash::identity_nes(raw).normalized.sha256
+    }
 }
