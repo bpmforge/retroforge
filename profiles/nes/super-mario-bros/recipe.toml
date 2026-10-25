@@ -16,3 +16,104 @@ addr = 0x075a
 width = 1
 name = "lives"
 source = "profiles/nes/super-mario-bros/profile.toml [[memory_map]] lives"
+
+# ---- W36-06: live enemies in the widescreen margins -----------------------
+# Method and findings: docs/research/W36-06-live-enemies.md. The RAM rows come
+# from the Data Crystal SMB RAM map (the profile's own source), each one
+# checked by watching it in 1-1 play; the function rows were found by watching
+# the enemy slot flag bytes (who sets and who clears them) and mapping that PC
+# to the atlas function containing it.
+
+[[function]]
+name = "enemy_activate"
+shape_hash = "0x70c7c60b0e5956b0"
+exact_hash = "0xdf9653d8fda3490d"
+address_hint = 0xc047
+hooks = ["entry"]
+source = "observed: the PC that sets an enemy slot flag when a level-data object enters the right-hand activation window (RAM map $000F-$0013 enemy flag), in 1-1, 1-2 and 4-1 play"
+
+[[function]]
+name = "enemy_update"
+shape_hash = "0x4531d0d9add41789"
+exact_hash = "0x6c18ff487cf10e09"
+address_hint = 0xc8e0
+hooks = ["entry"]
+source = "observed: the per-slot enemy routine whose tail clears the slot flag when an enemy is far outside the screen (RAM map $000F-$0013 enemy flag), in 1-1, 1-2 and 3-1 play"
+
+[[ram]]
+addr = 0x000f
+width = 5
+name = "enemy_flag"
+source = "observed: 0 free, 1 active, set and cleared as enemies appear and leave in 1-1 play; Data Crystal SMB RAM map Enemy_Flag"
+
+[[ram]]
+addr = 0x0016
+width = 5
+name = "enemy_id"
+source = "observed: 0x06 for the walking mushroom enemies of 1-1; Data Crystal SMB RAM map Enemy_ID"
+
+[[ram]]
+addr = 0x001e
+width = 5
+name = "enemy_state"
+source = "observed: per-slot behaviour state, nonzero while squashed or falling; Data Crystal SMB RAM map Enemy_State"
+
+[[ram]]
+addr = 0x006e
+width = 5
+name = "enemy_x_page"
+source = "observed: level page of each enemy, with enemy_x gives the level x; Data Crystal SMB RAM map Enemy_PageLoc"
+
+[[ram]]
+addr = 0x0087
+width = 5
+name = "enemy_x"
+source = "observed: low byte of the enemy's level x, falls as a walker heads left; Data Crystal SMB RAM map Enemy_X_Position"
+
+[[ram]]
+addr = 0x071a
+width = 1
+name = "screen_left_page"
+source = "observed: page of the screen's left edge, with screen_left_x equals the camera; Data Crystal SMB RAM map ScreenLeft_PageLoc"
+
+[[ram]]
+addr = 0x071c
+width = 1
+name = "screen_left_x"
+source = "observed: low byte of the screen's left edge, the camera, advances as Mario scrolls the level; Data Crystal SMB RAM map ScreenLeft_X_Pos"
+
+[[ram]]
+addr = 0x071b
+width = 1
+name = "screen_right_page"
+source = "observed: page of the screen's right edge, one screen right of screen_left_page; Data Crystal SMB RAM map ScreenRight_PageLoc"
+
+[[ram]]
+addr = 0x071d
+width = 1
+name = "screen_right_x"
+source = "observed: low byte of the right edge, 255 past screen_left_x; Data Crystal SMB RAM map ScreenRight_X_Pos"
+
+[[patch]]
+name = "activation-lead"
+mod = "live-enemies"
+function = "enemy_activate"
+offset = 193
+value = 0xf0
+source = "observed: the immediate added to the screen's right edge to get the distance at which level objects come alive (enemies first seen about 48 px past the edge in 1-1 play); widened to about 240 px"
+
+[[patch]]
+name = "cull-right"
+mod = "live-enemies"
+function = "enemy_update"
+offset = 73
+value = 0xff
+source = "observed: the immediate added to the right edge in the 'too far right, remove' test (enemies vanish about 72 px past the edge in 1-1 play); widened to the largest a byte can hold, still beyond the activation lead"
+
+[[patch]]
+name = "cull-left"
+mod = "live-enemies"
+function = "enemy_update"
+offset = 59
+value = 0xff
+source = "observed: the immediate subtracted from the left edge in the 'too far left, remove' test (enemies removed about 74 px left of the screen in 1-1, 1-2, 2-1, 3-1 and 5-1 play); widened to the largest a byte can hold"

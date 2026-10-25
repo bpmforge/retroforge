@@ -27,6 +27,16 @@
 //! width = 1
 //! name = "lives"
 //! source = "profile.toml memory_map: lives"                   # required
+//!
+//! # A mod: bytes of a listed function to replace (ticket W36-06). Only the
+//! # NEW value is stored; the function's `exact_hash` vouches for the old one.
+//! [[patch]]
+//! name = "spawn-lead"                 # label for reports
+//! mod = "live-enemies"                # rows of one mod apply together
+//! function = "tick"                   # a [[function]] with an exact_hash
+//! offset = 41                         # index into the function's byte stream
+//! value = 0xF0
+//! source = "observed: ..."            # required
 //! ```
 //!
 //! Unknown keys are an error (the format is new and small; a typo that
@@ -35,7 +45,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use rf_rebuild::{HookPoints, RamMeaning, Recipe, RecipeFunction};
+use rf_rebuild::{HookPoints, PatchRow, RamMeaning, Recipe, RecipeFunction};
 use serde::Deserialize;
 
 /// The recipe format this build reads and writes.
@@ -67,6 +77,13 @@ pub enum RecipeError {
         value: String,
     },
     DuplicateFunction(String),
+    /// A `[[patch]]` that names no listed function, or one without an
+    /// `exact_hash` (the hash is what vouches for the byte being replaced).
+    BadPatch {
+        patch: String,
+        why: &'static str,
+    },
+    DuplicatePatch(String),
 }
 
 impl std::fmt::Display for RecipeError {
@@ -95,6 +112,8 @@ impl std::fmt::Display for RecipeError {
                 "function `{function}`: hook point `{value}` is neither \"entry\" nor \"exit\""
             ),
             Self::DuplicateFunction(n) => write!(f, "function `{n}` appears twice"),
+            Self::BadPatch { patch, why } => write!(f, "[[patch]] `{patch}`: {why}"),
+            Self::DuplicatePatch(n) => write!(f, "patch `{n}` appears twice"),
         }
     }
 }
@@ -109,6 +128,8 @@ struct RecipeDoc {
     function: Vec<FunctionRow>,
     #[serde(default)]
     ram: Vec<RamRow>,
+    #[serde(default)]
+    patch: Vec<PatchRowDoc>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +160,18 @@ struct RamRow {
     #[serde(default = "one")]
     width: u8,
     name: String,
+    source: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchRowDoc {
+    name: String,
+    #[serde(rename = "mod")]
+    mod_name: String,
+    function: String,
+    offset: u32,
+    value: u8,
     source: Option<String>,
 }
 
@@ -227,11 +260,39 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
             name: row.name,
         });
     }
+    let mut patches: Vec<PatchRow> = Vec::new();
+    for row in doc.patch {
+        if patches.iter().any(|p| p.name == row.name) {
+            return Err(RecipeError::DuplicatePatch(row.name));
+        }
+        let bad = |why| RecipeError::BadPatch {
+            patch: row.name.clone(),
+            why,
+        };
+        match functions.iter().find(|f| f.name == row.function) {
+            None => return Err(bad("its function is not listed in this recipe")),
+            Some(f) if f.exact_hash.is_none() => {
+                return Err(bad(
+                    "its function has no exact_hash to vouch for the old byte",
+                ))
+            }
+            Some(_) => {}
+        }
+        patches.push(PatchRow {
+            source: source_of("patch", &row.name, row.source)?,
+            name: row.name,
+            mod_name: row.mod_name,
+            function: row.function,
+            offset: row.offset,
+            value: row.value,
+        });
+    }
     Ok(Recipe {
         id: doc.recipe.id,
         engine: doc.recipe.engine,
         functions,
         ram,
+        patches,
     })
 }
 
@@ -300,6 +361,18 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
             quote(&r.source)
         );
     }
+    for p in &recipe.patches {
+        let _ = writeln!(
+            out,
+            "\n[[patch]]\nname = {}\nmod = {}\nfunction = {}\noffset = {}\nvalue = {:#04x}\nsource = {}",
+            quote(&p.name),
+            quote(&p.mod_name),
+            quote(&p.function),
+            p.offset,
+            p.value,
+            quote(&p.source)
+        );
+    }
     out
 }
 
@@ -330,6 +403,14 @@ mod tests {
         addr = 0x075A
         name = "lives"
         source = "profile memory_map"
+
+        [[patch]]
+        name = "lead"
+        mod = "wide"
+        function = "tick"
+        offset = 41
+        value = 0xF0
+        source = "observed: test"
     "#;
 
     #[test]
@@ -343,6 +424,13 @@ mod tests {
         assert_eq!(r.functions[1].exact_hash, None);
         assert!(r.functions[1].hooks.entry && r.functions[1].hooks.exit);
         assert_eq!((r.ram[0].addr, r.ram[0].width), (0x75A, 1));
+        assert_eq!(r.patches.len(), 1);
+        let p = &r.patches[0];
+        assert_eq!(
+            (p.mod_name.as_str(), p.function.as_str(), p.offset, p.value),
+            ("wide", "tick", 41, 0xF0)
+        );
+        assert_eq!(r.mods(), ["wide"]);
     }
 
     #[test]
@@ -380,6 +468,34 @@ mod tests {
         ));
         assert!(matches!(
             with("name = \"lives\"", "name = \"lives\"\nbytes = 3"),
+            Err(RecipeError::Parse(_))
+        ));
+        // Patch rows: a function that is not listed, one with no exact hash
+        // (the draw row has none), a value that is not a byte, no source.
+        assert!(matches!(
+            with(
+                "function = \"tick\"\n        offset",
+                "function = \"nope\"\n        offset"
+            ),
+            Err(RecipeError::BadPatch { .. })
+        ));
+        assert!(matches!(
+            with(
+                "function = \"tick\"\n        offset",
+                "function = \"draw\"\n        offset"
+            ),
+            Err(RecipeError::BadPatch { .. })
+        ));
+        assert!(matches!(
+            with("value = 0xF0", "value = 256"),
+            Err(RecipeError::Parse(_))
+        ));
+        assert!(matches!(
+            with("source = \"observed: test\"", ""),
+            Err(RecipeError::MissingSource { table: "patch", .. })
+        ));
+        assert!(matches!(
+            with("name = \"lead\"", "name = \"lead\"\n        old = 1"),
             Err(RecipeError::Parse(_))
         ));
     }

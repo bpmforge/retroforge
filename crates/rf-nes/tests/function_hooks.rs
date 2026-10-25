@@ -359,6 +359,7 @@ fn a_real_6502_function_moved_and_repointed_keeps_its_shape_hash() {
         engine: "t".to_string(),
         functions: vec![row(&original)],
         ram: vec![],
+        patches: vec![],
     };
 
     let moved_atlas = atlas_for(&build(0x8300, 0xAD, 0x10));

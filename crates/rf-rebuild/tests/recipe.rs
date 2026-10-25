@@ -10,8 +10,8 @@ use rf_core_api::coverage::{
 };
 use rf_core_api::CodeAddr;
 use rf_rebuild::{
-    build_atlas, match_recipe, Atlas, AtlasError, Confidence, DecodeMode, Decoded, Flow,
-    HookPoints, Isa, Recipe, RecipeFunction, ATLAS_FORMAT_VERSION,
+    build_atlas, match_recipe, resolve_patches, Atlas, AtlasError, Confidence, DecodeMode, Decoded,
+    Flow, HookPoints, Isa, PatchRefusal, PatchRow, Recipe, RecipeFunction, ATLAS_FORMAT_VERSION,
 };
 
 struct Toy;
@@ -110,6 +110,7 @@ fn recipe(rows: Vec<RecipeFunction>) -> Recipe {
         engine: "toy".to_string(),
         functions: rows,
         ram: vec![],
+        patches: vec![],
     }
 }
 
@@ -207,4 +208,115 @@ fn the_v2_atlas_round_trips_its_hashes_and_a_v1_cache_entry_is_a_miss() {
     let mut v1 = bytes;
     v1[4..8].copy_from_slice(&1u32.to_le_bytes());
     assert_eq!(Atlas::from_bytes(&v1), Err(AtlasError::Version(1)));
+}
+
+fn patch(name: &str, function: &str, offset: u32, value: u8) -> PatchRow {
+    PatchRow {
+        name: name.to_string(),
+        mod_name: "m".to_string(),
+        function: function.to_string(),
+        offset,
+        value,
+        source: "test".to_string(),
+    }
+}
+
+fn patched_recipe(f: &rf_rebuild::Function, exact: bool, rows: Vec<PatchRow>) -> Recipe {
+    Recipe {
+        patches: rows,
+        ..recipe(vec![row("tick", f, exact, Some(f.entry_cpu))])
+    }
+}
+
+#[test]
+fn patch_rows_resolve_to_prg_offsets_in_the_stream_order() {
+    let mut img = vec![0u8; 0x1000];
+    put_fn(&mut img, 0x100, 0x0A);
+    let a = atlas_of(&img, &[0x100]);
+    let f = func_at(&a, 0x100).clone();
+    // Stream bytes: 0..3 load, 3..6 call, 6 return.
+    let r = patched_recipe(
+        &f,
+        true,
+        vec![
+            patch("first", "tick", 0, 0x1A),
+            patch("ret", "tick", 6, 0x04),
+        ],
+    );
+    let out = resolve_patches(&a, &r, "m").expect("resolves");
+    let got: Vec<(&str, u32, u8)> = out
+        .iter()
+        .map(|p| (p.name.as_str(), p.prg_offset, p.value))
+        .collect();
+    assert_eq!(got, [("first", 0x100, 0x1A), ("ret", 0x106, 0x04)]);
+}
+
+#[test]
+fn a_mod_is_refused_whole_for_every_way_a_row_can_fail() {
+    let mut img = vec![0u8; 0x1000];
+    put_fn(&mut img, 0x100, 0x0A);
+    let a = atlas_of(&img, &[0x100]);
+    let f = func_at(&a, 0x100).clone();
+    let ok = patch("ok", "tick", 1, 9);
+    let refuse = |r: &Recipe, atlas: &Atlas| resolve_patches(atlas, r, "m").unwrap_err();
+
+    // No such mod.
+    let r = patched_recipe(&f, true, vec![ok.clone()]);
+    assert_eq!(
+        resolve_patches(&a, &r, "other"),
+        Err(PatchRefusal::NoSuchMod("other".into()))
+    );
+    // A row naming a function the recipe does not list.
+    let r = patched_recipe(&f, true, vec![ok.clone(), patch("bad", "nope", 0, 1)]);
+    assert!(matches!(
+        refuse(&r, &a),
+        PatchRefusal::UnknownFunction { .. }
+    ));
+    // Past the end of the function (7 bytes).
+    let r = patched_recipe(&f, true, vec![ok.clone(), patch("far", "tick", 7, 1)]);
+    assert!(matches!(
+        refuse(&r, &a),
+        PatchRefusal::OutOfFunction { len: 7, .. }
+    ));
+    // Two rows on one byte.
+    let r = patched_recipe(&f, true, vec![ok.clone(), patch("dup", "tick", 1, 2)]);
+    assert!(matches!(refuse(&r, &a), PatchRefusal::Overlap { .. }));
+    // No exact hash in the recipe: shape alone does not vouch for the byte.
+    let r = patched_recipe(&f, false, vec![ok.clone()]);
+    assert!(matches!(refuse(&r, &a), PatchRefusal::NotExact { .. }));
+
+    // A moved copy matches on shape only (the exact hash differs): refused.
+    let mut b_img = vec![0u8; 0x1000];
+    put_fn(&mut b_img, 0x300, 0x0A);
+    let b = atlas_of(&b_img, &[0x300]);
+    let r = patched_recipe(&f, true, vec![ok.clone()]);
+    assert!(matches!(refuse(&r, &b), PatchRefusal::NotExact { .. }));
+    // A different function altogether: unmatched.
+    let mut c_img = vec![0u8; 0x1000];
+    put_fn(&mut c_img, 0x100, 0x1A);
+    let c = atlas_of(&c_img, &[0x100]);
+    assert!(matches!(refuse(&r, &c), PatchRefusal::Unmatched { .. }));
+    // Every refusal reads as a sentence naming the row.
+    assert!(refuse(&r, &c).to_string().contains("`ok`"));
+}
+
+#[test]
+fn identical_copies_are_ambiguous_not_guessed() {
+    // Two functions with the very same bytes (operands point at one place).
+    let mut img = vec![0u8; 0x1000];
+    for rom in [0x100usize, 0x300] {
+        img[rom..rom + 7].copy_from_slice(&[0x0A, 0x00, 0x90, 0x03, 0x00, 0x90, 0x04]);
+    }
+    let a = atlas_of(&img, &[0x100, 0x300]);
+    let (f1, f2) = (func_at(&a, 0x100).clone(), func_at(&a, 0x300).clone());
+    assert_eq!(f1.byte_hash, f2.byte_hash);
+    let r = patched_recipe(&f1, true, vec![patch("p", "tick", 0, 1)]);
+    assert_eq!(
+        resolve_patches(&a, &r, "m"),
+        Err(PatchRefusal::Ambiguous {
+            row: "p".into(),
+            function: "tick".into(),
+            copies: 2
+        })
+    );
 }

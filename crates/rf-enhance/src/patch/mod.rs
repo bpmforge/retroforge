@@ -22,6 +22,7 @@ pub mod bps;
 pub mod bso;
 pub mod discover;
 pub mod ips;
+pub mod prg;
 pub mod ups;
 
 /// Largest image any patch may produce (also the cap used for zips in
