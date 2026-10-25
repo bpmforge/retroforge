@@ -877,6 +877,17 @@ impl Ppu {
             {
                 *slot = under;
             }
+            if x == 0 {
+                // Dot 1 of the line: `v` has run the two prefetch tiles of dots 321-336 (nesdev wiki
+                // "PPU scrolling"), so the first pixel's tile is two coarse-X steps back; fine X is `x`.
+                let tile = ((self.v & 0x001F) | ((self.v >> 5) & 0x0020)).wrapping_sub(2) & 0x003F;
+                let sx = tile * 8 + u16::from(self.x & 0x07);
+                let coarse_y = (self.v >> 5) & 0x001F;
+                let sy = ((self.v >> 11) & 1) * 240 + coarse_y * 8 + ((self.v >> 12) & 0x07);
+                if let Some(slot) = self.line_scroll.get_mut(usize::from(self.scanline)) {
+                    *slot = (sx, sy);
+                }
+            }
         }
         self.line_buffer[x as usize] = PpuPixel {
             palette_index,

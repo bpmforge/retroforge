@@ -521,6 +521,10 @@ pub struct Ppu {
     /// Complete when `run_frame` returns; allocated by
     /// [`Ppu::set_bg_under_capture`].
     pub(super) bg_under: Vec<u8>,
+    /// Ticket W36-07: the background's scroll position at the start of each picture line
+    /// (`(x, y)` in nametable space, x in 0..512 and y in 0..480), recorded with `bg_under`.
+    /// Presentation-only like it; `240` entries when capture is on, empty when off.
+    pub(super) line_scroll: Vec<(u16, u16)>,
     /// Tiles of the frame currently being drawn.
     pub(super) drawn_tiles: Vec<DrawnTile>,
     /// Sprite tiles of the frame being drawn, and of the last complete
@@ -938,6 +942,7 @@ impl Ppu {
             tile_capture: false,
             bg_under_capture: false,
             bg_under: Vec::new(),
+            line_scroll: Vec::new(),
             drawn_tiles: Vec::new(),
             completed_tiles: Vec::new(),
             drawn_sprites: Vec::new(),
@@ -1050,6 +1055,17 @@ impl Ppu {
     pub fn set_bg_under_capture(&mut self, on: bool) {
         self.bg_under_capture = on;
         self.bg_under = if on { vec![0; 256 * 240] } else { Vec::new() };
+        self.line_scroll = if on { vec![(0, 0); 240] } else { Vec::new() };
+    }
+
+    /// Ticket W36-07: where the background was scrolled to at the start of each picture line of the
+    /// frame just rendered (`240` pairs of `(x, y)` in nametable space: x in `0..512`, y in `0..480`),
+    /// or empty when capture is off. A split-scroll game (a status bar over a scrolling playfield) has
+    /// one value above the split and another below it, which is exactly what a per-line record shows.
+    /// A plain borrow of what the PPU computed anyway; reading it changes nothing.
+    #[must_use]
+    pub fn line_scroll(&self) -> &[(u16, u16)] {
+        &self.line_scroll
     }
 
     /// The background colour under each dot of the frame just rendered

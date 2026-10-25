@@ -1,13 +1,14 @@
 //! Frame-interpolation candidacy (ticket W8-09;
 //! `docs/design/FRAME_INTERPOLATION.md`).
 //!
-//! **This module does not interpolate anything.** W8-09 is a design-first
-//! ticket, and the design's §7 declines to implement blending: a full
+//! **This module does not interpolate anything; `crate::interpolate` does (W36-07, D-028).**
+//! W8-09 was a design-first ticket, and the design's §7 declined to build it: a full
 //! frame of added input latency is inherent to interpolating toward a
-//! frame you must first possess, and it is a poor trade in an emulator.
+//! frame you must first possess. Brad's D-028 ruling (2026-10-25) accepted exactly that one
+//! frame, disclosed, opt-in.
 //!
-//! What it delivers instead is the question any future implementation has
-//! to answer before it blends a single pixel: **given two consecutive
+//! What this module delivers is the question any implementation has
+//! to answer before it moves a single pixel: **given two consecutive
 //! frames, may this pair be interpolated at all?** Settling that here,
 //! with tests, means the answer exists before a blender does — rather
 //! than being discovered later from a bug report about cross-fading
@@ -37,6 +38,32 @@ pub enum Refusal {
     /// The pair is not consecutive, so there is nothing to interpolate
     /// *between* — a dropped or rewound frame.
     NotConsecutive,
+    /// W36-07: the background scrolled further in one frame than motion does (a warp, a transition,
+    /// a screen that was rebuilt): a jump, not a step.
+    LargeMotion,
+    /// W36-07: the second frame's background is not the first one shifted, which is what a scene cut
+    /// is when scene identity cannot see it (the NES edge signature is flat, `scene_identity`).
+    Discontinuity,
+    /// W36-07: every row of the frame is excluded (a HUD band covers it), so there is nothing to move.
+    HudOnly,
+    /// W36-07: the layers handed over do not describe a picture (zero size, buffers of the wrong
+    /// length, two sizes).
+    Malformed,
+}
+
+/// The honesty label of frame interpolation (D-028): the whole picture between two console frames is
+/// invented, and it costs a frame of input delay.
+pub const FRAME_INTERPOLATION: &str = "frame_interpolation";
+
+/// The label a surface must show with interpolated frames.
+#[must_use]
+pub fn label() -> crate::experiments::HonestyLabel {
+    crate::experiments::HonestyLabel {
+        feature: FRAME_INTERPOLATION,
+        claim: "Frames between the game's own are made up from its layers, and every picture is \
+                shown one frame (about 17 ms) late to make room for them.",
+        invents: true,
+    }
 }
 
 impl std::fmt::Display for Refusal {
@@ -49,6 +76,10 @@ impl std::fmt::Display for Refusal {
                 "the palette changed, so the difference is colour rather than motion"
             }
             Refusal::NotConsecutive => "the frames are not consecutive",
+            Refusal::LargeMotion => "the background jumped further than motion does in one frame",
+            Refusal::Discontinuity => "the second frame's background is not the first one shifted",
+            Refusal::HudOnly => "every row of the frame is excluded as HUD",
+            Refusal::Malformed => "the frame layers do not describe a picture",
         };
         f.write_str(s)
     }
@@ -261,6 +292,22 @@ mod tests {
                 scanlines: vec![(0, 239)]
             }
         );
+    }
+
+    /// D-028: the label names the added latency and says it invents.
+    #[test]
+    fn the_label_invents_and_names_the_latency() {
+        let l = label();
+        assert!(l.invents);
+        assert!(l.claim.contains("one frame"), "{}", l.claim);
+        for r in [
+            Refusal::LargeMotion,
+            Refusal::Discontinuity,
+            Refusal::HudOnly,
+            Refusal::Malformed,
+        ] {
+            assert!(!r.to_string().is_empty());
+        }
     }
 
     impl Candidacy {
