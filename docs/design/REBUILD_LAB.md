@@ -195,6 +195,43 @@ lockstep are.
 | W36-11 | Public guide: how Rebuild works | In docs/site |
 | W36-12 | Cranelift JIT tier behind the block interface; spike vs block executor | SMB plays on the JIT in lockstep; compile time and frame cost measured for both tiers |
 
+### W36-06b: how a margin object is drawn (built 2026-10-25)
+
+**Observed first.** With the live-enemies mod on, the game never draws a margin enemy where it is: in the
+1-1 unhurt script, of 1,570 slot-frames deep in a margin (right 283, left 1,287), 0 had OAM entries
+wrapped onto the real picture, 1,566 had the enemy's own tiles in OAM with Y pushed off the visible
+range (hidden) and 4 had none (absent). (An earlier pass of the classifier counted 81 left frames as
+wrapped; they were a real enemy standing on the picture at the wrapped X, now excluded.) So the
+design is the shifted-camera redraw, not relocation of wrapped entries.
+
+**Redraw.** `retroforge::margin_draw` keeps the machine state from before each of the last three frames
+(`MachineSnapshot`). When a recipe object-table slot is outside the picture, a private `EmuStepper` of
+the same (patched) image is restored from the state two frames back, both camera pages (recipe RAM
+meanings) are moved by one page toward the object, and it runs three frames with the real inputs. The
+picture of frame N is drawn from the OAM copied in the vblank before it, built by logic two frames
+earlier (`w36_06b_oam_observation::which_frames_oam_does_the_picture_come_from`: 899 of 899), which is why
+the camera is moved two frames before. The PPU's own drawn-sprite list of the third frame
+(`DrawnSprite`, now carrying the OAM index) is filtered to tiles within tolerance of the objects' expected
+spots, the player excluded, and rasterised from the copy's pattern bytes and palette into a 256 x 240
+indexed strip per side. With the camera moved by exactly one page, an 8-bit sprite X in the copy is the
+same number the real machine would hold, which is what lets a wrapped copy on the real picture be told
+by its OAM bytes (`ghost_indices`) and its dots by the per-dot sprite id; the compositor gives those
+dots back to the background colour the PPU computed under them (`Ppu::bg_under`, a presentation-only
+capture, off by default).
+
+**Recipe vocabulary** read by the redraw (names, not titles): `enemy_flag` (width = slot count),
+`enemy_x_page`, `enemy_x`, `enemy_y`, `screen_left_page`, `screen_left_x`, `screen_right_page`, optional `player_screen_x`, `player_y`.
+
+**Cost.** Release build, M2 Max, 1-1 unhurt 3,200 frames: the real frame 1.8 ms, the redraw 3.4 ms on
+average and 12.3 ms at worst (three replayed frames per side).
+
+**Mod writes in states.** The live save path stamps `PROF`: mod ids, the patch rows (recipe function,
+its exact hash, offset, value) and the hook host's write ledger, as a tail after the v1 fields. A load
+restores the ledger into the host and warns when the session's mods differ from the state's.
+
+**Copies and hooks.** Run-ahead's shadow and the redraw machine are built from the session's image but
+carry no hook host, so a host holding `write_memory` turns both off, with a badge.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

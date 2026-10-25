@@ -174,4 +174,23 @@ spawns can ship a smaller lead as a different value of the same row.
   input can end differently. It is a mod (NON_GOALS 13), off by default,
   with its own save states.
 * Drawing the enemies in the margins, and the NES's 8-bit sprite x, is
-  W36-06b.
+  W36-06b (below).
+
+## W36-06b: what the game's OAM holds for a margin enemy
+
+Test `rf-harness/tests/w36_06b_oam_observation.rs`, 1-1 "Mario unhurt" script, mod on. An enemy slot is
+"deep" at camera-relative x 336 and up or below -80. For each deep slot-frame, OAM entries near the
+slot's expected spot (x wrapped to eight bits, y from the slot's y byte, not the player's, not explained
+by another enemy standing on the picture) with one of that enemy's own tiles (learned from frames where
+it stood on the picture) are classified.
+
+| deep side | slot-frames | wrapped onto the real picture | hidden (Y pushed off) | absent |
+|---|---|---|---|---|
+| right | 283 | 0 | 279 | 4 |
+| left | 1,287 | 0 | 1,287 | 0 |
+
+The game hides these enemies (its own off-screen test, driven by the enemy's page and the camera) and
+does not wrap them, so W36-06 was not a visual regression on the real picture, and the way to draw them is
+to ask the game to draw them with the camera moved (docs/design/REBUILD_LAB.md, W36-06b). The same
+test confirms the premise of that redraw: the picture of frame N is drawn from the OAM at the end of
+frame N-1.

@@ -501,6 +501,17 @@ impl NesBus {
         self.ppu.chr()
     }
 
+    /// Ticket W36-06b: forwards [`Ppu::set_bg_under_capture`].
+    pub fn set_bg_under_capture(&mut self, on: bool) {
+        self.ppu.set_bg_under_capture(on);
+    }
+
+    /// Ticket W36-06b: forwards [`Ppu::bg_under`].
+    #[must_use]
+    pub fn bg_under(&self) -> &[u8] {
+        self.ppu.bg_under()
+    }
+
     /// The sprite tiles of the frame just completed (ticket W11-14).
     #[must_use]
     pub fn completed_sprites(&self) -> &[crate::ppu::DrawnSprite] {

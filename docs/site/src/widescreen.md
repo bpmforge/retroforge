@@ -58,7 +58,9 @@ is not Accuracy Mode.
 
 * Scenery is complete where the scout reaches. Enemies and other moving
   things are only ever the game's own live ones: you see an enemy when the
-  game draws it, not before.
+  game draws it, not before. The one exception is the Super Mario Bros.
+  "live enemies" mod below, which keeps enemies alive in the margins and
+  draws them there (the session shows the Patched badge).
 * The scout cannot reach everything: places behind doors or pipes, rooms the
   game only loads when you get there, sections where the screen stops
   scrolling, and games that cannot scroll backwards. Those margins show what
@@ -72,12 +74,23 @@ is not Accuracy Mode.
   draw beyond what the game scrolled.
 * The Super Mario Bros. "live enemies" mod (a per-game mod, off by default,
   under **Mods** in the game's settings) keeps enemies alive up to about 240
-  pixels past the screen edges so they exist in the margins. It changes what
-  the game computes, so the game is no longer the original cartridge and has
-  its own save states. There are only five enemy slots: enemies hold theirs
-  longer, which we measured did not cost spawns in 1-1, 1-2 or 4-1 but could
-  in a crowded level. Groups of walkers still appear at the old screen edge,
-  and drawing these enemies in the margins is not done yet (it comes with a
-  later step), so for now you see them only where the game draws them.
-  Needs the game's code atlas: record some play in the Coverage tab and turn
-  Rebuild on once.
+  pixels past the screen edges and draws them in the margins from the game's
+  own sprite data. It changes what the game computes, so the game is no
+  longer the original cartridge: the session shows the Patched badge and has
+  its own save states, which record the mod. Where the margin enemies come
+  from: the NES draws sprites with a one-byte X, so the game itself hides an
+  enemy that far out. RetroForge asks the game to draw it anyway on a private
+  copy of the machine, with the camera moved a screen over, and paints what
+  that copy drew in the margin. The real picture and the real machine are not
+  touched. Limits: the outer 45 pixels or so of each margin stay empty (a
+  byte cannot hold more); drawing ignores a sprite's behind-the-background
+  priority, so an enemy there always shows in front; only enemies are drawn
+  (not platforms or items); and an enemy crossing the screen's own edge can
+  be a tile off at the seam. There are only five enemy slots: enemies hold
+  theirs longer, which we measured did not cost spawns in 1-1, 1-2 or 4-1 but
+  could in a crowded level. Groups of walkers still appear at the old screen
+  edge. Drawing margin enemies costs about 3 ms a frame on an M2 Max on average
+  (12 ms at worst). Run-ahead works with the mod on, but both it and the margin enemies
+  switch off if a hook script is loaded that can write memory (the badge
+  says so). Needs the game's code atlas: record some play in the Coverage tab
+  and turn Rebuild on once.

@@ -24,6 +24,7 @@ pub mod hud;
 pub mod interpolation;
 pub mod level_view;
 pub mod loading;
+pub mod margin_draw;
 pub mod margin_sprites;
 pub mod mods;
 pub mod overlay;

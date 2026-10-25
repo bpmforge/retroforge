@@ -66,6 +66,7 @@ pub mod library_cache;
 pub mod library_roots;
 pub mod live_heights;
 pub mod live_learn;
+pub mod margin_draw;
 pub mod mod_chunk;
 pub mod mode_invariant;
 pub mod overclock_ui;

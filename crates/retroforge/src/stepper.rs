@@ -382,6 +382,12 @@ pub struct MachineSnapshot {
 }
 
 impl MachineSnapshot {
+    /// The shell's frame counter when the snapshot was taken (ticket W36-06b).
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
     /// SHA-256 over the snapshot's required state chunks (header excluded),
     /// so two snapshots of the same machine state hash alike on either
     /// console. What the run-ahead tests compare after every frame.
@@ -957,6 +963,31 @@ impl EmuStepper {
         self.machine
             .nes_bus()
             .map_or(&[], rf_nes::NesBus::completed_tiles)
+    }
+
+    /// Ticket W36-06b: the sprite tiles of the frame just completed, one per
+    /// 8x8 tile with the OAM index it came from. Empty unless tile capture is
+    /// on, and always empty on SNES.
+    #[must_use]
+    pub fn completed_sprites(&self) -> &[rf_nes::ppu::DrawnSprite] {
+        self.machine
+            .nes_bus()
+            .map_or(&[], rf_nes::NesBus::completed_sprites)
+    }
+
+    /// Ticket W36-06b: record the background colour under every dot (NES
+    /// only; a presentation capture the simulation never reads).
+    pub fn set_bg_under_capture(&mut self, on: bool) {
+        if let Some(bus) = self.machine.nes_bus_mut() {
+            bus.set_bg_under_capture(on);
+        }
+    }
+
+    /// Ticket W36-06b: the background colour under each dot of the frame
+    /// just run (`256 * 240` palette indices); empty when capture is off.
+    #[must_use]
+    pub fn bg_under(&self) -> &[u8] {
+        self.machine.nes_bus().map_or(&[], rf_nes::NesBus::bg_under)
     }
 
     /// The NES cartridge's CHR, for a pack rule keyed on tile bytes.

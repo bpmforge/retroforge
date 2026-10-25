@@ -187,6 +187,11 @@ impl Ppu {
             // next tile's own attribute fetch. No oracle exercises MMC5
             // save states mid-scanline at all yet.
             ext_attr_bank: _,
+            // Ticket W36-06b: a presentation-only capture of the background
+            // under each dot. Derived from machine state and read by nothing
+            // that feeds back, so it is excluded like `watches` above.
+            bg_under_capture: _,
+            bg_under: _,
             pending_scanline_starts: _,
             pending_frame_end: _,
             events,

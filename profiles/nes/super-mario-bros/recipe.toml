@@ -94,6 +94,32 @@ width = 1
 name = "screen_right_x"
 source = "observed: low byte of the right edge, 255 past screen_left_x; Data Crystal SMB RAM map ScreenRight_X_Pos"
 
+# ---- W36-06b: drawing the margin enemies -----------------------------------
+# The shell redraws an object it cannot see on the 256-px picture by moving the
+# camera on a private copy of the machine (retroforge::margin_draw). Rows the
+# redraw reads: where each enemy's sprite sits vertically, and where the player
+# is drawn (the player is drawn at its own screen spot whatever the camera says,
+# so its tiles are never an enemy's). Same method as the rows above: each one
+# was watched in 1-1 play next to the OAM it explains.
+
+[[ram]]
+addr = 0x00cf
+width = 5
+name = "enemy_y"
+source = "observed: each enemy slot's vertical screen position, about 8 less than its sprite's OAM y in 1-1 play; Data Crystal SMB RAM map Enemy_Y_Position"
+
+[[ram]]
+addr = 0x03ad
+width = 1
+name = "player_screen_x"
+source = "observed: the player's x on the 256-px screen, equals the first player sprite's OAM x in 1-1 play; Data Crystal SMB RAM map Player_Rel_XPos"
+
+[[ram]]
+addr = 0x00ce
+width = 1
+name = "player_y"
+source = "observed: the player's vertical screen position, tracks the player sprite's OAM y in 1-1 play; Data Crystal SMB RAM map Player_Y_Position"
+
 [[patch]]
 name = "activation-lead"
 mod = "live-enemies"

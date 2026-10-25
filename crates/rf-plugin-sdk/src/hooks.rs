@@ -382,6 +382,21 @@ impl HookHost {
         self.0.borrow().ledger.borrow().entries().to_vec()
     }
 
+    /// Whether the host's manifest grants `write_memory`. A machine without
+    /// this host (run-ahead's shadow, the margin redraw copy) cannot
+    /// reproduce a frame in which a hook wrote memory (ticket W36-06b).
+    #[must_use]
+    pub fn holds_write_memory(&self) -> bool {
+        self.0.borrow().manifest.capabilities.write_memory
+    }
+
+    /// Put back the ledger a save state carried (ticket W36-06b): the writes
+    /// that made the saved machine what it is. Replaces what is there; the
+    /// panel then shows them as the session's own history.
+    pub fn restore_ledger(&self, entries: Vec<LedgerEntry>) {
+        self.0.borrow().ledger.borrow_mut().restore(entries);
+    }
+
     /// `print` output and host diagnostics.
     #[must_use]
     pub fn log_lines(&self) -> Vec<String> {

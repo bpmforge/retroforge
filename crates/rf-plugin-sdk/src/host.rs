@@ -146,6 +146,12 @@ impl WriteLedger {
         &self.entries
     }
 
+    /// Replace the entries with a saved list (ticket W36-06b: a save state
+    /// carries the writes that shaped its machine).
+    pub fn restore(&mut self, entries: Vec<LedgerEntry>) {
+        self.entries = entries;
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
