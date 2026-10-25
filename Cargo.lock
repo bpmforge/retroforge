@@ -4075,6 +4075,7 @@ name = "rf-profiles"
 version = "0.9.1"
 dependencies = [
  "rf-cart",
+ "rf-rebuild",
  "serde",
  "toml",
 ]
