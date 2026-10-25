@@ -597,8 +597,15 @@ impl SnesCore {
 
 impl EmulatorCore for SnesCore {
     fn load(&mut self, cart: CartImage<'_>) -> Result<(), CoreError> {
+        // A recording survives a load (fresh, for the new cartridge), like the
+        // NES core's: it is a session setting, not cartridge state.
+        let recording = self.system.coverage.is_some();
         self.system =
             SnesSystem::load(cart.rom).map_err(|e| CoreError::InvalidImage(format!("{e:?}")))?;
+        if recording {
+            self.system.set_coverage(true);
+            self.system.coverage_note_reset();
+        }
         Ok(())
     }
 
@@ -758,6 +765,14 @@ impl EmulatorCore for SnesCore {
 
     fn config(&mut self) -> &mut CoreConfig {
         &mut self.config
+    }
+
+    fn set_coverage_recording(&mut self, on: bool) {
+        self.system.set_coverage(on);
+    }
+
+    fn take_coverage(&mut self) -> Option<rf_core_api::CoverageLog> {
+        self.system.take_coverage()
     }
 
     fn peek(&self, addr: u32) -> u8 {

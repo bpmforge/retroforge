@@ -6,6 +6,7 @@
 pub mod apu;
 pub mod bus;
 pub mod core;
+pub mod coverage;
 pub mod cpu;
 pub mod cx4;
 pub mod debug;
@@ -17,6 +18,7 @@ pub mod idle;
 pub mod mapping;
 pub mod obc1;
 pub mod ppu;
+pub mod rebuild;
 pub mod regs;
 pub mod sa1;
 pub mod sdd1;

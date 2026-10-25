@@ -451,6 +451,19 @@ impl SnesBus {
         self.window_ram = Some(Box::default());
     }
 
+    /// The cartridge ROM offset the 24-bit address `addr` reads right now,
+    /// `None` for anything that is not ROM (work RAM, save RAM, registers,
+    /// coprocessor memory, open bus). Goes through the same resolution the
+    /// CPU's reads do, so it agrees with [`Self::peek`] byte for byte
+    /// (ticket W36-08).
+    #[must_use]
+    pub fn rom_offset(&self, addr: u32) -> Option<usize> {
+        match self.target(addr) {
+            Target::Rom(i) => Some(i),
+            _ => None,
+        }
+    }
+
     fn window_ram_read(&self, i: usize) -> u8 {
         match self.window_ram.as_ref() {
             Some(w) if w.written[i] => w.data[i],
@@ -458,7 +471,9 @@ impl SnesBus {
         }
     }
 
-    fn target(&self, addr: u32) -> Target {
+    /// Where the 24-bit address `addr` lands right now, coprocessor windows
+    /// included (the recorder asks this of every fetch; ticket W36-08).
+    pub(crate) fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
         // Checked BEFORE the generic map: `map` answers open bus for this

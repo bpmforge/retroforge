@@ -233,6 +233,50 @@ restores the ledger into the host and warns when the session's mods differ from 
 **Copies and hooks.** Run-ahead's shadow and the redraw machine are built from the session's image but
 carry no hook host, so a host holding `write_memory` turns both off, with a badge.
 
+### W36-08: the SNES recorder and the 65816 atlas (built 2026-10-25)
+
+**Width model.** The 65816's instruction length depends on `M` (accumulator
+immediates), `X` (index immediates) and `E` (which forces both to 8 bits), so
+the identity of an instruction is `(ROM offset, mode)`. A *mode* is an index
+below `Isa::mode_count`: 0 is emulation, 1..=4 native with `1 + m8 + 2 * x8`;
+those are the only five states the chip can be in (fullsnes, "SNES CPU 65XX
+Microprocessor"). The 6502 has one mode. The recorder stores the modes an
+opcode ran in as five bits of its `prg_flags` byte (`MODE_SHIFT`), the atlas
+keys every node, block and function by `(offset, mode)` (format **v3**, cache
+name `code-atlas-v3`: the NES atlas moved to v3 too, so cached v2 entries are a
+clean miss), and the same bytes entered in two widths are two functions.
+
+**Static width tracking.** `Decoded::after` says what an instruction does to
+the mode of the code after it: `Same`, `Set(mode)` for `REP`/`SEP` with their
+immediate (native mode only; emulation ignores both), or `Unknown` for `XCE`
+(carry) and `PLP` (stack). After `Unknown` the builder follows the successor
+only in modes the recording saw it run in, and an edge with no observed mode is
+`Why::WidthUnknown`, never a guess. Calls enter the callee in the caller's
+mode; the instruction after a call is also entered in every mode it was seen
+in, since a callee may change widths before returning. A decode that did not
+execute is accepted only if it cannot contradict what ran: when the offset ran
+in other modes it must decode to the same length as one of them, otherwise
+none of its bytes may have executed (`overlap_rejected` counts the refusals).
+
+**Addresses.** The LoROM/HiROM map is fixed, so the builder asks the ISA
+(`fixed_mapping`, `rom_offset`, `cpu_for_rom`) instead of using the recorded
+bank windows. 16-bit targets keep the site's bank (branches and fall-through
+wrap inside it); `JSL`/`JML` carry 24 bits. `rf_snes::mapping::rom_offset`
+and `SnesBus::rom_offset` are tested against the byte the bus returns across
+both layouts. Boards that switch ROM banks (SA-1, S-DD1) are not covered by
+the static map.
+
+**Recorder.** `SnesSystem::step` peeks before `Cpu::step` (bank, PC, mode,
+operand bytes by the table length for the widths in force; nothing is recorded
+for a CPU halted in `WAI`/`STP`), notes the indirect edge right after it
+(`JMP (abs)`/`(abs,X)`/`[abs]`/`JML [abs]`, `JSR (abs,X)`, `RTS`, `RTL`, `RTI`,
+`BRK`, `COP`) and notes NMI/IRQ entries at the dispatch and the Reset entry at
+reset. Work-RAM execution goes to the volatile set (`ram_exec` is now sized by
+the core: 128 KiB of WRAM offsets on the SNES). Fetches from coprocessor memory
+(SA-1 I-RAM/BW-RAM, Super FX RAM, ...) are counted in `coproc_exec`, other
+non-ROM, non-WRAM fetches in `other_exec`; the coprocessors' own CPUs are never
+recorded. One `Option::is_some` per instruction when off.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player
