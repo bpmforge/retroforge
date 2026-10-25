@@ -4065,6 +4065,7 @@ name = "rf-plugin-sdk"
 version = "0.9.1"
 dependencies = [
  "mlua",
+ "rf-core-api",
  "wasmtime",
  "wat",
 ]

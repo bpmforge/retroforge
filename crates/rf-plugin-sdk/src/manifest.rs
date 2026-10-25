@@ -30,6 +30,10 @@ pub struct Capabilities {
     /// impossible because the host routes all writes through a ledger".
     pub write_memory: bool,
     pub input_bindings: bool,
+    /// Ticket W36-05: receive function entry/exit events from a rebuilt core
+    /// (`rf.on_enter` / `rf.on_exit`, Rust hooks). Observation only: a hook
+    /// that also changes memory additionally needs `write_memory`.
+    pub function_hooks: bool,
     /// `none` | `cache_dir` — never raw filesystem access.
     pub filesystem: FilesystemCap,
 }
@@ -90,6 +94,9 @@ impl Capabilities {
         }
         if self.read_ppu {
             out.push("read PPU memory (VRAM/OAM/palette)");
+        }
+        if self.function_hooks {
+            out.push("run code when game functions are entered or left (needs Rebuild)");
         }
         if self.scanline_events {
             out.push("receive per-scanline events (costs performance)");
@@ -190,6 +197,7 @@ impl Manifest {
                 replace_layers: flag(&fields, "replace_layers"),
                 write_memory: flag(&fields, "write_memory"),
                 input_bindings: flag(&fields, "input_bindings"),
+                function_hooks: flag(&fields, "function_hooks"),
                 filesystem: fields
                     .get("filesystem")
                     .map_or(FilesystemCap::None, |v| FilesystemCap::from_str(v)),
@@ -219,6 +227,25 @@ mod tests {
         assert!(
             m.capabilities.granted_summary().is_empty(),
             "a manifest that declares no capabilities must grant none"
+        );
+    }
+
+    #[test]
+    fn function_hooks_is_its_own_capability_and_listed_when_granted() {
+        let on = format!("{MINIMAL}\nfunction_hooks = true\n");
+        let m = Manifest::parse(&on).unwrap();
+        assert!(m.capabilities.function_hooks);
+        assert!(!m.capabilities.write_memory, "hooks do not imply writes");
+        assert!(m
+            .capabilities
+            .granted_summary()
+            .iter()
+            .any(|l| l.contains("functions")));
+        assert!(
+            !Manifest::parse(MINIMAL)
+                .unwrap()
+                .capabilities
+                .function_hooks
         );
     }
 

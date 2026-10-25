@@ -15,10 +15,12 @@ mod tests {
 }
 
 pub mod component;
+pub mod hooks;
 pub mod host;
 pub mod manifest;
 pub mod sandbox;
 
+pub use hooks::{HookHost, HookKey, HookRefusal, ModCtx, Resolution};
 pub use host::{Budget, LedgerEntry, PathRefusal, ScriptHost, ScriptState, WriteLedger};
 pub use manifest::{Capabilities, FilesystemCap, Manifest, ManifestError};
 pub use sandbox::ScriptLog;

@@ -72,12 +72,29 @@ draw_overlay = true
 replace_layers = false   # render override
 write_memory = false     # MOD-tier: requires per-plugin user opt-in + red badge
 input_bindings = false   # register hotkeys/virtual buttons; shown in the remap UI, conflict-checked
+function_hooks = false   # run code at game-function entry/exit (needs Rebuild, W36-05); a hook that also
+                         # writes memory additionally needs write_memory
 filesystem = "cache_dir" # none | cache_dir; exports go through the host `export` API (user-picked destination), never raw fs access
 ```
 
 `write_memory` is the mod boundary: silently altering game behavior is
 impossible because the host routes all writes through a ledger surfaced in
 the UI and recorded in save states (PROF/ENHC chunks).
+
+**Function hooks (W36-05).** `function_hooks` lets a script or in-tree
+plugin register `rf.on_enter(name_or_id, fn)` / `rf.on_exit(...)` (Lua) or a
+Rust closure for a function of a rebuilt core (`REBUILD_LAB.md` §5-7). Hooks
+run on the core thread, synchronously, inside the core's own step, so the host
+(`rf_plugin_sdk::HookHost`) and its Lua state are created there and are never
+`Send`. Inside a callback `rf.regs()` and `rf.mem.read_u8/read_u16` need
+`read_memory`; `rf.mem.write_u8` needs `write_memory`, is applied by the core
+with no clock cost to work RAM or cartridge RAM only, and goes through the
+same `WriteLedger` as any other write (plugin id, frame, address, value). A
+callback error pauses the hook host, never the emulator. A host holding
+`write_memory` is never budget-throttled (skipping events would make the mod's
+effect depend on timing). Hooks are session state: today the ledger is shown in
+the UI but is **not** written into a savestate (`PROF` records mod ids only), so
+a state does not yet carry which hook writes produced it.
 
 **Path containment (D-006, NFR-010):** the `filesystem = "cache_dir"` cap
 is realpath-enforced — every path a plugin opens is canonicalized and must
