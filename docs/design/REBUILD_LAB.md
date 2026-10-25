@@ -1,7 +1,7 @@
 # Rebuild lab (W36): rebuild a game's code from the player's ROM
 
 Status: design R1, 2026-10-25 (ticket W36-00). Rulings are recorded as
-D-024..D-026 in `docs/DECISIONS.md`; tickets W36-00..W36-11 are in
+D-024..D-027 in `docs/DECISIONS.md`; tickets W36-00..W36-11 are in
 `plan.json`. Research summary and public sources:
 `docs/research/W36-00-rebuild-sources.md`.
 
@@ -60,20 +60,28 @@ decompilation, recomp metadata or disassembly (D-021 stands).
 
 R0 said "emit Rust per function". With recipes rebuilt on first launch, that
 would need a Rust toolchain on every player's machine, which they do not
-have. So R1 splits the roles:
+have. Brad approved a JIT dependency the same day (D-027, answering the
+Rebuild Player Guide). So R1 splits the roles into tiers that share one IR:
 
-- **Runtime (default): lifted IR compiled at load into pre-decoded blocks**
-  run by a block executor inside the core (each instruction a pre-resolved
-  operation with its operands, flags made explicit, cycle cost attached).
-  This needs no compiler, rebuilds in seconds, and is what Rebuild mode runs.
-  Speed is not the goal (the interpreter already runs far above real time);
-  named, hookable, replaceable functions are.
-- **Later, measured:** a Cranelift-style JIT behind the same block interface,
-  only if a profile shows the block executor costs frame budget. Not in W36.
+- **Tier 0, interpreter:** today's 6502/65816 cores. Unseen code, RAM code,
+  failed guards, first block after a savestate.
+- **Block executor (W36-03):** lifted IR compiled at load into pre-decoded
+  blocks (each instruction a pre-resolved operation with its operands, flags
+  made explicit, cycle cost attached), run inside the core. No compiler, no
+  platform code; it is the reference for the JIT and the fallback for any
+  platform the JIT does not support.
+- **Cranelift JIT (W36-12):** the same IR compiled to native arm64/x86-64 at
+  launch and on each new function. The ticket adds the dependency (decision
+  row in `docs/TECH_STACK.md` section 2) and measures it against the block
+  executor on the SMB atlas before it becomes the default generic tier.
 - **Developer tool:** Rust source emission from the IR, for reading a
   function and for writing our replacement functions against its shape.
   Output stays local and gitignored; it is never committed for a commercial
-  game.
+  game. Shipped Rust is only code we own (tier 3 replacement functions).
+
+Speed is not the goal (the interpreter already runs far above real time);
+named, hookable, replaceable functions and checking real compiled code in
+lockstep are.
 
 ## 5. Pipeline
 
@@ -157,8 +165,19 @@ have. So R1 splits the roles:
 | W36-09 | Understand pass + opt-in AI naming | Names exported as recipe facts; lockstep green |
 | W36-10 | ROM-hack support: recipe matching on a Lunar Magic SMW hack | Hack boots rebuilt; matched functions get Super Enhanced features |
 | W36-11 | Public guide: how Rebuild works | In docs/site |
+| W36-12 | Cranelift JIT tier behind the block interface; spike vs block executor | SMB plays on the JIT in lockstep; compile time and frame cost measured for both tiers |
 
-## 9. Risks
+## 9. After W36 (vision, not ticketed)
+
+From the Rebuild Player Guide answers (2026-10-25): engine recipes after SMB
+and SMW follow Brad's showcase order, Zelda, then Super Metroid, then
+Castlevania, then Mega Man; SA-1 lifting is in scope for the vision (same
+65816 lifter, second recorded core); a public recipe hub may accept
+community recipes, with the lockstep checker as referee. Generic
+interpolated 60 fps from OAM deltas (one frame of latency, labelled) is a
+PPU-side feature outside this wave.
+
+## 10. Risks
 
 - Coverage gaps leave code interpreted; report the rate honestly in the UI.
 - Mid-frame raster timing; keep per-instruction cycle accounting.

@@ -4648,7 +4648,7 @@ stories, 10 decisions).
   lands Brad's 2026-10-25 rulings: recipes rebuilt on the player's machine
   (D-024), reading exception for MIT/Apache recompilers with PolyForm and GPL
   docs-only or excluded (D-025), opt-in cloud AI naming amending NON_GOALS 6
-  and 8 (D-026). One change from the draft: no Rust toolchain on players'
-  machines, so lifted code runs as pre-decoded blocks in the core; Rust
+  and 8 (D-026), Cranelift JIT approved (D-027). No Rust toolchain on players'
+  machines: lifted code runs as pre-decoded blocks (W36-03), then on Cranelift (W36-12); Rust
   emission is a developer tool. New crate `rf-rebuild` (core layer) planned for
-  W36-02. Tickets W36-01..W36-11 in plan.json; SMB pilot first, then SMW.
+  W36-02. Tickets W36-01..W36-12 in plan.json; SMB pilot first, then SMW.
