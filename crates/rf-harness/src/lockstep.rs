@@ -96,7 +96,17 @@ pub struct Options<'a> {
     /// Where to write the repro bundle on divergence (`None`: no bundle).
     pub bundle_dir: Option<PathBuf>,
     pub before_frame: Option<BeforeFrame<'a>>,
+    /// Atlas function ids to hook on the rebuilt core (ticket W36-05); the
+    /// plain core never has hooks.
+    pub function_hooks: Vec<u32>,
+    /// Makes the sink the rebuilt core's `function_event`s go to (a
+    /// `HookHost` handle). Called once per run, and again for the
+    /// investigation re-run, so the re-run starts from fresh hook state.
+    pub hook_sink: Option<HookSinkFactory<'a>>,
 }
+
+/// See [`Options::hook_sink`].
+pub type HookSinkFactory<'a> = Box<dyn FnMut() -> Box<dyn CoreSink> + 'a>;
 
 impl Default for Options<'_> {
     fn default() -> Self {
@@ -106,6 +116,8 @@ impl Default for Options<'_> {
             fine: true,
             bundle_dir: None,
             before_frame: None,
+            function_hooks: Vec::new(),
+            hook_sink: None,
         }
     }
 }
@@ -179,9 +191,11 @@ impl std::fmt::Display for LockstepError {
 impl std::error::Error for LockstepError {}
 
 /// FNV-1a over what a frame put on the sinks.
-struct HashSink {
+struct HashSink<'a> {
     video: u64,
     audio: u64,
+    /// The rebuilt core's hook sink, if any (W36-05).
+    hooks: Option<&'a mut dyn CoreSink>,
 }
 
 const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -191,16 +205,17 @@ fn fnv(h: &mut u64, byte: u8) {
     *h = h.wrapping_mul(0x0100_0000_01b3);
 }
 
-impl HashSink {
-    fn new() -> Self {
+impl<'a> HashSink<'a> {
+    fn new(hooks: Option<&'a mut dyn CoreSink>) -> Self {
         Self {
             video: FNV_BASIS,
             audio: FNV_BASIS,
+            hooks,
         }
     }
 }
 
-impl CoreSink for HashSink {
+impl CoreSink for HashSink<'_> {
     fn video_scanline(&mut self, y: u16, pixels: &[PpuPixel]) {
         for b in y.to_le_bytes() {
             fnv(&mut self.video, b);
@@ -216,15 +231,36 @@ impl CoreSink for HashSink {
             .for_each(|b| fnv(&mut self.audio, b));
     }
     fn event(&mut self, _event: CoreEvent) {}
+    fn function_event(
+        &mut self,
+        ev: rf_core_api::FunctionEvent,
+        ctx: &mut dyn rf_core_api::HookCtx,
+    ) {
+        if let Some(h) = self.hooks.as_deref_mut() {
+            h.function_event(ev, ctx);
+        }
+    }
 }
 
-/// Drops everything (the fine pass compares machine state, not output).
-struct NullSink;
+/// Drops everything but hook events (the fine pass compares machine state,
+/// not output).
+struct NullSink<'a> {
+    hooks: Option<&'a mut dyn CoreSink>,
+}
 
-impl CoreSink for NullSink {
+impl CoreSink for NullSink<'_> {
     fn video_scanline(&mut self, _y: u16, _pixels: &[PpuPixel]) {}
     fn audio(&mut self, _samples: &[i16]) {}
     fn event(&mut self, _event: CoreEvent) {}
+    fn function_event(
+        &mut self,
+        ev: rf_core_api::FunctionEvent,
+        ctx: &mut dyn rf_core_api::HookCtx,
+    ) {
+        if let Some(h) = self.hooks.as_deref_mut() {
+            h.function_event(ev, ctx);
+        }
+    }
 }
 
 fn regs(core: &NesCore) -> Mos6502Regs {
@@ -240,13 +276,19 @@ fn power_on(raw: &[u8]) -> Result<NesCore, LockstepError> {
     Ok(core)
 }
 
-fn pair(raw: &[u8], atlas: &Atlas, trace_len: usize) -> Result<(NesCore, NesCore), LockstepError> {
+fn pair(
+    raw: &[u8],
+    atlas: &Atlas,
+    trace_len: usize,
+    hook_ids: &[u32],
+) -> Result<(NesCore, NesCore), LockstepError> {
     let plain = power_on(raw)?;
     let mut rebuilt = power_on(raw)?;
     rebuilt
         .set_rebuild(Some(atlas.clone()))
         .map_err(|e| LockstepError::Atlas(format!("{e:?}")))?;
     rebuilt.set_rebuild_trace(trace_len);
+    rebuilt.set_function_hooks(hook_ids);
     Ok((plain, rebuilt))
 }
 
@@ -312,12 +354,7 @@ fn compare_cpu(plain: &NesCore, rebuilt: &NesCore) -> Vec<FieldDiff> {
 }
 
 /// Everything compared once a frame ends.
-fn compare_frame(
-    plain: &NesCore,
-    rebuilt: &NesCore,
-    hp: &HashSink,
-    hr: &HashSink,
-) -> Vec<FieldDiff> {
+fn compare_frame(plain: &NesCore, rebuilt: &NesCore, hp: Hashes, hr: Hashes) -> Vec<FieldDiff> {
     let mut out = compare_cpu(plain, rebuilt);
     scalar(
         &mut out,
@@ -338,18 +375,42 @@ fn compare_frame(
     out
 }
 
+/// Lend the hook sink for one pass. A function rather than `as_deref_mut`
+/// because that keeps the boxed trait object's `'static` bound, which `&mut`
+/// invariance then pins the borrow to.
+fn hooks_of(sink: &mut Option<Box<dyn CoreSink>>) -> Option<&mut dyn CoreSink> {
+    sink.as_mut().map(|b| &mut **b as &mut dyn CoreSink)
+}
+
+/// What a frame put on the video and audio sinks, as FNV hashes.
+#[derive(Clone, Copy)]
+struct Hashes {
+    video: u64,
+    audio: u64,
+}
+
 fn run_pair_frame(
     frame: u32,
     input: &InputFrame,
     plain: &mut NesCore,
     rebuilt: &mut NesCore,
     hook: &mut Option<BeforeFrame<'_>>,
-) -> (HashSink, HashSink) {
+    rebuilt_hooks: Option<&mut dyn CoreSink>,
+) -> (Hashes, Hashes) {
     apply_hook(hook, frame, plain, rebuilt);
-    let (mut hp, mut hr) = (HashSink::new(), HashSink::new());
+    let (mut hp, mut hr) = (HashSink::new(None), HashSink::new(rebuilt_hooks));
     plain.run_frame(input, &mut hp);
     rebuilt.run_frame(input, &mut hr);
-    (hp, hr)
+    (
+        Hashes {
+            video: hp.video,
+            audio: hp.audio,
+        },
+        Hashes {
+            video: hr.video,
+            audio: hr.audio,
+        },
+    )
 }
 
 /// Run `inputs` (one entry per frame) through a plain core and a rebuilt
@@ -368,7 +429,8 @@ pub fn run(
     mut opts: Options<'_>,
 ) -> Result<Report, LockstepError> {
     let inputs: Vec<InputFrame> = inputs.into_iter().collect();
-    let (mut plain, mut rebuilt) = pair(raw, atlas, opts.trace_len)?;
+    let (mut plain, mut rebuilt) = pair(raw, atlas, opts.trace_len, &opts.function_hooks)?;
+    let mut hook_sink = opts.hook_sink.as_mut().map(|make| make());
     let mut frames_run = 0u32;
     let mut found: Option<(u32, Vec<FieldDiff>)> = None;
     for (frame, input) in (0u32..).zip(&inputs) {
@@ -378,9 +440,10 @@ pub fn run(
             &mut plain,
             &mut rebuilt,
             &mut opts.before_frame,
+            hooks_of(&mut hook_sink),
         );
         frames_run = frame + 1;
-        let diffs = compare_frame(&plain, &rebuilt, &hp, &hr);
+        let diffs = compare_frame(&plain, &rebuilt, hp, hr);
         if !diffs.is_empty() {
             found = Some((frame, diffs));
             break;
@@ -446,18 +509,28 @@ fn investigate(
         wram_plain: Vec::new(),
         wram_rebuilt: Vec::new(),
     };
-    let Ok((mut plain, mut rebuilt)) = pair(raw, atlas, opts.trace_len) else {
+    let Ok((mut plain, mut rebuilt)) = pair(raw, atlas, opts.trace_len, &opts.function_hooks)
+    else {
         return empty("investigation re-run could not rebuild the cores".to_string());
     };
+    // Fresh hook state: the re-run replays every hook event the main run saw.
+    let mut hook_sink = opts.hook_sink.as_mut().map(|make| make());
     for (f, input) in (0..frame).zip(inputs) {
-        let _ = run_pair_frame(f, input, &mut plain, &mut rebuilt, &mut opts.before_frame);
+        let _ = run_pair_frame(
+            f,
+            input,
+            &mut plain,
+            &mut rebuilt,
+            &mut opts.before_frame,
+            hooks_of(&mut hook_sink),
+        );
     }
     let state = snapshot(&plain, raw);
     let mut fine = None;
     if let Some(input) = inputs.get(frame as usize) {
         if opts.fine {
             apply_hook(&mut opts.before_frame, frame, &mut plain, &mut rebuilt);
-            fine = fine_pass(&mut plain, &mut rebuilt, input);
+            fine = fine_pass(&mut plain, &mut rebuilt, input, hooks_of(&mut hook_sink));
         } else {
             let _ = run_pair_frame(
                 frame,
@@ -465,6 +538,7 @@ fn investigate(
                 &mut plain,
                 &mut rebuilt,
                 &mut opts.before_frame,
+                hooks_of(&mut hook_sink),
             );
         }
     }
@@ -489,6 +563,7 @@ fn fine_pass(
     plain: &mut NesCore,
     rebuilt: &mut NesCore,
     input: &InputFrame,
+    rebuilt_hooks: Option<&mut dyn CoreSink>,
 ) -> Option<FineDivergence> {
     for core in [&mut *plain, &mut *rebuilt] {
         core.bus_mut()
@@ -496,11 +571,14 @@ fn fine_pass(
         core.bus_mut()
             .set_controller_buttons(1, input.ports[1] as u8);
     }
-    let mut sink = NullSink;
+    let mut plain_sink = NullSink { hooks: None };
+    let mut rebuilt_sink = NullSink {
+        hooks: rebuilt_hooks,
+    };
     for n in 0..FINE_STEP_LIMIT {
         let pc_before = regs(plain).pc;
-        let a = plain.step(Step::Instruction, &mut sink);
-        let b = rebuilt.step(Step::Instruction, &mut sink);
+        let a = plain.step(Step::Instruction, &mut plain_sink);
+        let b = rebuilt.step(Step::Instruction, &mut rebuilt_sink);
         let mut fields = compare_cpu(plain, rebuilt);
         if a.frame_complete != b.frame_complete {
             scalar(

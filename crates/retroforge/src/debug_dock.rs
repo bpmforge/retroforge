@@ -1524,6 +1524,10 @@ pub struct CoveragePanelData {
     pub rebuild: crate::rebuild::RebuildStatus,
     /// Set by the panel, acted on by the app (like `request`).
     pub rebuild_request: Option<bool>,
+    /// Ticket W36-05: function-hook lines from the core thread (active and
+    /// inactive hooks, the host's state, the mod write ledger). Empty when no
+    /// hooks are loaded.
+    pub hooks: Vec<String>,
 }
 
 /// The Coverage tab: arm/disarm, PRG coverage, a strip per PRG bank, and
@@ -1576,6 +1580,9 @@ fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
                 s.interrupt_entries, s.indirect_checked, s.dispatch_misses, s.delta_len, s.delta_dropped
             ));
         }
+    }
+    for line in &data.hooks {
+        ui.label(line);
     }
     ui.separator();
 }

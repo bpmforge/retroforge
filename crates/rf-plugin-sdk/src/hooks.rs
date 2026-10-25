@@ -431,6 +431,10 @@ impl HookHost {
         for name in &i.resolution.inactive {
             out.push(format!("  inactive {name} (no matching function)"));
         }
+        out.push(format!(
+            "  {} events delivered, {} skipped by the throttle",
+            i.delivered, i.skipped
+        ));
         let ledger = i.ledger.borrow();
         if ledger.is_empty() {
             out.push("  no memory writes".to_string());

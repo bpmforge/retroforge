@@ -502,6 +502,58 @@ field, and NON_GOALS #11's "visited/decoded screens only" restriction on
 
 <!-- ANCHOR_END: schema -->
 
+### Rebuild recipes (ticket W36-05)
+
+A **recipe** is a second data file beside a profile,
+`profiles/<console>/<game>/recipe.toml`, for the Rebuild lab
+(`docs/design/REBUILD_LAB.md` §3): facts about a game's *functions* and the
+meaning of RAM, used to attach hooks by name instead of by address. Like a
+profile it holds facts only: no ROM bytes, no disassembly (law 5, D-021).
+Every row carries a `source` note saying how it was observed. The data types
+and the matcher are in `rf-rebuild` (`recipe`), the TOML reader/writer is
+`rf_profiles::recipe` (`load_recipe_str`, `load_recipe_file`,
+`recipe_to_toml`).
+
+```toml
+[recipe]
+format = 1                    # this build reads 1
+id = "super-mario-bros"
+engine = "smb1"               # a label for the engine family, not logic
+
+[[function]]
+name = "nmi"                  # hooks register by this name
+shape_hash = "0x3f3d315a776a77dd"   # required, quoted hex (u64 does not fit a TOML integer)
+exact_hash = "0xf25cac5c834aa9ee"   # optional; raises match confidence
+address_hint = 0x8082         # optional CPU entry on the observed dump; breaks ties
+hooks = ["entry", "exit"]     # sides a hook may attach to (default: both)
+source = "observed: the atlas function the NMI vector targets in a recording"
+
+[[ram]]
+addr = 0x075a
+width = 1
+name = "lives"
+source = "profiles/nes/super-mario-bros/profile.toml [[memory_map]] lives"
+```
+
+**Matching.** A row matches an atlas function by `shape_hash`: the FNV-1a hash
+of the function's instruction bytes with every *absolute-address* operand
+zeroed (`rf_rebuild::Isa::masked_operand`; for the 6502 that is every 3-byte
+instruction, i.e. absolute, absolute indexed, indirect, `JSR`, `JMP`). Zero
+page, immediate and relative operands and all opcode bytes are kept, so a
+function that was moved or re-linked still matches and one whose code changed
+does not. If the row has an `exact_hash` and some candidates equal it, those
+win and the match is `Exact`; otherwise it is `Shape`. Among several
+candidates the entry nearest `address_hint` wins (no hint: the lowest entry).
+A row with no candidate is **unmatched**: its hooks are reported inactive and
+the game runs on the generic rebuild and the interpreter. A hook never
+guesses.
+
+Unknown keys, a bad hash, a hook point other than `entry`/`exit`, a duplicate
+function name and a row without `source` are load errors. Hashes depend on
+which blocks the recording reached (a function's extent is what was observed
+plus what static decode adds), so a recipe is made from, and matches best
+against, atlases built from a similar amount of play.
+
 ## 3. Authoring pipeline
 
 1. Play in Research/Debug mode; label addresses in the debugger (watchpoints

@@ -377,6 +377,11 @@ pub struct FrameMsg {
     /// while on). Sent every [`COVERAGE_REFRESH_FRAMES`] frames while it is
     /// not `Off`, and on the next frame after any change; `None` otherwise.
     pub rebuild: Option<crate::rebuild::RebuildStatus>,
+    /// Ticket W36-05: the function-hook panel lines (which hooks are active
+    /// or inactive, the host's state, the mod write ledger). Sent when they
+    /// change, checked every [`COVERAGE_REFRESH_FRAMES`] frames; `None`
+    /// otherwise.
+    pub hooks: Option<Vec<String>>,
     /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, read via
     /// `NesBus::vram()`/`palette()` — plain non-observing borrows, so
     /// snapshotting them here cannot perturb A12 edge timing (see
@@ -750,6 +755,7 @@ fn rebuild_report(
     status: &mut crate::rebuild::RebuildStatus,
     job: &mut Option<Receiver<crate::rebuild::RebuildBuild>>,
     dirty: &mut bool,
+    hooks: &mut HookState,
 ) -> Option<crate::rebuild::RebuildStatus> {
     use crate::rebuild::{RebuildBuild, RebuildStatus};
     if let Some(rx) = job.as_ref() {
@@ -759,7 +765,12 @@ fn rebuild_report(
                 *dirty = true;
                 *status = match done {
                     RebuildBuild::Ready(atlas) => match stepper.set_rebuild_atlas(Some(atlas)) {
-                        Ok(()) => RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default()),
+                        Ok(()) => {
+                            // The atlas the hook names resolve against is
+                            // new (ticket W36-05).
+                            hooks.resolve(stepper);
+                            RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default())
+                        }
                         Err(e) => RebuildStatus::Failed(e.to_string()),
                     },
                     RebuildBuild::NeedCoverage => RebuildStatus::NeedCoverage,
@@ -782,6 +793,79 @@ fn rebuild_report(
         *dirty = true;
     }
     std::mem::take(dirty).then(|| status.clone())
+}
+
+/// The core thread's function-hook bookkeeping (ticket W36-05).
+#[derive(Default)]
+struct HookState {
+    /// The recipe the loaded hooks resolve against, kept to re-resolve when
+    /// an atlas is installed.
+    recipe: Option<rf_rebuild::Recipe>,
+    /// Why the last `SetHooks` failed to load, if it did.
+    error: Option<String>,
+    last_lines: Vec<String>,
+    dirty: bool,
+}
+
+impl HookState {
+    /// Handle [`CoreCommand::SetHooks`]: build the host here, on the core
+    /// thread, and resolve it against whatever atlas is installed.
+    fn set(&mut self, stepper: &mut EmuStepper, setup: Option<Box<crate::rebuild::HookSetup>>) {
+        self.dirty = true;
+        self.error = None;
+        self.recipe = None;
+        let Some(s) = setup else {
+            stepper.set_hook_host(None);
+            return;
+        };
+        let s = *s;
+        match rf_plugin_sdk::HookHost::load(
+            s.manifest,
+            &s.lua_source,
+            rf_plugin_sdk::Budget::default(),
+            &rf_plugin_sdk::sandbox::Bridge::default(),
+        ) {
+            Ok(host) => {
+                stepper.set_hook_host(Some(host));
+                stepper.resolve_hooks(&s.recipe);
+                self.recipe = Some(s.recipe);
+            }
+            Err(e) => {
+                stepper.set_hook_host(None);
+                self.error = Some(format!("hook script did not load: {e}"));
+            }
+        }
+    }
+
+    fn resolve(&mut self, stepper: &mut EmuStepper) {
+        if let Some(r) = &self.recipe {
+            stepper.resolve_hooks(r);
+            self.dirty = true;
+        }
+    }
+
+    /// The panel lines when they changed (checked on the refresh cadence or
+    /// right after a change).
+    fn report(&mut self, stepper: &EmuStepper) -> Option<Vec<String>> {
+        let tick = stepper
+            .frame_count()
+            .is_multiple_of(COVERAGE_REFRESH_FRAMES);
+        if !(tick || self.dirty) {
+            return None;
+        }
+        let lines = match (stepper.hook_host(), &self.error) {
+            (_, Some(e)) => vec![e.clone()],
+            (Some(h), None) => h.panel_lines(),
+            (None, None) => Vec::new(),
+        };
+        self.dirty = false;
+        // Resent on every refresh while there is something to show: a frame
+        // message the UI had no room for is dropped (`publish_frame`), and a
+        // change reported only once would be lost with it.
+        let send = lines != self.last_lines || (tick && !lines.is_empty());
+        self.last_lines.clone_from(&lines);
+        send.then_some(lines)
+    }
 }
 
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
@@ -1033,6 +1117,12 @@ pub enum CoreCommand {
     /// Ticket W36-03: turn the block executor on for this ROM (find or build
     /// the atlas in the background, install it here) or off. Off by default.
     SetRebuild(bool),
+    /// Ticket W36-05: load Lua function hooks (built on this thread, resolved
+    /// against the installed atlas now and whenever one is installed), or
+    /// `None` to drop them. Needs Rebuild on for any hook to fire. A hook
+    /// that writes memory is mod-tier: the manifest must grant
+    /// `write_memory` and every write is ledgered in the panel.
+    SetHooks(Option<Box<crate::rebuild::HookSetup>>),
     /// Ticket W15-06 (FR-ENH-008): disable frame pacing entirely while
     /// held — the App-hotkey fast-forward. `false` runs the loop flat-out
     /// (`crate::pacer::FramePacer::set_enabled`'s own doc); `true`
@@ -1567,6 +1657,8 @@ fn core_thread_main(
     let mut rebuild_job: Option<Receiver<crate::rebuild::RebuildBuild>> = None;
     let mut rebuild_dirty = false;
     let rebuild_sha = rom_sha256.clone();
+    // Ticket W36-05: function hooks (Lua state lives here, on this thread).
+    let mut hook_state = HookState::default();
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -1983,6 +2075,7 @@ fn core_thread_main(
                         coverage_acc = None;
                     }
                 }
+                CoreCommand::SetHooks(setup) => hook_state.set(&mut stepper, setup),
                 CoreCommand::SetRebuild(on) => {
                     rebuild_job = None;
                     let _ = stepper.set_rebuild_atlas(None);
@@ -2602,7 +2695,9 @@ fn core_thread_main(
                     &mut rebuild_status,
                     &mut rebuild_job,
                     &mut rebuild_dirty,
+                    &mut hook_state,
                 ),
+                hooks: hook_state.report(&stepper),
                 audio_traces: if audio_capture {
                     // ~64 points is more than a 32-pixel-tall scope can
                     // resolve; reducing here keeps a frame's 5x735
@@ -2960,6 +3055,7 @@ mod tests {
             audio_traces: Vec::new(),
             coverage: None,
             rebuild: None,
+            hooks: None,
             snes: None,
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
@@ -3835,6 +3931,177 @@ mod tests {
             }
         }
         assert_eq!(off, Some(RebuildStatus::Off));
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W36-05: Lua function hooks load on the core thread, resolve
+    /// against the atlas once Rebuild installs one, fire on the NMI entry and
+    /// report active/inactive hooks and their event count back as panel
+    /// lines. The Lua state is built and used on the core thread only.
+    #[test]
+    fn lua_function_hooks_load_resolve_fire_and_report_on_the_core_thread() {
+        use rf_core_api::{EmulatorCore as _, InputFrame, ResetKind};
+        // NMI on, a long spin, and an NMI handler (`INC $12; RTI`) at $8060.
+        let mut ines = vec![0u8; 16];
+        ines[0..4].copy_from_slice(b"NES\x1a");
+        ines[4] = 1;
+        ines[5] = 1;
+        let mut prg = vec![0xEAu8; 0x4000];
+        let code: [(usize, &[u8]); 3] = [
+            (
+                0x00,
+                &[
+                    0xA9, 0x80, 0x8D, 0x00, 0x20, 0x20, 0x20, 0x80, 0x4C, 0x05, 0x80,
+                ],
+            ),
+            (
+                0x20,
+                &[
+                    0xA0, 0x00, 0xA2, 0x00, 0xE8, 0xD0, 0xFD, 0xC8, 0xD0, 0xF8, 0x60,
+                ],
+            ),
+            (0x60, &[0xE6, 0x12, 0x40]),
+        ];
+        for (off, b) in code {
+            prg[off..off + b.len()].copy_from_slice(b);
+        }
+        prg[0x3FFA..0x3FFC].copy_from_slice(&0x8060u16.to_le_bytes());
+        prg[0x3FFC..0x3FFE].copy_from_slice(&0x8000u16.to_le_bytes());
+        ines.extend(prg);
+        ines.extend(vec![0u8; 0x2000]);
+
+        // The recipe row is observed the way a recipe author would: record,
+        // build the atlas, take the function the NMI vector targets.
+        struct Quiet;
+        impl rf_core_api::CoreSink for Quiet {
+            fn video_scanline(&mut self, _y: u16, _p: &[rf_core_api::PpuPixel]) {}
+            fn audio(&mut self, _s: &[i16]) {}
+            fn event(&mut self, _e: rf_core_api::CoreEvent) {}
+        }
+        let mut rec = rf_nes::core::NesCore::from_ines_bytes(&ines).expect("loads");
+        rec.set_coverage_recording(true);
+        rec.reset(ResetKind::Hard);
+        for _ in 0..40 {
+            rec.run_frame(&InputFrame::empty(), &mut Quiet);
+        }
+        let log = rec.take_coverage().expect("armed");
+        let atlas = rf_nes::rebuild::build_atlas(
+            rf_nes::NesRom::from_ines_bytes(&ines)
+                .expect("rom")
+                .prg_rom(),
+            &log,
+        );
+        let f = atlas
+            .functions
+            .iter()
+            .find(|f| f.entry_cpu == 0x8060)
+            .expect("the NMI handler is an atlas function");
+        let row = |name: &str, shape: u64| rf_rebuild::RecipeFunction {
+            name: name.to_string(),
+            shape_hash: shape,
+            exact_hash: None,
+            address_hint: None,
+            hooks: rf_rebuild::HookPoints {
+                entry: true,
+                exit: false,
+            },
+            source: "test".to_string(),
+        };
+        let setup = |lua: &str| crate::rebuild::HookSetup {
+            manifest: rf_plugin_sdk::Manifest {
+                id: "core-thread-hooks".into(),
+                version: "0.1.0".into(),
+                api: "0.1".into(),
+                license: "MIT".into(),
+                provenance: "test".into(),
+                capabilities: rf_plugin_sdk::Capabilities {
+                    function_hooks: true,
+                    ..rf_plugin_sdk::Capabilities::default()
+                },
+            },
+            lua_source: lua.to_string(),
+            recipe: rf_rebuild::Recipe {
+                id: "t".into(),
+                engine: "t".into(),
+                functions: vec![row("nmi", f.shape_hash), row("ghost", 0x1234)],
+                ram: vec![],
+            },
+        };
+
+        let core = spawn(ines).expect("spawns a core thread");
+        let send = |c| core.cmd_tx.send(c).expect("accepted");
+        // Pulls frames until `done` accepts a message; every message is seen.
+        let step_until = |max: usize, done: &mut dyn FnMut(&FrameMsg) -> bool| {
+            for _ in 0..max {
+                send(CoreCommand::StepFrame);
+                let CoreEvent::Frame(msg) = core
+                    .evt_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("frame")
+                else {
+                    continue;
+                };
+                // The UI's duty (see `app::pump_core_events`): give the slot
+                // back, or the core thread drops every frame after the cap.
+                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+                if done(&msg) {
+                    return true;
+                }
+            }
+            false
+        };
+        send(CoreCommand::SetCoverage(true));
+        // Like the Rebuild test above: the recording steps are not waited on
+        // one by one (the boot frame can end without a message), but what
+        // they produce is drained so the frame channel has room again.
+        for _ in 0..40 {
+            send(CoreCommand::StepFrame);
+            while let Ok(CoreEvent::Frame(_)) = core.evt_rx.recv_timeout(Duration::from_millis(50))
+            {
+                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        send(CoreCommand::SetCoverage(false));
+        // Hooks are accepted before the atlas exists: nothing resolves yet.
+        send(CoreCommand::SetHooks(Some(Box::new(setup(
+            "rf.on_enter('nmi', function() end)\nrf.on_enter('ghost', function() end)",
+        )))));
+        send(CoreCommand::SetRebuild(true));
+        let mut lines: Vec<String> = Vec::new();
+        let seen = step_until(400, &mut |m| {
+            if let Some(h) = &m.hooks {
+                lines.clone_from(h);
+            }
+            lines.iter().any(|l| l.contains("active   nmi"))
+        });
+        assert!(seen, "the hook never resolved: {lines:?}");
+        assert!(lines[0].contains("1 active, 1 inactive"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("inactive ghost")),
+            "an unmatched name is reported inactive: {lines:?}"
+        );
+        // And events are delivered once frames run with the atlas on.
+        let fired = step_until(200, &mut |m| {
+            if let Some(h) = &m.hooks {
+                lines.clone_from(h);
+            }
+            lines
+                .iter()
+                .any(|l| l.contains("events delivered") && !l.contains("  0 events"))
+        });
+        assert!(fired, "no NMI event reached the hook: {lines:?}");
+
+        // A script that does not load is reported, and drops the hooks.
+        send(CoreCommand::SetHooks(Some(Box::new(setup(
+            "this is not lua",
+        )))));
+        let mut error = None;
+        step_until(50, &mut |m| {
+            error = m.hooks.clone().filter(|h| h[0].contains("did not load"));
+            error.is_some()
+        });
+        assert!(error.is_some(), "a load error must reach the panel");
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
         let _ = core.join_handle.join();
     }

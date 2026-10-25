@@ -1,7 +1,7 @@
 //! Turning Rebuild on for the current ROM (ticket W36-03): find or build the
 //! code atlas, off the core thread.
 //!
-//! The atlas comes from the per-ROM cache (`code-atlas-v1`) when present,
+//! The atlas comes from the per-ROM cache (`code-atlas-v2`) when present,
 //! otherwise from the coverage the session has recorded so far, and is then
 //! stored for next time. If there is neither, the answer is
 //! [`RebuildBuild::NeedCoverage`] and the panel says to record first.
@@ -32,6 +32,17 @@ pub enum RebuildStatus {
     NeedCoverage,
     Failed(String),
     On(RebuildStats),
+}
+
+/// What the UI asks the core thread to load as function hooks (ticket
+/// W36-05): a Lua script and the recipe its hook names resolve against.
+/// Plain data, so it can cross the command channel; the Lua state itself is
+/// created on the core thread and stays there (it is not `Send`).
+pub struct HookSetup {
+    pub manifest: rf_plugin_sdk::Manifest,
+    /// The script that calls `rf.on_enter` / `rf.on_exit`.
+    pub lua_source: String,
+    pub recipe: rf_rebuild::Recipe,
 }
 
 /// Result of the background build.
