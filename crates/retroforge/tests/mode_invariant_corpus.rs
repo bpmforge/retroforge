@@ -59,6 +59,22 @@ fn every_corpus_entry_is_invariant_with_the_coverage_recorder_armed() {
     }
 }
 
+/// Ticket W36-03: the block executor, with an atlas recorded from the entry's
+/// own run, must be invisible too. SNES entries have no atlas and are skipped
+/// (`check_with_rebuild` returns `None`); at least one entry must be NES.
+#[test]
+fn every_nes_corpus_entry_is_invariant_with_the_block_executor_on() {
+    for entry in CORPUS {
+        let divergence = mode_invariant::check_with_rebuild(entry);
+        assert!(
+            divergence.is_none(),
+            "corpus entry {:?} diverged with rebuild on: {:?}",
+            entry.name,
+            divergence
+        );
+    }
+}
+
 /// Sanity check that the corpus isn't accidentally empty (which would make
 /// the test above vacuously pass regardless of `check`'s correctness).
 #[test]

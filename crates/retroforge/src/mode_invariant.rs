@@ -345,9 +345,17 @@ fn run(
     entry: &CorpusEntry,
     enhanced: bool,
     coverage: bool,
+    rebuild: bool,
 ) -> (Vec<FrameHashes>, Vec<rf_core_api::InputFrame>) {
     let mut stepper = EmuStepper::open(&(entry.rom)()).expect("corpus ROM must be a valid image");
     stepper.set_coverage_recording(coverage);
+    if rebuild {
+        // Ticket W36-03: the atlas of this very run, from a recording of it.
+        let atlas = record_atlas(entry).expect("rebuild needs an NES corpus entry");
+        stepper
+            .set_rebuild_atlas(Some(Box::new(atlas)))
+            .expect("atlas matches its own cartridge");
+    }
     let mut builder = rf_core_api::FrameBundleBuilder::new(
         rf_renderer::frame::NES_WIDTH as u16,
         rf_renderer::frame::NES_HEIGHT as u16,
@@ -400,8 +408,8 @@ fn build_replay_slice(
 /// `entry.frames` frames matched on both.
 #[must_use]
 pub fn check(entry: &CorpusEntry) -> Option<Divergence> {
-    let (accuracy, _accuracy_inputs) = run(entry, false, false);
-    let (enhanced, enhanced_inputs) = run(entry, true, false);
+    let (accuracy, _accuracy_inputs) = run(entry, false, false, false);
+    let (enhanced, enhanced_inputs) = run(entry, true, false, false);
     let n = entry.frames.min(accuracy.len()).min(enhanced.len());
     for i in 0..n {
         if accuracy[i] != enhanced[i] {
@@ -425,8 +433,8 @@ pub fn check(entry: &CorpusEntry) -> Option<Divergence> {
 /// `enhanced` side is the armed run.
 #[must_use]
 pub fn check_with_coverage(entry: &CorpusEntry) -> Option<Divergence> {
-    let (plain, _) = run(entry, false, false);
-    let (armed, armed_inputs) = run(entry, false, true);
+    let (plain, _) = run(entry, false, false, false);
+    let (armed, armed_inputs) = run(entry, false, true, false);
     let n = entry.frames.min(plain.len()).min(armed.len());
     (0..n).find(|&i| plain[i] != armed[i]).map(|i| Divergence {
         entry_name: entry.name,
@@ -435,6 +443,46 @@ pub fn check_with_coverage(entry: &CorpusEntry) -> Option<Divergence> {
         enhanced: armed[i].clone(),
         replay_slice_rfreplay: build_replay_slice(&(entry.rom)(), &armed_inputs, i),
     })
+}
+
+/// The code atlas of `entry`'s ROM from a coverage recording of its own run,
+/// or `None` when it is not an NES image (ticket W36-03).
+fn record_atlas(entry: &CorpusEntry) -> Option<rf_nes::rebuild::Atlas> {
+    let ines = (entry.rom)();
+    let rom = rf_nes::NesRom::from_ines_bytes(&ines).ok()?;
+    let mut stepper = EmuStepper::open(&ines).ok()?;
+    stepper.set_coverage_recording(true);
+    let mut builder = rf_core_api::FrameBundleBuilder::new(
+        rf_renderer::frame::NES_WIDTH as u16,
+        rf_renderer::frame::NES_HEIGHT as u16,
+    );
+    for _ in 0..entry.frames {
+        stepper.latch_and_advance_frame(rf_core_api::InputFrame::empty(), &mut builder);
+        let _ = builder.take(stepper.frame_count());
+    }
+    let log = stepper.take_coverage()?;
+    Some(rf_nes::rebuild::build_atlas(rom.prg_rom(), &log))
+}
+
+/// Like [`check_with_coverage`], with the block executor installed on the
+/// second run instead (ticket W36-03). The executor is the interpreter with
+/// a map, so every per-frame state and video hash must match the plain run.
+/// `None` for entries that are not NES images (no atlas to build).
+#[must_use]
+pub fn check_with_rebuild(entry: &CorpusEntry) -> Option<Divergence> {
+    record_atlas(entry)?;
+    let (plain, _) = run(entry, false, false, false);
+    let (rebuilt, inputs) = run(entry, false, false, true);
+    let n = entry.frames.min(plain.len()).min(rebuilt.len());
+    (0..n)
+        .find(|&i| plain[i] != rebuilt[i])
+        .map(|i| Divergence {
+            entry_name: entry.name,
+            frame: i,
+            accuracy: plain[i].clone(),
+            enhanced: rebuilt[i].clone(),
+            replay_slice_rfreplay: build_replay_slice(&(entry.rom)(), &inputs, i),
+        })
 }
 
 /// Write CI-artifact evidence for `div` under `out_dir` (criterion 4,

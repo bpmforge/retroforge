@@ -1520,17 +1520,73 @@ pub struct CoveragePanelData {
     pub request: Option<bool>,
     /// Whether the recorder is armed (the app's view of it).
     pub armed: bool,
+    /// Ticket W36-03: latest Rebuild status from the core thread.
+    pub rebuild: crate::rebuild::RebuildStatus,
+    /// Set by the panel, acted on by the app (like `request`).
+    pub rebuild_request: Option<bool>,
 }
 
 /// The Coverage tab: arm/disarm, PRG coverage, a strip per PRG bank, and
 /// the indirect-edge / interrupt-entry counts. Read-only over a summary
 /// the core thread built, so it cannot reach core state.
 fn coverage_ui(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
+    // The whole tab scrolls: Rebuild's section above, a 4 MiB cart's 256
+    // bank rows below.
+    egui::ScrollArea::vertical().show(ui, |ui| coverage_body(ui, data));
+}
+
+/// Rebuild's section of the Coverage tab (ticket W36-03): the toggle, and
+/// while on the executor's counters and the share of instructions that had
+/// no atlas node.
+fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
+    use crate::rebuild::RebuildStatus;
+    ui.horizontal(|ui| {
+        let on = !matches!(data.rebuild, RebuildStatus::Off);
+        let label = if on { "Rebuild off" } else { "Rebuild on" };
+        if ui.button(label).clicked() {
+            data.rebuild_request = Some(!on);
+        }
+        ui.label("block executor over the code atlas (off by default)");
+    });
+    match &data.rebuild {
+        RebuildStatus::Off => {}
+        RebuildStatus::Building => {
+            ui.label("Building the atlas\u{2026}");
+        }
+        RebuildStatus::NeedCoverage => {
+            ui.label(
+                "No atlas for this ROM yet \u{2014} record coverage first, then turn Rebuild on.",
+            );
+        }
+        RebuildStatus::Failed(e) => {
+            ui.label(format!("Rebuild failed: {e}"));
+        }
+        RebuildStatus::On(s) => {
+            ui.label(format!(
+                "{} atlas functions  |  {} instructions: {} observed, {} inferred, {} fallback ({:.2}% fallback)",
+                s.atlas_functions,
+                s.instructions(),
+                s.observed,
+                s.inferred,
+                s.fallback,
+                s.fallback_rate() * 100.0
+            ));
+            ui.label(format!(
+                "{} interrupt entries  |  {} indirect transfers checked, {} dispatch misses ({} distinct, {} dropped)",
+                s.interrupt_entries, s.indirect_checked, s.dispatch_misses, s.delta_len, s.delta_dropped
+            ));
+        }
+    }
+    ui.separator();
+}
+
+fn coverage_body(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
     use rf_debugger::coverage_view::CellState;
     let Some(data) = data else {
         ui.label("No session \u{2014} open a ROM to record coverage.");
         return;
     };
+    rebuild_section(ui, data);
     ui.horizontal(|ui| {
         let label = if data.armed {
             "Stop recording"
@@ -1566,8 +1622,7 @@ fn coverage_ui(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
         s.instructions, s.indirect_edges, s.interrupt_entries, s.ram_executed_bytes
     ));
     ui.separator();
-    // A 4 MiB cart is 256 bank rows: always scrollable.
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    {
         ui.label("Per 16 KiB PRG bank (green: opcode run, amber: operand only, grey: never seen)");
         let cell = 6.0;
         for (n, bank) in s.banks.iter().enumerate() {
@@ -1596,7 +1651,7 @@ fn coverage_ui(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
                 }
             });
         }
-    });
+    }
 }
 
 /// What the Audio tab needs (ticket W4-10b).

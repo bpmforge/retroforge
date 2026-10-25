@@ -44,9 +44,13 @@ impl CoreSink for Null {
 fn buttons(frame: u32) -> u8 {
     match frame {
         0..=199 => 0,
-        200..=204 => START,
-        205..=229 => 0,
-        f if (f - 230) % 60 < 12 => RIGHT | A,
+        // The first Start leaves the multicart's game select; the second
+        // leaves SMB's title before it idles into the attract demo (which
+        // ignores the pad). Found by observation in W36-03: with one Start
+        // the run was the demo.
+        200..=204 | 400..=404 => START,
+        205..=399 | 405..=499 => 0,
+        f if (f - 500) % 60 < 12 => RIGHT | A,
         _ => RIGHT,
     }
 }
@@ -67,8 +71,8 @@ fn smb_level_one_coverage_matches_an_independent_pc_oracle() {
     let mut fetched = vec![false; prg_len];
     let mut oracle_instructions = 0u64;
     let mut sink = Null;
-    let mut start_x = 0u8;
-    for frame in 0..(230 + 1500) {
+    let mut start_x = 0u16;
+    for frame in 0..(500 + 1500) {
         core.bus_mut().set_controller_buttons(0, buttons(frame));
         loop {
             let pc = core.cpu().pc;
@@ -86,18 +90,19 @@ fn smb_level_one_coverage_matches_an_independent_pc_oracle() {
         // Proof the run is in World 1-1, from the observed RAM facts in
         // profiles/nes/super-mario-bros/profile.toml ($075F world, $0760
         // level, both zero-indexed; $0086 Mario's on-screen x, 0x28 at the
-        // start of play).
+        // start of play; $006D its page, so page*256+x is the level x).
         if frame == 700 {
             assert_eq!(
                 (core.peek(0x075F), core.peek(0x0760)),
                 (0, 0),
                 "not in World 1-1 at frame 700"
             );
-            start_x = core.peek(0x0086);
+            assert_eq!(core.peek(0x0770), 1, "not in play at frame 700 (demo?)");
+            start_x = world_x(&core);
         }
     }
-    let end_x = core.peek(0x0086);
-    println!("Mario x: frame 700 {start_x:#04x}, end {end_x:#04x}");
+    let end_x = world_x(&core);
+    println!("Mario world x: frame 700 {start_x}, end {end_x}");
     assert_eq!(
         (core.peek(0x075F), core.peek(0x0760)),
         (0, 0),
@@ -153,4 +158,10 @@ fn smb_level_one_coverage_matches_an_independent_pc_oracle() {
         .indirect
         .iter()
         .any(|e| matches!(e.kind, IndirectKind::JmpIndirect | IndirectKind::Rts)));
+}
+
+/// Mario's x in the level: page ($006D) times 256 plus on-screen x ($0086),
+/// both from profiles/nes/super-mario-bros/profile.toml.
+fn world_x(core: &NesCore) -> u16 {
+    u16::from(core.peek(0x006D)) * 256 + u16::from(core.peek(0x0086))
 }
