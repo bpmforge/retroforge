@@ -93,4 +93,5 @@ is not Accuracy Mode.
   (12 ms at worst). Run-ahead works with the mod on, but both it and the margin enemies
   switch off if a hook script is loaded that can write memory (the badge
   says so). Needs the game's code atlas: record some play in the Coverage tab
-  and turn Rebuild on once.
+  and turn Rebuild on once. With the mod on, the level scout still fills the margins' scenery (its own
+  player is kept clear of the enemies the mod keeps alive); the enemies are drawn over it.

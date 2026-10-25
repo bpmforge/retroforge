@@ -4793,3 +4793,13 @@ stories, 10 decisions).
   and 0.29%, all work-RAM code; 0 width mismatches. The Rebuild toggle builds
   the 65816 atlas in the app (tested on a synthetic LoROM, not SMW through the
   GUI). SA-1/S-DD1 bank switching not covered. Workspace: **3537 passing**.
+
+- **W36-06c — Margin scenery under live enemies** (2026-10-25, from Brad's
+  look at the W36-06b capture). Cause: with the mod on, the kept-alive first
+  Goomba killed the scout's walking player before the camera moved, so the
+  scout never mapped 1-1. Mod sessions now build the scout plan with the
+  recipe's object-slot flags held at 0. In-app capture at 32:9: ground, hills,
+  blocks and the pipe in the margins, enemies drawn over them (0 non-enemy
+  margin dots changed). Limits: the walk-only scout stops at the first pipe, so
+  the right margin past it is sky (W37-03); the left margin is play history.
+  Workspace: **3539 passing**.

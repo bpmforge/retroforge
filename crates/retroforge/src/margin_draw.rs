@@ -245,6 +245,15 @@ impl Tally {
     }
 }
 
+/// Ticket W36-06c: the RAM bytes of the recipe's object-slot flags (empty when the recipe describes
+/// no object table). A level scout of a mod session holds them at 0: the mod keeps enemies alive
+/// from the level's first frame and they kill the scouting player before the camera has moved, and
+/// the scout wants the level, not its enemies.
+#[must_use]
+pub fn object_flag_addrs(recipe: &rf_rebuild::Recipe) -> Vec<u32> {
+    Map::from_recipe(recipe).map_or_else(Vec::new, |m| (m.flag..m.flag + m.slots).collect())
+}
+
 /// Whether a loaded hook host makes the machine something a private copy cannot reproduce.
 #[must_use]
 pub fn blocked_by_hooks(real: &EmuStepper) -> bool {

@@ -16,125 +16,15 @@
 mod w36_06b_common;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
 use egui_kittest::Harness;
 use retroforge::app::{RetroForgeApp, WINDOW_SIZE};
 use retroforge::core_thread::CoreCommand;
 use retroforge::game_settings::Mode;
-use retroforge::stepper::EmuStepper;
-use rf_core_api::{CoreEvent, CoreSink, PpuPixel};
 use rf_enhance::widescreen::Aspect;
 use w36_06b_common::*;
-
-struct Discard;
-
-impl CoreSink for Discard {
-    fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
-    fn audio(&mut self, _s: &[i16]) {}
-    fn event(&mut self, _e: CoreEvent) {}
-}
-
-/// Camera-relative x of each active enemy slot.
-fn rels(st: &EmuStepper) -> Vec<i32> {
-    let cam = i32::from(st.peek_bus(0x071A)) * 256 + i32::from(st.peek_bus(0x071C));
-    (0..5u32)
-        .filter(|k| st.peek_bus(0x0F + k) != 0)
-        .map(|k| i32::from(st.peek_bus(0x6E + k)) * 256 + i32::from(st.peek_bus(0x87 + k)) - cam)
-        .collect()
-}
-
-/// Enemies deep in the right margin, deep in the left, and in the picture.
-fn census(st: &EmuStepper) -> (usize, usize, usize) {
-    let r = rels(st);
-    (
-        r.iter().filter(|r| (300..480).contains(*r)).count(),
-        r.iter().filter(|r| (-250..-100).contains(*r)).count(),
-        r.iter().filter(|r| (24..232).contains(*r)).count(),
-    )
-}
-
-/// Play the unhurt script on the live-enemies image to a frame where enemies stand in both margins and
-/// still do 45 frames later with the pad idle and Mario alive; return the state container there.
-fn find_scene(image: &[u8], session: &retroforge::mod_chunk::ModSession) -> rf_state::Container {
-    let mut st = EmuStepper::open(image).expect("opens");
-    let mut best: Option<((usize, usize, usize), rf_state::Container)> = None;
-    for f in 0..3200u32 {
-        let inp = input(script_two(f));
-        if st.peek_bus(0x0770) == 1 {
-            st.poke_bus(0x079E, 0x30);
-        }
-        st.latch_and_advance_frame(inp, &mut Discard);
-        if f < 600 || st.peek_bus(0x0770) != 1 || f % 4 != 0 {
-            continue;
-        }
-        let (right, left, inside) = census(&st);
-        if right == 0
-            || best.as_ref().is_some_and(|(c, _)| {
-                (c.0 > 0) as usize + (c.1 > 0) as usize + (c.2 > 0) as usize
-                    >= (right > 0) as usize + (left > 0) as usize + (inside > 0) as usize
-            })
-        {
-            continue;
-        }
-        // Does the scene hold with the pad idle?
-        let snap = st.snapshot().expect("snapshots");
-        let mut later = EmuStepper::open(image).expect("opens");
-        later.restore(&snap).expect("restores");
-        for _ in 0..45 {
-            later.latch_and_advance_frame(input(0), &mut Discard);
-        }
-        let after = census(&later);
-        if later.peek_bus(0x0770) == 1 && after.0 > 0 {
-            best = Some((
-                (right, left, inside),
-                st.save_state_with_mods(0, Some(session)).expect("saves"),
-            ));
-            if left > 0 && inside > 0 {
-                break;
-            }
-        }
-    }
-    let (c, container) = best.expect("a scene with margin enemies");
-    println!(
-        "scene: enemies deep right {}, deep left {}, in the picture {}",
-        c.0, c.1, c.2
-    );
-    container
-}
-
-fn run_frames(h: &mut Harness<'_, RetroForgeApp>, target: u64, deadline: Duration) {
-    let start = Instant::now();
-    while h.state().frame_count_for_test() < target && start.elapsed() < deadline {
-        h.run_steps(1);
-        std::thread::sleep(Duration::from_millis(4));
-    }
-}
-
-fn run_n(h: &mut Harness<'_, RetroForgeApp>, n: usize) {
-    for _ in 0..n {
-        h.run_steps(1);
-        std::thread::sleep(Duration::from_millis(4));
-    }
-}
-
-/// The picture the app composed for the last frame.
-fn grab(h: &Harness<'_, RetroForgeApp>) -> (usize, usize, Vec<u8>) {
-    let rgba = h.state().last_frame_rgba_for_test().expect("a frame");
-    let (w, hh) = h.state().frame_size_for_test().expect("a size");
-    assert_eq!(rgba.len(), w * hh * 4);
-    (w, hh, rgba)
-}
-
-fn save(path: &Path, w: usize, h: usize, rgba: &[u8]) {
-    let mut opaque = rgba.to_vec();
-    for px in opaque.chunks_exact_mut(4) {
-        px[3] = 255;
-    }
-    image::save_buffer(path, &opaque, w as u32, h as u32, image::ColorType::Rgba8).expect("png");
-    println!("SHOT {}", path.display());
-}
 
 #[test]
 #[ignore = "needs the mapper-66 multicart ROM (RF_SCREENS_ROMS_DIR) and a GPU"]
@@ -193,7 +83,7 @@ fn smb_1_1_at_32_9_with_enemies_in_the_margins() {
         mods: vec![MOD.to_string()],
         recipe: recipe(),
     };
-    let scene = find_scene(&image, &session);
+    let scene = find_scene(&image, &session, 45, false, 0..=i32::MAX);
     let mut shots = Vec::new();
     // The first pass only fills the margins' canvas (the scene's first render has none yet); the two
     // that are kept are rendered from the same warm canvas.
@@ -236,8 +126,9 @@ fn smb_1_1_at_32_9_with_enemies_in_the_margins() {
     println!(
         "dots that differ with the margin objects on: real picture {centre_diff}, pad {pad_diff}"
     );
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screens/w36");
-    std::fs::create_dir_all(&out).expect("docs/screens/w36");
+    // The committed pair is W36-06c's (the same scene over the level scout's scenery); this one has no
+    // canvas in its margins, so it stays in the scratch directory.
+    let out = dir.clone();
     save(
         &out.join("smb-1-1-32x9-margin-objects-off.png"),
         w,
