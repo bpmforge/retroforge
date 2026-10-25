@@ -123,7 +123,7 @@ a parallel channel that cannot displace the reference.
   of trade a user must opt into knowingly.
 - Never active during a recording, a replay, or a golden capture.
 
-## 7. Decision
+## 7. Decision (W8-09, superseded by §8 on 2026-10-25)
 
 **Not implemented under W8-09, and the reason is §3.1.** A full frame of
 input latency is a poor trade for smoothness in an emulator, and it is not
@@ -148,3 +148,73 @@ report about cross-fading cutscenes.
    its failure mode at direction changes.
 3. Per-region interpolation (playfield only, HUD excluded) demonstrated,
    since a whole-frame blend is already known to be wrong by §3.5.
+
+## 8. Implementation (W36-07, D-028, 2026-10-25)
+
+Brad's D-028 ruling meets precondition 1: **one frame of latency (about 17 ms), disclosed in the UI,
+opt-in, off on a fresh install, absent from Accuracy Mode.** Precondition 3 (per-region, never a
+whole-frame blend) is how it is built. Precondition 2 (extrapolation) is not needed: the design
+interpolates between two frames it holds, so it never guesses ahead.
+
+### Where the code lives
+
+| Piece | Where | Thread |
+|---|---|---|
+| Per-line scroll, background colour under every dot, OAM index per dot (presentation-only reads of the PPU, excluded from save states, off by default) | `rf-nes` `Ppu::line_scroll`, `Ppu::bg_under`, the sink's sprite ids | core thread, read after a real frame |
+| `capture` (reads the above into `Layers`), carried on `FrameMsg::interp` | `retroforge::frame_interp` | core thread |
+| `Presenter` (holds the last two console frames, shows the older one, composes between) | `retroforge::frame_interp` | UI thread, downstream of the channel |
+| `compose`, `detect_hud`, refusals | `rf_enhance::interpolate`, `rf_enhance::interpolation` | pure functions |
+
+Nothing is written back to the machine, `FrameMsg::rgba` is still the console's own frame when it
+leaves the core thread (the Presenter swaps in the older one on the UI side), and the capture is off
+unless the setting is on, so the accuracy-exact stream, goldens, replays and the mode-invariant
+hashes are untouched. It is never on while a video recording runs or a screenshot is taken.
+
+### How an intermediate frame is made (alpha 0..255 of the gap, fixed point)
+
+* **Background.** Frame N's background colour under every dot (including the dots a sprite covered),
+  shifted by `alpha` of the scroll the PPU applied between N and N+1, **line by line**. The scroll
+  source is the PPU's own per-line scroll at dot 1 of each picture line (the loopy `v` register less
+  the two prefetched tiles, plus fine X), not the camera RAM and not the `$2005` write events: the
+  RAM runs about two frames ahead of the picture (`which_frames_oam_does_the_picture_come_from`), so
+  its delta is the wrong pair of frames, and a per-line value is exact for a split-scroll game by
+  construction (a status bar above the split has a different, constant value than the playfield
+  below it, so it does not move). Columns the shift uncovers are taken from N+1's background (the
+  same world, drawn by the machine), never blended.
+* **Sprites.** Frame N's own sprite pixels, moved by `alpha` of how far the same OAM entry moved by
+  N+1. The movement is read from the picture (bounding box of the dots each OAM index won, in both
+  frames), not from the OAM bytes (the OAM runs ahead of the picture too). With a recipe, entries
+  whose pixels sit near one of its object places (enemy slots, the player: `Map::anchors`, from the
+  recipe's RAM rows) are one object and all move by the median movement of the entries that have a
+  counterpart; without a recipe each OAM entry moves by its own (this is the generic path W37-06
+  will build a UI for). Lower OAM index stays on top; a behind-background entry is drawn only where
+  the background is the backdrop colour.
+* **New and unmatched sprites.** A sprite that exists only in N+1 is not drawn until N+1 (we only draw
+  N's pixels). A sprite that exists only in N, or moved implausibly far (over 32 dots), or changed size
+  between the frames, is drawn where N had it until N+1.
+* **HUD.** Rows are excluded through `candidacy`: a top or bottom band, at most half the frame, whose
+  per-line scroll equals its first (last) line's in both frames while the rest of the frame differs
+  (a status bar over a scrolling playfield). Those rows, sprites in them included, are copied from N.
+  A frame with no split has no HUD to exclude and nothing in it is wrongly held.
+
+### Refusals (the pair is repeated: frame N stays on screen)
+
+Not consecutive (a frame the UI never saw), palette changed (`$3F00-$3F1F` digest; star-power and
+flash cycling land here), scroll step over 24 dots between frames (`LargeMotion`), a background that is
+not N's shifted (`Discontinuity`: at least 80% of the dots must match; this is the cut detector, because
+the NES edge signature behind `SceneId` is flat, `scene_identity` module doc), every row HUD, and layers
+that do not describe a picture (`Malformed`).
+
+### Presentation and honesty
+
+* When console frame N+1 arrives the Presenter shows N (so the picture is one console frame late: the
+  disclosed latency); each later repaint in the gap composes `alpha = elapsed / measured gap`. At
+  60 Hz no repaint falls in a gap and nothing is composed (the tally reports those as untried).
+* It steps aside, passing frames through untouched, whenever another stage rewrites the picture after
+  the console: widescreen, an HD pack, a shader, fog, the lens, the diorama, comparison/peek, a
+  recording or screenshot, run-ahead, de-flicker, the sprite overlay. An intermediate frame would
+  bypass those stages, so it is not drawn around them.
+* The row ("Smoother motion") is generic, NES only for now, Enhanced-only and does not exist in
+  Accuracy Mode. Its label is `rf_enhance::interpolation::label()`: `invents: true`, claim naming the
+  one-frame delay, shown under the switch.
+* No float in the composer (`alpha` is 0..=255); loops are `for` over ranges or iterators (law 8).

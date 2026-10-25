@@ -42,6 +42,10 @@ pub fn describe(id: &str) -> &'static str {
         "run_ahead" => {
             "Hides 1-2 frames of the game's own input lag by showing a frame from slightly ahead."
         }
+        "frame_interpolation" => {
+            "Fills the gaps between the game's frames on a fast display. The frames in between are \
+             invented, and every picture is shown one frame (about 17 ms) late."
+        }
         "superfx_overclock" => {
             "Removes slowdown by giving the Super FX chip more speed only when the game needs it."
         }
@@ -75,6 +79,7 @@ pub fn works_on_any_game(id: &str) -> bool {
             | "sa1_overclock"
             | "nes_extra_lines"
             | "run_ahead"
+            | "frame_interpolation"
             | "hd_mode7"
             | "hd2d_lens"
             | "snes_interpolation"
@@ -109,6 +114,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"sa1_overclock" => "Faster SA-1 chip",
         b"nes_extra_lines" => "Less slowdown",
         b"run_ahead" => "Less input lag",
+        b"frame_interpolation" => "Smoother motion",
         b"hd_mode7" => "Sharper Mode 7",
         b"superfx_hd" => "HD Super FX",
         b"hd2d_lens" => "Lens and lighting",

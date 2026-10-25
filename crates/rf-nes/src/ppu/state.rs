@@ -192,6 +192,7 @@ impl Ppu {
             // that feeds back, so it is excluded like `watches` above.
             bg_under_capture: _,
             bg_under: _,
+            line_scroll: _,
             pending_scanline_starts: _,
             pending_frame_end: _,
             events,

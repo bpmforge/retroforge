@@ -284,6 +284,10 @@ pub struct GameSettings {
     /// simulation is untouched (presentation only), but it costs extra CPU,
     /// so it is off by default (law 6). Clamped to 0..=2 on load.
     pub run_ahead: u8,
+    /// Ticket W36-07 (D-028): interpolated presentation, layer by layer, at the cost of one frame of
+    /// input delay (NES). Invents the frames between the game's own, so off by default (law 6) and
+    /// written only when on.
+    pub frame_interpolation: bool,
     /// Ticket W30-02: redraw Mode 7 floors at a finer step (presentation
     /// only; the simulation is untouched). Off by default (law 6).
     pub hd_mode7: bool,
@@ -463,6 +467,7 @@ impl Default for GameSettings {
             snes_interpolation_mode: rf_snes::apu::dsp::Interpolation::Cubic,
             nes_extra_lines: 0,
             run_ahead: 0,
+            frame_interpolation: false,
             hd_mode7: false,
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
@@ -626,6 +631,9 @@ impl GameSettings {
         // Ticket W30-07: written only when on, like the other opt-ins.
         if self.run_ahead > 0 {
             fields.insert("run_ahead".to_string(), self.run_ahead.to_string());
+        }
+        if self.frame_interpolation {
+            fields.insert("frame_interpolation".to_string(), "true".to_string());
         }
         // Ticket W30-02: the scale and perspective flag are written only
         // when they differ from their defaults (2, on).
@@ -829,6 +837,7 @@ impl GameSettings {
                         settings.nes_extra_lines = lines.min(NES_EXTRA_LINES_MAX);
                     }
                 }
+                "frame_interpolation" => settings.frame_interpolation = value == "true",
                 "run_ahead" => {
                     if let Ok(frames) = value.parse::<u8>() {
                         settings.run_ahead = frames.min(RUN_AHEAD_MAX);
@@ -1400,6 +1409,25 @@ mod mode_and_feature_persistence_tests {
 
     /// Ticket W35-16: "Objects past the edge" is off by default, written only when on, and read back.
     #[test]
+    fn frame_interpolation_defaults_off_and_persists_only_when_on() {
+        assert!(!GameSettings::default().frame_interpolation);
+        let on = GameSettings {
+            frame_interpolation: true,
+            ..GameSettings::default()
+        };
+        let text = on.to_text();
+        assert!(text.contains("frame_interpolation=true"), "{text}");
+        assert!(
+            GameSettings::from_text(&text)
+                .expect("parses")
+                .frame_interpolation
+        );
+        let off = GameSettings::from_text(&format!("{MAGIC}\nframe_interpolation=false\n"))
+            .expect("parses");
+        assert!(!off.frame_interpolation);
+    }
+
+    #[test]
     fn margin_sprites_defaults_off_and_persists_only_when_on() {
         assert!(!GameSettings::default().margin_sprites);
         let on = GameSettings {
@@ -1438,6 +1466,7 @@ mod mode_and_feature_persistence_tests {
             "snes_interpolation",
             "nes_extra_lines",
             "run_ahead",
+            "frame_interpolation",
             "hd_mode7",
             "superfx_hd",
             "lens_",

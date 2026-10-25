@@ -29,6 +29,13 @@ ambient glow or a bezel around the picture.
 |---|---|
 | ![CRT shader](tour/24-shader-crt.png) | ![Ambient glow](tour/21-ambient-glow.png) |
 
+**Smoother motion** (Enhanced mode, NES games) fills the gaps between the game's frames on a
+120 Hz or faster display. The frames in between are made up, from the game's own layers (the
+background moved by its real scroll, each sprite by how far it moved), never blended; the status bar
+stays put, and anything that is not smooth motion (a cut, a palette flash) just repeats the game's
+frame. It costs one frame (about 17 ms) of extra delay, so it is off until you turn it on and it does
+not exist in Accuracy Mode.
+
 ## What a profile unlocks
 
 With a matched profile, Game-Aware mode can stitch the level as you play

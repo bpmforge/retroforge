@@ -776,6 +776,14 @@ pub struct RetroForgeApp {
     gsu_clock_sent: Option<crate::clock_governor::ClockPolicy>,
     /// Ticket W30-07: the run-ahead frames last sent to the core.
     run_ahead_sent: Option<u8>,
+    /// Ticket W36-07 (D-028): the interpolated presentation. The Presenter holds back one console
+    /// frame and composes the pictures between; `frame_interp_sent` is what the core was last told.
+    frame_interp: crate::frame_interp::Presenter,
+    frame_interp_sent: Option<bool>,
+    /// A console frame arrived in this repaint's drain (so there is no gap to fill this time).
+    frame_interp_arrived: bool,
+    /// Test hook: every picture the Presenter presented, in order.
+    presented_log: Option<Vec<(crate::frame_interp::Shown, Vec<u8>)>>,
     /// Ticket W30-02: the HD Mode 7 options last sent to the core
     /// (outer `None` = nothing sent yet for this core).
     hd_mode7_sent: Option<Option<rf_snes::ppu::hd_mode7::HdMode7Options>>,
@@ -1903,6 +1911,10 @@ impl RetroForgeApp {
             loading_sent: None,
             gsu_clock_sent: None,
             run_ahead_sent: None,
+            frame_interp: crate::frame_interp::Presenter::new(),
+            frame_interp_sent: None,
+            frame_interp_arrived: false,
+            presented_log: None,
             hd_mode7_sent: None,
             superfx_polygons: None,
             superfx_hd_sent: None,
@@ -4312,6 +4324,8 @@ impl RetroForgeApp {
         self.loading_sent = None;
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
+        self.frame_interp_sent = None;
+        self.frame_interp.reset();
         self.mod_session_sent = false;
         self.hd_mode7_sent = None;
         self.superfx_hd_sent = None;
@@ -4753,7 +4767,7 @@ impl RetroForgeApp {
         self.diorama_fog = fog_source
             .as_ref()
             .map(|(density, w, h)| (density.clone(), (*w, *h)));
-        if let Some(msg) = latest_frame {
+        if let Some(mut msg) = latest_frame {
             self.camera_search = msg.camera_search;
             self.item_values.clone_from(&msg.items);
             // Ticket W2-14: a stepped frame has now been consumed.
@@ -4790,6 +4804,10 @@ impl RetroForgeApp {
                     height: h,
                 })
             });
+            // Ticket W36-07: show the previous console frame, one frame late, when interpolating. After
+            // the HUD watch and the compare pair above, which pair this frame's pixels with this
+            // frame's events and its accuracy-exact twin; only the picture painted below is late.
+            self.present_delayed(&mut msg, fog_source.is_some());
             if self.screenshot_pending {
                 self.screenshot_pending = false;
                 self.write_screenshots(ctx);
@@ -9840,6 +9858,10 @@ impl RetroForgeApp {
                     }
                 }
                 // Ticket W30-07: how many frames ahead.
+                // Ticket W36-07: the honesty label's claim under the switch.
+                if row.id == "frame_interpolation" && row.enabled {
+                    ui.weak(rf_enhance::interpolation::label().claim);
+                }
                 if row.id == "run_ahead"
                     && row.enabled
                     && crate::enhance_dock::run_ahead_picker(
@@ -15019,6 +15041,7 @@ impl RetroForgeApp {
             sprite_rgba,
             margin_sprites: Vec::new(),
             margin_draw: None,
+            interp: None,
             copies_refused_by_hooks: false,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
@@ -17489,6 +17512,151 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W36-07: keep the core's layer capture matching the row's EFFECTIVE state (Enhanced mode,
+    /// toggle on, an NES game), off whenever a video recording is running; sends only on a change.
+    fn sync_frame_interpolation(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let want = self.recorder.is_none()
+            && self.console_label == "NES"
+            && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .any(|r| r.id == "frame_interpolation" && r.effective());
+        if self.frame_interp_sent != Some(want) {
+            self.send_command(CoreCommand::SetInterpolation(want));
+            self.frame_interp_sent = Some(want);
+            if !want {
+                self.frame_interp.reset();
+            }
+        }
+    }
+
+    /// Ticket W36-07: whether the picture on screen is the plain console frame that the layers
+    /// describe. Anything that rewrites the picture after the console (a pack, a lens, a shader,
+    /// fog, a comparison, the diorama, widescreen) is a stage the intermediate frames would bypass,
+    /// so interpolation steps aside for it rather than be drawn around it.
+    fn interp_picture_is_plain(&self, fog: bool) -> bool {
+        self.running
+            && self.compare_mode == rf_renderer::CompareMode::Off
+            && !self.widescreen_on
+            && self.hd_pack.is_none()
+            && self.video.shader.is_none()
+            && self.peek_amount == 0.0
+            && !self.screenshot_pending
+            && self.recorder.is_none()
+            && !fog
+            && !(self.diorama_render.is_some() && self.diorama_view_active())
+            && !self.lens_effective()
+    }
+
+    /// Ticket W36-07: swap the console frame that just arrived for the one before it (the latency
+    /// D-028 accepts), keeping this one's layers for the pictures in between.
+    fn present_delayed(&mut self, msg: &mut core_thread::FrameMsg, fog: bool) {
+        let plain = self.frame_interp_sent == Some(true)
+            && msg.hd.is_none()
+            && msg.hd_mode7.is_none()
+            && self.interp_picture_is_plain(fog);
+        match msg.interp.take() {
+            Some(layers) if plain => {
+                self.frame_interp_arrived = true;
+                let shown = self
+                    .frame_interp
+                    .arrive(*layers, &msg.rgba, std::time::Instant::now());
+                if let (Some(log), Some(n)) =
+                    (&mut self.presented_log, self.frame_interp.shown_frame())
+                {
+                    log.push((crate::frame_interp::Shown::Console(n), shown.clone()));
+                }
+                msg.rgba = shown;
+            }
+            _ => self.frame_interp.reset(),
+        }
+    }
+
+    /// Ticket W36-07: a repaint with no new console frame shows a picture composed between the one on
+    /// screen and the next, when the pair allows it; otherwise the picture on screen stays (a repeat).
+    fn present_intermediate(&mut self, ctx: &egui::Context) {
+        if self.frame_interp_arrived || self.frame_interp_sent != Some(true) || !self.running {
+            return;
+        }
+        let Some((w, rows)) = self.last_frame_size else {
+            return;
+        };
+        let Some((rgba, shown)) = self.frame_interp.intermediate(std::time::Instant::now()) else {
+            return;
+        };
+        let n = w * rows * 4;
+        if rgba.len() < n {
+            return;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, rows], &rgba[..n]);
+        match &mut self.texture {
+            Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+            None => {
+                self.texture =
+                    Some(ctx.load_texture("nes-frame", image, egui::TextureOptions::NEAREST));
+            }
+        }
+        if let Some(log) = &mut self.presented_log {
+            log.push((shown, rgba[..n].to_vec()));
+        }
+    }
+
+    /// Ticket W36-07 test hook: set the gap fraction (0..=255) intermediates use instead of the clock.
+    #[doc(hidden)]
+    pub fn frame_interp_alpha_for_test(&mut self, alpha: Option<u8>) {
+        self.frame_interp.alpha_override = alpha;
+    }
+
+    /// Ticket W36-07 test hook: why the Presenter is or is not engaged.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_debug_for_test(&self) -> String {
+        format!(
+            "sent {:?} running {} compare_off {} widescreen {} hd_pack {} shader {:?} peek {} shot {} rec {} diorama {} lens {} delaying {}",
+            self.frame_interp_sent,
+            self.running,
+            self.compare_mode == rf_renderer::CompareMode::Off,
+            self.widescreen_on,
+            self.hd_pack.is_some(),
+            self.video.shader,
+            self.peek_amount,
+            self.screenshot_pending,
+            self.recorder.is_some(),
+            self.diorama_view_active(),
+            self.lens_effective(),
+            self.frame_interp.is_delaying()
+        )
+    }
+
+    /// Ticket W36-07 test hook: start logging every picture presented while interpolating.
+    #[doc(hidden)]
+    pub fn log_presented_for_test(&mut self) {
+        self.presented_log = Some(Vec::new());
+    }
+
+    /// Ticket W36-07 test hook: the pictures logged so far (see [`Self::log_presented_for_test`]).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn presented_for_test(&self) -> &[(crate::frame_interp::Shown, Vec<u8>)] {
+        self.presented_log.as_deref().unwrap_or(&[])
+    }
+
+    /// Ticket W36-07 test hook: how the gaps between console frames were presented.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_tally_for_test(&self) -> crate::frame_interp::Tally {
+        self.frame_interp.tally
+    }
+
+    /// Ticket W36-07 test hook: switch the setting on for the loaded game.
+    #[doc(hidden)]
+    pub fn set_frame_interpolation_for_test(&mut self, on: bool) {
+        self.current_game_settings.frame_interpolation = on;
+        self.sync_frame_interpolation();
+    }
+
     /// Ticket W36-06b: tell a new core which recipe mods the session runs (once per core): the live
     /// save path stamps them into states and, with widescreen on, the margin redraw draws the objects
     /// they keep alive.
@@ -18544,6 +18712,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
+        self.sync_frame_interpolation();
         self.sync_mod_session();
         self.sync_patch_widescreen();
         // Ticket W14-02: adopt a background library scan the moment it
@@ -18560,7 +18729,9 @@ impl eframe::App for RetroForgeApp {
         // SAME repaint (acceptance 1).
         self.sync_diorama_subscription();
         self.update_peek(&ctx);
+        self.frame_interp_arrived = false;
         self.pump_core_events(&ctx);
+        self.present_intermediate(&ctx);
         self.rebuild_peek_texture_if_stale();
         self.maybe_request_canvas_snapshot();
         self.sync_event_subscription();

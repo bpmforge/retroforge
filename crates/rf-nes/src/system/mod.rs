@@ -512,6 +512,12 @@ impl NesBus {
         self.ppu.bg_under()
     }
 
+    /// Ticket W36-07: forwards [`Ppu::line_scroll`].
+    #[must_use]
+    pub fn line_scroll(&self) -> &[(u16, u16)] {
+        self.ppu.line_scroll()
+    }
+
     /// The sprite tiles of the frame just completed (ticket W11-14).
     #[must_use]
     pub fn completed_sprites(&self) -> &[crate::ppu::DrawnSprite] {

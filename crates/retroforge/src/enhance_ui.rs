@@ -265,6 +265,13 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         "an NES game whose profile allows extra vblank lines",
     );
     let (run_ahead_av, run_ahead_on) = generic(settings.run_ahead > 0);
+    // Ticket W36-07 (D-028): interpolated presentation. NES only for now (the layers come from the
+    // NES PPU's captures); the row does not exist at all in Accuracy Mode (see the retain below).
+    let (interp_frames_av, interp_frames_on) = also(
+        generic(settings.frame_interpolation),
+        nes,
+        "an NES game (the layers come from the NES picture unit)",
+    );
     // Ticket W30-09: SNES sound only (the NES has no S-DSP). Presentation,
     // so no cartridge or profile condition.
     let (interp_av, interp_on) = also(
@@ -344,7 +351,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         Availability::NeedsGameState("BG mode 7 active")
     };
 
-    vec![
+    let mut rows = vec![
         FeatureRow {
             id: "sprite_overlay",
             label: "Sprite-limit bypass",
@@ -409,6 +416,16 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             scope: "generic, any console",
             enabled: run_ahead_on,
             availability: run_ahead_av,
+            heuristic: None,
+        },
+        // Ticket W36-07: invents frames and costs one frame of input delay (its honesty label,
+        // `rf_enhance::interpolation::label`), so it is opt-in and Enhanced-only.
+        FeatureRow {
+            id: "frame_interpolation",
+            label: "Smoother motion (invented frames, +1 frame delay)",
+            scope: "generic, NES",
+            enabled: interp_frames_on,
+            availability: interp_frames_av,
             heuristic: None,
         },
         FeatureRow {
@@ -493,7 +510,13 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             availability: lens_av,
             heuristic: None,
         },
-    ]
+    ];
+    // Ticket W36-07: absent from Accuracy Mode, not merely disabled (law 6; FRAME_INTERPOLATION.md
+    // section 6). Every other row stays visible there with the mode it needs.
+    if !enhancement {
+        rows.retain(|r| r.id != "frame_interpolation");
+    }
+    rows
 }
 
 /// The status-bar badge (FRONTEND_UI.md §1/§80: `NES · Accuracy` or
@@ -1365,6 +1388,35 @@ mod tests {
         assert_ne!(badge_text("NES", &s, &facts), with, "the badge counts it");
         s.run_ahead = 2;
         assert!(find(&s).effective(), "2 frames is on too");
+    }
+
+    /// Ticket W36-07 (D-028): frame interpolation is off on a fresh install, ABSENT from Accuracy
+    /// Mode (not a greyed row), Enhanced-only, and NES-only.
+    #[test]
+    fn frame_interpolation_row_is_opt_in_absent_in_accuracy_and_nes_only() {
+        let find = |s: &GameSettings, f: &GameFacts| {
+            feature_rows(s, f)
+                .into_iter()
+                .find(|r| r.id == "frame_interpolation")
+        };
+        let nes = GameFacts::new(false, false, false);
+        let mut s = GameSettings::default();
+        assert!(!s.frame_interpolation, "off by default");
+        s.frame_interpolation = true;
+        s.mode = Mode::Accuracy;
+        assert!(find(&s, &nes).is_none(), "no row at all in Accuracy Mode");
+        s.mode = Mode::Enhanced;
+        let row = find(&s, &nes).expect("present in Enhanced");
+        assert!(row.enabled);
+        // The test facts are not an NES game unless they say so: the row then names what it needs.
+        let facts_nes = GameFacts { nes: true, ..nes };
+        assert!(find(&s, &facts_nes).unwrap().effective());
+        let facts_snes = GameFacts {
+            nes: false,
+            snes: true,
+            ..nes
+        };
+        assert!(!find(&s, &facts_snes).unwrap().effective());
     }
 
     /// Ticket W30-09: the audio interpolation row — Enhanced-only, SNES

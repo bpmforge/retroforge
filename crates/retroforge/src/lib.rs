@@ -50,6 +50,7 @@ pub mod enhance_panel;
 pub mod enhance_ui;
 pub mod enhanced_view;
 pub mod explainers;
+pub mod frame_interp;
 pub mod game_info;
 pub mod game_settings;
 pub mod gsu_poly;
