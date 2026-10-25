@@ -66,7 +66,8 @@ pub struct Layers {
     pub bg: Vec<u8>,
     /// OAM index that won each dot ([`NO_SPRITE`] for none), `width * height`.
     pub ids: Vec<u8>,
-    /// Scroll position at the start of each picture line: `(x in 0..512, y in 0..480)`.
+    /// Scroll at the start of each picture line: `(x in 0..512, vertical offset in 0..480)`. The offset
+    /// is the nametable row the line shows less the line number, so it is constant across a band.
     pub scroll: Vec<(u16, u16)>,
     /// The colour index shown where the background is transparent (`$3F00`).
     pub backdrop: u8,
@@ -250,6 +251,24 @@ fn group_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIE
     out
 }
 
+/// Whether the layers describe the picture they came with: the background colour under every dot no
+/// sprite won must be the colour the console frame shows there. A frame captured part-way (a state just
+/// loaded, a rendering toggle) or drawn through a colour effect the layers cannot see (greyscale,
+/// emphasis, a mid-frame palette fade) fails it, and is refused rather than rebuilt wrongly.
+fn describes_its_picture(l: &Layers, resolve: &dyn Fn(u8) -> [u8; 3]) -> bool {
+    let (mut total, mut bad) = (0usize, 0usize);
+    for ((&idx, &id), px) in l.bg.iter().zip(&l.ids).zip(l.rgba.chunks_exact(4)) {
+        if id != NO_SPRITE {
+            continue;
+        }
+        total += 1;
+        if px[..3] != resolve(idx) {
+            bad += 1;
+        }
+    }
+    bad * 200 <= total
+}
+
 /// Compose the intermediate frame `alpha`/256 of the way from `prev` to `next` into `out`
 /// (`width * height * 4` RGBA).
 ///
@@ -272,6 +291,9 @@ pub fn compose(
         || prev.width != next.width
         || prev.height != next.height
     {
+        return Err(Refusal::Malformed);
+    }
+    if !describes_its_picture(prev, resolve) || !describes_its_picture(next, resolve) {
         return Err(Refusal::Malformed);
     }
     let (w, h) = (prev.width, prev.height);
@@ -596,8 +618,9 @@ mod tests {
         assert_eq!(run(&p, &pal, 128).err(), Some(Refusal::PaletteChanged));
         // A cut: the same small scroll step, a different picture.
         let mut cut = frame(2, 6, None);
-        for b in &mut cut.bg {
+        for (i, b) in cut.bg.iter_mut().enumerate() {
             *b = b.wrapping_add(50);
+            cut.rgba[i * 4..i * 4 + 3].copy_from_slice(&resolve(*b));
         }
         assert_eq!(run(&p, &cut, 128).err(), Some(Refusal::Discontinuity));
         // Not consecutive.
@@ -643,6 +666,17 @@ mod tests {
         for alpha in 0..=255u8 {
             assert!(run(&p, &n, alpha).is_ok(), "alpha {alpha}");
         }
+    }
+
+    /// A frame whose background layer is not the picture it came with (captured part-way) is refused.
+    #[test]
+    fn layers_that_do_not_describe_their_picture_are_refused() {
+        let p = frame(1, 4, None);
+        let mut n = frame(2, 4, None);
+        for b in &mut n.bg[..W * 4] {
+            *b = b.wrapping_add(1);
+        }
+        assert_eq!(run(&p, &n, 128).err(), Some(Refusal::Malformed));
     }
 
     #[test]

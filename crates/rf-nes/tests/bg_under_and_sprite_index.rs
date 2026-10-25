@@ -118,3 +118,17 @@ fn the_capture_is_off_by_default_and_changes_nothing_the_machine_sees() {
     assert_eq!(hash(&off), hash(&on));
     assert_eq!(off.bus().frame_count(), on.bus().frame_count());
 }
+
+/// Ticket W36-07: the scroll at the start of each line is recorded with the capture and is empty without
+/// it. This program never writes `$2005`, so its leftover `$2006` address is the scroll: the same on all
+/// 240 lines. (That the values are the game's real scroll is checked against Super Mario Bros.'s camera RAM
+/// in `retroforge/tests/w36_07_interpolation.rs`.)
+#[test]
+fn the_per_line_scroll_is_recorded_with_the_capture() {
+    let (off, _) = run(false);
+    assert!(off.bus().line_scroll().is_empty());
+    let (on, _) = run(true);
+    let scroll = on.bus().line_scroll();
+    assert_eq!(scroll.len(), 240);
+    assert!(scroll.iter().all(|s| *s == scroll[0]), "{:?}", &scroll[..4]);
+}

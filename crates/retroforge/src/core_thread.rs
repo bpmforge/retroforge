@@ -4495,4 +4495,59 @@ mod tests {
             "frames not reproduced after save/load: {mismatches:?}"
         );
     }
+
+    /// Ticket W36-07, mode-invariant at the core thread: with `SetInterpolation(true)` the frames the
+    /// thread sends are byte-identical to the ones it sends with it off (the delay is the UI's), the
+    /// layers ride on the frames only when it is on, and consecutive layers compose.
+    #[test]
+    fn interpolation_changes_no_frame_the_core_sends_and_only_adds_layers() {
+        let Some(rom) = rf_scroller_rom() else {
+            eprintln!("SKIP: RF-Scroller fixture not built");
+            return;
+        };
+        let run = |on: bool| {
+            let core = spawn(rom.clone()).unwrap();
+            core.cmd_tx.send(CoreCommand::SetInterpolation(on)).unwrap();
+            core.cmd_tx.send(CoreCommand::Resume).unwrap();
+            let mut frames: Vec<(u64, u64, Option<Box<rf_enhance::interpolate::Layers>>)> =
+                Vec::new();
+            while frames.len() < 90 {
+                let Some(m) = next_frame(&core, Duration::from_secs(5)) else {
+                    break;
+                };
+                frames.push((m.frame_count, fnv64(&m.rgba), m.interp));
+            }
+            let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+            let _ = core.join_handle.join();
+            frames
+        };
+        let (off, on) = (run(false), run(true));
+        assert!(
+            off.len() >= 60 && on.len() >= 60,
+            "frames arrived: {} / {}",
+            off.len(),
+            on.len()
+        );
+        assert!(off.iter().all(|f| f.2.is_none()), "no layers with it off");
+        let with_layers = on.iter().filter(|f| f.2.is_some()).count();
+        assert!(
+            with_layers * 2 > on.len(),
+            "layers ride on most frames: {with_layers}/{}",
+            on.len()
+        );
+        let off_by_count: std::collections::HashMap<u64, u64> =
+            off.iter().map(|f| (f.0, f.1)).collect();
+        let common: Vec<_> = on
+            .iter()
+            .filter(|f| off_by_count.contains_key(&f.0))
+            .collect();
+        assert!(common.len() >= 30, "frames in both runs: {}", common.len());
+        for f in &common {
+            assert_eq!(
+                off_by_count[&f.0], f.1,
+                "frame {} identical with interpolation on",
+                f.0
+            );
+        }
+    }
 }

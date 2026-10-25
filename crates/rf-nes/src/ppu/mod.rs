@@ -522,7 +522,8 @@ pub struct Ppu {
     /// [`Ppu::set_bg_under_capture`].
     pub(super) bg_under: Vec<u8>,
     /// Ticket W36-07: the background's scroll position at the start of each picture line
-    /// (`(x, y)` in nametable space, x in 0..512 and y in 0..480), recorded with `bg_under`.
+    /// (`(x, y)`: x in 0..512 is the nametable-space column of the line's first pixel; y in 0..480 is the
+    /// vertical scroll offset, the nametable-space row the line shows less the line number), recorded with `bg_under`.
     /// Presentation-only like it; `240` entries when capture is on, empty when off.
     pub(super) line_scroll: Vec<(u16, u16)>,
     /// Tiles of the frame currently being drawn.
@@ -1059,7 +1060,7 @@ impl Ppu {
     }
 
     /// Ticket W36-07: where the background was scrolled to at the start of each picture line of the
-    /// frame just rendered (`240` pairs of `(x, y)` in nametable space: x in `0..512`, y in `0..480`),
+    /// frame just rendered (`240` pairs of `(x, y)`: x in `0..512`, y in `0..480` the vertical offset),
     /// or empty when capture is off. A split-scroll game (a status bar over a scrolling playfield) has
     /// one value above the split and another below it, which is exactly what a per-line record shows.
     /// A plain borrow of what the PPU computed anyway; reading it changes nothing.

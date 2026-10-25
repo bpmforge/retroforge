@@ -17544,7 +17544,7 @@ impl RetroForgeApp {
             && !self.screenshot_pending
             && self.recorder.is_none()
             && !fog
-            && !self.diorama_view_active()
+            && !(self.diorama_render.is_some() && self.diorama_view_active())
             && !self.lens_effective()
     }
 
@@ -17605,6 +17605,27 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn frame_interp_alpha_for_test(&mut self, alpha: Option<u8>) {
         self.frame_interp.alpha_override = alpha;
+    }
+
+    /// Ticket W36-07 test hook: why the Presenter is or is not engaged.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_debug_for_test(&self) -> String {
+        format!(
+            "sent {:?} running {} compare_off {} widescreen {} hd_pack {} shader {:?} peek {} shot {} rec {} diorama {} lens {} delaying {}",
+            self.frame_interp_sent,
+            self.running,
+            self.compare_mode == rf_renderer::CompareMode::Off,
+            self.widescreen_on,
+            self.hd_pack.is_some(),
+            self.video.shader,
+            self.peek_amount,
+            self.screenshot_pending,
+            self.recorder.is_some(),
+            self.diorama_view_active(),
+            self.lens_effective(),
+            self.frame_interp.is_delaying()
+        )
     }
 
     /// Ticket W36-07 test hook: start logging every picture presented while interpolating.
