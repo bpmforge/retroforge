@@ -197,7 +197,12 @@ impl RebuildExec {
                     prov: insn.prov,
                     indirect: matches!(
                         insn.flow,
-                        Flow::IndirectJump | Flow::Return | Flow::ReturnInterrupt | Flow::Break
+                        Flow::IndirectJump
+                            | Flow::IndirectCall
+                            | Flow::Return
+                            | Flow::ReturnLong
+                            | Flow::ReturnInterrupt
+                            | Flow::Break
                     ),
                     entry_of: entry_fn.get(&insn.rom).copied().unwrap_or(u32::MAX),
                     site: site_of(insn.rom),
@@ -495,15 +500,18 @@ mod tests {
             len: 1,
             flow,
             prov,
+            mode: 0,
         }
     }
 
     fn atlas() -> Atlas {
         Atlas {
             prg_len: 0x20,
+            mode_count: 1,
             blocks: vec![Block {
                 start_rom: 0,
                 start_cpu: 0x8000,
+                start_mode: 0,
                 insns: vec![
                     insn(0, Flow::Fall, Provenance::Observed),
                     insn(1, Flow::Fall, Provenance::Inferred),
@@ -514,6 +522,7 @@ mod tests {
             functions: vec![Function {
                 entry_rom: 0,
                 entry_cpu: 0x8000,
+                entry_mode: 0,
                 entry_kinds: 0,
                 blocks: vec![0],
                 insn_count: 3,
@@ -529,6 +538,7 @@ mod tests {
                     Target::Rom {
                         cpu: 0x8000,
                         rom: 0,
+                        mode: 0,
                     },
                     Target::Unresolved {
                         cpu: 0x0300,
@@ -542,7 +552,12 @@ mod tests {
     }
 
     fn addr(cpu: u16, rom: Option<u32>) -> CodeAddr {
-        CodeAddr { cpu, rom }
+        CodeAddr {
+            cpu,
+            pbr: 0,
+            mode: 0,
+            rom,
+        }
     }
 
     #[test]
@@ -645,6 +660,7 @@ mod tests {
             blocks.push(Block {
                 start_rom: entry,
                 start_cpu: 0x8000 + entry,
+                start_mode: 0,
                 insns: vec![
                     insn(entry, Flow::Fall, Provenance::Observed),
                     insn(entry + 1, Flow::Return, Provenance::Observed),
@@ -654,6 +670,7 @@ mod tests {
             functions.push(Function {
                 entry_rom: entry,
                 entry_cpu: 0x8000 + entry,
+                entry_mode: 0,
                 entry_kinds: 0,
                 blocks: vec![i as u32],
                 insn_count: 2,
@@ -664,6 +681,7 @@ mod tests {
         }
         Atlas {
             prg_len: 0x100,
+            mode_count: 1,
             blocks,
             functions,
             indirect_sites: vec![],

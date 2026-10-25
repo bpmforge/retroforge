@@ -30,6 +30,29 @@ pub enum Flow {
     Break,
     /// The CPU locks up or leaves the instruction stream (6502 `JAM`).
     Halt,
+    /// 65816 `JML`/`JMP long`: jump to a full 24-bit address (`Jump` is a
+    /// 16-bit target inside the current program bank).
+    JumpLong { target: u32 },
+    /// 65816 `JSL`: call a full 24-bit address; resumes at the next
+    /// instruction after an `RTL`.
+    CallLong { target: u32 },
+    /// 65816 `JSR (abs,X)`: call through a table; resumes at the next
+    /// instruction.
+    IndirectCall,
+    /// 65816 `RTL`: return to a 24-bit address off the stack.
+    ReturnLong,
+}
+
+/// What an instruction does to the [`DecodeMode`] of the code after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeAfter {
+    /// Unchanged (every 6502 instruction; most 65816 ones).
+    Same,
+    /// Becomes this mode (a 65816 `REP`/`SEP` with a known immediate).
+    Set(DecodeMode),
+    /// Not known from the bytes (`XCE`, `PLP`): the code after it is
+    /// decoded only in modes the recording saw it run in.
+    Unknown,
 }
 
 /// One decoded instruction.
@@ -38,12 +61,28 @@ pub struct Decoded {
     /// Length in bytes, at least 1.
     pub len: u8,
     pub flow: Flow,
+    /// The decode mode in force after this instruction.
+    pub after: ModeAfter,
 }
 
-/// Extra state that changes how bytes decode. The 6502 ignores it. It exists
-/// because the 65816's operand width depends on the M, X and E flags in
-/// force at the instruction (W36-08): the SNES `Isa` reads its bits, the
-/// atlas keys code by it, and the NES builder always passes the default.
+impl Decoded {
+    /// An instruction that leaves the decode mode alone.
+    #[must_use]
+    pub const fn plain(len: u8, flow: Flow) -> Self {
+        Self {
+            len,
+            flow,
+            after: ModeAfter::Same,
+        }
+    }
+}
+
+/// Extra state that changes how bytes decode: an index below
+/// [`Isa::mode_count`]. The 6502 has one mode (0) and ignores it. The 65816's
+/// operand width depends on the M, X and E flags in force at the instruction
+/// (W36-08), which makes five modes (0 = emulation; 1..=4 native, see
+/// `rf_core_api::coverage`); the atlas keys code by `(ROM offset, mode)`, so
+/// the same bytes entered with two widths are two functions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 pub struct DecodeMode(pub u8);
 
@@ -52,8 +91,36 @@ pub trait Isa {
     /// Longest instruction in bytes (bounds how many bytes `decode` needs).
     fn max_len(&self) -> usize;
 
-    /// Mask applied to computed CPU addresses (`0xFFFF` for the 6502).
+    /// Mask applied to computed CPU addresses (`0xFFFF` for the 6502). The
+    /// bits above it name the program bank and never change by falling
+    /// through or branching (65816: a fetch at `$xx:FFFF` is followed by
+    /// `$xx:0000`).
     fn addr_mask(&self) -> u32;
+
+    /// How many decode modes exist (1 for the 6502, 5 for the 65816).
+    fn mode_count(&self) -> usize {
+        1
+    }
+
+    /// True when the cartridge maps CPU addresses to ROM statically (SNES
+    /// LoROM/HiROM). The builder then resolves targets with
+    /// [`Self::rom_offset`] instead of the recorded bank windows.
+    fn fixed_mapping(&self) -> bool {
+        false
+    }
+
+    /// The ROM offset the 24-bit CPU address `cpu` reads, `None` when it is
+    /// not ROM. Only meaningful when [`Self::fixed_mapping`] is true.
+    fn rom_offset(&self, cpu: u32) -> Option<u32> {
+        let _ = cpu;
+        None
+    }
+
+    /// A canonical CPU address that reads ROM offset `rom` (the lowest bank
+    /// alias the ISA prefers). Only meaningful when [`Self::fixed_mapping`].
+    fn cpu_for_rom(&self, rom: u32) -> u32 {
+        rom
+    }
 
     /// Decode the instruction at the start of `bytes`, located at CPU
     /// address `cpu` (needed for relative branches). `None` when `bytes` is

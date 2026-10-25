@@ -75,7 +75,7 @@ impl Isa for Mos6502 {
             }
             _ => Flow::Fall,
         };
-        Some(Decoded { len, flow })
+        Some(Decoded::plain(len, flow))
     }
 
     /// Every 3-byte 6502 instruction is an absolute-family one: absolute,
@@ -163,6 +163,11 @@ mod tests {
                 Flow::Break => "break",
                 Flow::Halt => "halt",
                 Flow::Fall => "fall",
+                // 65816-only flows; the 6502 never produces them.
+                Flow::JumpLong { .. }
+                | Flow::CallLong { .. }
+                | Flow::IndirectCall
+                | Flow::ReturnLong => unreachable!("not a 6502 flow"),
             };
             assert_eq!(got, want, "opcode {op:#04x} ({m})");
         }
