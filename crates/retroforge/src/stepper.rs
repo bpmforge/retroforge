@@ -990,6 +990,15 @@ impl EmuStepper {
         self.machine.nes_bus().map_or(&[], rf_nes::NesBus::bg_under)
     }
 
+    /// Ticket W36-07: the background's scroll at the start of each picture line of the frame just
+    /// run (NES; empty when `set_bg_under_capture` is off).
+    #[must_use]
+    pub fn line_scroll(&self) -> &[(u16, u16)] {
+        self.machine
+            .nes_bus()
+            .map_or(&[], rf_nes::NesBus::line_scroll)
+    }
+
     /// The NES cartridge's CHR, for a pack rule keyed on tile bytes.
     #[must_use]
     pub fn chr(&self) -> &[u8] {

@@ -355,6 +355,10 @@ pub struct FrameMsg {
     /// hooks; a hook host that holds `write_memory` changes the machine in ways they cannot reproduce, so
     /// both are off. The UI shows this on the badge so the player knows why.
     pub copies_refused_by_hooks: bool,
+    /// Ticket W36-07: this frame's layers for interpolated presentation (`crate::frame_interp`),
+    /// without pixels (the Presenter takes them from `rgba`). `None` when interpolation is off or the
+    /// frame is not one it can describe.
+    pub interp: Option<Box<rf_enhance::interpolate::Layers>>,
     /// Ticket W4-06a: the same frame's full 256-byte OAM
     /// (`EmuStepper::oam`, a side-effect-free `&self` read — never
     /// perturbs the core, same "read-only is a hard requirement" posture
@@ -1035,6 +1039,11 @@ pub enum CoreCommand {
     /// ones the game placed past the picture's edge (`FrameMsg::margin_sprites`). SNES only; off (the
     /// default) allocates and computes nothing.
     SetMarginSprites(bool),
+    /// Ticket W36-07 (D-028): capture the layers of each real frame for interpolated presentation and
+    /// send them on `FrameMsg::interp`. NES only; a no-op while widescreen, run-ahead, de-flicker, the
+    /// sprite overlay or an HD capture is on (their pictures are not the plain one the layers describe).
+    /// Off (the default) allocates and computes nothing.
+    SetInterpolation(bool),
     /// Ticket W27-02: look for this game's camera while it plays (a game
     /// with no profile camera). Observer only; replies once with
     /// `CoreEvent::CameraFound`. `false` stops looking.
@@ -1629,6 +1638,11 @@ fn core_thread_main(
     let mut layers_enabled = false;
     // Ticket W35-16: see `CoreCommand::SetMarginSprites`.
     let mut margin_sprites = false;
+    // Ticket W36-07: see `CoreCommand::SetInterpolation`. `interp_objects` is the recipe's object table
+    // (recipe-optional); `interp_oam` the OAM at the end of the previous frame, which drew this picture.
+    let mut interp_on = false;
+    let mut interp_objects: Option<crate::frame_interp::Objects> = None;
+    let mut interp_oam = [0xF8u8; 256];
     // Widescreen (W11-03). `None` is off, and off means the core never
     // reaches its widening path at all.
     let mut widescreen: Option<WidescreenRequest> = None;
@@ -1844,6 +1858,9 @@ fn core_thread_main(
                         .as_deref()
                         .filter(|s| !s.mods.is_empty())
                         .and_then(|s| crate::margin_draw::MarginDrawer::new(&rom, &s.recipe));
+                    interp_objects = session
+                        .as_deref()
+                        .and_then(|s| crate::frame_interp::Objects::from_recipe(&s.recipe));
                     mod_session = session.map(|s| *s);
                     margin_capture = false;
                 }
@@ -1916,6 +1933,9 @@ fn core_thread_main(
                 CoreCommand::SetMarginSprites(on) => {
                     margin_sprites = on;
                     sink.set_sprite_id_capture(on || margin_capture);
+                }
+                CoreCommand::SetInterpolation(on) => {
+                    interp_on = on;
                 }
                 CoreCommand::SetTileCapture(on) => {
                     hd_capture = on;
@@ -2265,10 +2285,22 @@ fn core_thread_main(
         // writes memory: the copies it runs on have no hooks.
         let hooks_block = crate::margin_draw::blocked_by_hooks(&stepper);
         let margin_wanted = widescreen.is_some() && margin_drawer.is_some() && !hooks_block;
-        if margin_wanted != margin_capture {
-            stepper.set_bg_under_capture(margin_wanted);
-            sink.set_sprite_id_capture(margin_wanted || margin_sprites);
-            margin_capture = margin_wanted;
+        // Ticket W36-07: interpolated presentation reads the same two captures. Only for the plain
+        // picture its layers describe: not widescreen, not a run-ahead picture, not a rebuilt one.
+        let interp_wanted = interp_on
+            && widescreen.is_none()
+            && run_ahead == 0
+            && !historian.enabled()
+            && overlay_capture.is_none()
+            && !hd_capture
+            && !studio_capture
+            && !layers_enabled
+            && !stepper.is_paused();
+        let capture_wanted = margin_wanted || interp_wanted;
+        if capture_wanted != margin_capture {
+            stepper.set_bg_under_capture(capture_wanted);
+            sink.set_sprite_id_capture(capture_wanted || margin_sprites);
+            margin_capture = capture_wanted;
         }
         if margin_wanted && !stepper.is_paused() {
             if let Some(d) = margin_drawer.as_mut() {
@@ -2747,6 +2779,7 @@ fn core_thread_main(
                     Vec::new()
                 },
                 margin_draw: None,
+                interp: None,
                 copies_refused_by_hooks: false,
                 oam: Box::new(*stepper.oam()),
                 coverage: if coverage_on {
@@ -2869,6 +2902,20 @@ fn core_thread_main(
                         },
                     );
                 }
+            }
+            // Ticket W36-07: the layers of this picture, read from the captures; nothing is written back.
+            if interp_wanted && ran && spec_shown.is_none() {
+                msg.interp = crate::frame_interp::capture(
+                    &stepper,
+                    sink.sprite_ids(),
+                    msg.width,
+                    msg.height,
+                    &interp_oam,
+                    interp_objects.as_ref(),
+                );
+            }
+            if interp_on {
+                interp_oam = *stepper.oam();
             }
             if publish_frame(
                 &frame_tx,
@@ -3144,6 +3191,7 @@ mod tests {
             sprite_rgba: Vec::new(),
             margin_sprites: Vec::new(),
             margin_draw: None,
+            interp: None,
             copies_refused_by_hooks: false,
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),

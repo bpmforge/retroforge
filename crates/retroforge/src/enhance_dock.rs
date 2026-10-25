@@ -372,6 +372,8 @@ pub fn apply_toggle(
         // Ticket W30-07: likewise read every frame by `sync_run_ahead`. The
         // row reads on at 1 or 2 frames, so switching it on starts at 1.
         "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
+        // Ticket W36-07: read every frame by `sync_frame_interpolation`.
+        "frame_interpolation" => ctx_settings.frame_interpolation = enabled,
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
         // Ticket W31-03: read every frame by `sync_superfx_hd`.
@@ -735,6 +737,10 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
             }
         }
         // Ticket W30-07: how many frames ahead, right under its toggle.
+        // Ticket W36-07: the honesty label's claim, in words, right under the switch it explains.
+        if row.id == "frame_interpolation" && row.enabled {
+            ui.weak(format!("    {}", rf_enhance::interpolation::label().claim));
+        }
         if row.id == "run_ahead" && row.enabled && run_ahead_picker(ui, &mut ctx.settings.run_ahead)
         {
             actions.settings_changed = true;

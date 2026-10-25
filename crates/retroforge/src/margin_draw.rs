@@ -49,7 +49,7 @@ const WIDTH: usize = 256;
 
 /// The recipe fields the redraw reads, resolved to RAM addresses.
 #[derive(Debug, Clone)]
-struct Map {
+pub(crate) struct Map {
     /// Number of object slots (the width of the flag row).
     slots: u32,
     flag: u32,
@@ -66,7 +66,7 @@ struct Map {
 impl Map {
     /// Read the object table out of `recipe`'s RAM meanings. `None` when the recipe does not describe
     /// one (the names are the recipe vocabulary documented in `docs/design/REBUILD_LAB.md`).
-    fn from_recipe(recipe: &rf_rebuild::Recipe) -> Option<Self> {
+    pub(crate) fn from_recipe(recipe: &rf_rebuild::Recipe) -> Option<Self> {
         let row = |name: &str| recipe.ram.iter().find(|r| r.name == name);
         let addr = |name: &str| row(name).map(|r| r.addr);
         Some(Self {
@@ -81,6 +81,35 @@ impl Map {
             player_x: addr("player_screen_x"),
             player_y: addr("player_y"),
         })
+    }
+}
+
+impl Map {
+    /// Ticket W36-07: where the game's tables put its objects on the picture now, as places for
+    /// `rf_enhance::interpolate` to cluster sprites around (centre of the object, and how far a
+    /// sprite of it may sit from that). The tables run about two frames ahead of the picture
+    /// (`which_frames_oam_does_the_picture_come_from`), so the reach is generous.
+    pub(crate) fn anchors(&self, peek: &dyn Fn(u32) -> u8) -> Vec<rf_enhance::interpolate::Anchor> {
+        use rf_enhance::interpolate::Anchor;
+        let mut out: Vec<Anchor> = slots(self, peek)
+            .into_iter()
+            .map(|s| Anchor {
+                x: s.rel + 8,
+                // The table's y is about 8 above the sprite's OAM y, and a sprite is drawn a line below it.
+                y: s.y + 8 + 1 + 8,
+                reach_x: 20,
+                reach_y: 24,
+            })
+            .collect();
+        if let (Some(px), Some(py)) = (self.player_x, self.player_y) {
+            out.push(Anchor {
+                x: i32::from(peek(px)) + 8,
+                y: i32::from(peek(py)) + 16,
+                reach_x: 14,
+                reach_y: 28,
+            });
+        }
+        out
     }
 }
 
