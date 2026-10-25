@@ -480,6 +480,11 @@ pub struct DrawnSprite {
     pub palette: u8,
     pub flip_x: bool,
     pub flip_y: bool,
+    /// Index in primary OAM of the entry this tile belongs to (both halves
+    /// of an 8x16 sprite carry the same one). Ticket W36-06b: lets a shell
+    /// tell which sprite a drawn tile came from without re-deriving it from
+    /// OAM bytes that may have been rewritten since.
+    pub oam_index: u8,
 }
 
 pub struct Ppu {
@@ -505,6 +510,17 @@ pub struct Ppu {
     /// **Off by default and free when off** — the capture is one branch
     /// at each reload dot, and the vector is never allocated.
     pub(super) tile_capture: bool,
+    /// Ticket W36-06b: record, for every dot, the BACKGROUND colour under
+    /// whatever won it (`bg_under`). Off by default and free when off: one
+    /// branch per dot. Presentation-only; never read by the simulation and
+    /// not part of a save state.
+    pub(super) bg_under_capture: bool,
+    /// `256 * 240` palette indices (`$3F00`-resolved, 0..0x3F) of the
+    /// background pixel at each dot as if no sprite were there (the
+    /// backdrop colour where the background is transparent or masked).
+    /// Complete when `run_frame` returns; allocated by
+    /// [`Ppu::set_bg_under_capture`].
+    pub(super) bg_under: Vec<u8>,
     /// Tiles of the frame currently being drawn.
     pub(super) drawn_tiles: Vec<DrawnTile>,
     /// Sprite tiles of the frame being drawn, and of the last complete
@@ -920,6 +936,8 @@ impl Ppu {
             pending_scanline_starts: 0,
             pending_frame_end: false,
             tile_capture: false,
+            bg_under_capture: false,
+            bg_under: Vec::new(),
             drawn_tiles: Vec::new(),
             completed_tiles: Vec::new(),
             drawn_sprites: Vec::new(),
@@ -1025,6 +1043,21 @@ impl Ppu {
             self.drawn_sprites = Vec::new();
             self.completed_sprites = Vec::new();
         }
+    }
+
+    /// Ticket W36-06b: start or stop recording the background colour under
+    /// every dot (see [`Ppu::bg_under`]). Turning it off frees the buffer.
+    pub fn set_bg_under_capture(&mut self, on: bool) {
+        self.bg_under_capture = on;
+        self.bg_under = if on { vec![0; 256 * 240] } else { Vec::new() };
+    }
+
+    /// The background colour under each dot of the frame just rendered
+    /// (`256 * 240` palette indices), or empty when capture is off. A plain
+    /// borrow of data the PPU computed anyway; reading it changes nothing.
+    #[must_use]
+    pub fn bg_under(&self) -> &[u8] {
+        &self.bg_under
     }
 
     /// The background tiles of the frame just completed.

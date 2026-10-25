@@ -608,6 +608,7 @@ impl Ppu {
             palette,
             flip_x,
             flip_y,
+            oam_index: candidate.oam_index,
         };
         if self.sprite_height() == 16 {
             let bank = if candidate.tile & 0x01 != 0 {
@@ -868,6 +869,15 @@ impl Ppu {
         };
 
         let palette_index = self.palette_read(palette_addr) & 0x3F;
+        if self.bg_under_capture {
+            let under = self.palette_read(bg_addr.map_or(0, u16::from)) & 0x3F;
+            if let Some(slot) = self
+                .bg_under
+                .get_mut(usize::from(self.scanline) * 256 + usize::from(x))
+            {
+                *slot = under;
+            }
+        }
         self.line_buffer[x as usize] = PpuPixel {
             palette_index,
             layer,
