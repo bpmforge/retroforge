@@ -4676,3 +4676,18 @@ stories, 10 decisions).
   observed, 3,649 inferred), 8 unresolved static targets; every executed
   opcode is an atlas instruction start. Armed recorder cost after the
   snapshot change not re-measured. Workspace: **3396 passing**.
+
+- **W36-03 — Block executor** (2026-10-25). `rf_rebuild::RebuildExec` maps
+  every instruction to its atlas node by PRG offset and runs it through the
+  core's own cycle-exact path (the interpreter with a map); no node means
+  interpreter fallback; indirect landings are checked against recorded
+  targets (misses counted, never acted on). Rebuild toggle (off by default)
+  builds or loads `code-atlas-v1` off the UI thread and installs it on the core
+  thread; counters in the debugger's Coverage tab. SMB + Duck Hunt, real play
+  in 1-1, rebuilt vs plain compared every frame (CPU, WRAM, VRAM, OAM, palette,
+  video+audio): identical; fallback 0.007%; a different input script hit 842
+  inferred instructions and 1 dispatch miss, still identical. **Correction:**
+  the W36-01/02 SMB scripts had recorded the attract demo (one Start only
+  leaves the multicart menu); with a second Start, real-play 1-1 covers 11,078
+  PRG bytes (16.9%) and the atlas has 305 functions. Semantic IR moves to
+  W36-12. Workspace: **3408 passing**.
