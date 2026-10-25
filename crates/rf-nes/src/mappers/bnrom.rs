@@ -77,6 +77,13 @@ impl Bnrom {
 }
 
 impl Mapper for Bnrom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let count = (self.prg_rom.len() / PRG_BANK_32K).max(1);
+        let base = (usize::from(self.prg_bank) % count) * PRG_BANK_32K;
+        Some((base + usize::from(addr - 0x8000)) % self.prg_rom.len())
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let count = (self.prg_rom.len() / PRG_BANK_32K).max(1);
         let base = (usize::from(self.prg_bank) % count) * PRG_BANK_32K;

@@ -16,6 +16,7 @@
 mod cart;
 pub mod color;
 mod core;
+pub mod coverage;
 mod cpu_regs;
 mod error;
 mod event;
@@ -29,6 +30,9 @@ mod watch;
 
 pub use cart::CartImage;
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
+pub use coverage::{
+    CodeAddr, CoverageLog, IndirectEdge, IndirectKind, InterruptEntry, InterruptKind,
+};
 pub use cpu_regs::{CpuRegs, Mos6502Regs, Wdc65816Regs};
 pub use error::{CoreError, StateError};
 pub use event::{CoreEvent, EventMask};

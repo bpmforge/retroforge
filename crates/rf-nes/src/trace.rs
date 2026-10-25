@@ -122,6 +122,27 @@ enum Mode {
     IndirectY,
 }
 
+/// Length in bytes (1-3) of the instruction starting with `opcode`, from
+/// the same addressing-mode table the disassembler uses (ticket W36-01:
+/// the coverage recorder marks the operand bytes of what executes).
+pub(crate) fn instruction_len(opcode: u8) -> u8 {
+    match opcode_info(opcode).1 {
+        Mode::Implied | Mode::Accumulator => 1,
+        Mode::Immediate
+        | Mode::ZeroPage
+        | Mode::ZeroPageX
+        | Mode::ZeroPageY
+        | Mode::Relative
+        | Mode::IndirectX
+        | Mode::IndirectY => 2,
+        Mode::Absolute
+        | Mode::AbsoluteJump
+        | Mode::AbsoluteX
+        | Mode::AbsoluteY
+        | Mode::Indirect => 3,
+    }
+}
+
 /// nestest's own mnemonic label (which occasionally differs from this
 /// crate's internal naming, e.g. the dispatcher's "ISC" vs. nestest's
 /// `ISB` for `$E3/$E7/$EF/$F3/$F7/$FB/$FF` — verified against the real

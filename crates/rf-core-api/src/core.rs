@@ -301,4 +301,24 @@ pub trait EmulatorCore {
     /// Reads of open-bus or unmapped addresses return whatever the core
     /// considers the quiescent value; they must not latch anything.
     fn peek(&self, addr: u32) -> u8;
+
+    /// Arm or disarm the code-coverage recorder (ticket W36-01; see
+    /// [`crate::coverage`]). Arming starts a fresh log; disarming discards
+    /// it. Default no-op: a core that cannot record ignores the request and
+    /// [`Self::take_coverage`] keeps returning `None`.
+    ///
+    /// Observation only — an armed core must run bit-identically to an
+    /// unarmed one — and not part of a savestate. Costs one branch per
+    /// instruction when off.
+    fn set_coverage_recording(&mut self, on: bool) {
+        let _ = on;
+    }
+
+    /// Hand over what has been recorded so far, or `None` when not
+    /// recording. Recording stays armed with a fresh empty log, so
+    /// successive takes are disjoint and [`crate::CoverageLog::merge`]
+    /// reunites them.
+    fn take_coverage(&mut self) -> Option<crate::CoverageLog> {
+        None
+    }
 }

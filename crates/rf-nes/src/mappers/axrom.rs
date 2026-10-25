@@ -83,6 +83,12 @@ impl AxRom {
 }
 
 impl Mapper for AxRom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let bank = (self.bank as usize) % self.bank_count();
+        Some(bank * BANK_SIZE + usize::from(addr - 0x8000))
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         debug_assert!(
             (0x8000..=0xFFFF).contains(&addr),

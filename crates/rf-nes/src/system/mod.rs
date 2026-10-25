@@ -835,6 +835,24 @@ impl NesBus {
         }
     }
 
+    /// PRG ROM byte offset a CPU read of `addr` returns right now, or
+    /// `None` for anything that is not PRG ROM (RAM, I/O, PRG RAM, a
+    /// RAM-selected MMC5 window) or that the mapper does not report
+    /// (ticket W36-01; [`Mapper::prg_rom_offset`]). No side effects.
+    #[must_use]
+    pub fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        if addr < 0x8000 || self.mapper.prg_ram_window(addr).is_some() {
+            return None;
+        }
+        self.mapper.prg_rom_offset(addr)
+    }
+
+    /// Size in bytes of the cartridge's PRG ROM image.
+    #[must_use]
+    pub fn prg_rom_len(&self) -> usize {
+        self.rom.prg_rom().len()
+    }
+
     /// One CPU-visible write with no `master_cycle` side effect (see
     /// `read_untimed`'s doc — the same reasoning, and the same
     /// caller-must-tick obligation, applies to OAM DMA's "put" cycles).

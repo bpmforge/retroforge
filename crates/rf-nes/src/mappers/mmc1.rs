@@ -159,17 +159,48 @@ impl Mmc1 {
         mapper
     }
 
+    /// Start of the 256 KiB half the board's PRG address lines select
+    /// (SUROM/SXROM, nesdev "MMC1": CHR bank 0 bit 4 is PRG A18); `0` for
+    /// anything up to 256 KiB.
+    fn prg_half_base(&self) -> usize {
+        const HALF: usize = 256 * 1024;
+        if self.prg_rom.len() > HALF && self.chr_bank0 & 0x10 != 0 {
+            HALF
+        } else {
+            0
+        }
+    }
+
     /// The PRG ROM this cartridge's PRG windows come from: the whole
     /// image, or on a 512 KiB SUROM the 256 KiB half CHR Bank 0 bit 4
     /// selects (module doc).
     fn prg_half(&self) -> &[u8] {
         const HALF: usize = 256 * 1024;
-        if self.prg_rom.len() > HALF {
-            let upper = self.chr_bank0 & 0x10 != 0;
-            let base = if upper { HALF } else { 0 };
-            &self.prg_rom[base..(base + HALF).min(self.prg_rom.len())]
-        } else {
-            &self.prg_rom[..]
+        let base = self.prg_half_base();
+        &self.prg_rom[base..(base + HALF).min(self.prg_rom.len())]
+    }
+
+    /// Index of `addr`'s byte within [`Mmc1::prg_half`].
+    fn prg_index(&self, addr: u16) -> usize {
+        let bank_count = self.prg_bank_count();
+        // Bits 3-0 of the PRG Bank register are the bank number; bit 4 is
+        // MMC1B's PRG-RAM-enable, not modeled here (module doc) and
+        // deliberately excluded from bank arithmetic.
+        let bank16 = (self.prg_bank as usize) & 0x0F;
+        match self.prg_mode() {
+            0 | 1 => {
+                let bank32_count = (bank_count / 2).max(1);
+                let bank32 = (bank16 >> 1) % bank32_count;
+                bank32 * (2 * PRG_BANK) + (addr as usize - 0x8000)
+            }
+            2 => match addr {
+                0x8000..=0xBFFF => addr as usize - 0x8000, // fixed: first bank
+                _ => (bank16 % bank_count) * PRG_BANK + (addr as usize - 0xC000),
+            },
+            _ => match addr {
+                0xC000..=0xFFFF => (bank_count - 1) * PRG_BANK + (addr as usize - 0xC000), // fixed: last bank
+                _ => (bank16 % bank_count) * PRG_BANK + (addr as usize - 0x8000),
+            },
         }
     }
 
@@ -208,28 +239,13 @@ impl Mmc1 {
 }
 
 impl Mapper for Mmc1 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        Some(self.prg_half_base() + self.prg_index(addr))
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
-        let bank_count = self.prg_bank_count();
-        // Bits 3-0 of the PRG Bank register are the bank number; bit 4 is
-        // MMC1B's PRG-RAM-enable, not modeled here (module doc) and
-        // deliberately excluded from bank arithmetic.
-        let bank16 = (self.prg_bank as usize) & 0x0F;
-        let idx = match self.prg_mode() {
-            0 | 1 => {
-                let bank32_count = (bank_count / 2).max(1);
-                let bank32 = (bank16 >> 1) % bank32_count;
-                bank32 * (2 * PRG_BANK) + (addr as usize - 0x8000)
-            }
-            2 => match addr {
-                0x8000..=0xBFFF => addr as usize - 0x8000, // fixed: first bank
-                _ => (bank16 % bank_count) * PRG_BANK + (addr as usize - 0xC000),
-            },
-            _ => match addr {
-                0xC000..=0xFFFF => (bank_count - 1) * PRG_BANK + (addr as usize - 0xC000), // fixed: last bank
-                _ => (bank16 % bank_count) * PRG_BANK + (addr as usize - 0x8000),
-            },
-        };
-        self.prg_half()[idx]
+        self.prg_half()[self.prg_index(addr)]
     }
 
     /// Serial-port write per this file's module doc: bit 7 set resets the

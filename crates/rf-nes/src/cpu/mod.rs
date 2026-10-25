@@ -357,6 +357,16 @@ impl Cpu {
         exec::execute(self, bus, opcode)
     }
 
+    /// Which hardware interrupt the *next* [`Cpu::step`] will enter instead
+    /// of fetching an opcode, if any: `(nmi, irq)`, NMI taking priority.
+    /// A read of the poll results `step` consults; changes nothing (ticket
+    /// W36-01's coverage recorder uses it to tell an interrupt entry from
+    /// an instruction).
+    #[must_use]
+    pub fn pending_interrupt(&self) -> (bool, bool) {
+        (self.pending_nmi_after, self.pending_irq_after)
+    }
+
     /// Hardware reset/power-on sequence (ticket W1-03; nesdev.org/6502_cpu.txt
     /// "RESET": the reset line performs an interrupt-shaped sequence with
     /// writes turned into reads (`R/W` held high, since nothing may
