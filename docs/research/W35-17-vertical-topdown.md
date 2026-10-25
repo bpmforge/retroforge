@@ -199,3 +199,31 @@ cargo test --release -p retroforge --test w35_17_vertical -- --ignored --nocaptu
 RF_DIRS=right,left ...                                                                                           # the one-axis baseline
 RF_SCREENS_ONLY=z1-up / alttp-up (w30_screens, scripts: shot.sh)                                                 # ~1 min / ~4 min
 ```
+
+## 9. W35-19: a blocked trial is not a verdict (the in-app Find gap of section 5)
+
+Observation only. Cause (checked by the in-app run, table `right, left` before): `walk_vertically` tried
+Up, then Down, only from the snapshot where the finder's trials start, the player's first idle (Zelda 1:
+x `0x3c`, y `0x8d`, trees above). Up was blocked there (extent under the floor), Down has no screen below
+the first one, so the table never got `down, up`; from the first screen's middle it did.
+
+Fix (generic, `scout_discovery.rs`): when both halves fail from the snapshot, the same two trials run
+again from where a 120-frame sidestep (`SIDESTEP_FRAMES`: Right, then Left) leaves the machine
+(`start_from_here`, as W35-08's midway Left); the first start that grows both ways decides. A sidestep
+that dies (scene change) is skipped. Only the NES `walk` recipe with a Left verdict reaches this code.
+
+| | before | after |
+|---|---|---|
+| in-app Find (`z1_in_app_start_gate`: power-on, play, Find pressed in the field from Link's first idle) saves | `right, left` | `right, left, down, up` |
+| Find answer, wall time after pressing Find (paced, the play script included) | 41.3 s | 41.8 s |
+| `z1_margins_after_walking_up` (that table) | | start 105,600/105,600 playfield rows; after `U70` 105,600/105,600 (100%) |
+| `z1_scouted_screens_against_what_the_game_shows` | | screen above 99.98% (same shapes 99.98%); the one to its right 85.57% (shapes 100.00%) |
+
+Regression, discovery re-run (dirs, agreement): SMW right, left, 100.0%; SMB3 right, left, 99.7%; MM2
+right, left, 99.0%; MMX right, left, 100.0%; Super Metroid right, left, 99.8%; Castlevania right, left,
+100.0%; ALttP `discover_alttp` right, left, 99.8% (its `down, up` come from the SNES vertical-room path,
+untouched: only the NES walk code changed); Zelda 1 `discover_z1` right, left, down, up, 99.8%. The sidestep
+trials only run where the first ones fail, so they cost time only for games that were going to end without
+Y passes; the platformers above were unchanged.
+
+Run: `cargo test --release -p retroforge --test w35_11_start_gates -- --ignored --nocapture z1_in_app_start_gate` (~3 min).
