@@ -4651,4 +4651,5 @@ stories, 10 decisions).
   and 8 (D-026), Cranelift JIT approved (D-027). No Rust toolchain on players'
   machines: lifted code runs as pre-decoded blocks (W36-03), then on Cranelift (W36-12); Rust
   emission is a developer tool. New crate `rf-rebuild` (core layer) planned for
-  W36-02. Tickets W36-01..W36-12 in plan.json; SMB pilot first, then SMW.
+  W36-02. Tickets W36-01..W36-12 and phases B-E (W37..W40) in plan.json; SMB
+  pilot first (the SMB + Duck Hunt cart, mapper 66), then SMW. Workspace: **3343 passing**.
