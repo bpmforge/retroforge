@@ -11,7 +11,7 @@ const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8'));
 
 const CRATES = [
   'rf-core-api', 'rf-nes', 'rf-snes', 'rf-cart', 'rf-renderer', 'rf-audio',
-  'rf-input', 'rf-state', 'rf-cache', 'rf-enhance', 'rf-profiles',
+  'rf-input', 'rf-state', 'rf-cache', 'rf-rebuild', 'rf-enhance', 'rf-profiles',
   'rf-plugin-sdk', 'rf-ai', 'rf-debugger', 'rf-harness', 'retroforge',
   'infra', 'tools', 'profiles', 'fixtures',
 ];

@@ -1,0 +1,16 @@
+[package]
+name = "rf-rebuild"
+description = "Rebuild lab core: code atlas (functions + CFG) from a coverage recording, ISA-generic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rf-core-api = { path = "../rf-core-api" }
+# Atlas wire format (docs/TECH_STACK.md section 2, "Save states" row: the
+# same bincode 2 the cache and save states use; pure, no clock or RNG).
+bincode = "2"

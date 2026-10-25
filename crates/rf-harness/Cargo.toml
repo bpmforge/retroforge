@@ -29,6 +29,8 @@ rf-snes = { path = "../rf-snes" }
 # two sides can meet.
 rf-enhance = { path = "../rf-enhance" }
 rf-profiles = { path = "../rf-profiles" }
+rf-rebuild = { path = "../rf-rebuild" }
+rf-cache = { path = "../rf-cache" }
 sha2 = "0.11"
 toml = "1"
 serde = { version = "1", features = ["derive"] }

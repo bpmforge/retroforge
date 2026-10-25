@@ -4023,12 +4023,14 @@ dependencies = [
 name = "rf-harness"
 version = "0.9.1"
 dependencies = [
+ "rf-cache",
  "rf-cart",
  "rf-core-api",
  "rf-enhance",
  "rf-input",
  "rf-nes",
  "rf-profiles",
+ "rf-rebuild",
  "rf-renderer",
  "rf-snes",
  "serde",
@@ -4052,6 +4054,7 @@ dependencies = [
  "criterion",
  "rf-cart",
  "rf-core-api",
+ "rf-rebuild",
 ]
 
 [[package]]
@@ -4070,6 +4073,14 @@ dependencies = [
  "rf-cart",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "rf-rebuild"
+version = "0.9.1"
+dependencies = [
+ "bincode",
+ "rf-core-api",
 ]
 
 [[package]]

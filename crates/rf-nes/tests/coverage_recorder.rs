@@ -252,3 +252,52 @@ fn armed_and_unarmed_runs_are_bit_identical() {
     assert_eq!(off_hash, on_hash);
     assert_ne!(off_hash, Hasher::new().h, "the run produced output");
 }
+
+#[test]
+fn window_snapshot_records_the_whole_mapping_once_for_a_fixed_cart() {
+    let mut core = armed_nrom();
+    run_frames(&mut core, 3, &mut Hasher::new());
+    let log = core.take_coverage().unwrap();
+    // NROM-128 never rebanks: one snapshot, with $8000 and $C000 both
+    // showing the same 16 KiB (nesdev "NROM" mirroring).
+    assert_eq!(log.windows.len(), 1);
+    let m = log.windows[0].0;
+    assert_eq!(m[0], 0);
+    assert_eq!(m[4], 0, "$C000 mirrors $8000");
+    assert_eq!(m[1], 0x1000);
+    assert_eq!(m[7], 0x3000);
+}
+
+#[test]
+fn a_bank_switch_adds_a_second_snapshot() {
+    // GxROM (mapper 66), two 32 KiB banks. The same program sits at the
+    // start of both; it selects bank 1, then spins.
+    let mut prg = vec![0u8; 0x1_0000];
+    for base in [0usize, 0x8000] {
+        put(
+            &mut prg,
+            base,
+            &[
+                0xA9, 0x10, // LDA #$10  (PRG bank 1)
+                0x8D, 0x00, 0x80, // STA $8000
+                0x4C, 0x05, 0x80, // JMP $8005
+            ],
+        );
+        put(
+            &mut prg,
+            base + 0x7FFA,
+            &[0x00, 0x80, 0x00, 0x80, 0x00, 0x80],
+        );
+    }
+    let mut core = NesCore::from_ines_bytes(&ines(66, &prg, 1)).expect("loads");
+    core.set_coverage_recording(true);
+    core.reset(ResetKind::Hard);
+    run_frames(&mut core, 2, &mut Hasher::new());
+    let log = core.take_coverage().unwrap();
+    let firsts: Vec<u32> = log.windows.iter().map(|w| w.0[0]).collect();
+    assert_eq!(firsts, vec![0, 0x8000], "one snapshot per bank, sorted");
+    // Whole 32 KiB moves together: the snapshot is simultaneous.
+    for w in &log.windows {
+        assert_eq!(w.0[7], w.0[0] + 0x7000);
+    }
+}
