@@ -154,9 +154,9 @@ lockstep are.
 | Id | Ticket | Acceptance |
 |---|---|---|
 | W36-00 | This design doc + D-024..D-026 + NON_GOALS amendment | Merged; rulings cited |
-| W36-01 | Coverage recorder (NES first, then SNES) + coverage view in debugger | SMB 1-1 recording lists every executed address; zero cost when off (bench) |
+| W36-01 | Coverage recorder (NES) + coverage view in debugger (SNES recording moves to W36-08) | SMB 1-1 recording lists every executed address; zero cost when off (bench) |
 | W36-02 | `rf-rebuild` crate: code atlas + superset decode + per-ROM cache | SMB atlas covers 100% of recorded code; unseen bytes decoded without crash |
-| W36-03 | 6502 IR + block executor + interpreter fallback (NROM) | SMB boots and plays through the rebuilt path; fallback rate reported |
+| W36-03 | 6502 IR + block executor + interpreter fallback (SMB cart, mapper 66: no standalone NROM dump on hand) | SMB boots and plays through the rebuilt path; fallback rate reported |
 | W36-04 | Lockstep checker + repro bundles | SMB 1-1 to 8-4 replay, zero divergence; fallback rate reported |
 | W36-05 | Function hooks (Lua + Rust), recipe format with byte-hash matching | A hook mod changes one behaviour; recipe survives a relocated function |
 | W36-06 | First Super Enhanced mod: SMB live enemies at 32:9 | Enemies stay active in margins; original mode byte-identical |
