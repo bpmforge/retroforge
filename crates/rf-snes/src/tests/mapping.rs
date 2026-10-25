@@ -615,3 +615,76 @@ mod st010_window {
         assert_eq!(st010_target(0x70, 0x0000), None);
     }
 }
+
+/// Ticket W36-08: `rom_offset` names the byte the bus really returns, for a
+/// grid of addresses over every bank, in both layouts and for an undersized
+/// (mirrored) image. The images are filled with a pattern that differs per
+/// offset, so a wrong offset cannot read the right byte by luck.
+mod rom_offset {
+    use super::*;
+    use crate::bus::SnesBus;
+    use crate::cpu::CpuBus;
+    use crate::mapping::rom_offset;
+
+    fn image(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                (i as u8).wrapping_mul(31) ^ ((i >> 8) as u8).wrapping_mul(7) ^ (i >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn check(mode: rf_cart::SnesMapMode, len: usize) -> (usize, usize) {
+        let rom = image(len);
+        let bus = SnesBus::new(rom.clone(), 0, mode);
+        let (mut rom_hits, mut other) = (0, 0);
+        for bank in 0..=255u8 {
+            for offset in [
+                0x0000u16, 0x00FF, 0x1FFF, 0x2100, 0x4200, 0x5FFF, 0x6000, 0x7FFF, 0x8000, 0x8001,
+                0xABCD, 0xFFFE, 0xFFFF,
+            ] {
+                let addr = (u32::from(bank) << 16) | u32::from(offset);
+                let via_map = rom_offset(mode, bank, offset, len, 0);
+                assert_eq!(bus.rom_offset(addr), via_map, "{bank:02X}:{offset:04X}");
+                match via_map {
+                    Some(o) => {
+                        assert!(o < len, "{bank:02X}:{offset:04X} -> {o:#x}");
+                        assert_eq!(bus.peek(addr), rom[o], "{bank:02X}:{offset:04X} -> {o:#x}");
+                        rom_hits += 1;
+                    }
+                    None => other += 1,
+                }
+            }
+        }
+        (rom_hits, other)
+    }
+
+    #[test]
+    fn matches_the_byte_the_bus_returns_in_lorom() {
+        let (hits, other) = check(LoRom, ROM_1M);
+        assert!(hits > 1000 && other > 100, "{hits} ROM, {other} other");
+        let (hits, _) = check(LoRom, ROM_32K);
+        assert!(hits > 1000);
+    }
+
+    #[test]
+    fn matches_the_byte_the_bus_returns_in_hirom() {
+        let (hits, other) = check(HiRom, ROM_1M);
+        assert!(hits > 1000 && other > 100, "{hits} ROM, {other} other");
+        let (hits, _) = check(HiRom, ROM_32K);
+        assert!(hits > 1000);
+    }
+
+    #[test]
+    fn work_ram_registers_and_save_ram_are_not_rom() {
+        for mode in [LoRom, HiRom] {
+            assert_eq!(rom_offset(mode, 0x7E, 0x1234, ROM_1M, 0x2000), None);
+            assert_eq!(rom_offset(mode, 0x7F, 0xFFFF, ROM_1M, 0x2000), None);
+            assert_eq!(rom_offset(mode, 0x00, 0x0000, ROM_1M, 0x2000), None);
+            assert_eq!(rom_offset(mode, 0x00, 0x2100, ROM_1M, 0x2000), None);
+            assert_eq!(rom_offset(mode, 0x01, 0x4210, ROM_1M, 0x2000), None);
+        }
+        assert_eq!(rom_offset(LoRom, 0x70, 0x0000, ROM_1M, 0x2000), None);
+        assert_eq!(rom_offset(LoRom, 0x00, 0x8000, 0, 0), None, "no ROM at all");
+    }
+}

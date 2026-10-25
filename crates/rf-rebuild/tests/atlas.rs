@@ -57,10 +57,7 @@ impl Isa for Toy {
             8 => Flow::ReturnInterrupt,
             _ => Flow::Fall,
         };
-        Some(Decoded {
-            len: len as u8,
-            flow,
-        })
+        Some(Decoded::plain(len as u8, flow))
     }
 }
 
@@ -87,6 +84,8 @@ fn linear(base: u32) -> WindowMap {
 fn at(cpu: u16, rom: u32) -> CodeAddr {
     CodeAddr {
         cpu,
+        pbr: 0,
+        mode: 0,
         rom: Some(rom),
     }
 }

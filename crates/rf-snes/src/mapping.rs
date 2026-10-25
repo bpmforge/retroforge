@@ -711,6 +711,26 @@ pub fn st010_target(bank: u8, offset: u16) -> Option<Target> {
     }
 }
 
+/// The cartridge ROM offset behind `bank:offset` under the plain LoROM/HiROM
+/// map, `None` when the address is not ROM (work RAM, save RAM, registers,
+/// open). The mapping is fixed for these two layouts, which is what lets the
+/// code atlas (ticket W36-08) resolve static jump targets without having seen
+/// a bank switch. Bank-switched boards (SA-1, S-DD1, ...) change the answer
+/// at run time; ask [`crate::bus::SnesBus::rom_offset`] for those.
+#[must_use]
+pub fn rom_offset(
+    mode: SnesMapMode,
+    bank: u8,
+    offset: u16,
+    rom_len: usize,
+    sram_len: usize,
+) -> Option<usize> {
+    match map(mode, bank, offset, rom_len, sram_len) {
+        Target::Rom(i) => Some(i),
+        _ => None,
+    }
+}
+
 /// Resolve a 24-bit address.
 ///
 /// `rom_len` and `sram_len` shape the mirroring; a zero `sram_len` means

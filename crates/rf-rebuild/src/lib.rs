@@ -25,7 +25,7 @@ pub use exec::{
     Delta, Dispatch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,
 };
-pub use isa::{DecodeMode, Decoded, Flow, Isa};
+pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 pub use recipe::{
     match_recipe, resolve_patches, Confidence, HookPoints, Match, MatchReport, PatchRefusal,
     PatchRow, RamMeaning, Recipe, RecipeFunction, ResolvedPatch,

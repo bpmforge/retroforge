@@ -126,6 +126,11 @@ pub struct SnesSystem {
     /// Ticket W30-08: the read-only idle observer for the S-CPU — see
     /// [`crate::idle`]. Not saved, never read by the simulation.
     pub idle: crate::idle::IdleTracker,
+    /// Ticket W36-08: the armed coverage recorder, `None` when off. Session
+    /// observation like a watchpoint table: not saved, not restored, and it
+    /// only ever peeks, so an armed machine runs bit-identically. See
+    /// [`crate::coverage`].
+    pub(crate) coverage: Option<Box<rf_core_api::CoverageLog>>,
 }
 
 impl SnesSystem {
@@ -186,6 +191,7 @@ impl SnesSystem {
             cpu_clock_multiplier: 1,
             cpu_overclock_remainder: 0,
             idle: crate::idle::IdleTracker::default(),
+            coverage: None,
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -321,6 +327,7 @@ impl SnesSystem {
             cpu_clock_multiplier: 1,
             cpu_overclock_remainder: 0,
             idle: crate::idle::IdleTracker::default(),
+            coverage: None,
         };
         system.reset();
         system
@@ -347,6 +354,7 @@ impl SnesSystem {
             sa1.idle.clear();
         }
         self.bus.timing = crate::timing::Timing::new();
+        self.coverage_note_reset();
     }
 
     /// Execute one instruction, charging its bus accesses in master
@@ -375,6 +383,13 @@ impl SnesSystem {
         // Ticket W30-08: for the idle observer only.
         let was_waiting = self.cpu.stopped && self.cpu.wai;
         let start_pc = (self.cpu.pbr, self.cpu.pc);
+        // Ticket W36-08: one armed check per instruction when recording is
+        // off. Peeks only, so the step itself is the plain `Cpu::step`.
+        let covering = self
+            .coverage
+            .is_some()
+            .then(|| self.coverage_before())
+            .flatten();
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
@@ -469,6 +484,12 @@ impl SnesSystem {
         } else {
             counting.accesses + u64::from(self.cpu.internal_cycles)
         };
+        // Ticket W36-08: the recorder's post-step half (the `counting`
+        // borrow of the bus ends above). The CPU still holds the state the
+        // instruction left it in: any interrupt is dispatched further down.
+        if let Some(before) = covering {
+            self.coverage_after(before);
+        }
         self.bus.tick_math(math_cycles as u32);
         // The APU accrues debt with every master cycle the CPU spends —
         // DMA included, because a transfer stalls the CPU and not the
@@ -676,6 +697,7 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, true),
             }
+            self.coverage_note_interrupt(rf_core_api::InterruptKind::Nmi);
         } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
             && !self.cpu.flag(crate::cpu::flags::I)
         {
@@ -689,6 +711,7 @@ impl SnesSystem {
                 Some(vector) => self.cpu.interrupt_to_vector(&mut self.bus, vector),
                 None => self.cpu.interrupt(&mut self.bus, false),
             }
+            self.coverage_note_interrupt(rf_core_api::InterruptKind::Irq);
         } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
             && self.cpu.flag(crate::cpu::flags::I)
             && self.cpu.wai

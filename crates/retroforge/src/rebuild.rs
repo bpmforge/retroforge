@@ -1,7 +1,7 @@
 //! Turning Rebuild on for the current ROM (ticket W36-03): find or build the
 //! code atlas, off the core thread.
 //!
-//! The atlas comes from the per-ROM cache (`code-atlas-v2`) when present,
+//! The atlas comes from the per-ROM cache (`code-atlas-v3`) when present,
 //! otherwise from the coverage the session has recorded so far, and is then
 //! stored for next time. If there is neither, the answer is
 //! [`RebuildBuild::NeedCoverage`] and the panel says to record first.

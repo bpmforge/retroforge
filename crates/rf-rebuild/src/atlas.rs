@@ -25,14 +25,14 @@ use crate::isa::Flow;
 
 /// Bumped on any change to the encoded shape. Part of the cache name
 /// ([`CACHE_SETTINGS`]); a different number is a clean cache miss.
-pub const ATLAS_FORMAT_VERSION: u32 = 2;
+pub const ATLAS_FORMAT_VERSION: u32 = 3;
 /// `rf-cache` key `producer` component.
 pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
 pub const CACHE_ASSET: &str = "code-atlas";
 /// `rf-cache` key `settings_hash` component, `-vN` like rf-cache's other
 /// users (e.g. `canvas-chunk-v3`).
-pub const CACHE_SETTINGS: &str = "code-atlas-v2";
+pub const CACHE_SETTINGS: &str = "code-atlas-v3";
 
 const MAGIC: [u8; 4] = *b"RFAT";
 /// Upper bound on what `from_bytes` will allocate, so a corrupt cache entry
@@ -62,12 +62,25 @@ pub enum Why {
     /// Resolves into the image but the bytes there do not form an
     /// acceptable instruction (overlaps executed bytes, or truncated).
     Undecodable,
+    /// The code after a width-changing instruction (65816 `XCE`, `PLP`) was
+    /// never seen running, so its decode mode is unknown (appended in
+    /// format v3).
+    WidthUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 pub enum Target {
-    Rom { cpu: u32, rom: u32 },
-    Unresolved { cpu: u32, why: Why },
+    /// `cpu` is the address as the instruction named it (24-bit on the
+    /// 65816), `mode` the decode mode the target is entered in.
+    Rom {
+        cpu: u32,
+        rom: u32,
+        mode: u8,
+    },
+    Unresolved {
+        cpu: u32,
+        why: Why,
+    },
 }
 
 impl Target {
@@ -75,6 +88,15 @@ impl Target {
     pub fn rom(&self) -> Option<u32> {
         match *self {
             Target::Rom { rom, .. } => Some(rom),
+            Target::Unresolved { .. } => None,
+        }
+    }
+
+    /// The `(ROM offset, mode)` node key, `None` when unresolved.
+    #[must_use]
+    pub fn node(&self) -> Option<(u32, u8)> {
+        match *self {
+            Target::Rom { rom, mode, .. } => Some((rom, mode)),
             Target::Unresolved { .. } => None,
         }
     }
@@ -118,6 +140,8 @@ pub struct InsnRec {
     pub len: u8,
     pub flow: Flow,
     pub prov: Provenance,
+    /// The decode mode the instruction was decoded in (0 on the 6502).
+    pub mode: u8,
 }
 
 /// A straight-line run of instructions: entered only at the top (it starts
@@ -127,6 +151,8 @@ pub struct InsnRec {
 pub struct Block {
     pub start_rom: u32,
     pub start_cpu: u32,
+    /// Decode mode of the first instruction.
+    pub start_mode: u8,
     pub insns: Vec<InsnRec>,
     /// Successor edges of the last instruction (plus the fall edge into the
     /// next block when the run was cut by a leader).
@@ -150,6 +176,10 @@ pub mod entry {
 pub struct Function {
     pub entry_rom: u32,
     pub entry_cpu: u32,
+    /// Decode mode the function is entered in. The key of a function is
+    /// `(entry_rom, entry_mode)`: the same bytes entered in two modes are
+    /// two functions.
+    pub entry_mode: u8,
     /// OR of [`entry`] flags.
     pub entry_kinds: u8,
     /// Indices into [`Atlas::blocks`], ascending.
@@ -175,6 +205,12 @@ pub enum SiteKind {
     Rts,
     Rti,
     Brk,
+    /// 65816 `JSR (abs,X)` (appended in format v3).
+    JsrIndirect,
+    /// 65816 `RTL`.
+    Rtl,
+    /// 65816 `COP`.
+    Cop,
 }
 
 /// An indirect control transfer in ROM and every target it was recorded
@@ -188,8 +224,9 @@ pub struct IndirectSite {
     pub targets: Vec<Target>,
 }
 
-/// A run of CPU addresses that executed outside PRG ROM. Never an atlas
-/// function: the bytes can change underneath the recording.
+/// A run of the core's volatile space that executed outside PRG ROM (CPU
+/// addresses on the 6502, work-RAM offsets on the SNES: `$7E:0000` is 0).
+/// Never an atlas function: the bytes can change underneath the recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct VolatileRegion {
     pub start: u32,
@@ -205,9 +242,9 @@ pub struct Stats {
     pub unresolved_static: u32,
     /// Of those, ambiguous between several recorded banks.
     pub ambiguous_static: u32,
-    /// Executed opcode offsets that did not decode to an instruction.
+    /// Executed opcode `(offset, mode)` pairs that did not decode.
     pub undecodable_observed: u32,
-    /// Executed opcode offsets that are not an instruction start in some
+    /// Executed opcode `(offset, mode)` pairs that are not an instruction start in some
     /// function. Zero by construction unless a walk budget was hit.
     pub observed_uncovered: u32,
     /// Inferred decodes dropped for overlapping bytes that really executed.
@@ -222,10 +259,10 @@ pub struct Stats {
     pub dangling_edges: u32,
     /// Indirect sites executed from RAM (no ROM offset), not listed.
     pub ram_indirect_sites: u32,
-    /// Never-executed offsets at which an instruction decodes (the
-    /// superset view; see [`crate::superset`]).
+    /// Never-executed `(offset, mode)` pairs at which an instruction decodes
+    /// (the superset view; see [`crate::superset`]).
     pub superset_candidates: u32,
-    /// Of those, offsets also instruction starts in the atlas.
+    /// Of those, pairs also instruction starts in the atlas.
     pub superset_in_atlas: u32,
     /// A hard step budget stopped a walk early.
     pub budget_hit: bool,
@@ -234,6 +271,8 @@ pub struct Stats {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Atlas {
     pub prg_len: u32,
+    /// Decode modes the ISA has (1 on the 6502, 5 on the 65816).
+    pub mode_count: u8,
     /// Sorted by `start_rom`.
     pub blocks: Vec<Block>,
     /// Sorted by `entry_rom`.

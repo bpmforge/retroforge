@@ -45,15 +45,30 @@
 //!   is one *simultaneous* state, so "these two pages were mapped together"
 //!   is a fact in the log, not an inference.
 //!
-//! ## Extending to the 65816
+//! ## The 65816 extension (ticket W36-08)
 //!
-//! [`CodeAddr`] is `{ cpu, rom }` for a 16-bit CPU. A later SNES ticket
-//! adds the program bank (`pbr: u8`) and the M/X/E width state that
-//! decides operand length; both belong in `CodeAddr` (as new fields, with
-//! `rom` widening to the cart offset), and the width bits can ride in the
-//! spare high bits of the `prg_flags` byte ([`OPCODE`]/[`OPERAND`] use
-//! only bits 0-1). Nothing here assumes 16-bit addresses beyond that one
-//! struct.
+//! [`CodeAddr`] carries the program bank (`pbr`) and the width state in force
+//! (`mode`, see below) beside the 16-bit `cpu`; `rom` widens to the cart
+//! offset. The width state decides operand length, so each executed opcode
+//! byte records *which* of the five reachable states ([`MODE_COUNT`]) it ran
+//! in, in the spare bits of its `prg_flags` byte ([`MODE_SHIFT`]): bit
+//! `MODE_SHIFT + mode`. The NES never sets them (its only mode is 0, and the
+//! recorder leaves the bits alone), so a NES log is unchanged.
+//!
+//! * `mode` is an index, not the raw `P` bits: 0 is emulation mode (`E = 1`,
+//!   `M = X = 1` forced), 1..=4 are native mode with `1 + m8 + 2 * x8`
+//!   (`m8`/`x8` true when the register is 8 bits wide). Those are the only
+//!   five states a 65816 can be in (fullsnes, "SNES CPU 65XX Microprocessor":
+//!   `E` forces `M` and `X`).
+//! * `ram_exec` is "the core's volatile space": CPU addresses on the 6502,
+//!   work-RAM offsets (`$7E:0000` = 0, 128 KiB) on the SNES, where a 64 KiB
+//!   CPU address cannot name `$7E/$7F`. Size it with
+//!   [`CoverageLog::with_volatile_len`].
+//! * Fetches that land neither in ROM nor work RAM (save RAM, a
+//!   coprocessor's own memory, open bus) are counted, not mapped:
+//!   [`CoverageLog::coproc_exec`] for memory a coprocessor owns (SA-1 I-RAM
+//!   and BW-RAM, Super FX RAM, Cx4 RAM, ...), [`CoverageLog::other_exec`] for
+//!   the rest. The coprocessors' own CPUs are not recorded at all.
 
 use std::collections::BTreeSet;
 
@@ -61,6 +76,25 @@ use std::collections::BTreeSet;
 pub const OPCODE: u8 = 0b01;
 /// `prg_flags`/`ram_exec` bit: operand byte of an executed instruction.
 pub const OPERAND: u8 = 0b10;
+
+/// `prg_flags` bit position of "executed as an opcode in mode 0" (ticket
+/// W36-08). Mode `k` sets bit `MODE_SHIFT + k`.
+pub const MODE_SHIFT: u32 = 2;
+/// Number of distinct width states a core can record (the 65816's five).
+pub const MODE_COUNT: usize = 5;
+/// Mask of the `prg_flags` bits holding width states.
+pub const MODE_BITS: u8 = 0b0111_1100;
+
+/// The `prg_flags` bit for width state `mode` (0 for an out-of-range mode, so
+/// a bad caller cannot set bits that mean something else).
+#[must_use]
+pub const fn mode_bit(mode: u8) -> u8 {
+    if (mode as usize) < MODE_COUNT {
+        1 << (MODE_SHIFT + mode as u32)
+    } else {
+        0
+    }
+}
 
 /// First CPU address covered by [`WindowMap`] (PRG ROM starts at `$8000` on
 /// every board the NES core models).
@@ -86,6 +120,10 @@ pub const RAM_EXEC_LEN: usize = 0x1_0000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CodeAddr {
     pub cpu: u16,
+    /// Program bank; always 0 on the 6502.
+    pub pbr: u8,
+    /// Width state in force there (65816: see the module doc; 6502: 0).
+    pub mode: u8,
     /// PRG ROM byte offset, `None` for RAM or anything the mapper does not
     /// resolve.
     pub rom: Option<u32>,
@@ -94,7 +132,8 @@ pub struct CodeAddr {
 /// Which instruction produced an [`IndirectEdge`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndirectKind {
-    /// `JMP (addr)`, opcode `$6C`.
+    /// `JMP (addr)`, opcode `$6C`. On the 65816 also `JMP (abs,X)` `$7C`,
+    /// `JMP [abs]` / `JML [abs]` `$DC`.
     JmpIndirect,
     /// `RTS`, opcode `$60`.
     Rts,
@@ -104,6 +143,12 @@ pub enum IndirectKind {
     /// NMI arriving during the sequence can hijack — nesdev, "CPU
     /// interrupts").
     Brk,
+    /// 65816 `JSR (abs,X)`, opcode `$FC` (ticket W36-08).
+    JsrIndirect,
+    /// 65816 `RTL`, opcode `$6B`.
+    Rtl,
+    /// 65816 `COP`, opcode `$02` (through the COP vector).
+    Cop,
 }
 
 /// One observed indirect control transfer: the instruction at `site`
@@ -156,6 +201,12 @@ pub struct CoverageLog {
     /// Flags per CPU address for code fetched from non-ROM addresses;
     /// always [`RAM_EXEC_LEN`] long.
     pub ram_exec: Vec<u8>,
+    /// Fetches that landed in memory a coprocessor owns (65816 only; see the
+    /// module doc). Counted per instruction; not part of the flag arrays.
+    pub coproc_exec: u64,
+    /// Fetches that landed in neither ROM, work RAM nor coprocessor memory
+    /// (save RAM, open bus, a register window; 65816 only).
+    pub other_exec: u64,
     /// Deduplicated, sorted by `Ord`.
     pub indirect: Vec<IndirectEdge>,
     /// Deduplicated, sorted by `Ord`.
@@ -168,12 +219,22 @@ pub struct CoverageLog {
 }
 
 impl CoverageLog {
-    /// An empty log for a cartridge with `prg_len` bytes of PRG ROM.
+    /// An empty log for a cartridge with `prg_len` bytes of PRG ROM and the
+    /// 6502's 64 KiB volatile space.
     #[must_use]
     pub fn new(prg_len: usize) -> Self {
+        Self::with_volatile_len(prg_len, RAM_EXEC_LEN)
+    }
+
+    /// An empty log with a `volatile_len`-byte volatile space (128 KiB of
+    /// work RAM for the SNES; see the module doc).
+    #[must_use]
+    pub fn with_volatile_len(prg_len: usize, volatile_len: usize) -> Self {
         Self {
             prg_flags: vec![0; prg_len],
-            ram_exec: vec![0; RAM_EXEC_LEN],
+            ram_exec: vec![0; volatile_len],
+            coproc_exec: 0,
+            other_exec: 0,
             indirect: Vec::new(),
             interrupts: Vec::new(),
             windows: Vec::new(),
@@ -190,11 +251,19 @@ impl CoverageLog {
         }
     }
 
-    /// OR `flag` into the RAM-executed flag for CPU address `addr`.
-    pub fn mark_ram(&mut self, addr: u16, flag: u8) {
-        if let Some(b) = self.ram_exec.get_mut(usize::from(addr)) {
+    /// OR `flag` into the volatile-space flag at `addr` (a CPU address on
+    /// the 6502, a work-RAM offset on the SNES).
+    pub fn mark_ram(&mut self, addr: u32, flag: u8) {
+        if let Some(b) = self.ram_exec.get_mut(addr as usize) {
             *b |= flag;
         }
+    }
+
+    /// Width states (mode indices, ascending) the opcode at PRG `offset`
+    /// was seen executing in; empty on the 6502 and for unexecuted bytes.
+    pub fn modes_at(&self, offset: usize) -> impl Iterator<Item = u8> {
+        let f = self.prg_flags.get(offset).copied().unwrap_or(0);
+        (0..MODE_COUNT as u8).filter(move |&m| f & mode_bit(m) != 0)
     }
 
     /// Insert an edge, keeping `indirect` sorted and duplicate-free.
@@ -254,6 +323,8 @@ impl CoverageLog {
         let maps: BTreeSet<_> = self.windows.iter().chain(&other.windows).copied().collect();
         self.windows = maps.into_iter().take(MAX_WINDOW_MAPS).collect();
         self.instructions_recorded += other.instructions_recorded;
+        self.coproc_exec += other.coproc_exec;
+        self.other_exec += other.other_exec;
         true
     }
 
@@ -292,6 +363,8 @@ mod tests {
     fn at(cpu: u16, rom: u32) -> CodeAddr {
         CodeAddr {
             cpu,
+            pbr: 0,
+            mode: 0,
             rom: Some(rom),
         }
     }
@@ -376,5 +449,42 @@ mod tests {
         let before = a.clone();
         assert!(!a.merge(&CoverageLog::new(5)));
         assert_eq!(a, before);
+    }
+
+    #[test]
+    fn width_bits_ride_above_the_opcode_flags() {
+        let mut l = CoverageLog::new(4);
+        l.mark_prg(1, OPCODE | mode_bit(0));
+        l.mark_prg(1, OPCODE | mode_bit(3));
+        l.mark_prg(2, OPERAND);
+        assert_eq!(l.modes_at(1).collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(l.modes_at(2).count(), 0);
+        assert_eq!(l.modes_at(99).count(), 0);
+        assert_eq!(mode_bit(MODE_COUNT as u8), 0, "out of range sets nothing");
+        assert_eq!(
+            (0..MODE_COUNT as u8).fold(0, |m, k| m | mode_bit(k)),
+            MODE_BITS
+        );
+        assert_eq!(MODE_BITS & (OPCODE | OPERAND), 0);
+        // OR-merge keeps both logs' states.
+        let mut other = CoverageLog::new(4);
+        other.mark_prg(1, OPCODE | mode_bit(4));
+        other.coproc_exec = 2;
+        other.other_exec = 1;
+        assert!(l.merge(&other));
+        assert_eq!(l.modes_at(1).collect::<Vec<_>>(), vec![0, 3, 4]);
+        assert_eq!((l.coproc_exec, l.other_exec), (2, 1));
+    }
+
+    #[test]
+    fn volatile_space_is_sized_by_the_core() {
+        let mut l = CoverageLog::with_volatile_len(0, 0x2_0000);
+        l.mark_ram(0x1_ABCD, OPCODE);
+        assert_eq!(l.ram_exec.len(), 0x2_0000);
+        assert_eq!(l.executed_ram_bytes(), 1);
+        let mut small = CoverageLog::new(0);
+        small.mark_ram(0x1_0000, OPCODE); // past the 6502 space: ignored
+        assert_eq!(small.executed_ram_bytes(), 0);
+        assert!(!small.merge(&l), "different volatile spaces never merge");
     }
 }

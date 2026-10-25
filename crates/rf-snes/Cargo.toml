@@ -9,6 +9,9 @@ repository.workspace = true
 [dependencies]
 rf-cart = { path = "../rf-cart" }
 rf-core-api = { path = "../rf-core-api" }
+# rf-rebuild: the `Isa` the code atlas decodes the 65816 through (ticket
+# W36-08), the same shape rf-nes has; rf-rebuild is core layer.
+rf-rebuild = { path = "../rf-rebuild" }
 
 [dev-dependencies]
 sha2 = "0.11"

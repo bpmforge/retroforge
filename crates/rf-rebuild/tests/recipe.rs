@@ -43,10 +43,7 @@ impl Isa for Toy {
             4 => Flow::Return,
             _ => Flow::Fall,
         };
-        Some(Decoded {
-            len: len as u8,
-            flow,
-        })
+        Some(Decoded::plain(len as u8, flow))
     }
 }
 
@@ -70,6 +67,8 @@ fn atlas_of(img: &[u8], entries: &[usize]) -> Atlas {
             kind: InterruptKind::Nmi,
             target: CodeAddr {
                 cpu: 0x8000 + rom as u16,
+                pbr: 0,
+                mode: 0,
                 rom: Some(rom as u32),
             },
         });
@@ -195,7 +194,7 @@ fn several_candidates_resolve_to_the_nearest_hint_then_the_exact_hash() {
 }
 
 #[test]
-fn the_v2_atlas_round_trips_its_hashes_and_a_v1_cache_entry_is_a_miss() {
+fn the_v3_atlas_round_trips_its_hashes_and_a_v2_cache_entry_is_a_miss() {
     let mut img = vec![0u8; 0x1000];
     put_fn(&mut img, 0x100, 0x0A);
     let a = atlas_of(&img, &[0x100]);
@@ -203,11 +202,11 @@ fn the_v2_atlas_round_trips_its_hashes_and_a_v1_cache_entry_is_a_miss() {
     let bytes = a.to_bytes();
     assert_eq!(Atlas::from_bytes(&bytes), Ok(a.clone()));
 
-    assert_eq!(ATLAS_FORMAT_VERSION, 2);
-    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v2");
-    let mut v1 = bytes;
-    v1[4..8].copy_from_slice(&1u32.to_le_bytes());
-    assert_eq!(Atlas::from_bytes(&v1), Err(AtlasError::Version(1)));
+    assert_eq!(ATLAS_FORMAT_VERSION, 3);
+    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v3");
+    let mut v2 = bytes;
+    v2[4..8].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(Atlas::from_bytes(&v2), Err(AtlasError::Version(2)));
 }
 
 fn patch(name: &str, function: &str, offset: u32, value: u8) -> PatchRow {

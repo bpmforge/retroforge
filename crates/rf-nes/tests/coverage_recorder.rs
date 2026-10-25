@@ -135,6 +135,8 @@ fn jmp_indirect_and_rts_edges_are_recorded_with_resolved_targets() {
         jmp.site,
         CodeAddr {
             cpu: 0x801C,
+            pbr: 0,
+            mode: 0,
             rom: Some(0x1C)
         }
     );
@@ -142,6 +144,8 @@ fn jmp_indirect_and_rts_edges_are_recorded_with_resolved_targets() {
         jmp.target,
         CodeAddr {
             cpu: 0x8030,
+            pbr: 0,
+            mode: 0,
             rom: Some(0x30)
         }
     );

@@ -264,7 +264,15 @@ impl NesCore {
             Dispatch::Atlas {
                 node,
                 indirect: true,
-            } => Some((node, CodeAddr { cpu: pc, rom })),
+            } => Some((
+                node,
+                CodeAddr {
+                    cpu: pc,
+                    pbr: 0,
+                    mode: 0,
+                    rom,
+                },
+            )),
             _ => None,
         };
         // Peeked, not taken from the atlas node: a call from code the atlas
@@ -393,6 +401,8 @@ impl NesCore {
     fn code_addr(&self, addr: u16) -> CodeAddr {
         CodeAddr {
             cpu: addr,
+            pbr: 0,
+            mode: 0,
             rom: self
                 .bus
                 .prg_rom_offset(addr)
@@ -433,7 +443,7 @@ impl NesCore {
             for &(addr, rom, flag) in marks.iter().take(usize::from(len)) {
                 match rom {
                     Some(o) => log.mark_prg(o, flag),
-                    None => log.mark_ram(addr, flag),
+                    None => log.mark_ram(u32::from(addr), flag),
                 }
             }
         }

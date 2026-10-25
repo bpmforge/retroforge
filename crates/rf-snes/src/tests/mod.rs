@@ -17,6 +17,7 @@
 
 mod apu;
 mod apu_ports;
+mod coverage;
 mod dma;
 mod dsp;
 mod dsp1_dma;
