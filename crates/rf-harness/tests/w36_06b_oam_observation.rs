@@ -226,6 +226,25 @@ fn pass(image: &[u8], known: &Tiles) -> (Tally, Tally, Tally, Tiles) {
                 -300..=-81 => &mut left,
                 _ => continue,
             };
+            // An entry that another slot's enemy, standing in the picture, explains is not this slot's.
+            let others: Vec<(i64, i64)> = (0..5u32)
+                .filter(|&k2| k2 != k && core.peek(0x0F + k2) != 0)
+                .map(|k2| {
+                    let r2 = i64::from(core.peek(0x6E + k2)) * 256
+                        + i64::from(core.peek(0x87 + k2))
+                        - cam;
+                    (r2, i64::from(core.peek(u32::from(ENEMY_Y) + k2)))
+                })
+                .filter(|(r2, _)| (-16..256).contains(r2))
+                .collect();
+            let explained = |e: &(u8, u8, u8, u8)| {
+                !(16..=224).contains(&rel)
+                    && others.iter().any(|&(r2, y2)| {
+                        let dx = i64::from(e.3) - r2;
+                        (-12..20).contains(&dx) && (-24..=8).contains(&(i64::from(e.0) - y2))
+                    })
+            };
+            let near = |e: &(u8, u8, u8, u8)| near(e) && !explained(e);
             let tiles = known.get(&id);
             let is_enemy = |e: &(u8, u8, u8, u8)| tiles.is_some_and(|t| t.contains(&e.1));
             tally.frames += 1;

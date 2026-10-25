@@ -37,6 +37,12 @@ use crate::stepper::{EmuStepper, MachineSnapshot};
 /// Frames the redraw runs: the camera is moved before the first, the picture is the third.
 const REPLAY_FRAMES: usize = 3;
 
+/// The picture's width: an object at or past this camera-relative x is beyond its right edge.
+const PICTURE_EDGE: i32 = 256;
+
+/// How far inside an edge an object already counts as "near the margin" (see `compute`).
+const ZONE_SLACK: i32 = 32;
+
 /// Picture rows and width of a NES frame.
 const HEIGHT: usize = 240;
 const WIDTH: usize = 256;
@@ -177,6 +183,39 @@ pub struct MarginDrawer {
     last_oam: [u8; 256],
     /// Redraw frames run, for the cost readout.
     pub frames_replayed: u64,
+    /// What the real OAM held for the entries the redraw drew (the observation behind this design).
+    pub tally: Tally,
+}
+
+/// For every OAM entry the redraw machine drew for a margin object: what the REAL machine's OAM holds
+/// at that index for the picture on screen. The game hides the object (Y pushed off the visible range),
+/// draws it wrapped onto the real picture (the same four bytes), or reuses the entry for something else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub hidden: u64,
+    pub wrapped: u64,
+    pub other: u64,
+}
+
+impl Tally {
+    fn observe(&mut self, real_oam: &[u8; 256], redraw_oam: &[u8; 256], kept: &[Tile]) {
+        let mut seen: Vec<u8> = Vec::new();
+        for t in kept {
+            if seen.contains(&t.oam_index) {
+                continue;
+            }
+            seen.push(t.oam_index);
+            let i = usize::from(t.oam_index) * 4;
+            let (a, b) = (&real_oam[i..i + 4], &redraw_oam[i..i + 4]);
+            if a[0] >= 0xEF {
+                self.hidden += 1;
+            } else if a == b {
+                self.wrapped += 1;
+            } else {
+                self.other += 1;
+            }
+        }
+    }
 }
 
 /// Whether a loaded hook host makes the machine something a private copy cannot reproduce.
@@ -199,6 +238,7 @@ impl MarginDrawer {
             recent: [0; REPLAY_FRAMES],
             last_oam: [0xF8; 256],
             frames_replayed: 0,
+            tally: Tally::default(),
         })
     }
 
@@ -247,10 +287,12 @@ impl MarginDrawer {
         let now = slots(&self.map, &|a| real.peek_bus(a));
         let mut sides = 0u8;
         for s in &now {
-            if s.rel >= 240 {
+            // A little inside the picture's edge too: an object near it is a frame or two from
+            // crossing, and run-ahead shows the picture that many frames later.
+            if s.rel >= PICTURE_EDGE - ZONE_SLACK {
                 sides |= Side::Right.bit();
             }
-            if s.rel < 16 {
+            if s.rel < ZONE_SLACK {
                 sides |= Side::Left.bit();
             }
         }
@@ -291,6 +333,8 @@ impl MarginDrawer {
                 Side::Left => left = done.strip,
                 Side::Right => right = done.strip,
             }
+            self.tally
+                .observe(shown.oam, &done.oam_before_picture, &done.kept);
             for i in margin_draw::ghost_indices(shown.oam, &done.oam_before_picture, &done.kept) {
                 if !ghost_idx.contains(&i) {
                     ghost_idx.push(i);

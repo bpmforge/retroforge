@@ -208,3 +208,207 @@ fn the_unmoved_replay_reproduces_the_real_pictures_sprites() {
         "the replay reproduces the real picture's sprites exactly"
     );
 }
+
+/// The 256-px picture centred in a `out_w`-wide black frame, as `widen_margins_layered` starts from it.
+fn centred(rgba: &[u8], out_w: usize) -> Vec<u8> {
+    let pad = (out_w - 256) / 2;
+    let mut out = vec![0u8; out_w * 240 * 4];
+    for px in out.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+    for y in 0..240 {
+        out[(y * out_w + pad) * 4..][..256 * 4].copy_from_slice(&rgba[y * 256 * 4..][..256 * 4]);
+    }
+    out
+}
+
+#[test]
+#[ignore = "needs the mapper-66 multicart ROM (RF_SCREENS_ROMS_DIR)"]
+fn layer_on_changes_the_pad_and_exactly_the_wrapped_dots_of_the_real_picture() {
+    let Some(path) = rom_path() else {
+        println!("SKIP: {FILE} not found");
+        return;
+    };
+    let raw = load_rom(&path);
+    let image = mod_image(&raw);
+    let mut st = EmuStepper::open(&image).expect("opens");
+    st.set_bg_under_capture(true);
+    let mut sink = rf_renderer::FrameBuffer::new();
+    sink.set_sprite_id_capture(true);
+    let mut drawer = MarginDrawer::new(&image, &recipe()).expect("object table");
+    let resolve = |i: u8| rf_renderer::resolve_index(i, None);
+    let out_w = 856; // Aspect::Wide32x9 at 240 lines
+    let pad = (out_w - 256) / 2;
+    let (mut frames, mut drawn_frames, mut ghost_frames, mut ghost_dots) = (0u32, 0u32, 0u32, 0u32);
+    let (mut centre_changed, mut centre_changed_outside_ghosts, mut pad_painted) =
+        (0u64, 0u64, 0u64);
+    let mut pad_changed_but_not_by_a_strip = 0u64;
+    for f in 0..3200u32 {
+        let inp = input(script_two(f));
+        if st.peek_bus(0x0770) == 1 {
+            st.poke_bus(0x079E, 0x30);
+        }
+        drawer.before_frame(&st, inp);
+        st.latch_and_advance_frame(inp, &mut sink);
+        let oam = drawer.oam_of_current_picture();
+        let md = drawer.frame(
+            &st,
+            inp,
+            &Shown {
+                ahead: 0,
+                oam: &oam,
+                ids: sink.sprite_ids(),
+                bg_under: st.bg_under(),
+            },
+        );
+        if f < 500 || st.peek_bus(0x0770) != 1 {
+            continue;
+        }
+        frames += 1;
+        let off = centred(&sink.to_vec(), out_w);
+        let mut on = off.clone();
+        if let Some(md) = &md {
+            drawn_frames += 1;
+            pad_painted += md.paint_pad(&mut on, out_w, 240, &resolve) as u64;
+            let removed = md.remove_ghosts(&mut on, out_w, 240, &resolve);
+            ghost_frames += u32::from(removed > 0);
+            ghost_dots += removed as u32;
+            // Every removed dot shows the background colour the PPU computed under it.
+            for &(x, y, bg) in &md.ghosts {
+                let at = (usize::from(y) * out_w + pad + usize::from(x)) * 4;
+                assert_eq!(on[at..at + 3], resolve(bg), "frame {f}: ({x},{y})");
+            }
+        }
+        let ghosts: std::collections::HashSet<(usize, usize)> = md
+            .iter()
+            .flat_map(|m| {
+                m.ghosts
+                    .iter()
+                    .map(|&(x, y, _)| (usize::from(x), usize::from(y)))
+            })
+            .collect();
+        for y in 0..240 {
+            for x in 0..out_w {
+                let i = (y * out_w + x) * 4;
+                if on[i..i + 4] == off[i..i + 4] {
+                    continue;
+                }
+                if (pad..pad + 256).contains(&x) {
+                    centre_changed += 1;
+                    centre_changed_outside_ghosts += u64::from(!ghosts.contains(&(x - pad, y)));
+                } else {
+                    // Outside the picture the only change is a strip painting black margin.
+                    pad_changed_but_not_by_a_strip += u64::from(off[i..i + 3] != [0, 0, 0]);
+                }
+            }
+        }
+    }
+    println!(
+        "{frames} frames in play; the layer drew on {drawn_frames}; {ghost_frames} frames had a wrapped copy \
+         taken off the real picture ({ghost_dots} dots); {pad_painted} pad dots painted; real-picture dots \
+         changed {centre_changed}, outside the wrapped copies {centre_changed_outside_ghosts}"
+    );
+    assert!(drawn_frames > 500, "the layer drew: {drawn_frames}");
+    assert!(pad_painted > 10_000, "pad dots: {pad_painted}");
+    assert_eq!(
+        centre_changed_outside_ghosts, 0,
+        "the 256-px picture is untouched except the wrapped copies"
+    );
+    assert_eq!(pad_changed_but_not_by_a_strip, 0);
+    // Step 1 (w36_06b_oam_observation) found no wrapped copy of a margin enemy on the real picture in
+    // this run, so the wrapped-copy removal has nothing to remove here; its pure parts are unit-tested
+    // in rf_enhance::margin_draw. What the real OAM held at the entries the redraw drew:
+    println!("real OAM at the redraw's entries: {:?}", drawer.tally);
+    assert_eq!(ghost_frames, 0, "no wrapped copies were found by step 1");
+    assert!(
+        drawer.tally.hidden > 1000,
+        "the game hides the margin objects: {:?}",
+        drawer.tally
+    );
+}
+
+/// Plain play of 1-1 (no test-side help), `ahead` frames of run-ahead: per frame the picture shown and the
+/// margin draw for it.
+fn play_with_run_ahead(
+    image: &[u8],
+    ahead: u8,
+    frames: u32,
+) -> Vec<(Vec<u8>, Option<rf_enhance::margin_draw::MarginDraw>)> {
+    let mut st = EmuStepper::open(image).expect("opens");
+    st.set_bg_under_capture(true);
+    let mut sink = rf_renderer::FrameBuffer::new();
+    sink.set_sprite_id_capture(true);
+    let mut drawer = MarginDrawer::new(image, &recipe()).expect("object table");
+    let mut speculator = retroforge::run_ahead::Speculator::new();
+    let mut out = Vec::new();
+    for f in 0..frames {
+        let inp = input(script_one(f));
+        drawer.before_frame(&st, inp);
+        st.latch_and_advance_frame(inp, &mut sink);
+        let real_oam = drawer.oam_of_current_picture();
+        if ahead == 0 {
+            let md = drawer.frame(
+                &st,
+                inp,
+                &Shown {
+                    ahead: 0,
+                    oam: &real_oam,
+                    ids: sink.sprite_ids(),
+                    bg_under: st.bg_under(),
+                },
+            );
+            out.push((sink.to_vec(), md.map(|m| *m)));
+        } else {
+            let spec = speculator
+                .run(&st, image, inp, ahead, (256, 240), false, true)
+                .expect("a speculative frame");
+            let md = drawer.frame(
+                &st,
+                inp,
+                &Shown {
+                    ahead,
+                    oam: &spec.oam,
+                    ids: spec.sprite_ids.as_deref(),
+                    bg_under: &spec.bg_under,
+                },
+            );
+            out.push((spec.rgba, md.map(|m| *m)));
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "needs the mapper-66 multicart ROM (RF_SCREENS_ROMS_DIR)"]
+fn run_ahead_with_the_mod_predicts_the_real_frame_and_its_margin_draw() {
+    let Some(path) = rom_path() else {
+        println!("SKIP: {FILE} not found");
+        return;
+    };
+    let raw = load_rom(&path);
+    let image = mod_image(&raw);
+    let frames = 1700;
+    let off = play_with_run_ahead(&image, 0, frames);
+    for ahead in [1u8, 2] {
+        let on = play_with_run_ahead(&image, ahead, frames);
+        let n = usize::from(ahead);
+        let (mut compared, mut drawn, mut same_picture, mut same_draw) = (0u32, 0u32, 0u32, 0u32);
+        for k in 600..frames as usize - n {
+            // The speculative frames assume the input is held: skip windows where it changes.
+            if (k..=k + n).any(|i| script_one(i as u32) != script_one(k as u32)) {
+                continue;
+            }
+            compared += 1;
+            drawn += u32::from(off[k + n].1.is_some());
+            same_picture += u32::from(on[k].0 == off[k + n].0);
+            same_draw += u32::from(on[k].1 == off[k + n].1);
+        }
+        println!(
+            "run-ahead +{ahead}: {compared} windows; shown picture is the real frame +{ahead}: {same_picture}; \
+             its margin draw equal: {same_draw} (the real frame had one in {drawn})"
+        );
+        assert!(compared > 500 && drawn > 100, "the comparison ran: {compared}/{drawn}");
+        assert_eq!(same_picture, compared, "+{ahead}: prediction matches with the mod on");
+        assert_eq!(same_draw, compared, "+{ahead}: the margin draw is the shown frame's");
+    }
+}
