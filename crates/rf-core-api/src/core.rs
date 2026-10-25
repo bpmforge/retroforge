@@ -321,4 +321,33 @@ pub trait EmulatorCore {
     fn take_coverage(&mut self) -> Option<crate::CoverageLog> {
         None
     }
+
+    /// Install (`Some`) or drop (`None`) a code atlas for the block executor
+    /// (ticket W36-03; see `rf-rebuild`). Off by default: with no atlas the
+    /// core runs exactly as before.
+    ///
+    /// The atlas crosses as `Box<dyn Any + Send>` because `rf-core-api`
+    /// depends on no other `rf-*` crate, so it cannot name `rf_rebuild::Atlas`;
+    /// the core downcasts it. Bytes would force a decode round trip for an
+    /// atlas just built in memory. Executor state is derived from `pc` and
+    /// the atlas, so it is never part of a savestate and a state load needs
+    /// no handling.
+    ///
+    /// # Errors
+    /// The core cannot run an executor, the box is not its atlas type, or
+    /// the atlas is for a different cartridge.
+    fn set_rebuild_atlas(
+        &mut self,
+        atlas: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<(), CoreError> {
+        match atlas {
+            None => Ok(()),
+            Some(_) => Err(CoreError::Other("rebuild is not supported".to_string())),
+        }
+    }
+
+    /// The executor's counters, `None` when no atlas is installed.
+    fn rebuild_stats(&self) -> Option<crate::RebuildStats> {
+        None
+    }
 }

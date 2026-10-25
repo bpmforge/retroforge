@@ -49,6 +49,9 @@ use rf_core_api::{
     Mos6502Regs,
 };
 
+use crate::rebuild::{Atlas, Delta, RebuildExec};
+use rf_rebuild::Dispatch;
+
 use crate::{Cpu, NesBus};
 
 /// Four NTSC frames' worth of CPU cycles (29,781 per frame).
@@ -88,6 +91,14 @@ pub struct NesCore {
     /// this says the banking changed and triggers a fresh snapshot. Cleared
     /// whenever the log is replaced, so a new log always starts with one.
     window_cache: WindowMap,
+    /// Ticket W36-03: the block executor's map, `None` when Rebuild is off.
+    /// Derived from `pc` and the atlas, so it is not saved with the state and
+    /// a state load leaves it alone (`state load` goes through
+    /// [`NesCore::parts_mut`], which never touches it).
+    rebuild: Option<Box<RebuildExec>>,
+    /// `coverage.is_some() || rebuild.is_some()`: the single flag the hot
+    /// path in [`NesCore::tick`] tests.
+    observing: bool,
 }
 
 impl NesCore {
@@ -107,6 +118,8 @@ impl NesCore {
             pushed_watches: rf_core_api::WatchTable::new(),
             coverage: None,
             window_cache: WindowMap::EMPTY,
+            rebuild: None,
+            observing: false,
         })
     }
 
@@ -181,16 +194,94 @@ impl NesCore {
     /// small ring underrun between frames (FAILURE_MODES.md FM-02); the
     /// drain costs one branch when nothing is queued.
     fn tick(&mut self, sink: &mut dyn CoreSink, start_frame: u64) -> bool {
-        if self.coverage.is_some() {
-            let before = self.coverage_before();
-            self.cpu.step(&mut self.bus);
-            self.coverage_after(before);
+        if self.observing {
+            self.step_observed();
         } else {
             self.cpu.step(&mut self.bus);
         }
         self.bus.drain_video(sink);
         self.bus.drain_audio(sink);
         self.bus.frame_count() != start_frame
+    }
+
+    /// One instruction with the coverage recorder and/or the block executor
+    /// watching (tickets W36-01, W36-03). Both halves only peek before the
+    /// step and read `pc` after it, so the instruction itself is always the
+    /// plain `Cpu::step`.
+    #[inline(never)]
+    fn step_observed(&mut self) {
+        let cov = self.coverage.is_some().then(|| self.coverage_before());
+        let reb = self.rebuild_before();
+        self.cpu.step(&mut self.bus);
+        if let RebuildBefore::Indirect { node, site } = reb {
+            let target = self.code_addr(self.cpu.pc);
+            if let Some(x) = self.rebuild.as_deref_mut() {
+                x.check_target(node, site, target);
+            }
+        }
+        if let Some(before) = cov {
+            self.coverage_after(before);
+        }
+    }
+
+    /// Executor, pre-step half (ticket W36-03): where is the next instruction
+    /// in the atlas? A pending interrupt means the step is an NMI/IRQ
+    /// sequence, not the instruction at `pc`.
+    fn rebuild_before(&mut self) -> RebuildBefore {
+        let Some(x) = self.rebuild.as_deref_mut() else {
+            return RebuildBefore::Plain;
+        };
+        let (nmi, irq) = self.cpu.pending_interrupt();
+        if nmi || irq {
+            x.note_interrupt();
+            return RebuildBefore::Plain;
+        }
+        let pc = self.cpu.pc;
+        let rom = self
+            .bus
+            .prg_rom_offset(pc)
+            .and_then(|o| u32::try_from(o).ok());
+        match x.dispatch(rom) {
+            Dispatch::Atlas {
+                node,
+                indirect: true,
+            } => RebuildBefore::Indirect {
+                node,
+                site: CodeAddr { cpu: pc, rom },
+            },
+            _ => RebuildBefore::Plain,
+        }
+    }
+
+    fn refresh_observing(&mut self) {
+        self.observing = self.coverage.is_some() || self.rebuild.is_some();
+    }
+
+    /// Install (`Some`) or drop (`None`) a code atlas for the block executor
+    /// (ticket W36-03). Counters start from zero.
+    ///
+    /// # Errors
+    /// The atlas was built for a PRG image of another size (wrong cartridge).
+    pub fn set_rebuild(&mut self, atlas: Option<Atlas>) -> Result<(), CoreError> {
+        if let Some(a) = &atlas {
+            if a.prg_len as usize != self.bus.prg_rom_len() {
+                return Err(CoreError::Other(format!(
+                    "atlas is for a {}-byte PRG, this cartridge has {}",
+                    a.prg_len,
+                    self.bus.prg_rom_len()
+                )));
+            }
+        }
+        self.rebuild = atlas.map(|a| Box::new(RebuildExec::new(a)));
+        self.refresh_observing();
+        Ok(())
+    }
+
+    /// Dispatch misses seen so far (distinct, first-seen order); empty when
+    /// Rebuild is off.
+    #[must_use]
+    pub fn rebuild_deltas(&self) -> &[Delta] {
+        self.rebuild.as_deref().map_or(&[], RebuildExec::deltas)
     }
 
     /// A [`CodeAddr`] for `addr` under the bank state in force right now.
@@ -318,6 +409,13 @@ impl NesCore {
     }
 }
 
+/// What the executor found before a step (ticket W36-03).
+#[derive(Clone, Copy)]
+enum RebuildBefore {
+    Plain,
+    Indirect { node: u32, site: CodeAddr },
+}
+
 /// What the recorder saw before a step, carried to the after-step half.
 #[derive(Clone, Copy)]
 enum CoverageBefore {
@@ -340,6 +438,9 @@ impl EmulatorCore for NesCore {
             self.window_cache = WindowMap::EMPTY;
             self.coverage_note_reset();
         }
+        // An atlas describes one cartridge.
+        self.rebuild = None;
+        self.refresh_observing();
         Ok(())
     }
 
@@ -478,6 +579,25 @@ impl EmulatorCore for NesCore {
     fn set_coverage_recording(&mut self, on: bool) {
         self.coverage = on.then(|| Box::new(CoverageLog::new(self.bus.prg_rom_len())));
         self.window_cache = WindowMap::EMPTY;
+        self.refresh_observing();
+    }
+
+    fn set_rebuild_atlas(
+        &mut self,
+        atlas: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<(), CoreError> {
+        let atlas = match atlas {
+            None => None,
+            Some(b) => Some(
+                *b.downcast::<Atlas>()
+                    .map_err(|_| CoreError::Other("not an rf-rebuild atlas".to_string()))?,
+            ),
+        };
+        self.set_rebuild(atlas)
+    }
+
+    fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
+        self.rebuild.as_deref().map(RebuildExec::stats)
     }
 
     fn take_coverage(&mut self) -> Option<CoverageLog> {

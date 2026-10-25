@@ -23,6 +23,7 @@ mod event;
 mod frame_bundle;
 pub mod gsu_poly;
 mod input;
+mod rebuild;
 mod state_view;
 mod triple_buffer;
 mod video;
@@ -38,6 +39,7 @@ pub use error::{CoreError, StateError};
 pub use event::{CoreEvent, EventMask};
 pub use frame_bundle::{FrameBundle, FrameBundleBuilder};
 pub use input::{InputFrame, MAX_INPUT_PORTS};
+pub use rebuild::RebuildStats;
 pub use state_view::{StateReader, StateView, StateWriter};
 pub use triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 pub use video::{

@@ -14,7 +14,10 @@
 //! that sees both crates (`rf-harness`, `retroforge`) pairs them.
 
 use rf_core_api::coverage::CoverageLog;
-pub use rf_rebuild::{build_atlas as build_generic_atlas, entry, Atlas, Provenance};
+pub use rf_rebuild::{
+    build_atlas as build_generic_atlas, entry, Atlas, Delta, Provenance, RebuildExec, CACHE_ASSET,
+    CACHE_PRODUCER, CACHE_SETTINGS,
+};
 use rf_rebuild::{DecodeMode, Decoded, Flow, Isa};
 
 use crate::trace::instruction_len;
