@@ -856,6 +856,35 @@ mod tests {
     }
 
     #[test]
+    fn on_exit_hooks_fire_on_exit_events_only_and_see_the_return_pc() {
+        let h = host(
+            caps(true, false),
+            r#"
+            exits = 0
+            enters = 0
+            exit_pc = 0
+            rf.on_exit(4, function(id) exits = exits + 1; exit_pc = rf.regs().pc end)
+            rf.on_enter(4, function(id) enters = enters + 1 end)
+            "#,
+        );
+        let mut m = Fake::new();
+        m.pc = 0x9003;
+        h.dispatch(FunctionEvent::Exit { function: 4 }, &mut m);
+        h.dispatch(FunctionEvent::Exit { function: 5 }, &mut m);
+        assert_eq!(
+            (
+                h.lua_global_i64("exits"),
+                h.lua_global_i64("enters"),
+                h.lua_global_i64("exit_pc")
+            ),
+            (Some(1), Some(0), Some(0x9003))
+        );
+        h.dispatch(enter(4), &mut m);
+        assert_eq!(h.lua_global_i64("enters"), Some(1));
+        assert_eq!(h.lua_global_i64("exits"), Some(1));
+    }
+
+    #[test]
     fn the_machine_is_only_reachable_inside_a_callback() {
         let h = host(
             caps(true, true),
