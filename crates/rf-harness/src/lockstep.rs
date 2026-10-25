@@ -716,6 +716,7 @@ fn write_bundle(
         let _ = match kind {
             TraceKind::Interrupt => writeln!(text, "{cpu:04x} interrupt-entry"),
             TraceKind::Fallback => writeln!(text, "{cpu:04x} fallback"),
+            TraceKind::WidthMismatch => writeln!(text, "{cpu:04x} width-mismatch"),
             TraceKind::Atlas { function, prov } => match function {
                 Some(f) => writeln!(text, "{cpu:04x} atlas({prov:?}) function {f}"),
                 None => writeln!(text, "{cpu:04x} atlas({prov:?}) no-function"),

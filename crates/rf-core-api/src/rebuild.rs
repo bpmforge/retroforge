@@ -12,6 +12,17 @@ pub struct RebuildStats {
     /// Instructions with no atlas node (RAM code, unmapped, never decoded):
     /// plain interpreter.
     pub fallback: u64,
+    /// Of those: the offset is in the atlas, but only in other decode modes
+    /// (65816 widths; ticket W36-08b). Always 0 on the 6502.
+    pub fallback_width: u64,
+    /// Of those: ROM code the atlas has no node for in any mode.
+    pub fallback_no_node: u64,
+    /// Of those: code fetched from RAM (NES: RAM and registers; SNES: work
+    /// RAM). The atlas never holds volatile code.
+    pub fallback_ram: u64,
+    /// Of those: code fetched from memory a coprocessor owns, or any other
+    /// non-ROM, non-RAM space.
+    pub fallback_other: u64,
     /// Hardware interrupt entries (NMI/IRQ sequences, not instructions).
     pub interrupt_entries: u64,
     /// Indirect transfers (`JMP (a)`, `RTS`, `RTI`, `BRK`) compared against
