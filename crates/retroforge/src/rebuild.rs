@@ -39,8 +39,21 @@ pub enum RebuildBuild {
     Failed(String),
 }
 
+#[cfg(not(test))]
 fn cache_root() -> PathBuf {
     std::env::temp_dir().join("retroforge-atlas-cache")
+}
+
+/// Unit tests get a cache of their own per test process: the shared
+/// directory is also written by the app and by concurrent test runs (the
+/// gate, a second worktree), and a core-thread test that read another
+/// process's half-written index flaked in the 2026-10-25 gate runs.
+#[cfg(test)]
+fn cache_root() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "retroforge-atlas-cache-test-{}",
+        std::process::id()
+    ))
 }
 
 fn key(rom_sha256: &str) -> CacheKey {
