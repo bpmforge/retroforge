@@ -71,6 +71,10 @@ pub enum DebugTab {
     /// — the RE workflow's own panel. Additive like every variant above,
     /// so [`LAYOUT_FORMAT_VERSION`] does not move.
     Annotations,
+    /// `Coverage` (ticket W36-01): the code-coverage recorder's panel
+    /// (`coverage_view`). Additive like every variant above, so
+    /// [`LAYOUT_FORMAT_VERSION`] does not move.
+    Coverage,
 }
 
 impl DebugTab {
@@ -81,7 +85,7 @@ impl DebugTab {
     /// layout did not already contain, which is how `LuaConsole` and
     /// `OamDiff` came to ship with UI nobody could see (W13-02f's close
     /// note). A picker needs the list, and the list needs one home.
-    pub const ALL: [DebugTab; 11] = [
+    pub const ALL: [DebugTab; 12] = [
         DebugTab::Pattern,
         DebugTab::Nametable,
         DebugTab::Palette,
@@ -93,6 +97,7 @@ impl DebugTab {
         DebugTab::Audio,
         DebugTab::Annotations,
         DebugTab::LuaConsole,
+        DebugTab::Coverage,
     ];
 
     /// The tab's on-screen name.
@@ -114,6 +119,7 @@ impl DebugTab {
             DebugTab::Trace => "Trace",
             DebugTab::Audio => "Audio",
             DebugTab::Annotations => "Annotations",
+            DebugTab::Coverage => "Coverage",
         }
     }
 }
@@ -337,7 +343,7 @@ mod tests {
         }
         assert_eq!(
             DebugTab::ALL.len(),
-            11,
+            12,
             "a new variant must be added to ALL or it cannot be opened"
         );
     }

@@ -213,6 +213,9 @@ pub struct PanelData {
     /// Ticket W4-10b: per-channel scope traces and the mute/solo state.
     /// `None` with no session.
     pub audio: Option<Box<AudioPanelData>>,
+    /// Ticket W36-01: the code-coverage recorder's panel state. `None`
+    /// with no session.
+    pub coverage: Option<Box<CoveragePanelData>>,
     /// Latest frame's OAM (`core_thread::FrameMsg::oam`) — genuinely live,
     /// unlike `chr_rom`/vram/cgram.
     pub oam: [u8; 256],
@@ -269,6 +272,7 @@ impl Default for PanelData {
             script: None,
             trace: None,
             audio: None,
+            coverage: None,
             oam: [0u8; 256],
             previous_oam: [0u8; 256],
             vram: [0u8; 0x1000],
@@ -655,6 +659,7 @@ impl egui_dock::TabViewer for PanelTabViewer<'_> {
                 );
             }
             DebugTab::Annotations => annotations_ui(ui, self.annotations),
+            DebugTab::Coverage => coverage_ui(ui, self.data.coverage.as_deref_mut()),
             DebugTab::Audio => {
                 audio_ui(ui, self.data.audio.as_deref_mut());
                 if let Some(snes) = self.data.snes.as_deref() {
@@ -1503,6 +1508,95 @@ fn trace_ui(
                 }
             },
         );
+}
+
+/// What the Coverage tab needs (ticket W36-01).
+pub struct CoveragePanelData {
+    /// Latest summary from the core thread; `None` until the first refresh
+    /// after arming.
+    pub summary: Option<Box<rf_debugger::coverage_view::CoverageSummary>>,
+    /// Set by the panel, acted on by the app — no channel of its own,
+    /// exactly like `AudioPanelData::request`.
+    pub request: Option<bool>,
+    /// Whether the recorder is armed (the app's view of it).
+    pub armed: bool,
+}
+
+/// The Coverage tab: arm/disarm, PRG coverage, a strip per PRG bank, and
+/// the indirect-edge / interrupt-entry counts. Read-only over a summary
+/// the core thread built, so it cannot reach core state.
+fn coverage_ui(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {
+    use rf_debugger::coverage_view::CellState;
+    let Some(data) = data else {
+        ui.label("No session \u{2014} open a ROM to record coverage.");
+        return;
+    };
+    ui.horizontal(|ui| {
+        let label = if data.armed {
+            "Stop recording"
+        } else {
+            "Record coverage"
+        };
+        if ui.button(label).clicked() {
+            data.request = Some(!data.armed);
+        }
+        if data.armed {
+            ui.label("recording");
+        }
+    });
+    let Some(s) = data.summary.as_deref() else {
+        ui.label(if data.armed {
+            "Waiting for the first refresh\u{2026}"
+        } else {
+            "Off. Recording costs one branch per instruction when disarmed."
+        });
+        return;
+    };
+    ui.separator();
+    ui.label(format!(
+        "PRG executed: {:.1}%  ({} of {} bytes; {} opcode, {} operand)",
+        s.fraction * 100.0,
+        s.executed_bytes,
+        s.prg_len,
+        s.opcode_bytes,
+        s.operand_bytes
+    ));
+    ui.label(format!(
+        "{} instructions  |  {} indirect edges  |  {} interrupt entries  |  {} RAM bytes run",
+        s.instructions, s.indirect_edges, s.interrupt_entries, s.ram_executed_bytes
+    ));
+    ui.separator();
+    // A 4 MiB cart is 256 bank rows: always scrollable.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label("Per 16 KiB PRG bank (green: opcode run, amber: operand only, grey: never seen)");
+        let cell = 6.0;
+        for (n, bank) in s.banks.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.monospace(format!("{n:>3}"));
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(cell * bank.cells.len() as f32, 10.0),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter_at(rect);
+                for (i, state) in bank.cells.iter().enumerate() {
+                    let color = match state {
+                        CellState::Opcode => egui::Color32::from_rgb(0x40, 0xB0, 0x60),
+                        CellState::OperandOnly => egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+                        CellState::Never => egui::Color32::from_gray(60),
+                    };
+                    let x = rect.left() + cell * i as f32;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, rect.top()),
+                            egui::vec2(cell - 1.0, 10.0),
+                        ),
+                        0.0,
+                        color,
+                    );
+                }
+            });
+        }
+    });
 }
 
 /// What the Audio tab needs (ticket W4-10b).

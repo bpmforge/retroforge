@@ -367,6 +367,12 @@ pub struct FrameMsg {
     /// the panel draws a few dozen points. Empty when the scopes are
     /// closed.
     pub audio_traces: Vec<rf_debugger::audio_scope::ScopeTrace>,
+    /// Ticket W36-01: the coverage recorder's running summary, refreshed
+    /// every [`COVERAGE_REFRESH_FRAMES`] frames while armed and `None`
+    /// otherwise. Reduced on THIS thread (a log is 64 KiB of RAM flags plus
+    /// the PRG map) so the UI thread never touches core state (law 4) and
+    /// only a few hundred bytes cross the channel.
+    pub coverage: Option<Box<rf_debugger::coverage_view::CoverageSummary>>,
     /// Ticket W4-06d: the PPU's nametable VRAM and palette RAM, read via
     /// `NesBus::vram()`/`palette()` — plain non-observing borrows, so
     /// snapshotting them here cannot perturb A12 edge timing (see
@@ -686,6 +692,36 @@ pub struct WidescreenRequest {
     pub convention: bool,
 }
 
+/// How often (in frames) an armed coverage recorder drains its log into
+/// the running total and ships a fresh summary. About four times a second:
+/// merging and summarising touch ~64 KiB of flags, which is nothing per
+/// refresh and wasteful per frame.
+pub const COVERAGE_REFRESH_FRAMES: u64 = 15;
+
+/// Drain the stepper's recorder into `acc` and summarise, every
+/// [`COVERAGE_REFRESH_FRAMES`]th frame (ticket W36-01). `None` between
+/// refreshes and when the core records nothing.
+fn coverage_refresh(
+    stepper: &mut EmuStepper,
+    acc: &mut Option<rf_core_api::CoverageLog>,
+) -> Option<Box<rf_debugger::coverage_view::CoverageSummary>> {
+    if !stepper
+        .frame_count()
+        .is_multiple_of(COVERAGE_REFRESH_FRAMES)
+    {
+        return None;
+    }
+    let taken = stepper.take_coverage()?;
+    match acc {
+        Some(total) => {
+            total.merge(&taken);
+        }
+        None => *acc = Some(taken),
+    }
+    acc.as_ref()
+        .map(|log| Box::new(rf_debugger::coverage_view::CoverageSummary::from_log(log)))
+}
+
 /// What the UI thread can ask the core thread to do (FR-DBG-004).
 ///
 /// Not `Clone` or `Debug`: `ArmTrace` carries a `TraceProducer`, which is
@@ -929,6 +965,9 @@ pub enum CoreCommand {
     /// default, so a session that never opens the scopes pays nothing
     /// (DEBUGGER.md §6).
     SetAudioChannelCapture(bool),
+    /// Ticket W36-01: arm or disarm the code-coverage recorder. Off by
+    /// default; arming starts a fresh log, disarming discards it.
+    SetCoverage(bool),
     /// Ticket W15-06 (FR-ENH-008): disable frame pacing entirely while
     /// held — the App-hotkey fast-forward. `false` runs the loop flat-out
     /// (`crate::pacer::FramePacer::set_enabled`'s own doc); `true`
@@ -1453,6 +1492,10 @@ fn core_thread_main(
     let mut trace: Option<Box<crate::trace_capture::TraceProducer>> = None;
     // Ticket W4-10b: off by default (DEBUGGER.md §6's pay-for-use rule).
     let mut audio_capture = false;
+    // Ticket W36-01: off by default (pay-for-use). `coverage_acc` is the
+    // log merged from every take since arming.
+    let mut coverage_on = false;
+    let mut coverage_acc: Option<rf_core_api::CoverageLog> = None;
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -1855,6 +1898,11 @@ fn core_thread_main(
                 CoreCommand::SetAudioChannelCapture(on) => {
                     stepper.set_audio_channel_capture(on);
                     audio_capture = on;
+                }
+                CoreCommand::SetCoverage(on) => {
+                    stepper.set_coverage_recording(on);
+                    coverage_on = on;
+                    coverage_acc = None;
                 }
                 // Ticket W15-06 (FR-ENH-008): the fast-forward hotkey,
                 // held. `pacer.set_enabled` alone is not the whole story —
@@ -2442,6 +2490,11 @@ fn core_thread_main(
                     Vec::new()
                 },
                 oam: Box::new(*stepper.oam()),
+                coverage: if coverage_on {
+                    coverage_refresh(&mut stepper, &mut coverage_acc)
+                } else {
+                    None
+                },
                 audio_traces: if audio_capture {
                     // ~64 points is more than a 32-pixel-tall scope can
                     // resolve; reducing here keeps a frame's 5x735
@@ -2797,6 +2850,7 @@ mod tests {
             margin_sprites: Vec::new(),
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
+            coverage: None,
             snes: None,
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),

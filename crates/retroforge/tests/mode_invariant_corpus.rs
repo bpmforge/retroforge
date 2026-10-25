@@ -44,6 +44,21 @@ fn every_corpus_entry_is_mode_invariant_over_its_full_frame_window() {
     }
 }
 
+/// Ticket W36-01: the coverage recorder, armed, is invisible to every
+/// corpus entry over its full frame window (law 4).
+#[test]
+fn every_corpus_entry_is_invariant_with_the_coverage_recorder_armed() {
+    for entry in CORPUS {
+        let divergence = mode_invariant::check_with_coverage(entry);
+        assert!(
+            divergence.is_none(),
+            "corpus entry {:?} diverged with coverage armed: {:?}",
+            entry.name,
+            divergence
+        );
+    }
+}
+
 /// Sanity check that the corpus isn't accidentally empty (which would make
 /// the test above vacuously pass regardless of `check`'s correctness).
 #[test]

@@ -4653,3 +4653,15 @@ stories, 10 decisions).
   emission is a developer tool. New crate `rf-rebuild` (core layer) planned for
   W36-02. Tickets W36-01..W36-12 and phases B-E (W37..W40) in plan.json; SMB
   pilot first (the SMB + Duck Hunt cart, mapper 66), then SMW. Workspace: **3343 passing**.
+
+- **W36-01 — Coverage recorder (NES)** (2026-10-25). Pay-for-use recorder in
+  `NesCore::tick` (one `is_some` when off; `CoverageLog` in rf-core-api):
+  executed PRG bytes by ROM offset (new `Mapper::prg_rom_offset` for nrom,
+  cnrom, cprom, gxrom, uxrom, axrom, bnrom, mmc1, mmc3), RAM-executed code,
+  JMP-indirect/RTS/RTI/BRK edges, Reset/NMI/IRQ entries; armed vs unarmed runs
+  bit-identical, mode-invariant corpus green armed. SMB + Duck Hunt cart, 1-1
+  (world/level 0/0 checked, Mario x 0x28 to 0x7e): 9,859 of 65,536 PRG bytes
+  (15.0%), 323 indirect edges; opcode set equals an independent PC oracle.
+  Bench (loaded machine): off within noise of base, on ~+9%. Debugger
+  Coverage tab (unverified by eye). Workspace: **3363 passing** (two
+  load-only flakes passed when rerun alone).

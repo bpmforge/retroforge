@@ -50,6 +50,7 @@
 pub mod annotation;
 pub mod audio_scope;
 pub mod breakpoint;
+pub mod coverage_view;
 pub mod datacrystal;
 pub mod event_timeline;
 pub mod layout;

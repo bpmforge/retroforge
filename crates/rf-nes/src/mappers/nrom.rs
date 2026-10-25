@@ -26,6 +26,11 @@ impl Nrom {
 }
 
 impl Mapper for Nrom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        Some((usize::from(addr) - 0x8000) % self.prg_rom.len())
+    }
+
     /// A 16 KiB image is mirrored into both `$8000-$BFFF` and
     /// `$C000-$FFFF`; a 32 KiB image is mapped straight through. `%
     /// prg_rom.len()` implements both in one line since 16 KiB and 32 KiB

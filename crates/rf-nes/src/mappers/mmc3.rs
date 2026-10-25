@@ -566,6 +566,13 @@ impl Mmc3 {
 }
 
 impl Mapper for Mmc3 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let window = usize::from((addr - 0x8000) / PRG_BANK as u16);
+        let offset = (usize::from(addr) - 0x8000) % PRG_BANK;
+        Some(self.recompute_prg_reads()[window] * PRG_BANK + offset)
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         debug_assert!(!self.prg_rom.is_empty(), "MMC3 image with empty PRG ROM");
         let window = ((addr - 0x8000) / PRG_BANK as u16) as usize;

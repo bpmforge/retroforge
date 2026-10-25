@@ -37,11 +37,15 @@
 //! ever being drained. That is worse than the crash FM-01 exists to
 //! contain.
 
+use rf_core_api::coverage::{OPCODE, OPERAND};
 use rf_core_api::{
     CartImage, CoreConfig, CoreError, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind,
     StateError, StateReader, StateView, StateWriter, Step, StepResult,
 };
-use rf_core_api::{CpuRegs, Mos6502Regs};
+use rf_core_api::{
+    CodeAddr, CoverageLog, CpuRegs, IndirectEdge, IndirectKind, InterruptEntry, InterruptKind,
+    Mos6502Regs,
+};
 
 use crate::{Cpu, NesBus};
 
@@ -72,6 +76,11 @@ pub struct NesCore {
     /// changed something. `CoreConfig` is `Copy` and comparable, so this
     /// is a value comparison, not a heap check.
     pushed_watches: rf_core_api::WatchTable,
+    /// Ticket W36-01: the armed coverage recorder, `None` when off. Session
+    /// observation like the watch table: never saved, never restored, and
+    /// not touched by a state load. Boxed so the off case adds one pointer
+    /// to the struct and one `is_some` to [`NesCore::tick`].
+    coverage: Option<Box<CoverageLog>>,
 }
 
 impl NesCore {
@@ -89,6 +98,7 @@ impl NesCore {
             config: CoreConfig::default(),
             cycle_budget: CYCLE_BUDGET,
             pushed_watches: rf_core_api::WatchTable::new(),
+            coverage: None,
         })
     }
 
@@ -163,11 +173,106 @@ impl NesCore {
     /// small ring underrun between frames (FAILURE_MODES.md FM-02); the
     /// drain costs one branch when nothing is queued.
     fn tick(&mut self, sink: &mut dyn CoreSink, start_frame: u64) -> bool {
-        self.cpu.step(&mut self.bus);
+        if self.coverage.is_some() {
+            let before = self.coverage_before();
+            self.cpu.step(&mut self.bus);
+            self.coverage_after(before);
+        } else {
+            self.cpu.step(&mut self.bus);
+        }
         self.bus.drain_video(sink);
         self.bus.drain_audio(sink);
         self.bus.frame_count() != start_frame
     }
+
+    /// A [`CodeAddr`] for `addr` under the bank state in force right now.
+    fn code_addr(&self, addr: u16) -> CodeAddr {
+        CodeAddr {
+            cpu: addr,
+            rom: self
+                .bus
+                .prg_rom_offset(addr)
+                .and_then(|o| u32::try_from(o).ok()),
+        }
+    }
+
+    /// Recorder, pre-step half (ticket W36-01): classify what the next
+    /// `cpu.step` is about to do and mark the instruction's bytes. Peeks
+    /// only (`NesBus::peek` is side-effect-free), so the emulated machine
+    /// cannot tell it ran.
+    #[inline(never)]
+    fn coverage_before(&mut self) -> CoverageBefore {
+        let pc = self.cpu.pc;
+        let (nmi, irq) = self.cpu.pending_interrupt();
+        if nmi || irq {
+            let kind = if nmi {
+                InterruptKind::Nmi
+            } else {
+                InterruptKind::Irq
+            };
+            return CoverageBefore::Interrupt(kind);
+        }
+        let opcode = self.bus.peek(pc);
+        let len = crate::trace::instruction_len(opcode);
+        let mut marks = [(0u16, None, 0u8); 3];
+        for (i, slot) in marks.iter_mut().enumerate().take(usize::from(len)) {
+            let addr = pc.wrapping_add(i as u16);
+            let flag = if i == 0 { OPCODE } else { OPERAND };
+            *slot = (addr, self.bus.prg_rom_offset(addr), flag);
+        }
+        let site = self.code_addr(pc);
+        if let Some(log) = self.coverage.as_deref_mut() {
+            log.instructions_recorded += 1;
+            for &(addr, rom, flag) in marks.iter().take(usize::from(len)) {
+                match rom {
+                    Some(o) => log.mark_prg(o, flag),
+                    None => log.mark_ram(addr, flag),
+                }
+            }
+        }
+        CoverageBefore::Instruction { opcode, site }
+    }
+
+    /// Recorder, post-step half: the indirect edge or interrupt entry the
+    /// step just completed, with its target read off the new `pc`.
+    #[inline(never)]
+    fn coverage_after(&mut self, before: CoverageBefore) {
+        let target = self.code_addr(self.cpu.pc);
+        let Some(log) = self.coverage.as_deref_mut() else {
+            return;
+        };
+        match before {
+            CoverageBefore::Interrupt(kind) => log.note_interrupt(InterruptEntry { kind, target }),
+            CoverageBefore::Instruction { opcode, site } => {
+                let kind = match opcode {
+                    0x6C => IndirectKind::JmpIndirect,
+                    0x60 => IndirectKind::Rts,
+                    0x40 => IndirectKind::Rti,
+                    0x00 => IndirectKind::Brk,
+                    _ => return,
+                };
+                log.note_indirect(IndirectEdge { site, target, kind });
+            }
+        }
+    }
+
+    /// Note a reset entry at the CPU's current `pc` (ticket W36-01).
+    fn coverage_note_reset(&mut self) {
+        let target = self.code_addr(self.cpu.pc);
+        if let Some(log) = self.coverage.as_deref_mut() {
+            log.note_interrupt(InterruptEntry {
+                kind: InterruptKind::Reset,
+                target,
+            });
+        }
+    }
+}
+
+/// What the recorder saw before a step, carried to the after-step half.
+#[derive(Clone, Copy)]
+enum CoverageBefore {
+    Interrupt(InterruptKind),
+    Instruction { opcode: u8, site: CodeAddr },
 }
 
 impl EmulatorCore for NesCore {
@@ -178,6 +283,12 @@ impl EmulatorCore for NesCore {
         bus.set_extra_vblank_lines(self.bus.extra_vblank_lines());
         self.cpu = Cpu::power_on(&mut bus);
         self.bus = bus;
+        // A new cartridge invalidates a log sized for the old one; keep
+        // recording, from scratch.
+        if self.coverage.is_some() {
+            self.coverage = Some(Box::new(CoverageLog::new(self.bus.prg_rom_len())));
+            self.coverage_note_reset();
+        }
         Ok(())
     }
 
@@ -188,6 +299,7 @@ impl EmulatorCore for NesCore {
         // what a hard reset would additionally clear (RAM to its
         // power-on pattern) `rf-nes` does not model separately today.
         self.cpu = Cpu::power_on(&mut self.bus);
+        self.coverage_note_reset();
     }
 
     fn run_frame(&mut self, input: &InputFrame, sink: &mut dyn CoreSink) {
@@ -310,6 +422,16 @@ impl EmulatorCore for NesCore {
         // since W1-07 — it deliberately does not touch the PPU's
         // read-latch or any mapper side effect.
         self.bus.peek(u16::try_from(addr & 0xFFFF).unwrap_or(0))
+    }
+
+    fn set_coverage_recording(&mut self, on: bool) {
+        self.coverage = on.then(|| Box::new(CoverageLog::new(self.bus.prg_rom_len())));
+    }
+
+    fn take_coverage(&mut self) -> Option<CoverageLog> {
+        let log = self.coverage.as_deref_mut()?;
+        let fresh = CoverageLog::new(log.prg_flags.len());
+        Some(std::mem::replace(log, fresh))
     }
 }
 

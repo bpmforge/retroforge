@@ -1686,6 +1686,19 @@ impl EmuStepper {
         self.machine.set_channel_capture(on);
     }
 
+    /// Arm or disarm the code-coverage recorder (ticket W36-01). Off by
+    /// default; observation only, so it cannot change `state_hash` (see
+    /// `mode_invariant::check_with_coverage`). A no-op on cores that do not
+    /// record.
+    pub fn set_coverage_recording(&mut self, on: bool) {
+        self.machine.as_core().set_coverage_recording(on);
+    }
+
+    /// The coverage recorded since the last take, if armed (ticket W36-01).
+    pub fn take_coverage(&mut self) -> Option<rf_core_api::CoverageLog> {
+        self.machine.as_core().take_coverage()
+    }
+
     /// Drain the per-channel scope streams captured since the last call.
     pub fn take_audio_channel_samples(&mut self) -> [Vec<i16>; rf_nes::apu::CHANNEL_COUNT] {
         self.machine.take_channel_samples().unwrap_or_default()

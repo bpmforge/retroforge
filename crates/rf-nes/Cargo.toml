@@ -30,3 +30,9 @@ harness = false
 [[bench]]
 name = "machine_frame"
 harness = false
+
+# Ticket W36-01: NesCore frame cost with the coverage recorder off vs armed
+# (the off number is the "zero cost when disarmed" claim).
+[[bench]]
+name = "coverage"
+harness = false

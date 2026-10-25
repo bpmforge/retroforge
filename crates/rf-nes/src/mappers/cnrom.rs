@@ -54,6 +54,11 @@ impl Cnrom {
 }
 
 impl Mapper for Cnrom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        Some((usize::from(addr) - 0x8000) % self.prg_rom.len())
+    }
+
     /// Identical mirror-or-map-through arithmetic to
     /// [`super::Nrom::cpu_read`] — CNROM's PRG side has no bank registers.
     fn cpu_read(&self, addr: u16) -> u8 {

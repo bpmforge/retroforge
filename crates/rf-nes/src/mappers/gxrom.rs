@@ -65,6 +65,13 @@ impl GxRom {
 }
 
 impl Mapper for GxRom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let base = self.prg_bank() * PRG_BANK_32K;
+        let offset = (usize::from(addr) - 0x8000) % PRG_BANK_32K;
+        Some((base + offset) % self.prg_rom.len())
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let base = self.prg_bank() * PRG_BANK_32K;
         let offset = (addr as usize - 0x8000) % PRG_BANK_32K;

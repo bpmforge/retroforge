@@ -52,6 +52,15 @@ impl UxRom {
 }
 
 impl Mapper for UxRom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let (bank, offset) = match addr {
+            0x8000..=0xBFFF => ((self.bank as usize) % self.bank_count(), addr - 0x8000),
+            _ => (self.bank_count() - 1, addr - 0xC000),
+        };
+        Some(bank * BANK_SIZE + usize::from(offset))
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let (bank, offset) = match addr {
             0x8000..=0xBFFF => ((self.bank as usize) % self.bank_count(), addr - 0x8000),

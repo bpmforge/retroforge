@@ -121,6 +121,11 @@ impl Cprom {
 }
 
 impl Mapper for Cprom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W36-01).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        Some(usize::from(addr - 0x8000))
+    }
+
     /// 32 KiB fixed, no bank registers on the PRG side — same arithmetic
     /// as [`super::Nrom::cpu_read`]'s 32 KiB case.
     fn cpu_read(&self, addr: u16) -> u8 {

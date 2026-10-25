@@ -154,6 +154,8 @@ mod uxrom;
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod prg_offset_tests;
 
 pub use action53::Action53;
 pub use axrom::AxRom;
@@ -257,6 +259,21 @@ pub trait Mapper {
     }
 
     /// A `$8000-$FFFF` CPU window backed by cartridge PRG RAM rather than
+    /// Byte offset into this board's PRG ROM that [`Mapper::cpu_read`]
+    /// returns for `addr` under the *current* bank registers, or `None`
+    /// when the board does not (yet) report one (ticket W36-01). It is the
+    /// same arithmetic as `cpu_read` minus the final index, so a coverage
+    /// recorder can say which ROM byte executed rather than which CPU
+    /// address; the answer changes when a bank register is written, and
+    /// nesdev's mapper pages (<https://www.nesdev.org/wiki/Mapper>) give
+    /// each board's banking rule. Callers pass `$8000-$FFFF` only and
+    /// must treat a PRG-RAM-selected window (MMC5, [`Mapper::prg_ram_window`])
+    /// as non-ROM themselves. Default `None`: unknown, never wrong.
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let _ = addr;
+        None
+    }
+
     /// PRG ROM (ticket W14-17; MMC5's `$5114-$5117` bit 7 clear).
     /// `Some(offset)` into the bus's own PRG RAM backing store (ticket
     /// W14-22 widened this from a fixed 8 KiB array to a cartridge-sized

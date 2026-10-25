@@ -3195,6 +3195,30 @@ impl RetroForgeApp {
         }
     }
 
+    /// Keep the Coverage tab fed and act on its toggle (ticket W36-01).
+    /// Same shape as `pump_audio_scopes`: the panel records a request and
+    /// this sends the core-thread command, so no UI code touches the core.
+    /// Recording is never on unless the user turned it on.
+    fn pump_coverage(&mut self) {
+        if self.core.is_none() {
+            self.debug_panels.data.coverage = None;
+            return;
+        }
+        let panel = self.debug_panels.data.coverage.get_or_insert_with(|| {
+            Box::new(crate::debug_dock::CoveragePanelData {
+                summary: None,
+                request: None,
+                armed: false,
+            })
+        });
+        let Some(on) = panel.request.take() else {
+            return;
+        };
+        panel.armed = on;
+        panel.summary = None;
+        self.send_command(CoreCommand::SetCoverage(on));
+    }
+
     /// Refresh the slot listing and open the manager (ticket W4-11).
     /// Close the States window (screenshot tour).
     #[doc(hidden)]
@@ -4750,6 +4774,11 @@ impl RetroForgeApp {
             if let Some(audio) = self.debug_panels.data.audio.as_mut() {
                 if !msg.audio_traces.is_empty() {
                     audio.traces = msg.audio_traces.clone();
+                }
+            }
+            if let Some(cov) = self.debug_panels.data.coverage.as_mut() {
+                if cov.armed && msg.coverage.is_some() {
+                    cov.summary = msg.coverage.clone();
                 }
             }
             // Ticket W4-06d: live VRAM/palette for the nametable and
@@ -14721,6 +14750,7 @@ impl RetroForgeApp {
             margin_sprites: Vec::new(),
             oam: Box::new([0u8; 256]),
             audio_traces: Vec::new(),
+            coverage: None,
             snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),
             cpu_regs: Box::new(rf_core_api::CpuRegs::None),
@@ -18249,6 +18279,7 @@ impl eframe::App for RetroForgeApp {
         // committed one this frame.
         self.pump_memory_poke();
         self.pump_audio_scopes();
+        self.pump_coverage();
 
         self.update_chrome_visibility(&ctx);
         self.menu_bar(ui);
