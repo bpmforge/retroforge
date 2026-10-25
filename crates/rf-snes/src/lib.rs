@@ -12,6 +12,7 @@ pub mod cx4;
 pub mod debug;
 pub mod dma;
 pub mod dsp1;
+pub mod executor;
 pub mod gsu;
 pub mod gsu_observer;
 pub mod idle;

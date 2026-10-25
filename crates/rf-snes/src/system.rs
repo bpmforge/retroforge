@@ -131,6 +131,11 @@ pub struct SnesSystem {
     /// only ever peeks, so an armed machine runs bit-identically. See
     /// [`crate::coverage`].
     pub(crate) coverage: Option<Box<rf_core_api::CoverageLog>>,
+    /// Ticket W36-08b: the block executor's map, `None` when Rebuild is off.
+    /// Derived from the program counter and the atlas: never saved, never
+    /// restored, and it only ever peeks, so an installed atlas runs
+    /// bit-identically. See [`crate::executor`].
+    pub(crate) rebuild: Option<Box<rf_rebuild::RebuildExec>>,
 }
 
 impl SnesSystem {
@@ -192,6 +197,7 @@ impl SnesSystem {
             cpu_overclock_remainder: 0,
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
+            rebuild: None,
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -328,6 +334,7 @@ impl SnesSystem {
             cpu_overclock_remainder: 0,
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
+            rebuild: None,
         };
         system.reset();
         system
@@ -354,6 +361,9 @@ impl SnesSystem {
             sa1.idle.clear();
         }
         self.bus.timing = crate::timing::Timing::new();
+        if let Some(x) = self.rebuild.as_deref_mut() {
+            x.reset_frames();
+        }
         self.coverage_note_reset();
     }
 
@@ -390,6 +400,8 @@ impl SnesSystem {
             .is_some()
             .then(|| self.coverage_before())
             .flatten();
+        // Ticket W36-08b: the executor's pre-step half, likewise peeks only.
+        let rebuilding = self.rebuild_before();
         let mut counting = crate::cpu::AccessCost::new(&mut self.bus, fast_rom);
         let result = self.cpu.step(&mut counting);
         // **A HALTED CPU STILL BURNS TIME** (ticket W7-15).
@@ -489,6 +501,9 @@ impl SnesSystem {
         // instruction left it in: any interrupt is dispatched further down.
         if let Some(before) = covering {
             self.coverage_after(before);
+        }
+        if let Some(before) = rebuilding {
+            self.rebuild_after(before);
         }
         self.bus.tick_math(math_cycles as u32);
         // The APU accrues debt with every master cycle the CPU spends —
@@ -682,6 +697,7 @@ impl SnesSystem {
         // doc), so this is always `false` in practice until W18-02+, but
         // the OR plumbing itself is what this ticket's acceptance pins.
         let gsu_irq_to_snes = self.bus.gsu.as_ref().is_some_and(|g| g.regs.irq_pending());
+        let resume = self.rebuild_resume_point();
         if self.pending_nmi {
             self.pending_nmi = false;
             // `$2209` bit 4 optionally redirects the SNES's own NMI vector
@@ -698,6 +714,7 @@ impl SnesSystem {
                 None => self.cpu.interrupt(&mut self.bus, true),
             }
             self.coverage_note_interrupt(rf_core_api::InterruptKind::Nmi);
+            self.rebuild_note_interrupt(resume);
         } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
             && !self.cpu.flag(crate::cpu::flags::I)
         {
@@ -712,6 +729,7 @@ impl SnesSystem {
                 None => self.cpu.interrupt(&mut self.bus, false),
             }
             self.coverage_note_interrupt(rf_core_api::InterruptKind::Irq);
+            self.rebuild_note_interrupt(resume);
         } else if (self.bus.irq.fired || sa1_irq_to_snes || gsu_irq_to_snes)
             && self.cpu.flag(crate::cpu::flags::I)
             && self.cpu.wai
