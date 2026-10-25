@@ -4743,3 +4743,18 @@ stories, 10 decisions).
   starvation (dense levels not measured). Mod off is bit-identical; lockstep
   on the patched image, 2,200 frames, zero divergence. Not drawn yet (W36-06b);
   mod UI not clicked through. Workspace: **3454 passing**.
+
+- **W36-06b — Margin enemies drawn** (2026-10-25). With the live-enemies mod,
+  an enemy deep in a 32:9 margin has its OAM hidden (Y pushed off; 0 wrapped
+  of 1,570 slot-frames), so the margin is drawn by a shifted-camera redraw: a
+  private copy of the patched machine restored two frames back with the camera
+  moved one page toward the enemy, its drawn sprites near the slot kept and
+  rasterised from its own pattern/palette into indexed pad strips on
+  `FrameMsg`. 1,060 of 1,069 deep-margin frames drawn, none misplaced; the
+  256-px picture unchanged (0 dots over 2,700 frames); run-ahead +1/+2 predict
+  it exactly. Cost: 3.4-3.6 ms average, ~12.5 ms worst frame (M2 Max). Mod
+  writes (patch rows, hook ledger) go into the PROF chunk on the live save path
+  and the ledger restores on load; a write-capable hook turns run-ahead and the
+  redraw off with a badge. Screenshot: docs/screens/w36/. Sprite priority is
+  ignored; margin terrain still comes from the scout canvas. Workspace:
+  **3469 passing**.
