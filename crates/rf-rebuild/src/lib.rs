@@ -27,7 +27,8 @@ pub use exec::{
 };
 pub use isa::{DecodeMode, Decoded, Flow, Isa};
 pub use recipe::{
-    match_recipe, Confidence, HookPoints, Match, MatchReport, RamMeaning, Recipe, RecipeFunction,
+    match_recipe, resolve_patches, Confidence, HookPoints, Match, MatchReport, PatchRefusal,
+    PatchRow, RamMeaning, Recipe, RecipeFunction, ResolvedPatch,
 };
 pub use superset::{superset_decode, Superset};
 pub use windows::WindowIndex;

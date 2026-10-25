@@ -432,6 +432,66 @@ mod tests {
         a != b
     }
 
+    /// Ticket W36-06: a patched session (a soft patch or a recipe mod edits
+    /// the image in memory) boots the patched bytes, and `core_thread` hands
+    /// the speculator that same `Vec`, so the shadow machine runs the patched
+    /// image too. This proves the speculator is only as good as the image it
+    /// is given: with the patched image the shown frame is the real frame one
+    /// ahead; with the original image handed in by mistake it is not (the
+    /// speculative frame is refused or wrong).
+    #[test]
+    fn the_shadow_machine_must_run_the_patched_image() {
+        let original = counter_nrom();
+        let mut patched = original.clone();
+        // `AND #$3F` before the palette write becomes `AND #$0F`: once the
+        // counter passes 15 the two images paint different colours.
+        let at = patched
+            .windows(4)
+            .position(|w| w == [0xA5, 0x10, 0x29, 0x3F])
+            .expect("the mask instruction")
+            + 3;
+        patched[at] = 0x0F;
+        let off = run(&patched, false, 0, FRAMES);
+        let shown_with = |shadow: &[u8]| {
+            let mut stepper = EmuStepper::open(&patched).expect("opens");
+            stepper.resume();
+            let mut speculator = Speculator::new();
+            let mut shown = Vec::new();
+            for k in 0..FRAMES {
+                let input = pad(false, held_at(k));
+                let mut probe = Probe::new();
+                assert!(stepper.tick_running_with_input(input, &mut probe));
+                let size = (probe.frame.width(), probe.frame.height());
+                shown.push(
+                    speculator
+                        .run(&stepper, shadow, input, 1, size, false)
+                        .map(|s| s.rgba),
+                );
+            }
+            shown
+        };
+        let stable = |k: usize| held_at(k) == held_at(k + 1) && k + 1 < FRAMES;
+        let right = shown_with(&patched);
+        let wrong = shown_with(&original);
+        let (mut compared, mut mismatched) = (0, 0);
+        for k in (0..FRAMES).filter(|&k| stable(k)) {
+            assert_eq!(
+                right[k].as_ref(),
+                Some(&off.real[k + 1]),
+                "patched shadow, frame {k}"
+            );
+            // Either no speculative frame (the restore refuses a machine of
+            // another image) or a wrong one: never the right one.
+            mismatched += usize::from(wrong[k].as_ref() != Some(&off.real[k + 1]));
+            compared += 1;
+        }
+        assert!(compared >= 60, "only {compared} frames compared");
+        assert!(
+            mismatched >= 5,
+            "an original-image shadow should visibly disagree ({mismatched})"
+        );
+    }
+
     /// Run-ahead of 0 is not a thing the speculator does, and the frame
     /// count is clamped to the documented maximum.
     #[test]

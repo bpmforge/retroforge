@@ -4729,3 +4729,17 @@ stories, 10 decisions).
   test not acknowledging frames (confirmed). Open for W36-06: no UI path loads
   hooks, run-ahead does not run hooks, hook writes are not yet in savestates.
   Workspace: **3444 passing** (code-atlas-v1 above is now v2).
+
+- **W36-06 — SMB live enemies at 32:9, simulation** (2026-10-25). First
+  Super Enhanced mod, as recipe-relative ROM patch rows (function by shape
+  hash, offset, new value only) applied through the soft-patch session
+  ("Patched: mod live-enemies", own savestates, off by default; Mods list in
+  game settings). Sites found by watching the slot flags and reading our own
+  disassembly of the player's ROM (docs/research/W36-06-live-enemies.md):
+  activation lead 48 to 240 px, left/right cull about 72 to 255 px (one-byte
+  limit: the outer ~45 px of each 300 px margin cannot hold an enemy). 1-1 real
+  play: enemies deep in the margins on 600 right / 275 left frames mod-on, 0
+  mod-off, and they keep moving. Slot pressure on 1-1, 1-2, 4-1: no spawn
+  starvation (dense levels not measured). Mod off is bit-identical; lockstep
+  on the patched image, 2,200 frames, zero divergence. Not drawn yet (W36-06b);
+  mod UI not clicked through. Workspace: **3454 passing**.

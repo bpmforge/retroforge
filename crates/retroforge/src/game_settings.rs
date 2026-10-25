@@ -379,6 +379,11 @@ pub struct GameSettings {
     /// game (`soft_patch::Candidate::key`s). Empty by default: nothing
     /// applies silently (law 6).
     pub patches_enabled: Vec<String>,
+    /// Ticket W36-06: the recipe mods the player turned on for this game
+    /// (`rf_rebuild::Recipe::mods` names, e.g. `live-enemies`). Empty by
+    /// default: a mod changes what the game computes (NON_GOALS 13) and is
+    /// never on silently.
+    pub mods_enabled: Vec<String>,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
 }
@@ -491,6 +496,7 @@ impl Default for GameSettings {
             pinned_items: Vec::new(),
             info_corner: InfoCorner::default(),
             patches_enabled: Vec::new(),
+            mods_enabled: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -729,6 +735,9 @@ impl GameSettings {
             // in any name worth supporting.
             fields.insert("patches".to_string(), self.patches_enabled.join("\t"));
         }
+        if !self.mods_enabled.is_empty() {
+            fields.insert("mods".to_string(), self.mods_enabled.join("\t"));
+        }
         if self.favourite {
             fields.insert("favourite".to_string(), "true".to_string());
         }
@@ -921,6 +930,13 @@ impl GameSettings {
                 }
                 "patches" => {
                     settings.patches_enabled = value
+                        .split('\t')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "mods" => {
+                    settings.mods_enabled = value
                         .split('\t')
                         .filter(|p| !p.is_empty())
                         .map(str::to_owned)
@@ -1340,6 +1356,21 @@ mod mode_and_feature_persistence_tests {
         };
         let back = GameSettings::from_text(&s.to_text()).unwrap();
         assert_eq!(back.patches_enabled, s.patches_enabled);
+        assert!(back.unknown_keys().is_empty());
+    }
+
+    /// Ticket W36-06: recipe mods persist per game and are off by default.
+    #[test]
+    fn enabled_mods_round_trip_and_default_to_none() {
+        let untouched = GameSettings::default();
+        assert!(untouched.mods_enabled.is_empty());
+        assert!(!untouched.to_text().contains("mods"));
+        let s = GameSettings {
+            mods_enabled: vec!["live-enemies".into()],
+            ..GameSettings::default()
+        };
+        let back = GameSettings::from_text(&s.to_text()).unwrap();
+        assert_eq!(back.mods_enabled, s.mods_enabled);
         assert!(back.unknown_keys().is_empty());
     }
 

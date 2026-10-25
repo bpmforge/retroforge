@@ -110,6 +110,31 @@ that: build a homebrew project (cc65/ca65 for NES first), load it straight
 into the core, keep the debugger's symbol map in sync, and rebuild +
 hot-reload on save with the state preserved where layout allows.
 
+## Level 6: recipe mods (W36-06, built)
+
+A mod can be stated against the game's **functions** instead of a patch file's
+offsets: a recipe (`profiles/<console>/<game>/recipe.toml`, REBUILD_LAB
+section 3) carries `[[patch]]` rows, each a recipe function name, an index
+into that function's instruction-byte stream and the new byte. Only the new
+byte is stored (law 5); the function's exact hash vouches for the old one.
+
+* **Resolution** (`rf_rebuild::resolve_patches`) runs against the code atlas of
+  the *unpatched* image (an immediate is not masked out of the shape hash, so a
+  patched function no longer matches) and refuses the whole mod, with a
+  sentence, if a row's function is unmatched, matches on shape only, has
+  several byte-identical copies, or the offset is outside it.
+* **Application** is in memory, on a copy (`rf_enhance::patch::prg`), through
+  the same session as a patch file: the badge reads `Patched: mod <name>`, the
+  session has its own hash and save states, it is never Accuracy Mode, and a
+  mod is off by default per game (`GameSettings::mods_enabled`, the Mods list
+  next to Patches). Mods are not stacked on a patch file: the exact hash
+  describes the original image.
+* **Finding rows** is observation only: watch the game's RAM, take the PC that
+  changes it, map the PC to the atlas function, read that function through our
+  own disassembly of the player's ROM in memory. The first mod and its method:
+  `docs/research/W36-06-live-enemies.md` (SMB enemies alive in the 32:9
+  margins).
+
 ## Proposed tickets
 
 | Id | What | Depends on |

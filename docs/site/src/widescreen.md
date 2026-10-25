@@ -70,3 +70,14 @@ is not Accuracy Mode.
   back to what you have seen; the Enhancements panel shows how sure it is.
 * NES widescreen shows scenery only; there is no widescreen picture to
   draw beyond what the game scrolled.
+* The Super Mario Bros. "live enemies" mod (a per-game mod, off by default,
+  under **Mods** in the game's settings) keeps enemies alive up to about 240
+  pixels past the screen edges so they exist in the margins. It changes what
+  the game computes, so the game is no longer the original cartridge and has
+  its own save states. There are only five enemy slots: enemies hold theirs
+  longer, which we measured did not cost spawns in 1-1, 1-2 or 4-1 but could
+  in a crowded level. Groups of walkers still appear at the old screen edge,
+  and drawing these enemies in the margins is not done yet (it comes with a
+  later step), so for now you see them only where the game draws them.
+  Needs the game's code atlas: record some play in the Coverage tab and turn
+  Rebuild on once.

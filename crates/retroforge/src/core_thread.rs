@@ -4038,6 +4038,7 @@ mod tests {
                 engine: "t".into(),
                 functions: vec![row("nmi", f.shape_hash), row("ghost", 0x1234)],
                 ram: vec![],
+                patches: vec![],
             },
         };
 

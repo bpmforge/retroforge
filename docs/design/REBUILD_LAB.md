@@ -92,6 +92,17 @@ catch up at hardware accesses (sync points). The NES core ticks devices on
 every bus cycle, so that is a scheduling change, not an executor feature. It
 will be decided once the lockstep checker (W36-04) can prove it.
 
+**W36-06 as built (2026-10-25):** the NES widescreen enemy mod is three
+recipe patch rows (`rf_rebuild::PatchRow`; TOML `[[patch]]`; stream index plus
+new byte), not a hook and not a replacement function. Resolved against the
+unpatched atlas, applied in memory through the W32-01 session (badge, own
+saves), loaded by the app from the Mods list in the game settings
+(`GameSettings::mods_enabled`, atlas from the per-ROM cache). The Coverage tab
+also gets a "Load hook script" entry for `CoreCommand::SetHooks` (read-only
+manifest). Run-ahead's shadow machine is opened from the same `Vec` the real
+core is, so a patched image is predicted correctly (test in `run_ahead`); hook
+writes in savestates and the margin drawing stay W36-06b.
+
 Speed is not the goal (the interpreter already runs far above real time);
 named, hookable, replaceable functions and checking real compiled code in
 lockstep are.
@@ -123,7 +134,10 @@ lockstep are.
 6. **Rebuild**: Lua and Rust hooks at function entry/exit, replace-function
    overrides; live widescreen margins by overriding object culling,
    activation and OAM packing only (the approach DKC1Recomp's README
-   describes); 60+ fps by interpolating object and scroll positions between
+   describes); on NES a changed threshold is a recipe-relative ROM patch
+   (function by shape hash, offset, new byte) through the soft-patch session,
+   and margin objects are drawn from the object table because NES sprite X is
+   8-bit; 60+ fps by interpolating object and scroll positions between
    game ticks; Diorama and a new renderer fed by real object tables.
 
 ## 6. Where it lives (layer law, ARCHITECTURE §3)
@@ -172,7 +186,8 @@ lockstep are.
 | W36-03 | Block executor over the atlas + interpreter fallback (SMB cart, mapper 66: no standalone NROM dump on hand) | SMB boots and plays through the rebuilt path; fallback rate reported |
 | W36-04 | Lockstep checker + repro bundles | SMB 1-1 to 8-4 replay, zero divergence; fallback rate reported |
 | W36-05 | Function hooks (Lua + Rust), recipe format with byte-hash matching | A hook mod changes one behaviour; recipe survives a relocated function |
-| W36-06 | First Super Enhanced mod: SMB live enemies at 32:9 | Enemies stay active in margins; original mode byte-identical |
+| W36-06 | First Super Enhanced mod, simulation: SMB enemies stay active in the 32:9 margins (recipe-relative ROM patch) | Activity measured in the margins; mod off byte-identical; lockstep green on the patched image |
+| W36-06b | Same mod, presentation: draw margin enemies in the NES pad; mod writes in savestates; run-ahead parity | Screenshot; original mode byte-identical |
 | W36-07 | Interpolated 60+ fps for objects and scroll (SMB) | Smooth at 120 Hz; simulation untouched (mode-invariant test) |
 | W36-08 | 65816 lift with recorded M/X; SMW pilot | SMW Yoshi's Island 1 replay zero divergence |
 | W36-09 | Understand pass + opt-in AI naming | Names exported as recipe facts; lockstep green |

@@ -343,6 +343,7 @@ fn synthetic_cartridge_poke_diverges_at_the_hooked_frame_and_read_only_hooks_do_
             name: "nmi_count".to_string(),
             source: "the handler increments it".to_string(),
         }],
+        patches: vec![],
     };
     // The recipe survives its own file format.
     let recipe = load_recipe_str(&recipe_to_toml(&recipe)).expect("round trip");
@@ -460,16 +461,31 @@ fn smb_nmi_hooks_poke_diverges_read_only_and_inert_hooks_do_not() {
                 source: "profiles/nes/super-mario-bros/profile.toml [[memory_map]] lives"
                     .to_string(),
             }],
+            patches: vec![],
         };
         std::fs::write(&committed, recipe_to_toml(&recipe)).expect("writes the recipe");
         println!("wrote {}", committed.display());
     }
-    let recipe = load_recipe_file(&committed).expect("the committed recipe loads");
-    assert_eq!(
-        recipe.functions.len(),
-        1,
-        "the recipe's only row is the NMI"
-    );
+    // W36-06 added function, RAM and patch rows to this recipe; this test is
+    // about the NMI row and the lives byte, so it keeps those two.
+    let full = load_recipe_file(&committed).expect("the committed recipe loads");
+    let recipe = Recipe {
+        functions: full
+            .functions
+            .iter()
+            .filter(|f| f.name == "nmi")
+            .cloned()
+            .collect(),
+        ram: full
+            .ram
+            .iter()
+            .filter(|r| r.addr == LIVES)
+            .cloned()
+            .collect(),
+        patches: vec![],
+        ..full
+    };
+    assert_eq!(recipe.functions.len(), 1, "the recipe has the NMI row");
     let row = &recipe.functions[0];
     assert_eq!(row.name, "nmi");
     assert_eq!(

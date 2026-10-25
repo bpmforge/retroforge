@@ -10,6 +10,9 @@
 //! * The ROM file is never written, and neither is the patch.
 //! * A patched session is NOT the reference (law 6): [`SoftPatchSession::is_reference`]
 //!   is false, and the status badge says "Patched: ...".
+//! * A recipe MOD (ticket W36-06, `rf_rebuild::PatchRow`s) is the same kind of
+//!   thing: bytes of the in-memory image, off by default per game, never
+//!   written to disk, and the session it makes is not the cartridge either.
 //! * A patched session has its own identity (`session_sha256`) so its save
 //!   states never mix with the unpatched game's; `base_sha256` is kept for
 //!   settings and profile matching, which still name the base ROM.
@@ -177,6 +180,66 @@ fn read_bso(path: &Path) -> Option<BsoSettings> {
     BsoSettings::parse(&text).ok()
 }
 
+/// The result of applying recipe mods to a ROM image.
+#[derive(Debug, Clone, Default)]
+pub struct ModOutcome {
+    /// The image to boot (the base image, untouched, when nothing applied).
+    pub image: Vec<u8>,
+    /// Names of the mods that applied.
+    pub applied: Vec<String>,
+    /// One plain-words line per mod that was enabled but refused.
+    pub failures: Vec<String>,
+}
+
+/// Apply the enabled recipe mods to `base`, an iNES image, **in memory**.
+///
+/// `atlas` must be the code atlas of this same unpatched image (the shell
+/// finds it in the per-ROM cache): rows are resolved against it, because a
+/// patched immediate changes a function's hashes. A mod whose rows do not all
+/// resolve to an exact, unambiguous function is refused whole and reported;
+/// the others still apply. With no atlas every enabled mod is refused with the
+/// reason, never applied on a guess.
+#[must_use]
+pub fn apply_mods(
+    base: Vec<u8>,
+    atlas: Option<&rf_rebuild::Atlas>,
+    recipe: &rf_rebuild::Recipe,
+    enabled: &[String],
+) -> ModOutcome {
+    let mut out = ModOutcome {
+        image: base,
+        ..ModOutcome::default()
+    };
+    for name in recipe.mods() {
+        if !enabled.iter().any(|e| e == name) {
+            continue;
+        }
+        let Some(atlas) = atlas else {
+            out.failures.push(format!(
+                "Mod `{name}` not applied: this ROM has no code atlas yet \
+                 (open the Coverage tab, record some play, turn Rebuild on once)"
+            ));
+            continue;
+        };
+        let resolved = match rf_rebuild::resolve_patches(atlas, recipe, name) {
+            Ok(r) => r,
+            Err(e) => {
+                out.failures.push(format!("Mod `{name}` not applied: {e}"));
+                continue;
+            }
+        };
+        let edits: Vec<(u32, u8)> = resolved.iter().map(|p| (p.prg_offset, p.value)).collect();
+        match rf_enhance::patch::prg::apply_prg_bytes(&out.image, &edits) {
+            Ok(image) => {
+                out.image = image;
+                out.applied.push(name.to_owned());
+            }
+            Err(e) => out.failures.push(format!("Mod `{name}` not applied: {e}")),
+        }
+    }
+    out
+}
+
 /// What the running session knows about its patches.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SoftPatchSession {
@@ -187,6 +250,8 @@ pub struct SoftPatchSession {
     pub session_sha256: String,
     /// Keys of the applied patches, in order.
     pub applied: Vec<String>,
+    /// Names of the recipe mods applied (ticket W36-06).
+    pub mods: Vec<String>,
     /// What a `.bso` beside the ROM declared (W32-03 acts on it).
     pub widescreen_convention: WidescreenConvention,
 }
@@ -205,13 +270,20 @@ impl SoftPatchSession {
     /// Law 6: a patched session is not the cartridge.
     #[must_use]
     pub fn is_reference(&self) -> bool {
-        self.applied.is_empty()
+        self.applied.is_empty() && self.mods.is_empty()
     }
 
-    /// The badge suffix, e.g. `Patched: Game.bps, Game.ips1`.
+    /// The badge suffix, e.g. `Patched: Game.bps, Game.ips1` or
+    /// `Patched: Game.bps, mod live-enemies`.
     #[must_use]
     pub fn badge(&self) -> Option<String> {
-        (!self.applied.is_empty()).then(|| format!("Patched: {}", self.applied.join(", ")))
+        let parts: Vec<String> = self
+            .applied
+            .iter()
+            .cloned()
+            .chain(self.mods.iter().map(|m| format!("mod {m}")))
+            .collect();
+        (!parts.is_empty()).then(|| format!("Patched: {}", parts.join(", ")))
     }
 }
 
@@ -352,10 +424,101 @@ mod tests {
             base_sha256: base.clone(),
             session_sha256: crate::hash::sha256_hex(&o.image),
             applied: o.applied,
+            mods: Vec::new(),
             widescreen_convention: o.widescreen,
         };
         assert_ne!(s.session_sha256, s.base_sha256);
         assert!(!s.is_reference());
         assert_eq!(s.badge().as_deref(), Some("Patched: Game.ips"));
+    }
+
+    /// A 16 KiB NOP sled with a return at $10, and the recipe + atlas a
+    /// recording of its first 17 bytes gives.
+    fn mod_fixture() -> (Vec<u8>, rf_rebuild::Atlas, rf_rebuild::Recipe) {
+        use rf_core_api::coverage::{CoverageLog, WindowMap, OPCODE};
+        let mut ines = vec![0u8; 16];
+        ines[0..4].copy_from_slice(b"NES\x1a");
+        ines[4] = 1;
+        let mut prg = vec![0xEAu8; 0x4000];
+        prg[0x10] = 0x60;
+        ines.extend(&prg);
+        let mut log = CoverageLog::new(0x4000);
+        let mut m = WindowMap::EMPTY;
+        for (p, s) in m.0.iter_mut().enumerate() {
+            *s = (p as u32 % 4) * 0x1000;
+        }
+        log.note_windows(m);
+        for i in 0..=0x10 {
+            log.mark_prg(i, OPCODE);
+        }
+        let atlas = rf_nes::rebuild::build_atlas(&prg, &log);
+        let f = atlas
+            .functions
+            .iter()
+            .find(|f| f.entry_rom == 0)
+            .expect("function at 0");
+        let recipe = rf_rebuild::Recipe {
+            id: "t".into(),
+            engine: "t".into(),
+            functions: vec![rf_rebuild::RecipeFunction {
+                name: "sled".into(),
+                shape_hash: f.shape_hash,
+                exact_hash: Some(f.byte_hash),
+                address_hint: None,
+                hooks: rf_rebuild::HookPoints::default(),
+                source: "test".into(),
+            }],
+            ram: vec![],
+            patches: vec![rf_rebuild::PatchRow {
+                name: "p".into(),
+                mod_name: "m".into(),
+                function: "sled".into(),
+                offset: 3,
+                value: 0xAA,
+                source: "test".into(),
+            }],
+        };
+        (ines, atlas, recipe)
+    }
+
+    #[test]
+    fn a_mod_applies_in_memory_only_when_enabled_and_exact() {
+        let (ines, atlas, recipe) = mod_fixture();
+        let on = vec!["m".to_string()];
+        // Off by default: the image is the input, untouched.
+        let none = apply_mods(ines.clone(), Some(&atlas), &recipe, &[]);
+        assert_eq!((none.image == ines, none.applied.len()), (true, 0));
+        // On: one byte of the copy changes, at the PRG offset.
+        let r = apply_mods(ines.clone(), Some(&atlas), &recipe, &on);
+        assert_eq!(r.applied, ["m"]);
+        assert!(r.failures.is_empty());
+        let diff: Vec<usize> = (0..ines.len()).filter(|&i| ines[i] != r.image[i]).collect();
+        assert_eq!(diff, [16 + 3]);
+        assert_eq!(r.image[16 + 3], 0xAA);
+        // No atlas: refused with the reason, nothing applied.
+        let r = apply_mods(ines.clone(), None, &recipe, &on);
+        assert!(r.applied.is_empty() && r.image == ines);
+        assert!(r.failures[0].contains("no code atlas"), "{:?}", r.failures);
+        // A function that is not the one the row was written for.
+        let mut bad = recipe.clone();
+        bad.functions[0].exact_hash = Some(1);
+        let r = apply_mods(ines.clone(), Some(&atlas), &bad, &on);
+        assert!(r.applied.is_empty() && r.image == ines);
+        assert!(r.failures[0].contains("not applied"), "{:?}", r.failures);
+    }
+
+    #[test]
+    fn a_mod_session_is_not_the_reference_and_names_the_mod() {
+        let mut s = SoftPatchSession::unpatched("a");
+        assert!(s.is_reference());
+        s.mods.push("live-enemies".into());
+        s.session_sha256 = "b".into();
+        assert!(!s.is_reference());
+        assert_eq!(s.badge().as_deref(), Some("Patched: mod live-enemies"));
+        s.applied.push("Game.ips".into());
+        assert_eq!(
+            s.badge().as_deref(),
+            Some("Patched: Game.ips, mod live-enemies")
+        );
     }
 }
