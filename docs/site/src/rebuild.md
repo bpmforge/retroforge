@@ -74,7 +74,13 @@ side and compares the processor, all memories, the picture and the sound on
 every frame. If they ever differ it stops and saves a repro bundle (a save
 state from just before, the last inputs and the last functions run).
 
-Measured so far: all 32 levels of Super Mario Bros. and Yoshi's Island 1 of
+The checker's result is kept per game on your machine, and the Rebuild card
+reads it back: that is where "checked" and "proven" come from.
+
+Measured so far: on a fixed sample of 100 NES and 100 SNES games from the
+project's test library, the picture shown after 600 frames was identical with
+Rebuild on and off for all 194 that open here (the other six did not open at
+all, with or without Rebuild). Also: all 32 levels of Super Mario Bros. and Yoshi's Island 1 of
 Super Mario World, plus five Super Mario World ROM hacks, ran with zero
 differences.
 

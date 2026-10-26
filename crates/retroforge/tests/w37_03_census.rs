@@ -24,6 +24,11 @@
 //! cargo test --release -p retroforge --test w37_03_census -- --ignored --nocapture census
 //! ```
 //!
+//! Do not run other Rebuild work at the same time: the per-ROM atlas cache is one
+//! directory in the temp dir, and two processes opening it at once can race on its
+//! index file (the 2026-10-26 sweep lost six children, all fine when rerun alone; the cause was
+//! not established, and this is the suspect).
+//!
 //! Knobs: `RF_ROM_ROOT` (default `~/Games/Roms`, holding `nes/` and `snes/`),
 //! `RF_W37_03_NES` / `RF_W37_03_SNES` (sample sizes, 100), `RF_W37_03_SEED`,
 //! `RF_W37_03_FRAMES` (600), `RF_W37_03_BUDGET_MIN` (120; ROMs not reached are
@@ -295,6 +300,7 @@ struct Tally {
     stalled: u32,
     same: u32,
     mismatched: Vec<String>,
+    crashes: Vec<String>,
     engaged: u32,
     non_blank: u32,
     not_engaged: Vec<String>,
@@ -333,6 +339,9 @@ impl Tally {
         );
         for t in &self.mismatched {
             println!("  MISMATCH: {t}");
+        }
+        for t in &self.crashes {
+            println!("  CRASHED (not a picture difference; rerun alone): {t}");
         }
         for t in &self.not_engaged {
             println!("  not engaged: {t}");
@@ -398,8 +407,8 @@ fn census() {
         let title = title_of(path);
         if off.contains_key("crash") || on.contains_key("crash") {
             t.crashed += 1;
-            t.mismatched.push(format!(
-                "{title}: crashed (off {:?}, on {:?})",
+            t.crashes.push(format!(
+                "{title}: child died (off {:?}, on {:?})",
                 off.get("crash"),
                 on.get("crash")
             ));
