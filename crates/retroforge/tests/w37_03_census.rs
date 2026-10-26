@@ -24,10 +24,11 @@
 //! cargo test --release -p retroforge --test w37_03_census -- --ignored --nocapture census
 //! ```
 //!
-//! Do not run other Rebuild work at the same time: the per-ROM atlas cache is one
-//! directory in the temp dir, and two processes opening it at once can race on its
-//! index file (the 2026-10-26 sweep lost six children, all fine when rerun alone; the cause was
-//! not established, and this is the suspect).
+//! Every child's stderr (panic text, `RUST_BACKTRACE=1`) is captured and printed under
+//! its row when a child dies. The 2026-10-26 sweep's seven exit-101 children were
+//! `Harness::run` exceeding its step limit while the home screen's library-scan spinner
+//! kept repainting on a loaded machine (not the atlas cache, not Rebuild: the crashed
+//! child of the rerun was a Rebuild-off one); the child now uses `settle` (W37-03c).
 //!
 //! Knobs: `RF_ROM_ROOT` (default `~/Games/Roms`, holding `nes/` and `snes/`),
 //! `RF_W37_03_NES` / `RF_W37_03_SNES` (sample sizes, 100), `RF_W37_03_SEED`,
@@ -120,6 +121,15 @@ fn title_of(p: &Path) -> String {
 
 // ---- child -------------------------------------------------------------------
 
+/// Let the app draw its first frames. Never `Harness::run`: it panics once a
+/// run exceeds its step limit, and the home screen keeps asking for repaints
+/// while the library scan is in flight ("Scanning your ROM folders", a
+/// spinner), which on a loaded machine outlasts the limit. That panic, not
+/// Rebuild, was the exit-101 crashes of the 2026-10-26 sweep (W37-03c).
+fn settle<S>(harness: &mut Harness<'_, S>) {
+    harness.run_steps(4);
+}
+
 /// Step to `frames` and say what the app shows. One line on stdout.
 #[test]
 #[ignore = "child half of the census; the parent re-executes this"]
@@ -141,7 +151,7 @@ fn census_child() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0] + 200.0, WINDOW_SIZE[1] + 300.0))
         .build_eframe(|cc| RetroForgeApp::new(cc));
-    harness.run();
+    settle(&mut harness);
     harness.state_mut().launch_rom(Path::new(&path));
     harness.state_mut().pause_for_test();
     harness.state_mut().set_mode_for_test(Mode::Enhanced);
@@ -237,6 +247,22 @@ fn join(m: &BTreeMap<&str, String>) -> String {
         .join("\t")
 }
 
+/// Regression (W37-03c): an app that never stops repainting, as the home
+/// screen does during a library scan, kills `Harness::run` but not `settle`.
+#[test]
+fn settle_survives_an_app_that_keeps_repainting() {
+    let busy = |ui: &mut egui::Ui| {
+        ui.spinner();
+        ui.ctx().request_repaint();
+    };
+    let mut harness = Harness::new_ui(busy);
+    settle(&mut harness);
+    let plain = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Harness::new_ui(busy).run();
+    }));
+    assert!(plain.is_err(), "Harness::run is the call that panics");
+}
+
 // ---- parent ------------------------------------------------------------------
 
 fn run_child(exe: &Path, rom: &Path, rebuild: bool, deadline: Instant) -> BTreeMap<String, String> {
@@ -245,17 +271,26 @@ fn run_child(exe: &Path, rom: &Path, rebuild: bool, deadline: Instant) -> BTreeM
         .args(["--exact", "census_child", "--ignored", "--nocapture"])
         .env(ROM_VAR, rom)
         .env(REBUILD_VAR, if rebuild { "1" } else { "0" })
+        .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     else {
         m.insert("crash".into(), "spawn".into());
         return m;
     };
     let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    // Always captured: the 2026-10-26 sweep lost six children and the panic
+    // text went to /dev/null, so the cause had to be guessed (W37-03c).
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
         s
     });
     let started = Instant::now();
@@ -269,12 +304,14 @@ fn run_child(exe: &Path, rom: &Path, rebuild: bool, deadline: Instant) -> BTreeM
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
+            m.insert("stderr".into(), err_reader.join().unwrap_or_default());
             m.insert("crash".into(), "timeout".into());
             return m;
         }
         std::thread::sleep(Duration::from_millis(25));
     };
     let out = reader.join().unwrap_or_default();
+    let err = err_reader.join().unwrap_or_default();
     if let Some(l) = out.lines().find_map(|l| l.strip_prefix("W3703\t")) {
         m.extend(
             l.split('\t')
@@ -286,6 +323,7 @@ fn run_child(exe: &Path, rom: &Path, rebuild: bool, deadline: Instant) -> BTreeM
             "crash".into(),
             format!("child died: {:?}", status.and_then(|s| s.code())),
         );
+        m.insert("stderr".into(), err);
     }
     m
 }
@@ -408,9 +446,11 @@ fn census() {
         if off.contains_key("crash") || on.contains_key("crash") {
             t.crashed += 1;
             t.crashes.push(format!(
-                "{title}: child died (off {:?}, on {:?})",
+                "{title}: child died (off {:?}, on {:?})\n--- stderr (off) ---\n{}\n--- stderr (on) ---\n{}",
                 off.get("crash"),
-                on.get("crash")
+                on.get("crash"),
+                off.get("stderr").map_or("", String::as_str),
+                on.get("stderr").map_or("", String::as_str)
             ));
             continue;
         }
