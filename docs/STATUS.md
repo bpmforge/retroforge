@@ -4893,3 +4893,13 @@ stories, 10 decisions).
   tables and 9 streams confirmed. Rows written as `[[data_region]]` recipe facts
   (offsets and sizes only). Cranelift parked (D-029). Workspace: **3675
   passing**.
+
+- **W37-01 — Generic rebuild tier** (2026-10-26, D-029). Rebuild turns on
+  for any NES or SNES ROM with no cache or recording: a vectors-only atlas
+  (SMB 62 functions, SMW 30) installs first, the recorder stays armed, and grown
+  atlases are built off the core thread and swapped in at frame boundaries
+  (only if they rest on at least as much recorded code). Cache stores the atlas
+  and the merged recording per ROM. Builds: SMW 16-19 ms, 4 MB carts ~130 ms.
+  Cold starts in lockstep, zero divergence: SMB 1-1 (12 swaps), 32 levels x 2
+  (96 swaps), SMW YI1 two scripts; SMW fallback falls from 99% in the first
+  epoch to under 1%. Workspace: **3688 passing**.
