@@ -4359,6 +4359,9 @@ mod tests {
             .find(|f| f.entry_cpu == 0x8060)
             .expect("the NMI handler is an atlas function");
         let row = |name: &str, shape: u64| rf_rebuild::RecipeFunction {
+            grade: rf_rebuild::Grade::Observed,
+            entry: None,
+            insn_count: None,
             mode: None,
             confidence: None,
             name: name.to_string(),
@@ -4390,6 +4393,7 @@ mod tests {
                 functions: vec![row("nmi", f.shape_hash), row("ghost", 0x1234)],
                 ram: vec![],
                 patches: vec![],
+                ..Default::default()
             },
         };
 

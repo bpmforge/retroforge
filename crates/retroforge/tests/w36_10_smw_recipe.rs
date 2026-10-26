@@ -73,6 +73,12 @@ fn regenerating_the_smw_recipe_reproduces_the_committed_rows() {
                 width,
                 name: name.into(),
                 source: src.into(),
+                // profile.toml marks `lives` verified (0x04 at a new file).
+                grade: if name == "lives" {
+                    rf_rebuild::Grade::Confirmed
+                } else {
+                    rf_rebuild::Grade::Observed
+                },
             })
             .collect(),
         ..Recipe::default()

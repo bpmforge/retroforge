@@ -21,7 +21,10 @@ own copy of the game and never committed.
   a hack that changed one of them the old rule bound the name to the other
   (see Findings). Two rows of one recipe that share a shape (and could share a
   mode) now only match the function sitting at their own address hint; a
-  hack that moved it leaves the row unmatched and its hooks inactive.
+  hack that moved it leaves the row unmatched and its hooks inactive. (Superseded by W38-00:
+  entry kinds first, address hint only among same-kind twins; the RDL and A
+  Simple Story NMI stubs were edited by those hacks, so `nmi` correctly stays
+  unmatched there.)
 - **`profiles/snes/super-mario-world/recipe.toml`:** 29 function rows (the
   W36-09 rule names on the Yoshi's Island 1 run, each with shape hash, exact
   hash, address hint and mode) and 11 RAM rows (game mode, tick counter, camera,

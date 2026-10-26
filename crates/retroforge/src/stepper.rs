@@ -1869,7 +1869,18 @@ impl EmuStepper {
                 .rebuild_atlas()
                 .map(|a| rf_rebuild::match_recipe(a, recipe)),
         };
-        host.resolve(&|name| report.as_ref().and_then(|r| r.function_of(name)));
+        // A candidate row (not verified yet) may drive read-only hooks but
+        // never one that can write memory (ticket W38-00).
+        let writes = host.holds_write_memory();
+        host.resolve(&|name| {
+            report.as_ref().and_then(|r| {
+                if writes {
+                    r.function_of_writable(name)
+                } else {
+                    r.function_of(name)
+                }
+            })
+        });
         self.machine
             .as_core()
             .set_function_hooks(&host.function_ids());

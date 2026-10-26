@@ -461,6 +461,9 @@ mod tests {
             id: "t".into(),
             engine: "t".into(),
             functions: vec![rf_rebuild::RecipeFunction {
+                grade: rf_rebuild::Grade::Observed,
+                entry: None,
+                insn_count: None,
                 mode: None,
                 confidence: None,
                 name: "sled".into(),
@@ -472,6 +475,7 @@ mod tests {
             }],
             ram: vec![],
             patches: vec![rf_rebuild::PatchRow {
+                grade: rf_rebuild::Grade::Observed,
                 name: "p".into(),
                 mod_name: "m".into(),
                 function: "sled".into(),
@@ -479,6 +483,7 @@ mod tests {
                 value: 0xAA,
                 source: "test".into(),
             }],
+            ..Default::default()
         };
         (ines, atlas, recipe)
     }

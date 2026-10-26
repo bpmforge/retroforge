@@ -220,6 +220,9 @@ fn session() -> mod_chunk::ModSession {
             id: "super-mario-bros".to_string(),
             engine: "smb1".to_string(),
             functions: vec![RecipeFunction {
+                grade: rf_rebuild::Grade::Observed,
+                entry: None,
+                insn_count: None,
                 mode: None,
                 confidence: None,
                 name: "enemy_update".to_string(),
@@ -231,6 +234,7 @@ fn session() -> mod_chunk::ModSession {
             }],
             ram: Vec::new(),
             patches: vec![PatchRow {
+                grade: rf_rebuild::Grade::Observed,
                 name: "cull-left".to_string(),
                 mod_name: "live-enemies".to_string(),
                 function: "enemy_update".to_string(),
@@ -238,6 +242,7 @@ fn session() -> mod_chunk::ModSession {
                 value: 0xff,
                 source: "test".to_string(),
             }],
+            ..Default::default()
         },
     }
 }

@@ -19,9 +19,12 @@
 //! shape_hash = "0x0123456789abcdef"    # required
 //! exact_hash = "0xfedcba9876543210"    # optional: raises confidence
 //! address_hint = 0x8E19                # optional: CPU entry on the observed dump
+//! entry = "nmi"                        # optional (W38-00): nmi|irq|reset|brk|call|indirect
+//! insn_count = 41                      # optional: bounds the unmatched-reason scan
 //! mode = 3                             # optional: 65816 entry mode (W36-10), 0..=4
 //! hooks = ["entry", "exit"]            # which sides a hook may attach to
 //! confidence = 90                      # optional, percent: machine-made names
+//! grade = "observed"                   # observed | candidate | confirmed
 //! source = "observed: NMI vector target of a 1-1 recording"   # required
 //! # Names proposed by the understand pass (ticket W36-09) say where they came
 //! # from: source = "rule:read_controllers" or source = "ai:<model>", with a
@@ -31,7 +34,29 @@
 //! addr = 0x075A
 //! width = 1
 //! name = "lives"
+//! grade = "confirmed"
 //! source = "profile.toml memory_map: lives"                   # required
+//!
+//! # Object tables and tile semantics (ticket W38-00): facts, no consumers yet.
+//! # Field `f` of slot `i` is at base + f + i * stride.
+//! [[object_table]]
+//! name = "enemies"
+//! base = 0x0F
+//! slots = 5
+//! stride = 1
+//! x_lo = 0x3F2                         # optional offsets: x_lo x_hi y y_hi type state
+//! state = 0
+//! grade = "observed"
+//! source = "observed: ..."
+//!
+//! [[tile]]
+//! class = "solid"                      # solid | one_way | water | hazard
+//! first = 0x10
+//! last = 0x1f                          # inclusive
+//! layer = 1                            # optional
+//! tileset = "grass"                    # optional
+//! grade = "candidate"
+//! source = "ai:..."
 //!
 //! # A mod: bytes of a listed function to replace (ticket W36-06). Only the
 //! # NEW value is stored; the function's `exact_hash` vouches for the old one.
@@ -41,8 +66,12 @@
 //! function = "tick"                   # a [[function]] with an exact_hash
 //! offset = 41                         # index into the function's byte stream
 //! value = 0xF0
+//! grade = "confirmed"                 # a candidate patch is never applied
 //! source = "observed: ..."            # required
 //! ```
+//!
+//! A row without `grade` is a pre-W38-00 row: it reads as `observed` (`ai:`
+//! sources as `candidate`) and is written back with the grade spelled out.
 //!
 //! Unknown keys are an error (the format is new and small; a typo that
 //! silently dropped a hash would leave a hook inactive with no explanation).
@@ -50,7 +79,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use rf_rebuild::{HookPoints, PatchRow, RamMeaning, Recipe, RecipeFunction};
+use rf_rebuild::{
+    EntryKind, Grade, HookPoints, ObjectTable, PatchRow, RamMeaning, Recipe, RecipeFunction,
+    TileClass, TileSemantics,
+};
 use serde::Deserialize;
 
 /// The recipe format this build reads and writes.
@@ -94,6 +126,22 @@ pub enum RecipeError {
         function: String,
         value: u8,
     },
+    /// A `grade` other than observed / candidate / confirmed.
+    BadGrade {
+        row: String,
+        value: String,
+    },
+    /// An `entry` other than nmi / irq / reset / brk / call / indirect.
+    BadEntry {
+        function: String,
+        value: String,
+    },
+    /// A `[[object_table]]` or `[[tile]]` that cannot be right.
+    BadFact {
+        table: &'static str,
+        name: String,
+        why: &'static str,
+    },
     /// A `confidence` above 100 (it is a percentage).
     BadConfidence {
         function: String,
@@ -133,6 +181,15 @@ impl std::fmt::Display for RecipeError {
                 f,
                 "function `{function}`: mode {value} is not a decode mode (0..=4)"
             ),
+            Self::BadGrade { row, value } => write!(
+                f,
+                "`{row}`: grade `{value}` is not \"observed\", \"candidate\" or \"confirmed\""
+            ),
+            Self::BadEntry { function, value } => write!(
+                f,
+                "function `{function}`: entry `{value}` is not nmi, irq, reset, brk, call or indirect"
+            ),
+            Self::BadFact { table, name, why } => write!(f, "[[{table}]] `{name}`: {why}"),
             Self::BadConfidence { function, value } => write!(
                 f,
                 "function `{function}`: confidence {value} is not a percentage (0-100)"
@@ -153,6 +210,10 @@ struct RecipeDoc {
     ram: Vec<RamRow>,
     #[serde(default)]
     patch: Vec<PatchRowDoc>,
+    #[serde(default)]
+    object_table: Vec<ObjectTableDoc>,
+    #[serde(default)]
+    tile: Vec<TileDoc>,
 }
 
 #[derive(Deserialize)]
@@ -172,10 +233,13 @@ struct FunctionRow {
     exact_hash: Option<String>,
     address_hint: Option<u32>,
     mode: Option<u8>,
+    entry: Option<String>,
+    insn_count: Option<u32>,
     #[serde(default)]
     hooks: Vec<String>,
     source: Option<String>,
     confidence: Option<u8>,
+    grade: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +250,38 @@ struct RamRow {
     width: u8,
     name: String,
     source: Option<String>,
+    grade: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectTableDoc {
+    name: String,
+    base: u32,
+    slots: u32,
+    #[serde(default = "one32")]
+    stride: u32,
+    x_lo: Option<u32>,
+    x_hi: Option<u32>,
+    y: Option<u32>,
+    y_hi: Option<u32>,
+    #[serde(rename = "type")]
+    kind: Option<u32>,
+    state: Option<u32>,
+    source: Option<String>,
+    grade: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TileDoc {
+    class: String,
+    first: u32,
+    last: u32,
+    layer: Option<u8>,
+    tileset: Option<String>,
+    source: Option<String>,
+    grade: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -198,10 +294,40 @@ struct PatchRowDoc {
     offset: u32,
     value: u8,
     source: Option<String>,
+    grade: Option<String>,
 }
 
 fn one() -> u8 {
     1
+}
+
+fn one32() -> u32 {
+    1
+}
+
+/// The grade a row states, or the one a pre-W38-00 row (no `grade` key) gets:
+/// `candidate` for a machine guess from an AI, else `observed`. `legacy`
+/// counts the rows that had to be defaulted.
+fn grade_of(
+    row: &str,
+    grade: Option<&str>,
+    source: &str,
+    legacy: &mut usize,
+) -> Result<Grade, RecipeError> {
+    match grade {
+        Some(g) => Grade::parse(g).ok_or_else(|| RecipeError::BadGrade {
+            row: row.to_string(),
+            value: g.to_string(),
+        }),
+        None => {
+            *legacy += 1;
+            Ok(if source.starts_with("ai:") {
+                Grade::Candidate
+            } else {
+                Grade::Observed
+            })
+        }
+    }
 }
 
 fn parse_hash(function: &str, field: &'static str, s: &str) -> Result<u64, RecipeError> {
@@ -228,9 +354,20 @@ fn source_of(table: &'static str, name: &str, s: Option<String>) -> Result<Strin
 /// Parse recipe text.
 ///
 /// # Errors
-/// [`RecipeError`] for malformed TOML, a newer format, a bad hash or hook
-/// point, a row with no `source`, or a function named twice.
+/// [`RecipeError`] for malformed TOML, a newer format, a bad hash, hook
+/// point, grade or entry kind, a row with no `source`, or a function named
+/// twice.
 pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
+    load_recipe_noted(text).map(|(r, _)| r)
+}
+
+/// [`load_recipe_str`] plus how many rows had no `grade` and were defaulted
+/// (a recipe written before ticket W38-00); `0` means the text is already
+/// current. [`recipe_to_toml`] of the result is the migrated text.
+///
+/// # Errors
+/// As [`load_recipe_str`].
+pub fn load_recipe_noted(text: &str) -> Result<(Recipe, usize), RecipeError> {
     let doc: RecipeDoc = toml::from_str(text).map_err(|e| RecipeError::Parse(e.to_string()))?;
     if doc.recipe.format > RECIPE_FORMAT || doc.recipe.format == 0 {
         return Err(RecipeError::Format {
@@ -238,6 +375,7 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
             supported: RECIPE_FORMAT,
         });
     }
+    let mut legacy = 0usize;
     let mut functions: Vec<RecipeFunction> = Vec::new();
     for row in doc.function {
         if functions.iter().any(|f| f.name == row.name) {
@@ -275,6 +413,14 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
                 value: c,
             });
         }
+        let entry = match row.entry.as_deref() {
+            None => None,
+            Some(e) => Some(EntryKind::parse(e).ok_or_else(|| RecipeError::BadEntry {
+                function: row.name.clone(),
+                value: e.to_string(),
+            })?),
+        };
+        let source = source_of("function", &row.name, row.source)?;
         functions.push(RecipeFunction {
             mode: row.mode,
             confidence: row.confidence,
@@ -285,17 +431,22 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
                 .map(|h| parse_hash(&row.name, "exact_hash", h))
                 .transpose()?,
             address_hint: row.address_hint,
+            entry,
+            insn_count: row.insn_count,
             hooks,
-            source: source_of("function", &row.name, row.source)?,
+            grade: grade_of(&row.name, row.grade.as_deref(), &source, &mut legacy)?,
+            source,
             name: row.name,
         });
     }
     let mut ram = Vec::new();
     for row in doc.ram {
+        let source = source_of("ram", &row.name, row.source)?;
         ram.push(RamMeaning {
             addr: row.addr,
             width: row.width,
-            source: source_of("ram", &row.name, row.source)?,
+            grade: grade_of(&row.name, row.grade.as_deref(), &source, &mut legacy)?,
+            source,
             name: row.name,
         });
     }
@@ -317,8 +468,10 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
             }
             Some(_) => {}
         }
+        let source = source_of("patch", &row.name, row.source)?;
         patches.push(PatchRow {
-            source: source_of("patch", &row.name, row.source)?,
+            grade: grade_of(&row.name, row.grade.as_deref(), &source, &mut legacy)?,
+            source,
             name: row.name,
             mod_name: row.mod_name,
             function: row.function,
@@ -326,13 +479,73 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
             value: row.value,
         });
     }
-    Ok(Recipe {
-        id: doc.recipe.id,
-        engine: doc.recipe.engine,
-        functions,
-        ram,
-        patches,
-    })
+    let mut object_tables: Vec<ObjectTable> = Vec::new();
+    for row in doc.object_table {
+        let bad = |why| RecipeError::BadFact {
+            table: "object_table",
+            name: row.name.clone(),
+            why,
+        };
+        if object_tables.iter().any(|t| t.name == row.name) {
+            return Err(bad("appears twice"));
+        }
+        if row.slots == 0 || row.stride == 0 {
+            return Err(bad("needs at least one slot and a stride of at least 1"));
+        }
+        let source = source_of("object_table", &row.name, row.source.clone())?;
+        object_tables.push(ObjectTable {
+            grade: grade_of(&row.name, row.grade.as_deref(), &source, &mut legacy)?,
+            source,
+            name: row.name,
+            base: row.base,
+            slots: row.slots,
+            stride: row.stride,
+            x_lo: row.x_lo,
+            x_hi: row.x_hi,
+            y: row.y,
+            y_hi: row.y_hi,
+            kind: row.kind,
+            state: row.state,
+        });
+    }
+    let mut tiles: Vec<TileSemantics> = Vec::new();
+    for row in doc.tile {
+        let label = format!("{} {:#x}..={:#x}", row.class, row.first, row.last);
+        let class = TileClass::parse(&row.class).ok_or_else(|| RecipeError::BadFact {
+            table: "tile",
+            name: label.clone(),
+            why: "class is not solid, one_way, water or hazard",
+        })?;
+        if row.first > row.last {
+            return Err(RecipeError::BadFact {
+                table: "tile",
+                name: label,
+                why: "first is above last",
+            });
+        }
+        let source = source_of("tile", &label, row.source)?;
+        tiles.push(TileSemantics {
+            grade: grade_of(&label, row.grade.as_deref(), &source, &mut legacy)?,
+            class,
+            first: row.first,
+            last: row.last,
+            layer: row.layer,
+            tileset: row.tileset,
+            source,
+        });
+    }
+    Ok((
+        Recipe {
+            id: doc.recipe.id,
+            engine: doc.recipe.engine,
+            functions,
+            ram,
+            patches,
+            object_tables,
+            tiles,
+        },
+        legacy,
+    ))
 }
 
 /// Read a recipe file.
@@ -371,6 +584,12 @@ fn write_function(out: &mut String, f: &RecipeFunction) {
     if let Some(m) = f.mode {
         let _ = writeln!(out, "mode = {m}");
     }
+    if let Some(e) = f.entry {
+        let _ = writeln!(out, "entry = \"{}\"", e.as_str());
+    }
+    if let Some(n) = f.insn_count {
+        let _ = writeln!(out, "insn_count = {n}");
+    }
     let mut hooks = Vec::new();
     if f.hooks.entry {
         hooks.push("\"entry\"");
@@ -382,6 +601,7 @@ fn write_function(out: &mut String, f: &RecipeFunction) {
     if let Some(c) = f.confidence {
         let _ = writeln!(out, "confidence = {c}");
     }
+    let _ = writeln!(out, "grade = \"{}\"", f.grade.as_str());
     let _ = writeln!(out, "source = {}", quote(&f.source));
 }
 
@@ -448,23 +668,74 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
     for r in &recipe.ram {
         let _ = writeln!(
             out,
-            "\n[[ram]]\naddr = {:#06x}\nwidth = {}\nname = {}\nsource = {}",
+            "\n[[ram]]\naddr = {:#06x}\nwidth = {}\nname = {}\ngrade = \"{}\"\nsource = {}",
             r.addr,
             r.width,
             quote(&r.name),
+            r.grade.as_str(),
             quote(&r.source)
         );
     }
     for p in &recipe.patches {
         let _ = writeln!(
             out,
-            "\n[[patch]]\nname = {}\nmod = {}\nfunction = {}\noffset = {}\nvalue = {:#04x}\nsource = {}",
+            "\n[[patch]]\nname = {}\nmod = {}\nfunction = {}\noffset = {}\nvalue = {:#04x}\ngrade = \"{}\"\nsource = {}",
             quote(&p.name),
             quote(&p.mod_name),
             quote(&p.function),
             p.offset,
             p.value,
+            p.grade.as_str(),
             quote(&p.source)
+        );
+    }
+    for t in &recipe.object_tables {
+        let _ = writeln!(
+            out,
+            "\n[[object_table]]\nname = {}\nbase = {:#06x}\nslots = {}\nstride = {}",
+            quote(&t.name),
+            t.base,
+            t.slots,
+            t.stride
+        );
+        for (key, v) in [
+            ("x_lo", t.x_lo),
+            ("x_hi", t.x_hi),
+            ("y", t.y),
+            ("y_hi", t.y_hi),
+            ("type", t.kind),
+            ("state", t.state),
+        ] {
+            if let Some(v) = v {
+                let _ = writeln!(out, "{key} = {v:#x}");
+            }
+        }
+        let _ = writeln!(
+            out,
+            "grade = \"{}\"\nsource = {}",
+            t.grade.as_str(),
+            quote(&t.source)
+        );
+    }
+    for t in &recipe.tiles {
+        let _ = writeln!(
+            out,
+            "\n[[tile]]\nclass = \"{}\"\nfirst = {:#x}\nlast = {:#x}",
+            t.class.as_str(),
+            t.first,
+            t.last
+        );
+        if let Some(l) = t.layer {
+            let _ = writeln!(out, "layer = {l}");
+        }
+        if let Some(ts) = &t.tileset {
+            let _ = writeln!(out, "tileset = {}", quote(ts));
+        }
+        let _ = writeln!(
+            out,
+            "grade = \"{}\"\nsource = {}",
+            t.grade.as_str(),
+            quote(&t.source)
         );
     }
     out
@@ -598,6 +869,149 @@ mod tests {
         let none = splice_name_block(&twice, &name_rows_block(&[]));
         assert_eq!(load_recipe_str(&none).unwrap().functions.len(), 1);
         assert!(none.contains("# comment kept"));
+    }
+
+    const V1: &str = r#"
+        [recipe]
+        format = 1
+        id = "demo"
+        engine = "demo-engine"
+
+        [[function]]
+        name = "nmi"
+        shape_hash = "0x1"
+        entry = "nmi"
+        insn_count = 41
+        grade = "confirmed"
+        source = "rule:nmi"
+
+        [[function]]
+        name = "guess"
+        shape_hash = "0x2"
+        grade = "candidate"
+        source = "ai:some-model"
+
+        [[ram]]
+        addr = 0x0F
+        name = "enemy_flag"
+        grade = "observed"
+        source = "observed"
+
+        [[object_table]]
+        name = "enemies"
+        base = 0x0F
+        slots = 5
+        stride = 1
+        x_lo = 0x3F2
+        y = 0x2E
+        type = 0x5
+        state = 0
+        grade = "observed"
+        source = "observed: slot flag bytes in 1-1 play"
+
+        [[tile]]
+        class = "one_way"
+        first = 0x10
+        last = 0x1f
+        layer = 1
+        tileset = "grass"
+        grade = "candidate"
+        source = "ai:some-model"
+
+        [[tile]]
+        class = "water"
+        first = 0x40
+        last = 0x40
+        grade = "confirmed"
+        source = "profile"
+    "#;
+
+    #[test]
+    fn a_v1_recipe_reads_its_grades_entry_kinds_and_fact_tables_and_round_trips() {
+        let (r, legacy) = load_recipe_noted(V1).expect("parses");
+        assert_eq!(legacy, 0, "every row states its grade");
+        assert_eq!(r.functions[0].entry, Some(EntryKind::Nmi));
+        assert_eq!(r.functions[0].insn_count, Some(41));
+        assert_eq!(r.functions[0].grade, Grade::Confirmed);
+        assert_eq!(r.functions[1].grade, Grade::Candidate);
+        let t = &r.object_tables[0];
+        assert_eq!((t.base, t.slots, t.stride), (0x0F, 5, 1));
+        assert_eq!(
+            (t.x_lo, t.x_hi, t.y, t.kind, t.state),
+            (Some(0x3F2), None, Some(0x2E), Some(5), Some(0))
+        );
+        assert_eq!(r.tiles[0].class, TileClass::OneWay);
+        assert_eq!(
+            (r.tiles[0].first, r.tiles[0].last, r.tiles[0].layer),
+            (0x10, 0x1f, Some(1))
+        );
+        assert_eq!(r.tiles[0].tileset.as_deref(), Some("grass"));
+        assert_eq!(r.tiles[1].grade, Grade::Confirmed);
+        let text = recipe_to_toml(&r);
+        assert_eq!(load_recipe_noted(&text), Ok((r, 0)));
+    }
+
+    #[test]
+    fn a_pre_v1_recipe_migrates_by_loading_and_writing() {
+        // `GOOD` has no grades (the shape of every file before W38-00).
+        let (r, legacy) = load_recipe_noted(GOOD).expect("parses");
+        assert_eq!(legacy, 6, "4 functions + 1 ram + 1 patch defaulted");
+        assert_eq!(r.functions[0].grade, Grade::Observed);
+        assert_eq!(
+            r.functions[2].grade,
+            Grade::Observed,
+            "rule: rows were measured"
+        );
+        assert_eq!(
+            r.functions[3].grade,
+            Grade::Candidate,
+            "ai: rows are guesses"
+        );
+        let migrated = recipe_to_toml(&r);
+        assert_eq!(migrated.matches("grade = ").count(), 6);
+        assert_eq!(load_recipe_noted(&migrated), Ok((r, 0)));
+    }
+
+    #[test]
+    fn bad_v1_input_is_refused_with_a_reason() {
+        let with = |from: &str, to: &str| load_recipe_str(&V1.replace(from, to));
+        assert!(matches!(
+            with(
+                "grade = \"confirmed\"\n        source = \"rule:nmi\"",
+                "grade = \"sure\"\n        source = \"rule:nmi\""
+            ),
+            Err(RecipeError::BadGrade { .. })
+        ));
+        assert!(matches!(
+            with("entry = \"nmi\"", "entry = \"vblank\""),
+            Err(RecipeError::BadEntry { .. })
+        ));
+        assert!(matches!(
+            with("slots = 5", "slots = 0"),
+            Err(RecipeError::BadFact { .. })
+        ));
+        assert!(matches!(
+            with("class = \"one_way\"", "class = \"lava\""),
+            Err(RecipeError::BadFact { .. })
+        ));
+        assert!(matches!(
+            with("last = 0x1f", "last = 0x01"),
+            Err(RecipeError::BadFact { .. })
+        ));
+        assert!(matches!(
+            with("source = \"observed: slot flag bytes in 1-1 play\"", ""),
+            Err(RecipeError::MissingSource {
+                table: "object_table",
+                ..
+            })
+        ));
+        assert!(matches!(
+            with(
+                "tileset = \"grass\"",
+                "tileset = \"grass\"\n        speed = 3"
+            ),
+            Err(RecipeError::Parse(_))
+        ));
     }
 
     #[test]

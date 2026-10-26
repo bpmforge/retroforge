@@ -491,7 +491,11 @@ is every 6502 row. The understand pass writes the mode whenever the atlas has
 more than one. **Twin rows:** two rows of one recipe that share a shape (and
 could share a mode), such as the `nmi` and `irq` stubs, match only the function
 at their own address hint, so a hack that changed one stub leaves its row
-unmatched (hooks inactive) instead of handing the name to the other.
+unmatched (hooks inactive) instead of handing the name to the other. *Superseded by W38-00:* rows may carry an entry kind
+(`nmi`, `irq`, `reset`, `brk`, `call`, `indirect`) and twins resolve by entry
+kind first; only twins with the same entry kind fall back to the address hint.
+On Return to Dinosaur Land and A Simple Story the NMI stub itself was changed
+(4 instructions instead of 3), so `nmi` stays unmatched there by design.
 
 **Recipe.** `profiles/snes/super-mario-world/recipe.toml`: 29 rule-named
 function rows from the Yoshi's Island 1 run plus 11 RAM rows from the profile's

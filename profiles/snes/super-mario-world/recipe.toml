@@ -20,8 +20,11 @@ shape_hash = "0x410326640072ddee"
 exact_hash = "0x0ce27f2d6003a10d"
 address_hint = 0x8000
 mode = 0
+entry = "reset"
+insn_count = 51
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:reset"
 
 [[function]]
@@ -30,8 +33,11 @@ shape_hash = "0x92276c52a18e2b27"
 exact_hash = "0x92276c52a18e2b27"
 address_hint = 0x816a
 mode = 4
+entry = "nmi"
+insn_count = 3
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:nmi"
 
 [[function]]
@@ -40,8 +46,11 @@ shape_hash = "0x92276c52a18e2b27"
 exact_hash = "0x92276c52a18e2b27"
 address_hint = 0x8374
 mode = 4
+entry = "irq"
+insn_count = 3
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:irq"
 
 [[function]]
@@ -50,8 +59,11 @@ shape_hash = "0x8e76f867ac3dfe19"
 exact_hash = "0x477186e8efb080fa"
 address_hint = 0x816a
 mode = 1
+entry = "nmi"
+insn_count = 257
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:nmi"
 
 [[function]]
@@ -60,8 +72,11 @@ shape_hash = "0x92276c52a18e2b27"
 exact_hash = "0x92276c52a18e2b27"
 address_hint = 0x816a
 mode = 2
+entry = "nmi"
+insn_count = 3
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:nmi"
 
 [[function]]
@@ -70,8 +85,11 @@ shape_hash = "0x29de80437a8f64ef"
 exact_hash = "0x5b727e77c36c25a3"
 address_hint = 0x8374
 mode = 1
+entry = "irq"
+insn_count = 78
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:irq"
 
 [[function]]
@@ -80,8 +98,11 @@ shape_hash = "0x92276c52a18e2b27"
 exact_hash = "0x92276c52a18e2b27"
 address_hint = 0x8374
 mode = 3
+entry = "irq"
+insn_count = 3
 hooks = ["entry", "exit"]
 confidence = 99
+grade = "observed"
 source = "rule:irq"
 
 [[function]]
@@ -90,8 +111,10 @@ shape_hash = "0xe01e83916c0ef749"
 exact_hash = "0x24b1442a7d3b1a71"
 address_hint = 0x8449
 mode = 4
+insn_count = 17
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:oam_dma"
 
 [[function]]
@@ -100,8 +123,10 @@ shape_hash = "0x6564eac1a48ef863"
 exact_hash = "0x588cea77293b1336"
 address_hint = 0x8079
 mode = 4
+insn_count = 57
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:sound_update"
 
 [[function]]
@@ -110,8 +135,10 @@ shape_hash = "0xe6562a46b832865d"
 exact_hash = "0x4f8a92f88e4b4792"
 address_hint = 0x80fd
 mode = 4
+insn_count = 17
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:sound_update"
 
 [[function]]
@@ -120,8 +147,10 @@ shape_hash = "0x540a139de5df4533"
 exact_hash = "0x4976bd1a1defede7"
 address_hint = 0x85fa
 mode = 4
+insn_count = 49
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -130,8 +159,10 @@ shape_hash = "0x247733caf81bf4ec"
 exact_hash = "0x4c1633dbefe48357"
 address_hint = 0x8650
 mode = 4
+insn_count = 46
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:read_controllers"
 
 [[function]]
@@ -140,8 +171,10 @@ shape_hash = "0x821be24e96c714da"
 exact_hash = "0x3cbebc31b46f9e49"
 address_hint = 0x871e
 mode = 4
+insn_count = 72
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -150,8 +183,10 @@ shape_hash = "0x2336d7a124f7fd65"
 exact_hash = "0x574f96ded92c77f5"
 address_hint = 0x87ad
 mode = 1
+insn_count = 254
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -160,8 +195,10 @@ shape_hash = "0x7298a0ccfe0e461f"
 exact_hash = "0x13fdc4bfbe59a850"
 address_hint = 0x8cff
 mode = 4
+insn_count = 63
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -170,8 +207,10 @@ shape_hash = "0xb2e9e581c5ef96c8"
 exact_hash = "0x579d3af445580d5f"
 address_hint = 0x8dac
 mode = 4
+insn_count = 25
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -180,8 +219,10 @@ shape_hash = "0x6bb108f7fb88cbc4"
 exact_hash = "0x7c13eea61164a882"
 address_hint = 0x922f
 mode = 4
+insn_count = 11
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:palette_upload"
 
 [[function]]
@@ -190,8 +231,10 @@ shape_hash = "0x0b4d603b81292bc3"
 exact_hash = "0x960f9c4b206b2dc6"
 address_hint = 0xa300
 mode = 4
+insn_count = 56
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:palette_upload"
 
 [[function]]
@@ -200,8 +243,10 @@ shape_hash = "0x4a93cd712637b09e"
 exact_hash = "0x7b4ec67d2964b5db"
 address_hint = 0xa390
 mode = 4
+insn_count = 63
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:palette_upload"
 
 [[function]]
@@ -210,8 +255,10 @@ shape_hash = "0x08a8093cf658a8e8"
 exact_hash = "0x610b0eb3771658da"
 address_hint = 0xa436
 mode = 4
+insn_count = 27
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -220,8 +267,10 @@ shape_hash = "0x37684137d26dc6a5"
 exact_hash = "0x4097c26c576ab0cf"
 address_hint = 0xa4e3
 mode = 4
+insn_count = 36
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -230,8 +279,10 @@ shape_hash = "0x45f6fcac4ed4edfd"
 exact_hash = "0x6f8682a7c95ea6c1"
 address_hint = 0xa7c2
 mode = 4
+insn_count = 38
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -240,8 +291,10 @@ shape_hash = "0x416792b4332c1f86"
 exact_hash = "0xd484b8bedb79b89c"
 address_hint = 0xa993
 mode = 4
+insn_count = 29
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -250,8 +303,10 @@ shape_hash = "0x05075ab2d11147a4"
 exact_hash = "0x2bdc62d7f20ae2dc"
 address_hint = 0xaa6b
 mode = 4
+insn_count = 101
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -260,8 +315,10 @@ shape_hash = "0x3291fb79904df6bd"
 exact_hash = "0x6e578853fdb4ecc8"
 address_hint = 0x4d6e9
 mode = 4
+insn_count = 61
 hooks = ["entry", "exit"]
 confidence = 85
+grade = "observed"
 source = "rule:vram_upload"
 
 [[function]]
@@ -270,8 +327,10 @@ shape_hash = "0x77b97795435f2e71"
 exact_hash = "0xa1db71a62866323c"
 address_hint = 0x937d
 mode = 4
+insn_count = 5
 hooks = ["entry", "exit"]
 confidence = 80
+grade = "observed"
 source = "rule:hdma_setup"
 
 [[function]]
@@ -280,8 +339,10 @@ shape_hash = "0x3cb428c6725dc2f6"
 exact_hash = "0x97f1fa8bca796f46"
 address_hint = 0x9a74
 mode = 4
+insn_count = 12
 hooks = ["entry", "exit"]
 confidence = 80
+grade = "observed"
 source = "rule:read_controllers"
 
 [[function]]
@@ -290,8 +351,10 @@ shape_hash = "0x1b4979f5fb7d3ebe"
 exact_hash = "0xf62f12fa8cbf8d3e"
 address_hint = 0xcc14
 mode = 2
+insn_count = 39
 hooks = ["entry", "exit"]
 confidence = 80
+grade = "observed"
 source = "rule:hw_multiply_divide"
 
 [[function]]
@@ -300,72 +363,85 @@ shape_hash = "0xa70720ce8e683dd9"
 exact_hash = "0xc6b1ae3f9689652c"
 address_hint = 0x4945d
 mode = 2
+insn_count = 455
 hooks = ["entry", "exit"]
 confidence = 80
+grade = "observed"
 source = "rule:hw_multiply_divide"
 
 [[ram]]
 addr = 0x7e0100
 width = 1
 name = "game_mode"
+grade = "observed"
 source = "profile.toml [[scout.addr]] start_when: stepped 0x00..0x13 through boot, menus and the level load, held 0x14 in a level, 0x0e on the map"
 
 [[ram]]
 addr = 0x7e0014
 width = 1
 name = "tick_counter"
+grade = "observed"
 source = "profile.toml [[memory_map]] tick_counter: +1 on every in-level frame"
 
 [[ram]]
 addr = 0x7e001a
 width = 2
 name = "camera_x"
+grade = "observed"
 source = "profile.toml [camera] x; [[scout.addr]] camera_x: equals BG1HOFS"
 
 [[ram]]
 addr = 0x7e001c
 width = 2
 name = "camera_y"
+grade = "observed"
 source = "profile.toml [camera] y"
 
 [[ram]]
 addr = 0x7e0094
 width = 2
 name = "player_x"
+grade = "observed"
 source = "profile.toml [[scout.addr]] player_x: poking it moves Mario"
 
 [[ram]]
 addr = 0x7e0096
 width = 2
 name = "player_y"
+grade = "observed"
 source = "profile.toml [[scout.addr]] player_y"
 
 [[ram]]
 addr = 0x7e0071
 width = 1
 name = "player_state"
+grade = "observed"
 source = "profile.toml [[scout.addr]] start_when: 0 walking, 9 hit"
 
 [[ram]]
 addr = 0x7e0057
 width = 1
 name = "level_id"
+grade = "observed"
 source = "profile.toml [[scene.level_id]]: 0 on the title and map, non-zero in a level"
 
 [[ram]]
 addr = 0x7e0dbe
 width = 1
 name = "lives"
+grade = "confirmed"
 source = "profile.toml [[memory_map]] lives (minus one)"
 
 [[ram]]
 addr = 0x7e0dbf
 width = 1
 name = "coins"
+grade = "observed"
 source = "profile.toml [[memory_map]] coins"
 
 [[ram]]
 addr = 0x7e0f25
 width = 3
 name = "timer_digits"
+grade = "observed"
 source = "profile.toml [[memory_map]] timer_digits"

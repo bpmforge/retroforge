@@ -4874,3 +4874,12 @@ stories, 10 decisions).
   movie baseline: 27.31% to 28.19% of PRG (+572 bytes), 412 to 418 functions;
   new code in title/demo, pause, game over, dying and life-lost paths.
   Workspace: **3650 passing**.
+
+- **W38-00 — Recipe format v1** (2026-10-26). Grades on every row (observed /
+  candidate / confirmed; candidate rows never drive patches or write-capable
+  hooks), entry kinds on function rows (the atlas now tells NMI, IRQ, Reset and
+  BRK targets apart; atlas format v4), `[[object_table]]` and `[[tile]]`
+  sections (parsed, not yet consumed), legacy files load with defaulted grades.
+  On the five hacks: nmi matching unchanged and now correct (RDL and A Simple
+  Story edited their NMI stub); unmatched rows classified removed / not
+  reached / changed. Workspace: **3658 passing**.
