@@ -211,10 +211,104 @@ that do not describe a picture (`Malformed`).
   disclosed latency); each later repaint in the gap composes `alpha = elapsed / measured gap`. At
   60 Hz no repaint falls in a gap and nothing is composed (the tally reports those as untried).
 * It steps aside, passing frames through untouched, whenever another stage rewrites the picture after
-  the console: widescreen, an HD pack, a shader, fog, the lens, the diorama, comparison/peek, a
+  the console: widescreen (no longer, W37-06, section 9), an HD pack, a shader, fog, the lens, the diorama, comparison/peek, a
   recording or screenshot, run-ahead, de-flicker, the sprite overlay. An intermediate frame would
   bypass those stages, so it is not drawn around them.
-* The row ("Smoother motion") is generic, NES only for now, Enhanced-only and does not exist in
+* The row ("Smoother motion") is generic, NES only for now (SNES too since W37-06), Enhanced-only and does not exist in
   Accuracy Mode. Its label is `rf_enhance::interpolation::label()`: `invents: true`, claim naming the
   one-frame delay, shown under the switch.
 * No float in the composer (`alpha` is 0..=255); loops are `for` over ranges or iterators (law 8).
+
+## 9. Generic: palette cycling, widescreen, SNES (W37-06, 2026-10-26)
+
+Section 8 built the NES path for one recipe-aware game. W37-06 makes it generic: it no longer needs a
+recipe, it runs with widescreen on, and it covers the SNES. The honesty contract of section 6 is unchanged
+(opt-in, off on a fresh install, absent from Accuracy Mode, one frame of labelled latency, never while
+recording, replay or golden capture, the simulation and every console frame untouched).
+
+### Palette cycling (NES)
+
+The layers now carry colours (`0x00RRGGBB`), not palette indices, so each dot is drawn with the colour it
+had in the frame it is taken from: "frame N's pixels with N's palette". `interpolate::palette_verdict`
+refuses a palette change unless it is cycling: at most two of the 15 background entries differ, neither is
+the backdrop (`$3F00`, mirrored at `$3F10`). Sprite entries may change freely (star power): sprites are N's
+own pixels. A dot that differs between the frames only by being one of the cycled colours counts as the same
+dot in the background-fit test. Fades and flashes (three or more background entries, or the backdrop) are
+still refused. SMB 1-1: 91.3% of pairs and 91.6% of the steady running ones (the question-block shimmer,
+entry 13, was every refusal on steady pairs) became 98.9% and 100.0%.
+
+### Widescreen (NES)
+
+The Presenter holds the WIDENED picture. When console frame N+1 arrives the shell widens it first (its
+margins composed from its own canvas, VRAM or level image, with the W36-06b enemy strips drawn in), then
+`interpolate::widen` embeds the console's layers in it, then the Presenter swaps in the older one. (Swapping
+the console frame first and widening it after would have put frame N's centre between frame N+1's margins,
+a one-frame seam every frame.) The margin dots are background, so the same per-line scroll moves them and
+the dots it uncovers come from N+1's wide picture. **Margin enemy strips move with the scroll** (they are
+part of the margin background), not held: an object standing in the world is exact, one walking drifts from
+its true place by its own speed times alpha until the next console frame redraws it. Measured in one frame
+pair of SMB 1-1 a right-margin goomba stood still on the screen between consecutive console frames while the
+ground moved 3 dots, so the intermediate showed it 2 dots off for one picture: held would have been exact for
+that object and 2 dots wrong for the typical walker. Not resolved; the choice is the better on average.
+Sprites that straddle the console's edge move by their own OAM delta inside and by the scroll in the strip.
+
+### SNES
+
+Nothing about an SNES frame needs a recipe. Captured presentation-only, off unless the setting is effective,
+never in a save state, nothing written back:
+
+| What | Where it comes from |
+|---|---|
+| Layer (BG1-4, sprite, backdrop) and priority of every dot | `FrameBuffer::layer_codes` from `PpuPixel` (rf-renderer) |
+| OAM entry of every sprite dot | `FrameBuffer::sprite_ids` (existing) |
+| Scroll of every background, brightness and backdrop colour of every row | `FrameBuffer::line_regs` from `CoreSink::line_registers`, asked for only while on |
+| Mode, BG3 bit and the hazards of every latched row | `rf_snes::ppu::Ppu::line_facts` (reads the completed-frame latches, writes nothing) |
+| Priority order of every mode | `rf_snes::ppu::priority_slots` |
+
+A backdrop dot that colour math adds a sub-screen BACKGROUND to is recorded as that background
+(`LAYER_SUB`): Super Mario World draws its far hills that way (BG2 on the sub screen, "add" over the
+backdrop), and without it the hills would sit still while everything else moved.
+
+`interpolate_snes::compose_snes` moves each LAYER by its own per-line scroll and re-stacks them in the
+mode's own priority order: the dot at (x, y) shows layer L if frame N's dot at (x + sx_L, y + sy_L) was L (else
+N+1's, off N's picture), the front-most claim wins, sprites are N's pixels moved by their own OAM delta and
+take part in the order by their priority level. A dot nothing claims takes N+1's picture, then N's, then the
+row's backdrop. The colour of a dot is the colour the console showed where it came from, so brightness and
+colour math travel with their layer.
+
+**HUD bands are fixed by construction**: BG3's status bar, or an IRQ-split band whose scroll register is
+rewritten to the same value, has a zero step, so its dots are gathered from themselves.
+`SnesStats::fixed_rows` counts the rows where every visible layer stood still while others moved.
+
+Refusals (the pair is repeated), each from a named source: mode 7, hires or pseudo-hires, mosaic, a window
+hiding part of a main-screen layer, interlace, forced blank or direct colour, a register written
+mid-line (all from the PPU's latched line facts: a row with one is HELD from N when they are the minority of
+rows, the pair is refused with the reason when they are the majority); brightness differing on any row or the
+backdrop colour on more than an eighth of them (fade, flash); a layer's scroll jumping more than 24 dots;
+layers that are not their shifted selves (a cut); not consecutive. Colour math itself is not refused: it is
+carried by the dots, and a gradient that changes is the backdrop test's business. What a front layer or a
+sprite hid in both frames is not captured, so the sliver a sprite or a layer edge moves over is the one
+place the result is a guess (measured: 0.95% of dots differ from frame N+1 when a steady SMW pair is
+composed at alpha 255, worst pair 2.6%).
+
+Widescreen on the SNES: when the core itself widens the lines the frame is simply wider and the same gather
+works; when the shell widens it, `SnesLayers::widened` marks the margin dots and moves them with the layer
+that has the most visible dots.
+
+### Measured
+
+| Pair set | Interpolated | Notes |
+|---|---|---|
+| SMB 1-1, all pairs | 98.9% (1978/1999), was 91.3% | refusals: 17 scroll jumps, 3 palette changes, 1 cut |
+| SMB 1-1, steady running pairs | 100.0% (1190/1190), was 91.6% | |
+| SMB 1-1 at 32:9 with the scout canvas and live-enemy strips, 16 s in the app | 100.0% (954/954) | no refusals |
+| SMW Yoshi's Island 1, steady pairs (level, camera moving) | 100.0% (289/289) | the other 1,081 pairs of the 2,399 are the level's fades, mosaic wipes and loads: refused |
+| SMW Yoshi's Island 1, all pairs of a 2,400-frame play | 57.1% (1370/2399) | Blanked 573, Fade 214, Mosaic 227, MidLine 15 |
+
+Cost per intermediate frame, release build: NES 256x240 about 240 microseconds, NES 856x240 (32:9)
+about 1.0 ms in the app, SMW 256x224 about 0.5 ms; capture on the core thread about 8 microseconds per SNES
+frame, 17 per NES frame.
+
+Not done: the pass-through list still holds for HD packs, shaders, the lens, fog, peek, comparison and the
+Diorama view (their stages run after the console picture and an intermediate frame would bypass them), and
+for run-ahead, de-flicker and the sprite overlay (their pictures are not the plain one).

@@ -18,12 +18,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui_kittest::Harness;
 use retroforge::app::{RetroForgeApp, WINDOW_SIZE};
-use retroforge::core_thread::CoreCommand;
 use retroforge::frame_interp::Shown;
 use retroforge::game_settings::Mode;
-use retroforge::stepper::EmuStepper;
-use rf_core_api::InputFrame;
-use rf_input::SnesButton;
 
 fn rom_path() -> Option<PathBuf> {
     let root = std::env::var("RF_SCREENS_ROMS_DIR")
@@ -34,54 +30,39 @@ fn rom_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-fn pad(buttons: &[SnesButton]) -> InputFrame {
-    let mut f = InputFrame::empty();
-    f.ports[0] = buttons.iter().fold(0u16, |a, b| a | (1 << b.bit()));
-    f
-}
-
-struct Discard;
-
-impl rf_core_api::CoreSink for Discard {
-    fn video_scanline(&mut self, _y: u16, _p: &[rf_core_api::PpuPixel]) {}
-    fn audio(&mut self, _s: &[i16]) {}
-    fn event(&mut self, _e: rf_core_api::CoreEvent) {}
-}
-
-fn run(st: &mut EmuStepper, buttons: &[SnesButton], n: u32) {
-    let input = pad(buttons);
-    for _ in 0..n {
-        st.latch_and_advance_frame(input, &mut Discard);
+/// Wait until the core has produced `n` more frames.
+fn wait_frames(h: &mut Harness<'_, RetroForgeApp>, n: u64) {
+    let target = h.state().frame_count_for_test() + n;
+    let start = Instant::now();
+    while h.state().frame_count_for_test() < target && start.elapsed() < Duration::from_secs(120) {
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
     }
 }
 
-fn tap(st: &mut EmuStepper, b: SnesButton, hold: u32) {
-    run(st, &[b], hold);
-    run(st, &[], 8);
+/// Hold `key` for `frames` console frames, then let go (the pad as the keyboard holds it).
+fn tap(h: &mut Harness<'_, RetroForgeApp>, key: egui::Key, frames: u64) {
+    h.key_down(key);
+    wait_frames(h, frames);
+    h.key_up(key);
 }
 
-/// The script of `w32_07_scout_smw::reach_yi1`: boot, menus, the map, into Yoshi's Island 1.
-fn reach_yi1(st: &mut EmuStepper) {
-    run(st, &[], 200);
+/// Boot, menus, the map, left to Yoshi's Island 1, in (the script of `w30_screens::smw_enter_yi1`; Enter is
+/// Start and X the SNES A button).
+fn enter_yi1(h: &mut Harness<'_, RetroForgeApp>) {
+    use egui::Key as K;
+    wait_frames(h, 200);
     for i in 0..10 {
-        tap(
-            st,
-            if i % 2 == 0 {
-                SnesButton::Start
-            } else {
-                SnesButton::A
-            },
-            6,
-        );
-        run(st, &[], 100);
+        tap(h, if i % 2 == 0 { K::Enter } else { K::X }, 6);
+        wait_frames(h, 100);
     }
-    run(st, &[], 300);
-    tap(st, SnesButton::A, 8);
-    run(st, &[], 400);
-    tap(st, SnesButton::Left, 8);
-    run(st, &[], 150);
-    tap(st, SnesButton::A, 8);
-    run(st, &[], 150);
+    wait_frames(h, 300);
+    tap(h, K::X, 8);
+    wait_frames(h, 400);
+    tap(h, K::ArrowLeft, 8);
+    wait_frames(h, 150);
+    tap(h, K::X, 8);
+    wait_frames(h, 150);
 }
 
 fn run_n(h: &mut Harness<'_, RetroForgeApp>, n: usize) {
@@ -143,12 +124,6 @@ fn three_presented_frames_of_smw_at_120_hz() {
         rf_cart::Cartridge::Nes { .. } => unreachable!("an SNES image"),
     };
 
-    // The scene: Yoshi's Island 1 with Mario already running, from the same image the app runs.
-    let mut st = EmuStepper::open(&bytes).expect("opens");
-    reach_yi1(&mut st);
-    run(&mut st, &[SnesButton::Right, SnesButton::Y], 30);
-    let scene = st.save_state_with_mods(0, None).expect("saves");
-
     // --- Accuracy Mode: nothing presented, nothing sent. ---
     let mut settings = retroforge::game_settings::GameSettings::default();
     settings.mode = Mode::Accuracy;
@@ -158,11 +133,7 @@ fn three_presented_frames_of_smw_at_120_hz() {
         let mut h = open(&path);
         h.state_mut().log_presented_for_test();
         h.state_mut().resume_for_test();
-        h.state()
-            .send_core_command_for_test(CoreCommand::ApplyState(Box::new(scene.clone())));
-        h.key_down(egui::Key::ArrowRight);
-        h.key_down(egui::Key::A);
-        run_for(&mut h, 4);
+        run_for(&mut h, 5);
         assert!(
             h.state().presented_for_test().is_empty(),
             "Accuracy Mode presents nothing through the interpolator"
@@ -171,21 +142,25 @@ fn three_presented_frames_of_smw_at_120_hz() {
         println!("Accuracy Mode: nothing presented by the interpolator, as required");
     }
 
-    // --- Enhanced, Smoother motion on. ---
+    // --- Enhanced, Smoother motion on: into the level, then run right. ---
     settings.mode = Mode::Enhanced;
     retroforge::game_settings::save(&dir, &base, &settings).expect("settings");
     let mut h = open(&path);
     h.state_mut().frame_interp_alpha_for_test(Some(128));
-    h.state_mut().log_presented_for_test();
     h.state_mut().resume_for_test();
-    h.state()
-        .send_core_command_for_test(CoreCommand::ApplyState(Box::new(scene)));
+    enter_yi1(&mut h);
+    h.state_mut().log_presented_for_test();
     h.key_down(egui::Key::ArrowRight);
     h.key_down(egui::Key::A);
     run_for(&mut h, 14);
     println!("{}", h.state().frame_interp_debug_for_test());
     let tally = h.state().frame_interp_tally_for_test();
     println!("gaps between console frames: {tally:?}");
+    let (us, n) = h.state().frame_interp_cost_for_test();
+    println!(
+        "cost per composed intermediate (in the app, on the UI thread, release): {} us over {n} pictures",
+        us / n.max(1)
+    );
     println!(
         "refusals by name (pictures tried): {:?}",
         h.state().frame_interp_refusals_for_test()

@@ -291,6 +291,8 @@ pub struct Presenter {
     /// readout and the measurements, not per gap).
     pub refusals: std::collections::BTreeMap<String, u64>,
     pub tally: Tally,
+    /// Time spent composing (microseconds) and how many pictures that was, for the cost readout.
+    pub compose_cost: (u64, u64),
     scratch: Vec<u8>,
     /// Test hook: use this alpha instead of the clock.
     pub alpha_override: Option<u8>,
@@ -403,8 +405,17 @@ impl Presenter {
         if self.cached == Some((from, step)) {
             return None; // that picture (or the repeat of a refusal) is already on screen
         }
+        let started = Instant::now();
         let composed = if self.prev_ok && self.cur_ok {
-            compose(prev, cur, alpha.max(1), &mut self.scratch)
+            let r = compose(prev, cur, alpha.max(1), &mut self.scratch);
+            if r.is_ok() {
+                let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                self.compose_cost = (
+                    self.compose_cost.0.saturating_add(us),
+                    self.compose_cost.1 + 1,
+                );
+            }
+            r
         } else {
             Err(Refusal::Malformed)
         };

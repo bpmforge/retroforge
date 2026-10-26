@@ -17841,6 +17841,13 @@ impl RetroForgeApp {
         self.frame_interp.tally
     }
 
+    /// Ticket W37-06 test hook: `(microseconds spent composing, pictures composed)` so far.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_cost_for_test(&self) -> (u64, u64) {
+        self.frame_interp.compose_cost
+    }
+
     /// Ticket W37-06 test hook: how many composed pictures each refusal turned down, by name.
     #[doc(hidden)]
     #[must_use]

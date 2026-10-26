@@ -170,6 +170,11 @@ fn smb_1_1_at_32_9_with_smoother_motion() {
     println!("{}", h.state().frame_interp_debug_for_test());
     let tally = h.state().frame_interp_tally_for_test();
     println!("gaps between console frames: {tally:?}");
+    let (us, n) = h.state().frame_interp_cost_for_test();
+    println!(
+        "cost per composed intermediate (in the app, on the UI thread, release): {} us over {n} pictures",
+        us / n.max(1)
+    );
     println!(
         "refusals by name (pictures tried): {:?}",
         h.state().frame_interp_refusals_for_test()
