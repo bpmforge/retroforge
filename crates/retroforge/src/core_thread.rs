@@ -4331,7 +4331,7 @@ mod tests {
             .find(|f| f.entry_cpu == 0x8060)
             .expect("the NMI handler is an atlas function");
         let row = |name: &str, shape: u64| rf_rebuild::RecipeFunction {
-        mode: None,
+            mode: None,
             confidence: None,
             name: name.to_string(),
             shape_hash: shape,

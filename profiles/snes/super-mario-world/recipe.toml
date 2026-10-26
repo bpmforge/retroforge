@@ -1,0 +1,371 @@
+# Super Mario World (USA): function names and RAM meanings, built from
+# observation (ticket W36-10, D-021: no bytes, no disassembly).
+#
+# Function rows are the W36-09 rule names (`rule:<name>` sources) on a
+# Yoshi's Island 1 run: the shape hash survives a ROM hack that moves the
+# function, the exact hash raises the match to exact, and `mode` is the 65816
+# decode mode (0 emulation, 1..=4 native, 1 + m8 + 2 * x8) the function is
+# entered in -- the shape hash ignores it, so a SNES row matches on (shape,
+# mode). RAM rows come from profile.toml's observed facts. Regenerate with
+# crates/retroforge/tests/w36_10_smw_recipe.rs (RF_W36_10_WRITE_RECIPE=1).
+
+[recipe]
+format = 1
+id = "super-mario-world"
+engine = "smw"
+
+[[function]]
+name = "reset"
+shape_hash = "0x410326640072ddee"
+exact_hash = "0x0ce27f2d6003a10d"
+address_hint = 0x8000
+mode = 0
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:reset"
+
+[[function]]
+name = "nmi"
+shape_hash = "0x92276c52a18e2b27"
+exact_hash = "0x92276c52a18e2b27"
+address_hint = 0x816a
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:nmi"
+
+[[function]]
+name = "irq"
+shape_hash = "0x92276c52a18e2b27"
+exact_hash = "0x92276c52a18e2b27"
+address_hint = 0x8374
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:irq"
+
+[[function]]
+name = "nmi_00816a_m1"
+shape_hash = "0x8e76f867ac3dfe19"
+exact_hash = "0x477186e8efb080fa"
+address_hint = 0x816a
+mode = 1
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:nmi"
+
+[[function]]
+name = "nmi_00816a_m2"
+shape_hash = "0x92276c52a18e2b27"
+exact_hash = "0x92276c52a18e2b27"
+address_hint = 0x816a
+mode = 2
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:nmi"
+
+[[function]]
+name = "irq_008374_m1"
+shape_hash = "0x29de80437a8f64ef"
+exact_hash = "0x5b727e77c36c25a3"
+address_hint = 0x8374
+mode = 1
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:irq"
+
+[[function]]
+name = "irq_008374_m3"
+shape_hash = "0x92276c52a18e2b27"
+exact_hash = "0x92276c52a18e2b27"
+address_hint = 0x8374
+mode = 3
+hooks = ["entry", "exit"]
+confidence = 99
+source = "rule:irq"
+
+[[function]]
+name = "oam_dma"
+shape_hash = "0xe01e83916c0ef749"
+exact_hash = "0x24b1442a7d3b1a71"
+address_hint = 0x8449
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:oam_dma"
+
+[[function]]
+name = "sound_update_008079"
+shape_hash = "0x6564eac1a48ef863"
+exact_hash = "0x588cea77293b1336"
+address_hint = 0x8079
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:sound_update"
+
+[[function]]
+name = "sound_update_0080fd"
+shape_hash = "0xe6562a46b832865d"
+exact_hash = "0x4f8a92f88e4b4792"
+address_hint = 0x80fd
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:sound_update"
+
+[[function]]
+name = "vram_upload_0085fa"
+shape_hash = "0x540a139de5df4533"
+exact_hash = "0x4976bd1a1defede7"
+address_hint = 0x85fa
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "read_controllers_008650"
+shape_hash = "0x247733caf81bf4ec"
+exact_hash = "0x4c1633dbefe48357"
+address_hint = 0x8650
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:read_controllers"
+
+[[function]]
+name = "vram_upload_00871e"
+shape_hash = "0x821be24e96c714da"
+exact_hash = "0x3cbebc31b46f9e49"
+address_hint = 0x871e
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_0087ad"
+shape_hash = "0x2336d7a124f7fd65"
+exact_hash = "0x574f96ded92c77f5"
+address_hint = 0x87ad
+mode = 1
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_008cff"
+shape_hash = "0x7298a0ccfe0e461f"
+exact_hash = "0x13fdc4bfbe59a850"
+address_hint = 0x8cff
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_008dac"
+shape_hash = "0xb2e9e581c5ef96c8"
+exact_hash = "0x579d3af445580d5f"
+address_hint = 0x8dac
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "palette_upload_00922f"
+shape_hash = "0x6bb108f7fb88cbc4"
+exact_hash = "0x7c13eea61164a882"
+address_hint = 0x922f
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:palette_upload"
+
+[[function]]
+name = "palette_upload_00a300"
+shape_hash = "0x0b4d603b81292bc3"
+exact_hash = "0x960f9c4b206b2dc6"
+address_hint = 0xa300
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:palette_upload"
+
+[[function]]
+name = "palette_upload_00a390"
+shape_hash = "0x4a93cd712637b09e"
+exact_hash = "0x7b4ec67d2964b5db"
+address_hint = 0xa390
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:palette_upload"
+
+[[function]]
+name = "vram_upload_00a436"
+shape_hash = "0x08a8093cf658a8e8"
+exact_hash = "0x610b0eb3771658da"
+address_hint = 0xa436
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_00a4e3"
+shape_hash = "0x37684137d26dc6a5"
+exact_hash = "0x4097c26c576ab0cf"
+address_hint = 0xa4e3
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_00a7c2"
+shape_hash = "0x45f6fcac4ed4edfd"
+exact_hash = "0x6f8682a7c95ea6c1"
+address_hint = 0xa7c2
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_00a993"
+shape_hash = "0x416792b4332c1f86"
+exact_hash = "0xd484b8bedb79b89c"
+address_hint = 0xa993
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_00aa6b"
+shape_hash = "0x05075ab2d11147a4"
+exact_hash = "0x2bdc62d7f20ae2dc"
+address_hint = 0xaa6b
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "vram_upload_04d6e9"
+shape_hash = "0x3291fb79904df6bd"
+exact_hash = "0x6e578853fdb4ecc8"
+address_hint = 0x4d6e9
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 85
+source = "rule:vram_upload"
+
+[[function]]
+name = "hdma_setup"
+shape_hash = "0x77b97795435f2e71"
+exact_hash = "0xa1db71a62866323c"
+address_hint = 0x937d
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 80
+source = "rule:hdma_setup"
+
+[[function]]
+name = "read_controllers_009a74"
+shape_hash = "0x3cb428c6725dc2f6"
+exact_hash = "0x97f1fa8bca796f46"
+address_hint = 0x9a74
+mode = 4
+hooks = ["entry", "exit"]
+confidence = 80
+source = "rule:read_controllers"
+
+[[function]]
+name = "hw_multiply_divide_00cc14"
+shape_hash = "0x1b4979f5fb7d3ebe"
+exact_hash = "0xf62f12fa8cbf8d3e"
+address_hint = 0xcc14
+mode = 2
+hooks = ["entry", "exit"]
+confidence = 80
+source = "rule:hw_multiply_divide"
+
+[[function]]
+name = "hw_multiply_divide_04945d"
+shape_hash = "0xa70720ce8e683dd9"
+exact_hash = "0xc6b1ae3f9689652c"
+address_hint = 0x4945d
+mode = 2
+hooks = ["entry", "exit"]
+confidence = 80
+source = "rule:hw_multiply_divide"
+
+[[ram]]
+addr = 0x7e0100
+width = 1
+name = "game_mode"
+source = "profile.toml [[scout.addr]] start_when: stepped 0x00..0x13 through boot, menus and the level load, held 0x14 in a level, 0x0e on the map"
+
+[[ram]]
+addr = 0x7e0014
+width = 1
+name = "tick_counter"
+source = "profile.toml [[memory_map]] tick_counter: +1 on every in-level frame"
+
+[[ram]]
+addr = 0x7e001a
+width = 2
+name = "camera_x"
+source = "profile.toml [camera] x; [[scout.addr]] camera_x: equals BG1HOFS"
+
+[[ram]]
+addr = 0x7e001c
+width = 2
+name = "camera_y"
+source = "profile.toml [camera] y"
+
+[[ram]]
+addr = 0x7e0094
+width = 2
+name = "player_x"
+source = "profile.toml [[scout.addr]] player_x: poking it moves Mario"
+
+[[ram]]
+addr = 0x7e0096
+width = 2
+name = "player_y"
+source = "profile.toml [[scout.addr]] player_y"
+
+[[ram]]
+addr = 0x7e0071
+width = 1
+name = "player_state"
+source = "profile.toml [[scout.addr]] start_when: 0 walking, 9 hit"
+
+[[ram]]
+addr = 0x7e0057
+width = 1
+name = "level_id"
+source = "profile.toml [[scene.level_id]]: 0 on the title and map, non-zero in a level"
+
+[[ram]]
+addr = 0x7e0dbe
+width = 1
+name = "lives"
+source = "profile.toml [[memory_map]] lives (minus one)"
+
+[[ram]]
+addr = 0x7e0dbf
+width = 1
+name = "coins"
+source = "profile.toml [[memory_map]] coins"
+
+[[ram]]
+addr = 0x7e0f25
+width = 3
+name = "timer_digits"
+source = "profile.toml [[memory_map]] timer_digits"
