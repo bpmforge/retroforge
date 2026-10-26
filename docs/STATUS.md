@@ -4866,3 +4866,11 @@ stories, 10 decisions).
   100%; SMW Yoshi's Island 1 steady play 100% (fades, mosaic, mode 7, windows,
   mid-line writes are refused and repeat the frame). Cost 0.24-1.0 ms per
   intermediate. Workspace: **3644 passing**.
+
+- **W37-05 — Savestate fuzz driver** (2026-10-26). `rf_harness::fuzz`:
+  seeded, replayable, novelty-guided episodes from savestates (idle, held
+  directions, mashing, pause, menus), crash-safe (jams, stalls, frozen CPUs,
+  panics counted; none occurred). SMB, 5-minute budget over a 32-level plus
+  movie baseline: 27.31% to 28.19% of PRG (+572 bytes), 412 to 418 functions;
+  new code in title/demo, pause, game over, dying and life-lost paths.
+  Workspace: **3650 passing**.
