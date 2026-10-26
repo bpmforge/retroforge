@@ -4909,10 +4909,6 @@ impl RetroForgeApp {
                     height: h,
                 })
             });
-            // Ticket W36-07: show the previous console frame, one frame late, when interpolating. After
-            // the HUD watch and the compare pair above, which pair this frame's pixels with this
-            // frame's events and its accuracy-exact twin; only the picture painted below is late.
-            self.present_delayed(&mut msg, fog_source.is_some());
             if self.screenshot_pending {
                 self.screenshot_pending = false;
                 self.write_screenshots(ctx);
@@ -4969,6 +4965,13 @@ impl RetroForgeApp {
                     }
                 }
             };
+            // Ticket W36-07: show the previous console frame, one frame late, when interpolating. After
+            // the HUD watch and the compare pair above, which pair this frame's pixels with this
+            // frame's events and its accuracy-exact twin; only the picture painted below is late. After
+            // the widescreen margins too (W37-06): the Presenter holds the WIDENED picture, each frame's
+            // margins composed from that frame's own canvas, so centre and margins are never a frame
+            // apart.
+            let (rgba, size) = self.present_delayed(&mut msg, rgba, size, fog_source.is_some());
             // Ticket W16-02: feed the Upscale Studio's accumulator
             // whenever it asked for tiles this frame (`msg.hd.studio_tiles`
             // is empty otherwise — see `CoreCommand::SetStudioCapture`).
@@ -17694,13 +17697,12 @@ impl RetroForgeApp {
     }
 
     /// Ticket W36-07: keep the core's layer capture matching the row's EFFECTIVE state (Enhanced mode,
-    /// toggle on, an NES game), off whenever a video recording is running; sends only on a change.
+    /// toggle on, an NES or SNES game), off whenever a video recording is running; sends only on a change.
     fn sync_frame_interpolation(&mut self) {
         if self.core.is_none() {
             return;
         }
         let want = self.recorder.is_none()
-            && self.console_label == "NES"
             && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
                 .iter()
                 .any(|r| r.id == "frame_interpolation" && r.effective());
@@ -17720,7 +17722,6 @@ impl RetroForgeApp {
     fn interp_picture_is_plain(&self, fog: bool) -> bool {
         self.running
             && self.compare_mode == rf_renderer::CompareMode::Off
-            && !self.widescreen_on
             && self.hd_pack.is_none()
             && self.video.shader.is_none()
             && self.peek_amount == 0.0
@@ -17731,28 +17732,37 @@ impl RetroForgeApp {
             && !self.lens_effective()
     }
 
-    /// Ticket W36-07: swap the console frame that just arrived for the one before it (the latency
-    /// D-028 accepts), keeping this one's layers for the pictures in between.
-    fn present_delayed(&mut self, msg: &mut core_thread::FrameMsg, fog: bool) {
+    /// Ticket W36-07: swap the picture that just arrived for the one before it (the latency D-028
+    /// accepts), keeping this one's layers for the pictures in between. `rgba`/`size` is the picture as
+    /// it would be shown: the console's own, or (W37-06) the widescreen one with its margins.
+    fn present_delayed(
+        &mut self,
+        msg: &mut core_thread::FrameMsg,
+        rgba: Vec<u8>,
+        size: (usize, usize),
+        fog: bool,
+    ) -> (Vec<u8>, (usize, usize)) {
         let plain = self.frame_interp_sent == Some(true)
             && msg.hd.is_none()
             && msg.hd_mode7.is_none()
             && self.interp_picture_is_plain(fog);
-        match msg.interp.take() {
-            Some(layers) if plain => {
-                self.frame_interp_arrived = true;
-                let shown = self
-                    .frame_interp
-                    .arrive(*layers, &msg.rgba, std::time::Instant::now());
-                if let (Some(log), Some(n)) =
-                    (&mut self.presented_log, self.frame_interp.shown_frame())
-                {
-                    log.push((crate::frame_interp::Shown::Console(n), shown.clone()));
-                }
-                msg.rgba = shown;
-            }
-            _ => self.frame_interp.reset(),
+        let layers = msg.interp.take().filter(|_| plain).and_then(|l| {
+            let mut l = *l;
+            // `widened` wants the console picture the layers describe, then the picture as shown.
+            l.set_rgba(&msg.rgba);
+            l.widened(&rgba, size.0, size.1)
+        });
+        let Some(layers) = layers else {
+            self.frame_interp.reset();
+            return (rgba, size);
+        };
+        self.frame_interp_arrived = true;
+        let (width, height) = layers.dims();
+        let shown = self.frame_interp.arrive(layers, std::time::Instant::now());
+        if let (Some(log), Some(n)) = (&mut self.presented_log, self.frame_interp.shown_frame()) {
+            log.push((crate::frame_interp::Shown::Console(n), shown.clone()));
         }
+        (shown, (width, height))
     }
 
     /// Ticket W36-07: a repaint with no new console frame shows a picture composed between the one on
@@ -17829,6 +17839,20 @@ impl RetroForgeApp {
     #[must_use]
     pub fn frame_interp_tally_for_test(&self) -> crate::frame_interp::Tally {
         self.frame_interp.tally
+    }
+
+    /// Ticket W37-06 test hook: `(microseconds spent composing, pictures composed)` so far.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_cost_for_test(&self) -> (u64, u64) {
+        self.frame_interp.compose_cost
+    }
+
+    /// Ticket W37-06 test hook: how many composed pictures each refusal turned down, by name.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn frame_interp_refusals_for_test(&self) -> &std::collections::BTreeMap<String, u64> {
+        &self.frame_interp.refusals
     }
 
     /// Ticket W36-07 test hook: switch the setting on for the loaded game.

@@ -12,15 +12,11 @@ mod w36_06b_common;
 
 use std::time::Instant;
 
-use retroforge::frame_interp::{capture, Objects};
+use retroforge::frame_interp::{capture, Captured, Objects};
 use retroforge::stepper::EmuStepper;
 use rf_enhance::interpolate::{self, Layers};
 use rf_enhance::interpolation::Refusal;
 use w36_06b_common::*;
-
-fn resolve(i: u8) -> [u8; 3] {
-    rf_renderer::resolve_index(i, None)
-}
 
 /// One console frame's layers, taken the way the core thread takes them.
 fn grab(
@@ -29,7 +25,7 @@ fn grab(
     oam: &[u8; 256],
     objs: Option<&Objects>,
 ) -> Layers {
-    let mut l = *capture(
+    let Captured::Nes(mut l) = *capture(
         st,
         sink.sprite_ids(),
         sink.width(),
@@ -37,7 +33,9 @@ fn grab(
         oam,
         objs,
     )
-    .expect("the captures are all on");
+    .expect("the captures are all on") else {
+        unreachable!("a NES machine");
+    };
     l.rgba = sink.to_vec();
     l
 }
@@ -154,7 +152,7 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
             if f > 600 {
                 all_n += 1;
                 let mut candidate = Vec::new();
-                let verdict = interpolate::compose(&p, &l, 128, &resolve, &mut candidate);
+                let verdict = interpolate::compose(&p, &l, 128, &mut candidate);
                 let moving = (cam - pcam).abs() >= 1;
                 let steady = pgame == 1 && gameplay && pplayer == 1 && player_ok && moving;
                 if steady {
@@ -210,7 +208,7 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
                     let mut same = l.clone();
                     same.index += 1;
                     let mut o = Vec::new();
-                    if interpolate::compose(&l, &same, 128, &resolve, &mut o).is_ok() {
+                    if interpolate::compose(&l, &same, 128, &mut o).is_ok() {
                         static_exact.1 += 1;
                         if o == l.rgba {
                             static_exact.0 += 1;
@@ -260,21 +258,21 @@ fn smb_1_1_at_120_hz_how_many_frames_are_interpolated() {
     // Cost of one intermediate frame, on a typical steady pair.
     let (p, n) = sample.expect("a steady pair with moving sprites");
     let mut buf = Vec::new();
-    let _ = interpolate::compose(&p, &n, 128, &resolve, &mut buf);
+    let _ = interpolate::compose(&p, &n, 128, &mut buf);
     let runs = 400u32;
     let t = Instant::now();
     for i in 0..runs {
-        let _ = interpolate::compose(&p, &n, (i % 250 + 1) as u8, &resolve, &mut buf);
+        let _ = interpolate::compose(&p, &n, (i % 250 + 1) as u8, &mut buf);
     }
     let per_full = t.elapsed() / runs;
     let t = Instant::now();
     for i in 0..runs {
-        let _ = interpolate::compose_verified(&p, &n, (i % 250 + 1) as u8, &resolve, &mut buf);
+        let _ = interpolate::compose_verified(&p, &n, (i % 250 + 1) as u8, &mut buf);
     }
     let per = t.elapsed() / runs;
     let t = Instant::now();
     for _ in 0..runs {
-        let _ = interpolate::describes_its_picture(&p, &resolve);
+        let _ = interpolate::describes_its_picture(&p);
     }
     let per_check = t.elapsed() / runs;
     println!("cost per console frame: layer check {per_check:?}; per intermediate frame: compose {per:?} (with both checks {per_full:?}); 256x240, compose only");

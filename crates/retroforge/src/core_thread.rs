@@ -358,7 +358,7 @@ pub struct FrameMsg {
     /// Ticket W36-07: this frame's layers for interpolated presentation (`crate::frame_interp`),
     /// without pixels (the Presenter takes them from `rgba`). `None` when interpolation is off or the
     /// frame is not one it can describe.
-    pub interp: Option<Box<rf_enhance::interpolate::Layers>>,
+    pub interp: Option<Box<crate::frame_interp::Captured>>,
     /// Ticket W4-06a: the same frame's full 256-byte OAM
     /// (`EmuStepper::oam`, a side-effect-free `&self` read — never
     /// perturbs the core, same "read-only is a hard requirement" posture
@@ -1072,8 +1072,9 @@ pub enum CoreCommand {
     /// default) allocates and computes nothing.
     SetMarginSprites(bool),
     /// Ticket W36-07 (D-028): capture the layers of each real frame for interpolated presentation and
-    /// send them on `FrameMsg::interp`. NES only; a no-op while widescreen, run-ahead, de-flicker, the
+    /// send them on `FrameMsg::interp`. NES only for now; a no-op while run-ahead, de-flicker, the
     /// sprite overlay or an HD capture is on (their pictures are not the plain one the layers describe).
+    /// Widescreen is allowed (W37-06).
     /// Off (the default) allocates and computes nothing.
     SetInterpolation(bool),
     /// Ticket W27-02: look for this game's camera while it plays (a game
@@ -1550,14 +1551,17 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
         self.bundle.sub_scanline(y, pixels, fixed_color);
     }
 
-    /// Ticket W33-01: the per-line registers go to the bundle alone, and
-    /// only when it was asked to capture them (widescreen on).
+    /// Ticket W33-01: the per-line registers go to the bundle when it was asked to capture them
+    /// (widescreen on), and (W37-06) to the frame buffer when interpolation asked it to keep them.
     fn wants_line_registers(&self) -> bool {
-        self.bundle.wants_line_registers()
+        self.bundle.wants_line_registers() || self.frame.wants_line_registers()
     }
 
     fn line_registers(&mut self, y: u16, regs: &rf_core_api::LineRegisters) {
-        self.bundle.line_registers(y, regs);
+        if self.bundle.wants_line_registers() {
+            self.bundle.line_registers(y, regs);
+        }
+        self.frame.line_registers(y, regs);
     }
 
     /// Ticket W7-20: the SNES line palette, to both RGB sinks.
@@ -1793,6 +1797,8 @@ fn core_thread_main(
     let mut margin_drawer: Option<crate::margin_draw::MarginDrawer> = None;
     // Whether the captures the redraw needs (per-dot sprite ids, the background under each dot) are on.
     let mut margin_capture = false;
+    // Ticket W37-06: whether the sink is keeping the SNES layer codes and line registers.
+    let mut snes_capture = false;
     let mut watches_armed = false;
     // Ticket W14-20 defect 1: how many frames this thread has dropped
     // (see the `pending_frames` check at the send site below) since the
@@ -2033,6 +2039,8 @@ fn core_thread_main(
                     }
                     widescreen = request;
                     margin_capture = false;
+                    // The new frame buffer starts with the layer captures off (W37-06).
+                    snes_capture = false;
                     // Ticket W33-01: the bundle keeps the sub-screen and the
                     // per-line registers only while widescreen is on.
                     bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
@@ -2347,10 +2355,11 @@ fn core_thread_main(
         // writes memory: the copies it runs on have no hooks.
         let hooks_block = crate::margin_draw::blocked_by_hooks(&stepper);
         let margin_wanted = widescreen.is_some() && margin_drawer.is_some() && !hooks_block;
-        // Ticket W36-07: interpolated presentation reads the same two captures. Only for the plain
-        // picture its layers describe: not widescreen, not a run-ahead picture, not a rebuilt one.
+        // Ticket W36-07: interpolated presentation reads the same two captures. Only for the picture its
+        // layers describe: not a run-ahead picture, not a rebuilt one. Widescreen is fine (W37-06): the
+        // console's own 256 dots are what the captures describe, and the shell widens the layers with
+        // the margins it composes (`rf_enhance::interpolate::widen`).
         let interp_wanted = interp_on
-            && widescreen.is_none()
             && run_ahead == 0
             && !historian.enabled()
             && overlay_capture.is_none()
@@ -2363,6 +2372,14 @@ fn core_thread_main(
             stepper.set_bg_under_capture(capture_wanted);
             sink.set_sprite_id_capture(capture_wanted || margin_sprites);
             margin_capture = capture_wanted;
+        }
+        // Ticket W37-06: on an SNES the layers come from the frame buffer's per-dot layer codes and
+        // per-row registers (both off, and nothing built, unless this is on).
+        let snes_wanted = interp_wanted && stepper.is_snes();
+        if snes_wanted != snes_capture {
+            sink.set_layer_capture(snes_wanted);
+            sink.set_line_register_capture(snes_wanted);
+            snes_capture = snes_wanted;
         }
         if margin_wanted && !stepper.is_paused() {
             if let Some(d) = margin_drawer.as_mut() {
@@ -2968,14 +2985,25 @@ fn core_thread_main(
             }
             // Ticket W36-07: the layers of this picture, read from the captures; nothing is written back.
             if interp_wanted && ran && spec_shown.is_none() {
-                msg.interp = crate::frame_interp::capture(
-                    &stepper,
-                    sink.sprite_ids(),
-                    msg.width,
-                    msg.height,
-                    &interp_oam,
-                    interp_objects.as_ref(),
-                );
+                msg.interp = if snes_wanted {
+                    crate::frame_interp::capture_snes(
+                        &stepper,
+                        sink.layer_codes(),
+                        sink.sprite_ids(),
+                        sink.line_regs(),
+                        msg.width,
+                        msg.height,
+                    )
+                } else {
+                    crate::frame_interp::capture(
+                        &stepper,
+                        sink.sprite_ids(),
+                        msg.width,
+                        msg.height,
+                        &interp_oam,
+                        interp_objects.as_ref(),
+                    )
+                };
             }
             if interp_on {
                 interp_oam = *stepper.oam();
@@ -4677,32 +4705,31 @@ mod tests {
         );
     }
 
-    /// Ticket W36-07, mode-invariant at the core thread: with `SetInterpolation(true)` the frames the
-    /// thread sends are byte-identical to the ones it sends with it off (the delay is the UI's), the
-    /// layers ride on the frames only when it is on, and consecutive layers compose.
-    #[test]
-    fn interpolation_changes_no_frame_the_core_sends_and_only_adds_layers() {
-        let Some(rom) = rf_scroller_rom() else {
-            eprintln!("SKIP: RF-Scroller fixture not built");
-            return;
-        };
-        let run = |on: bool| {
-            let core = spawn(rom.clone()).unwrap();
-            core.cmd_tx.send(CoreCommand::SetInterpolation(on)).unwrap();
-            core.cmd_tx.send(CoreCommand::Resume).unwrap();
-            let mut frames: Vec<(u64, u64, Option<Box<rf_enhance::interpolate::Layers>>)> =
-                Vec::new();
-            while frames.len() < 90 {
-                let Some(m) = next_frame(&core, Duration::from_secs(5)) else {
-                    break;
-                };
-                frames.push((m.frame_count, fnv64(&m.rgba), m.interp));
-            }
-            let _ = core.cmd_tx.send(CoreCommand::Shutdown);
-            let _ = core.join_handle.join();
-            frames
-        };
-        let (off, on) = (run(false), run(true));
+    /// Run `rom` for 90 frames with `SetInterpolation(on)`: `(frame count, pixel hash, layers)` of each.
+    fn interpolation_run(
+        rom: &[u8],
+        on: bool,
+    ) -> Vec<(u64, u64, Option<Box<crate::frame_interp::Captured>>)> {
+        let core = spawn(rom.to_vec()).unwrap();
+        core.cmd_tx.send(CoreCommand::SetInterpolation(on)).unwrap();
+        core.cmd_tx.send(CoreCommand::Resume).unwrap();
+        let mut frames = Vec::new();
+        while frames.len() < 90 {
+            let Some(m) = next_frame(&core, Duration::from_secs(5)) else {
+                break;
+            };
+            frames.push((m.frame_count, fnv64(&m.rgba), m.interp));
+        }
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        frames
+    }
+
+    /// The mode-invariance claim of ticket W36-07/W37-06, shared by both consoles: the frames the thread
+    /// sends are byte-identical with interpolation on and off (the delay is the UI's), the layers ride on
+    /// the frames only when it is on.
+    fn assert_interpolation_adds_only_layers(rom: &[u8]) {
+        let (off, on) = (interpolation_run(rom, false), interpolation_run(rom, true));
         assert!(
             off.len() >= 60 && on.len() >= 60,
             "frames arrived: {} / {}",
@@ -4730,5 +4757,39 @@ mod tests {
                 f.0
             );
         }
+    }
+
+    /// Ticket W36-07, mode-invariant at the core thread, NES.
+    #[test]
+    fn interpolation_changes_no_frame_the_core_sends_and_only_adds_layers() {
+        let Some(rom) = rf_scroller_rom() else {
+            eprintln!("SKIP: RF-Scroller fixture not built");
+            return;
+        };
+        assert_interpolation_adds_only_layers(&rom);
+        // And the layers are the NES's.
+        let on = interpolation_run(&rom, true);
+        assert!(on
+            .iter()
+            .filter_map(|f| f.2.as_deref())
+            .all(|c| matches!(c, crate::frame_interp::Captured::Nes(_))));
+    }
+
+    /// Ticket W37-06, mode-invariant at the core thread, SNES: capturing every dot's layer and every
+    /// row's registers changes no frame the core sends, and the layers are the SNES's.
+    #[test]
+    fn snes_interpolation_changes_no_frame_the_core_sends_and_only_adds_layers() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc");
+        let Ok(rom) = std::fs::read(fixture) else {
+            eprintln!("SKIP: RF-Scroller-S fixture not built");
+            return;
+        };
+        assert_interpolation_adds_only_layers(&rom);
+        let on = interpolation_run(&rom, true);
+        assert!(on
+            .iter()
+            .filter_map(|f| f.2.as_deref())
+            .all(|c| matches!(c, crate::frame_interp::Captured::Snes(_))));
     }
 }
