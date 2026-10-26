@@ -430,6 +430,30 @@ core thread snapshots the machine and a worker runs the pass on a private copy,
 so the live game is not paused or touched. The panel lists proposals (rule and,
 if opted in, model) with a pick per function and an Export button.
 
+### W36-10: the SMW recipe on ROM hacks (built 2026-10-26)
+
+Method and numbers: `docs/research/W36-10-rom-hacks.md`.
+
+**Entry mode on rows.** A recipe function row may carry `mode` (the atlas
+function's `entry_mode`, 0..=4). The shape hash ignores 65816 widths, so SNES
+rows match on (shape hash, mode); a row without a mode matches any mode, which
+is every 6502 row. The understand pass writes the mode whenever the atlas has
+more than one. **Twin rows:** two rows of one recipe that share a shape (and
+could share a mode), such as the `nmi` and `irq` stubs, match only the function
+at their own address hint, so a hack that changed one stub leaves its row
+unmatched (hooks inactive) instead of handing the name to the other.
+
+**Recipe.** `profiles/snes/super-mario-world/recipe.toml`: 29 rule-named
+function rows from the Yoshi's Island 1 run plus 11 RAM rows from the profile's
+observed facts. `crates/retroforge/tests/w36_10_smw_recipe.rs` regenerates it
+and compares.
+
+**Hacks.** `w36_10_rom_hacks` (`--ignored`, about 19 minutes) applies each
+`.bps` in memory, drives it into a level, builds its atlas, matches the recipe,
+runs lockstep and a read-only `nmi` counter: all five hacks reach `$7E0100 ==
+$14`, zero divergence on all five, hook counts equal independent NMI counts
+where the row matched, and the rows lost to a hack are reported unmatched.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player
