@@ -4856,3 +4856,13 @@ stories, 10 decisions).
   a core timing finding carried to W37-00b. Coverage still grew: SMB 25.3% to
   27.3% of PRG (412 functions), SMW 4.9% to 6.1% (813). The acceptance line
   "replays to the end" is not met. Workspace: **3621 passing**.
+
+- **W37-06 — Smoother motion, generic** (2026-10-26). Layers carry RGB so a
+  cycling palette entry (SMB's question blocks) interpolates in frame N's
+  colours; widescreen interpolates (margins and live-enemy strips move with the
+  scroll); a SNES path captures per-dot layer/priority and per-row registers
+  presentation-only and re-stacks layers by mode priority, HUD layers fixed.
+  SMB 1-1: 98.9% of pairs interpolated (steady 100%, was 91.6%); SMB at 32:9:
+  100%; SMW Yoshi's Island 1 steady play 100% (fades, mosaic, mode 7, windows,
+  mid-line writes are refused and repeat the frame). Cost 0.24-1.0 ms per
+  intermediate. Workspace: **3644 passing**.
