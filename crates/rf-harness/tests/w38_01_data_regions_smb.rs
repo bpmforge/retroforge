@@ -290,11 +290,7 @@ fn smb_level_pointer_table_and_area_streams_are_found_without_hints() {
         let text = std::fs::read_to_string(&path).expect("recipe");
         // Keep the rows worth a recipe: confirmed ones and the finder's
         // better candidates (the rest are in the research note's counts).
-        let keep: Vec<_> = rows
-            .iter()
-            .filter(|r| r.grade == rf_rebuild::Grade::Confirmed || r.confidence.unwrap_or(0) >= 60)
-            .cloned()
-            .collect();
+        let keep = rf_rebuild::dataregion::select_rows(&rows, 150);
         let block = rf_profiles::recipe::region_rows_block(&keep);
         std::fs::write(
             &path,

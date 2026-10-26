@@ -1117,25 +1117,51 @@ fn region(kind: RegionKind, start: u32, size: u32, stride: u32) -> Region {
     }
 }
 
-/// Rows of the same kind, extent and part from different sites are one
-/// region read by several sites.
+/// Fold `r` into `o` (same kind and part): one region read by several sites.
+fn absorb(o: &mut Region, r: Region) {
+    let end = (o.start + o.size).max(r.start + r.size);
+    o.size = end - o.start;
+    o.stride = match (o.stride, r.stride) {
+        (a, b) if a == b => a,
+        (a, b) => gcd(a, b).max(1),
+    };
+    o.reads += r.reads;
+    o.entries += r.entries;
+    o.sites.extend(r.sites);
+    o.sites.sort_unstable();
+    o.sites.dedup();
+    o.confidence = o.confidence.max(r.confidence);
+    o.index_ram = o.index_ram.or(r.index_ram);
+    o.pointer_ram = o.pointer_ram.or(r.pointer_ram);
+    o.via = o.via.take().or(r.via);
+}
+
+/// Rows of the same kind, extent and part from different sites are one region
+/// read by several sites; graphics and element-table rows that touch or
+/// overlap are one region too (a table read field by field at base, base+1,
+/// base+2; an unrolled copy loop reading ahead of itself). Streams stay apart:
+/// two streams that merely touch are two streams.
 fn merge_same_region(rows: Vec<Region>) -> Vec<Region> {
-    let mut out: Vec<Region> = Vec::new();
+    let mut exact: BTreeMap<(RegionKind, Option<Part>, u32, u32), Region> = BTreeMap::new();
     for r in rows {
-        match out.iter_mut().find(|o| {
-            o.kind == r.kind && o.start == r.start && o.size == r.size && o.part == r.part
-        }) {
-            Some(o) => {
-                o.reads += r.reads;
-                o.sites.extend(r.sites);
-                o.sites.sort_unstable();
-                o.sites.dedup();
-                o.confidence = o.confidence.max(r.confidence);
-                o.index_ram = o.index_ram.or(r.index_ram);
-                o.pointer_ram = o.pointer_ram.or(r.pointer_ram);
-                o.via = o.via.take().or(r.via);
+        match exact.entry((r.kind, r.part, r.start, r.size)) {
+            std::collections::btree_map::Entry::Occupied(mut e) => absorb(e.get_mut(), r),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(r);
             }
-            None => out.push(r),
+        }
+    }
+    let mut out: Vec<Region> = Vec::new();
+    for (_, r) in exact {
+        let joins = |o: &Region| {
+            matches!(r.kind, RegionKind::Graphics | RegionKind::ElementTable)
+                && o.kind == r.kind
+                && o.part == r.part
+                && r.start <= o.start + o.size
+        };
+        match out.last_mut() {
+            Some(o) if joins(o) => absorb(o, r),
+            _ => out.push(r),
         }
     }
     out
@@ -1179,7 +1205,9 @@ fn pointer_regions(facts: &DataFacts, key: &LinkKey, link: &LinkStat) -> Vec<Reg
         } else {
             0.0
         };
-    let ptr_bytes = link.ptr_bytes;
+    // The bytes the finder saw built from the table: a bank byte that never
+    // came from a table (a constant) is not counted.
+    let ptr_bytes = if key.bank.is_some() { 3 } else { 2 };
     let evidence = format!(
         "{} pointers built from table reads, {} entries, high byte {delta:+} from low",
         link.count, entries
@@ -1188,6 +1216,14 @@ fn pointer_regions(facts: &DataFacts, key: &LinkKey, link: &LinkStat) -> Vec<Reg
         lo_set.iter().next().unwrap_or(&0),
         lo_set.iter().last().unwrap_or(&0),
     );
+    // Index 0 is the table's first entry: when the reading instruction
+    // names one base, the table starts there even if the game was only seen
+    // reading entries further in.
+    let lead = lo_site
+        .filter(|s| s.segments.len() == 1)
+        .and_then(|s| s.segments.keys().next().copied())
+        .filter(|&b| b <= lo_min)
+        .map_or(0, |b| lo_min - b);
     let sites: Vec<u32> = [Some(key.lo), Some(key.hi), key.bank]
         .into_iter()
         .flatten()
@@ -1213,7 +1249,9 @@ fn pointer_regions(facts: &DataFacts, key: &LinkKey, link: &LinkStat) -> Vec<Reg
             width
         };
         let mut r = base;
-        r.size = lo_max - lo_min + width;
+        r.start = lo_min - lead;
+        r.name = region(RegionKind::PointerTable, r.start, 0, 1).name;
+        r.size = lo_max - r.start + width;
         r.stride = stride;
         r.sites = sites;
         return vec![r];
@@ -1227,6 +1265,7 @@ fn pointer_regions(facts: &DataFacts, key: &LinkKey, link: &LinkStat) -> Vec<Reg
             shifted.iter().next().unwrap_or(&0),
             shifted.iter().last().unwrap_or(&0),
         );
+        let a = a.saturating_sub(lead);
         let mut r = base.clone();
         r.name = format!(
             "{}_{}",
@@ -1327,7 +1366,7 @@ pub struct LevelLink {
 
 impl LevelLink {
     /// The entry index follows the level: nearly every run used an entry of
-    /// its own, at least half as many different entries as runs were seen
+    /// its own, three quarters as many different entries as runs were seen
     /// (levels may share an area; a handful of entries over many levels is a
     /// coarse class, not the level), and each led to a stream read in that
     /// run.
@@ -1336,7 +1375,7 @@ impl LevelLink {
         self.runs >= 2
             && u64::from(self.own_entry) * 10 >= u64::from(self.runs) * 9
             && self.distinct_entries >= 2
-            && u64::from(self.distinct_entries) * 2 >= u64::from(self.runs)
+            && u64::from(self.distinct_entries) * 4 >= u64::from(self.runs) * 3
             && self.stream_found >= self.own_entry
     }
 }
@@ -1416,19 +1455,62 @@ pub fn associate(runs: &[(u32, &DataFacts)]) -> Vec<LevelLink> {
 
 static EMPTY_LINK: std::sync::LazyLock<LinkStat> = std::sync::LazyLock::new(LinkStat::default);
 
-/// The stream a run read from `target`: the extent of everything the run's
-/// indirect sites read from a base within [`TARGET_SLACK`] above it.
+/// The stream a run read from `target`: the extent of what the run's indirect
+/// sites read from a base within [`TARGET_SLACK`] above it, grown while the
+/// code moved its pointer to a base inside what was already read (a parser
+/// steps its pointer past each object it consumes).
 fn stream_from(f: &DataFacts, target: u32) -> Option<(u32, u32)> {
-    let segs: Vec<Segment> = f
+    let segs: Vec<(u32, Segment)> = f
         .sites
         .values()
         .filter(|s| s.indirect)
-        .flat_map(|s| s.segments.range(target..=target + TARGET_SLACK))
-        .map(|(_, seg)| *seg)
+        .flat_map(|s| s.segments.iter().map(|(&b, g)| (b, *g)))
         .collect();
-    let lo = segs.iter().map(|s| s.lo).min()?;
-    let hi = segs.iter().map(|s| s.hi).max()?;
+    let first: Vec<&(u32, Segment)> = segs
+        .iter()
+        .filter(|(b, _)| (target..=target + TARGET_SLACK).contains(b))
+        .collect();
+    let lo = first.iter().map(|(_, g)| g.lo).min()?;
+    let mut hi = first.iter().map(|(_, g)| g.hi).max()?;
+    // `hi` strictly grows each round and never passes the largest `hi` of any
+    // segment, so this ends.
+    loop {
+        let grown = segs
+            .iter()
+            .filter(|(b, _)| (lo..=hi).contains(b))
+            .map(|(_, g)| g.hi)
+            .max()
+            .unwrap_or(hi);
+        if grown <= hi {
+            break;
+        }
+        hi = grown;
+    }
     Some((lo, hi - lo))
+}
+
+/// The rows worth a recipe file: every confirmed row and pointer table, and the
+/// `max_candidates` most confident (then largest) other rows of confidence 60
+/// or more. The rest of what the finder saw stays in the run's own report.
+#[must_use]
+pub fn select_rows(rows: &[DataRegion], max_candidates: usize) -> Vec<DataRegion> {
+    let must = |r: &DataRegion| r.grade == Grade::Confirmed || r.kind == RegionKind::PointerTable;
+    let mut rest: Vec<&DataRegion> = rows
+        .iter()
+        .filter(|r| !must(r) && r.confidence.unwrap_or(0) >= 60)
+        .collect();
+    rest.sort_by_key(|r| {
+        (
+            std::cmp::Reverse(r.confidence),
+            std::cmp::Reverse(r.size),
+            r.rom,
+        )
+    });
+    rest.truncate(max_candidates);
+    let mut out: Vec<DataRegion> = rows.iter().filter(|r| must(r)).cloned().collect();
+    out.extend(rest.into_iter().cloned());
+    out.sort_by(|a, b| (a.rom, &a.name).cmp(&(b.rom, &b.name)));
+    out
 }
 
 /// Recipe rows for `regions`, graded by what the level-switch experiment
@@ -1452,7 +1534,7 @@ pub fn grade_rows(regions: &[Region], levels: &[LevelLink], note: &str) -> Vec<D
             let stream = tracking.iter().find(|l| {
                 r.kind == RegionKind::Stream
                     && l.per_run.iter().filter_map(|p| p.stream).any(|(start, size)| {
-                        start < r.start + r.size && r.start < start + size
+                        r.start + TARGET_SLACK >= start && r.start + r.size <= start + size + TARGET_SLACK
                     })
             });
             match table.or(stream) {
@@ -1778,5 +1860,67 @@ mod tests {
         let s: BTreeSet<u32> = [0, 3, 9, 12].into_iter().collect();
         assert_eq!(stride_of(&s), 3);
         assert_eq!(stride_of(&BTreeSet::from([4])), 0);
+    }
+    #[test]
+    fn graphics_rows_that_touch_are_one_region_and_streams_stay_apart() {
+        let mut r = nes_reader();
+        // Three unrolled copy sites, each reading 8 bytes, back to back.
+        for (site, base) in [(0x9000u32, 0x8300u16), (0x9010, 0x8308), (0x9020, 0x8310)] {
+            for x in 0u16..8 {
+                let mut a = lda_abs_x(site, base, x, 0x20 + x as u8);
+                a.push(wr(0x2007, 0x20 + x as u8));
+                step(&mut r, &a);
+            }
+        }
+        // Two streams that merely touch.
+        for (zp, ptr) in [(0x10u8, 0x8800u16), (0x12, 0x8810)] {
+            for y in 0u16..16 {
+                step(&mut r, &lda_ind_y(0x9100 + u32::from(zp), zp, ptr, y, 0x55));
+            }
+        }
+        let regions = infer(&r.take_facts());
+        let gfx: Vec<_> = regions
+            .iter()
+            .filter(|r| r.kind == RegionKind::Graphics)
+            .collect();
+        assert_eq!(gfx.len(), 1, "{gfx:?}");
+        assert_eq!(
+            (gfx[0].start, gfx[0].size, gfx[0].sites.len()),
+            (0x300, 24, 3)
+        );
+        let streams: Vec<_> = regions
+            .iter()
+            .filter(|r| r.kind == RegionKind::Stream)
+            .collect();
+        assert_eq!(streams.len(), 2);
+    }
+    #[test]
+    fn select_rows_keeps_confirmed_and_tables_and_caps_the_rest() {
+        let row = |name: &str, kind, grade, conf, size| DataRegion {
+            name: name.to_string(),
+            kind,
+            rom: u32::from(name.as_bytes()[0]),
+            size,
+            stride: 1,
+            part: None,
+            pointer_bytes: None,
+            index_ram: None,
+            pointer_ram: None,
+            via: None,
+            confidence: Some(conf),
+            source: "finder: t".to_string(),
+            grade,
+        };
+        use Grade::{Candidate, Confirmed};
+        use RegionKind::{ElementTable, PointerTable, Stream};
+        let rows = [
+            row("a", PointerTable, Candidate, 10, 4),
+            row("b", Stream, Confirmed, 10, 4),
+            row("c", ElementTable, Candidate, 90, 4),
+            row("d", ElementTable, Candidate, 80, 4),
+            row("e", ElementTable, Candidate, 59, 4),
+        ];
+        let kept: Vec<_> = select_rows(&rows, 1).into_iter().map(|r| r.name).collect();
+        assert_eq!(kept, ["a", "b", "c"]);
     }
 }
