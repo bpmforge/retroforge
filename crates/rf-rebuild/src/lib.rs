@@ -19,6 +19,7 @@ pub mod naming;
 pub mod profile;
 pub mod recipe;
 pub mod superset;
+pub mod verify;
 pub mod windows;
 
 pub use atlas::{
@@ -40,4 +41,7 @@ pub use recipe::{
     RecipeFunction, ResolvedPatch, TileClass, TileSemantics, UnmatchedReason,
 };
 pub use superset::{superset_decode, Superset};
+pub use verify::{
+    Verification, VerifyRecord, PROVEN_FRAMES, PROVEN_RUNS, VERIFY_ASSET, VERIFY_SETTINGS,
+};
 pub use windows::WindowIndex;

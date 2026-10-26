@@ -45,8 +45,9 @@ use rf_cache::{Cache, CacheKey};
 use rf_core_api::{CoverageLog, RebuildStats};
 use rf_nes::rebuild::Atlas;
 use rf_rebuild::{
-    decode_coverage, encode_coverage, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS, COVERAGE_ASSET,
-    COVERAGE_SETTINGS,
+    decode_coverage, encode_coverage, Provenance, Verification, VerifyRecord, CACHE_ASSET,
+    CACHE_PRODUCER, CACHE_SETTINGS, COVERAGE_ASSET, COVERAGE_SETTINGS, VERIFY_ASSET,
+    VERIFY_SETTINGS,
 };
 
 use crate::stepper::EmuStepper;
@@ -70,9 +71,60 @@ pub enum AtlasSource {
     Coverage,
 }
 
+/// What the installed atlas holds, worked out where it is built (never on the
+/// core thread): the panel's coverage and size lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AtlasFacts {
+    pub functions: u32,
+    /// Instructions the atlas holds, observed and inferred.
+    pub instructions: u32,
+    /// Bytes of instructions the recording had executed.
+    pub observed_bytes: u64,
+    /// Size of the ROM image's code space the atlas indexes.
+    pub prg_len: u64,
+    /// The atlas as stored in the cache.
+    pub stored_bytes: u64,
+}
+
+impl AtlasFacts {
+    /// Share of the ROM's code space the recording ran, `0.0..=1.0`.
+    #[must_use]
+    pub fn coverage(&self) -> f64 {
+        match self.prg_len {
+            0 => 0.0,
+            n => (self.observed_bytes as f64 / n as f64).min(1.0),
+        }
+    }
+}
+
+/// The facts of `atlas`. Walks every instruction and serialises once: call it
+/// on the build thread.
+#[must_use]
+pub fn atlas_facts(atlas: &Atlas) -> AtlasFacts {
+    let observed_bytes = atlas
+        .insns()
+        .filter(|i| i.prov == Provenance::Observed)
+        .map(|i| u64::from(i.len))
+        .sum();
+    AtlasFacts {
+        functions: u32::try_from(atlas.functions.len()).unwrap_or(u32::MAX),
+        instructions: atlas
+            .stats
+            .observed_insns
+            .saturating_add(atlas.stats.inferred_insns),
+        observed_bytes,
+        prg_len: u64::from(atlas.prg_len),
+        stored_bytes: atlas.to_bytes().len() as u64,
+    }
+}
+
 /// What the Rebuild panel shows while on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RebuildInfo {
+    /// What the installed atlas holds (coverage, size).
+    pub facts: AtlasFacts,
+    /// What the lockstep tools have recorded for this ROM (per-ROM cache).
+    pub verification: Verification,
     /// The executor's counters since the current atlas was installed, so the
     /// fallback rate is the current atlas's, not an average over the session.
     pub stats: RebuildStats,
@@ -111,6 +163,9 @@ pub struct HookSetup {
 /// A finished background build.
 pub struct BuildOutcome {
     pub atlas: Box<Atlas>,
+    pub facts: AtlasFacts,
+    /// The ROM's verification record as the job found it.
+    pub verification: Verification,
     pub source: AtlasSource,
     /// Wall time of the whole job (cache reads, build, cache writes).
     pub elapsed: Duration,
@@ -148,6 +203,32 @@ fn key(rom_sha256: &str) -> CacheKey {
         producer: CACHE_PRODUCER.to_string(),
         settings_hash: CACHE_SETTINGS.to_string(),
     }
+}
+
+fn verify_key(rom_sha256: &str) -> CacheKey {
+    CacheKey {
+        rom_sha256: rom_sha256.to_string(),
+        asset_hash: VERIFY_ASSET.to_string(),
+        producer: CACHE_PRODUCER.to_string(),
+        settings_hash: VERIFY_SETTINGS.to_string(),
+    }
+}
+
+/// What the lockstep tools recorded for this ROM; "not checked" on a miss, a
+/// damaged entry or no cache.
+fn load_verification(cache: Option<&mut Cache>, sha: &str) -> Verification {
+    let record = cache
+        .and_then(|c| c.get(&verify_key(sha)).ok().flatten())
+        .and_then(|b| VerifyRecord::decode(&b));
+    Verification::of(record.as_ref())
+}
+
+/// The verification state stored for the ROM with this hash (a test or tool
+/// asking the way the first Rebuild job does). Blocking file I/O.
+#[must_use]
+pub fn stored_verification(rom_sha256: &str) -> Verification {
+    let mut cache = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES).ok();
+    load_verification(cache.as_mut(), rom_sha256)
 }
 
 fn coverage_key(rom_sha256: &str) -> CacheKey {
@@ -250,8 +331,11 @@ fn first_atlas_in(
             log = Some(u.clone());
         }
     }
+    let verification = load_verification(cache.as_mut(), sha);
     let ready = |atlas: Atlas, source, log: Option<CoverageLog>| {
         RebuildBuild::Ready(Box::new(BuildOutcome {
+            facts: atlas_facts(&atlas),
+            verification,
             atlas: Box::new(atlas),
             source,
             elapsed: t.elapsed(),
@@ -304,6 +388,8 @@ fn grow_atlas_in(
             let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
             store(cache.as_mut(), sha, &atlas, Some(log), keep_observed);
             RebuildBuild::Ready(Box::new(BuildOutcome {
+                facts: atlas_facts(&atlas),
+                verification: load_verification(cache.as_mut(), sha),
                 atlas: Box::new(atlas),
                 source: AtlasSource::Coverage,
                 elapsed: t.elapsed(),
@@ -365,6 +451,8 @@ struct Session {
     first_installed: bool,
     swaps: u32,
     installed_observed: u64,
+    facts: AtlasFacts,
+    verification: Verification,
     source: AtlasSource,
     last_build: Duration,
     last_growth: Growth,
@@ -427,6 +515,8 @@ impl RebuildCtl {
             first_installed: false,
             swaps: 0,
             installed_observed: 0,
+            facts: AtlasFacts::default(),
+            verification: Verification::NotChecked,
             source: AtlasSource::Vectors,
             last_build: Duration::ZERO,
             last_growth: Growth::default(),
@@ -517,6 +607,9 @@ impl RebuildCtl {
         };
         let insns = observed_of(&out.atlas);
         let first = !s.first_installed;
+        // The record may have grown since (a lockstep run finished): always
+        // take the newest reading, installed or not.
+        s.verification = out.verification;
         // A grown atlas that rests on less recorded code than the one running
         // (a thin session over a richer cache) is not an improvement.
         if !first && insns < s.installed_observed {
@@ -532,6 +625,7 @@ impl RebuildCtl {
                     s.swaps += 1;
                 }
                 s.installed_observed = insns;
+                s.facts = out.facts;
                 s.source = out.source;
                 s.last_build = out.elapsed;
                 // Grow checks start from the first install.
@@ -612,6 +706,8 @@ impl RebuildCtl {
 
 fn info(stepper: &EmuStepper, s: &Session, rebuilding: bool) -> RebuildInfo {
     RebuildInfo {
+        facts: s.facts,
+        verification: s.verification,
         stats: stepper.rebuild_stats().unwrap_or_default(),
         swaps: s.swaps,
         rebuilding,
@@ -682,6 +778,49 @@ mod tests {
     fn the_cache_key_is_the_harness_key() {
         let sha = "ab".repeat(32);
         assert_eq!(key(&sha), rf_harness::atlas::atlas_cache_key(&sha));
+    }
+
+    #[test]
+    fn the_verification_key_is_the_harness_key() {
+        let sha = "ab".repeat(32);
+        assert_eq!(verify_key(&sha), rf_harness::atlas::verify_cache_key(&sha));
+    }
+
+    /// Ticket W37-03: the first job reports what the lockstep tools stored
+    /// (written through the harness's own writer), and the atlas's facts.
+    #[test]
+    fn the_first_job_reads_the_verification_record_and_the_atlas_facts() {
+        let root = dir("verify");
+        let (ines, sha) = (tiny_ines(), "9a".repeat(32));
+        let first = ready(first_atlas_in(&root, &ines, &sha, Some(&nes_log())));
+        assert_eq!(first.verification, Verification::NotChecked);
+        assert_eq!(first.facts.functions as usize, first.atlas.functions.len());
+        assert!(first.facts.observed_bytes >= 1);
+        assert_eq!(first.facts.prg_len, u64::from(first.atlas.prg_len));
+        assert!(first.facts.stored_bytes > 0);
+        assert!(first.facts.coverage() > 0.0 && first.facts.coverage() <= 1.0);
+        {
+            let mut cache = Cache::open(&root, ATLAS_CACHE_CAP_BYTES).expect("open");
+            rf_harness::atlas::record_lockstep_run(&mut cache, &sha, 600, 0).expect("record");
+        }
+        let again = ready(first_atlas_in(&root, &ines, &sha, None));
+        assert_eq!(again.verification, Verification::Checked { frames: 600 });
+        {
+            let mut cache = Cache::open(&root, ATLAS_CACHE_CAP_BYTES).expect("open");
+            rf_harness::atlas::record_lockstep_run(&mut cache, &sha, 10, 1).expect("record");
+        }
+        let grown = ready(grow_atlas_in(&root, &ines, &sha, &nes_log(), 0));
+        assert_eq!(
+            grown.verification,
+            Verification::Diverged {
+                frames: 610,
+                divergences: 1
+            }
+        );
+        // Another ROM was never checked.
+        let other = ready(first_atlas_in(&root, &ines, &"9b".repeat(32), None));
+        assert_eq!(other.verification, Verification::NotChecked);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Ticket W37-01: no cache, no recording: the first atlas is the vectors
