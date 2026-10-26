@@ -351,9 +351,9 @@ fn snes_rules(p: &FunctionProfile, out: &mut Vec<Candidate>) {
             "vram_upload",
             85,
             format!(
-                "{vram_data} direct write(s) to VRAM data{}",
+                "{vram_data} write(s) to VRAM data $2118/$2119{}",
                 if p.flags & flag::DMA_TO_VRAM != 0 {
-                    " and a DMA channel pointed at VRAM"
+                    ", with a DMA channel pointed at VRAM"
                 } else {
                     ""
                 }
@@ -366,9 +366,9 @@ fn snes_rules(p: &FunctionProfile, out: &mut Vec<Candidate>) {
             "palette_upload",
             85,
             format!(
-                "{cg} write(s) to CGRAM data{}",
+                "{cg} write(s) to CGRAM data $2122{}",
                 if p.flags & flag::DMA_TO_CGRAM != 0 {
-                    " and a DMA channel pointed at CGRAM"
+                    ", with a DMA channel pointed at CGRAM"
                 } else {
                     ""
                 }
@@ -489,29 +489,73 @@ pub fn propose_names(u: &Understanding, atlas: &Atlas) -> Vec<Proposal> {
         chosen.push((i, cs.swap_remove(0), also));
     }
 
-    let mut uses: BTreeMap<&'static str, u32> = BTreeMap::new();
-    for (_, c, _) in &chosen {
-        *uses.entry(c.base).or_default() += 1;
+    // Uniqueness. A name that only one function earned stays bare. Where
+    // several earned it, the interrupt and spine names go to the one that ran
+    // most (the same code entered at another decode width is a different
+    // function and keeps the suffix); every other duplicate takes its entry
+    // address, then its decode mode, then its index, until all differ.
+    let mut uses: BTreeMap<&'static str, Vec<usize>> = BTreeMap::new();
+    for (k, (_, c, _)) in chosen.iter().enumerate() {
+        uses.entry(c.base).or_default().push(k);
+    }
+    let singleton = |base: &str| matches!(base, "reset" | "nmi" | "irq" | "frame_main_loop");
+    let mut bare: Vec<bool> = vec![false; chosen.len()];
+    for (base, ks) in &uses {
+        if ks.len() == 1 {
+            bare[ks[0]] = true;
+        } else if singleton(base) {
+            let best = ks.iter().copied().max_by_key(|&k| {
+                let i = chosen[k].0;
+                (
+                    chosen[k].1.confidence,
+                    u.functions[i].entries.max(u.functions[i].calls),
+                    std::cmp::Reverse(i),
+                )
+            });
+            if let Some(k) = best {
+                bare[k] = true;
+            }
+        }
+    }
+    let width = if u.platform == Platform::Snes { 6 } else { 4 };
+    let mut names: Vec<String> = chosen
+        .iter()
+        .enumerate()
+        .map(|(k, (i, c, _))| {
+            if bare[k] {
+                c.base.to_string()
+            } else {
+                format!("{}_{:0width$x}", c.base, atlas.functions[*i].entry_cpu)
+            }
+        })
+        .collect();
+    for pass in 0..2 {
+        let mut count: BTreeMap<String, u32> = BTreeMap::new();
+        for n in &names {
+            *count.entry(n.clone()).or_default() += 1;
+        }
+        for (k, n) in names.iter_mut().enumerate() {
+            if count[n.as_str()] > 1 && !bare[k] {
+                let f = &atlas.functions[chosen[k].0];
+                if pass == 0 {
+                    *n = format!("{n}_m{}", f.entry_mode);
+                } else {
+                    *n = format!("{n}_{}", chosen[k].0);
+                }
+            }
+        }
     }
     chosen
         .into_iter()
-        .map(|(i, c, also)| {
-            let f = &atlas.functions[i];
-            let name = if uses[c.base] == 1 {
-                c.base.to_string()
-            } else {
-                let width = if u.platform == Platform::Snes { 6 } else { 4 };
-                format!("{}_{:0width$x}", c.base, f.entry_cpu)
-            };
-            Proposal {
-                function: i as u32,
-                name,
-                base: c.base.to_string(),
-                source: format!("rule:{}", c.base),
-                confidence: c.confidence,
-                evidence: vec![c.evidence],
-                also,
-            }
+        .zip(names)
+        .map(|((i, c, also), name)| Proposal {
+            function: i as u32,
+            name,
+            base: c.base.to_string(),
+            source: format!("rule:{}", c.base),
+            confidence: c.confidence,
+            evidence: vec![c.evidence],
+            also,
         })
         .collect()
 }
@@ -571,22 +615,31 @@ pub fn is_machine_source(source: &str) -> bool {
 ///   skipped: names people gave win over proposals. A previous machine row
 ///   for the same function is replaced by the caller (see
 ///   [`merge_name_rows`]).
+/// - Each row resolves to exactly one function and no two rows to the same
+///   one; functions a recipe cannot tell apart share the best name.
 /// - A name the recipe already uses gets the entry address as a suffix.
 /// - Every row carries the exact hash and the address hint, so a function
 ///   that shares its shape with another still resolves to itself.
 #[must_use]
 pub fn name_rows(atlas: &Atlas, accepted: &[Proposal], existing: &Recipe) -> Vec<RecipeFunction> {
-    let report = match_recipe(atlas, &without_machine_rows(existing));
-    let described: Vec<u32> = report.matched.iter().map(|m| m.function).collect();
+    let report = match_recipe(atlas, &human_only(existing));
+    let mut claimed: Vec<u32> = report.matched.iter().map(|m| m.function).collect();
     let mut taken: Vec<String> = existing.functions.iter().map(|f| f.name.clone()).collect();
+    // Best proposals first, and a bare name before its suffixed siblings, so
+    // when several functions are indistinguishable to a recipe (the same bytes
+    // entered at two 65816 widths) the row carries the name that fits best.
+    let mut order: Vec<&Proposal> = accepted.iter().collect();
+    order.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then((a.name != a.base).cmp(&(b.name != b.base)))
+            .then(a.function.cmp(&b.function))
+    });
     let mut rows = Vec::new();
-    for p in accepted {
+    for p in order {
         let Some(f) = atlas.functions.get(p.function as usize) else {
             continue;
         };
-        if described.contains(&p.function) {
-            continue;
-        }
         let mut name = p.name.clone();
         if taken.contains(&name) {
             name = format!("{}_{:04x}", p.name, f.entry_cpu);
@@ -594,9 +647,8 @@ pub fn name_rows(atlas: &Atlas, accepted: &[Proposal], existing: &Recipe) -> Vec
         if taken.contains(&name) {
             continue;
         }
-        taken.push(name.clone());
-        rows.push(RecipeFunction {
-            name,
+        let row = RecipeFunction {
+            name: name.clone(),
             shape_hash: f.shape_hash,
             exact_hash: Some(f.byte_hash),
             address_hint: Some(f.entry_cpu),
@@ -606,12 +658,33 @@ pub fn name_rows(atlas: &Atlas, accepted: &[Proposal], existing: &Recipe) -> Vec
             },
             source: p.source.clone(),
             confidence: Some(p.confidence),
-        });
+        };
+        // A row is only as good as what it resolves to. Same-byte functions
+        // at one address resolve to a single one of them; claim that one.
+        let probe = Recipe {
+            functions: vec![row.clone()],
+            ..Recipe::default()
+        };
+        let Some(resolved) = match_recipe(atlas, &probe)
+            .matched
+            .first()
+            .map(|m| m.function)
+        else {
+            continue;
+        };
+        if claimed.contains(&resolved) {
+            continue;
+        }
+        claimed.push(resolved);
+        taken.push(name);
+        rows.push(row);
     }
     rows
 }
 
-fn without_machine_rows(r: &Recipe) -> Recipe {
+/// `r` without its machine-proposed rows: what people established.
+#[must_use]
+pub fn human_only(r: &Recipe) -> Recipe {
     Recipe {
         functions: r
             .functions

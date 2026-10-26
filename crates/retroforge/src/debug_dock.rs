@@ -1530,6 +1530,36 @@ pub struct CoveragePanelData {
     pub hooks: Vec<String>,
     /// Ticket W36-06: set by the panel's hook buttons, acted on by the app.
     pub hook_request: Option<HookRequest>,
+    /// Ticket W36-09: the Name functions action.
+    pub naming: NamingPanel,
+}
+
+/// Whether the opt-in AI naming pass could run, as the app tells the panel
+/// (ticket W36-09, D-026).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AiPanelState {
+    /// Not opted in: the panel offers rules only and says nothing of AI.
+    #[default]
+    Off,
+    /// Opted in but no key anywhere.
+    NoKey,
+    /// Opted in with a key; the model that would be asked.
+    Ready(String),
+}
+
+/// The Name functions section of the Coverage tab (ticket W36-09).
+#[derive(Debug, Default)]
+pub struct NamingPanel {
+    pub status: crate::ai_naming::NamingStatus,
+    /// Set by the panel (`true` = also ask the model), acted on by the app.
+    pub request: Option<bool>,
+    pub ai: AiPanelState,
+    /// Which proposal the player accepted, per atlas function.
+    pub picks: std::collections::BTreeMap<u32, crate::ai_naming::Pick>,
+    /// Set by the panel, acted on by the app.
+    pub export_request: bool,
+    /// What the last export did.
+    pub export_note: String,
 }
 
 /// What the Coverage tab's hook buttons ask the app for (ticket W36-06).
@@ -1609,6 +1639,139 @@ fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
         ui.label(line);
     }
     ui.separator();
+    naming_section(ui, data);
+    ui.separator();
+}
+
+/// The Name functions action (ticket W36-09): observe the game, name
+/// functions by hardware rules, optionally ask a model, export what the
+/// player accepts to the game's recipe.
+fn naming_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
+    use crate::ai_naming::{NamingStatus, Pick};
+    let rebuild_on = matches!(data.rebuild, crate::rebuild::RebuildStatus::On(_));
+    let n = &mut data.naming;
+    let running = matches!(n.status, NamingStatus::Running);
+    ui.horizontal(|ui| {
+        let can = rebuild_on && !running;
+        if ui
+            .add_enabled(can, egui::Button::new("Name functions"))
+            .on_hover_text(
+                "Runs a copy of the game for a few seconds under an observer and names \
+                 functions from what they do to the hardware. The running game is not touched.",
+            )
+            .clicked()
+        {
+            n.request = Some(false);
+        }
+        if let AiPanelState::Ready(model) = &n.ai {
+            if ui
+                .add_enabled(
+                    can,
+                    egui::Button::new(format!("Name functions + ask {model}")),
+                )
+                .on_hover_text(
+                    "Also sends behaviour facts (call counts, hardware registers touched, RAM \
+                     ranges and names, call-graph shape) to Anthropic for the functions the \
+                     rules could not name. Never game code.",
+                )
+                .clicked()
+            {
+                n.request = Some(true);
+            }
+        }
+        if !rebuild_on {
+            ui.label("turn Rebuild on first");
+        }
+    });
+    match &n.ai {
+        AiPanelState::Off => {}
+        AiPanelState::NoKey => {
+            ui.small("AI naming is on in Settings but there is no API key (Settings, or ANTHROPIC_API_KEY).");
+        }
+        AiPanelState::Ready(_) => {
+            ui.small(
+                "AI naming is on: only behaviour facts are sent to Anthropic, never game code.",
+            );
+        }
+    }
+    let outcome = match &n.status {
+        NamingStatus::Idle => return,
+        NamingStatus::Running => {
+            ui.label("Observing\u{2026}");
+            return;
+        }
+        NamingStatus::Failed(e) => {
+            ui.label(format!("Naming failed: {e}"));
+            return;
+        }
+        NamingStatus::Done(o) => std::sync::Arc::clone(o),
+    };
+    let by_rule = rf_rebuild::naming::count_by_rule(&outcome.rule);
+    ui.label(format!(
+        "{} of {} atlas functions ran in {} frames; {} named by rules, {} by the model",
+        outcome.observed,
+        outcome.atlas.functions.len(),
+        outcome.frames,
+        outcome.rule.len(),
+        outcome.ai.len()
+    ));
+    ui.small(format!("{by_rule:?}"));
+    ui.small(&outcome.ai_note);
+    let mut ids: Vec<u32> = outcome
+        .rule
+        .iter()
+        .chain(&outcome.ai)
+        .map(|p| p.function)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    egui::ScrollArea::vertical()
+        .id_salt("naming-rows")
+        .max_height(240.0)
+        .show(ui, |ui| {
+            for id in ids {
+                let rule = outcome.rule.iter().find(|p| p.function == id);
+                let ai = outcome.ai.iter().find(|p| p.function == id);
+                ui.horizontal(|ui| {
+                    let pick = n.picks.entry(id).or_default();
+                    ui.selectable_value(pick, Pick::None, "skip");
+                    if let Some(r) = rule {
+                        ui.selectable_value(
+                            pick,
+                            Pick::Rule,
+                            format!("{} ({})", r.name, r.confidence),
+                        )
+                        .on_hover_text(r.evidence.join("; "));
+                    }
+                    if let Some(a) = ai {
+                        ui.selectable_value(
+                            pick,
+                            Pick::Ai,
+                            format!("{} ({})", a.name, a.confidence),
+                        )
+                        .on_hover_text(a.evidence.join("; "));
+                    }
+                });
+            }
+        });
+    let chosen = crate::ai_naming::picked_ids(&n.picks).len();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                chosen > 0,
+                egui::Button::new(format!("Export {chosen} accepted name(s)")),
+            )
+            .on_hover_text(
+                "Writes them into this game's recipe as rows with their source and confidence.",
+            )
+            .clicked()
+        {
+            n.export_request = true;
+        }
+        if !n.export_note.is_empty() {
+            ui.label(&n.export_note);
+        }
+    });
 }
 
 fn coverage_body(ui: &mut egui::Ui, data: Option<&mut CoveragePanelData>) {

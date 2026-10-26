@@ -450,6 +450,44 @@ pub struct PlaySettings {
     pub rewind: bool,
 }
 
+/// Ticket W36-09, ruling D-026: the opt-in cloud pass that proposes names for
+/// the functions the rules could not name. **Off by default** and the only
+/// setting that can make the app contact an AI service; nothing else needs
+/// an account. What is sent is behaviour facts only (call counts, hardware
+/// registers touched, RAM ranges and the recipe's RAM names, call-graph
+/// shape): never ROM bytes, code or hashes (D-024).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiNamingSettings {
+    pub enabled: bool,
+    /// Model id for the Messages API; user-configurable.
+    pub model: String,
+    /// The API key, if the user keeps it here. The `ANTHROPIC_API_KEY`
+    /// environment variable is used when this is empty. Never logged (the
+    /// `Debug` impl hides it), never written into a recipe or a savestate.
+    pub api_key: Option<String>,
+}
+
+impl Default for AiNamingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: rf_ai::anthropic::DEFAULT_MODEL.to_string(),
+            api_key: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for AiNamingSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiNamingSettings")
+            .field("enabled", &self.enabled)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
 /// Ticket W22-06: one-time tips already shown, so they are never shown
 /// twice. Keyed by normalized ROM SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -487,6 +525,8 @@ pub struct AppSettings {
     pub video_by_game: BTreeMap<String, VideoSettings>,
     /// Ticket W22-06.
     pub tips: TipSettings,
+    /// Ticket W36-09 (D-026): the opt-in AI naming pass.
+    pub ai_naming: AiNamingSettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -509,6 +549,7 @@ struct KnownSettings {
     video_by_console: BTreeMap<String, VideoSettings>,
     video_by_game: BTreeMap<String, VideoSettings>,
     tips: TipSettings,
+    ai_naming: AiNamingSettings,
 }
 
 impl AppSettings {
@@ -531,6 +572,7 @@ impl AppSettings {
             video_by_console: self.video_by_console.clone(),
             video_by_game: self.video_by_game.clone(),
             tips: self.tips.clone(),
+            ai_naming: self.ai_naming.clone(),
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -564,6 +606,7 @@ impl AppSettings {
                     | "video_by_console"
                     | "video_by_game"
                     | "tips"
+                    | "ai_naming"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -606,6 +649,7 @@ impl AppSettings {
             video_by_console: section("video_by_console").try_into().unwrap_or_default(),
             video_by_game: section("video_by_game").try_into().unwrap_or_default(),
             tips: section("tips").try_into().unwrap_or_default(),
+            ai_naming: section("ai_naming").try_into().unwrap_or_default(),
             unknown,
         })
     }

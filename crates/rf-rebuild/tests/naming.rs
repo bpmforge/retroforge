@@ -313,3 +313,60 @@ fn export_carries_source_and_confidence_and_human_names_win() {
     assert_eq!(recipe.functions.len(), 3);
     assert!(recipe.functions[0].source.starts_with("observed"));
 }
+
+#[test]
+fn the_same_vector_entered_at_several_widths_names_the_busiest_bare() {
+    // Three functions with one entry address and different decode modes (the
+    // 65816 case): the busiest is `nmi`, the others keep unique suffixes.
+    let mk = |mode: u8, nmi: u64, tag: u64| {
+        let mut f = func(0x00_816A, entry::INTERRUPT, tag);
+        f.entry_mode = mode;
+        let mut p = busy();
+        p.nmi_entries = nmi;
+        p.entries = nmi;
+        (f, p)
+    };
+    let (f0, p0) = mk(0, 7, 0);
+    let (f1, p1) = mk(1, 4312, 1);
+    let (f2, p2) = mk(2, 44, 2);
+    let ps = propose_names(
+        &run(Platform::Snes, vec![p0, p1, p2]),
+        &atlas(vec![f0, f1, f2]),
+    );
+    assert_eq!(name_of(&ps, 1), Some("nmi"));
+    assert_eq!(name_of(&ps, 0), Some("nmi_00816a_m0"));
+    assert_eq!(name_of(&ps, 2), Some("nmi_00816a_m2"));
+}
+
+#[test]
+fn functions_a_recipe_cannot_tell_apart_share_one_row_with_the_best_name() {
+    // The same bytes at one address entered at two decode widths: identical
+    // hashes and hint, so a recipe row resolves to just one of them. The
+    // export keeps one row, named for the busiest.
+    let mk = |mode: u8, nmi: u64| {
+        let mut f = func(0x00_816A, entry::INTERRUPT, 7);
+        f.entry_mode = mode;
+        let mut p = busy();
+        p.nmi_entries = nmi;
+        p.entries = nmi;
+        (f, p)
+    };
+    let (f0, p0) = mk(0, 5);
+    let (f1, p1) = mk(1, 900);
+    let at = atlas(vec![f0, f1]);
+    let ps = propose_names(&run(Platform::Snes, vec![p0, p1]), &at);
+    assert_eq!(name_of(&ps, 1), Some("nmi"));
+    assert_eq!(ps.len(), 2);
+    let rows = name_rows(&at, &ps, &Recipe::default());
+    assert_eq!(rows.len(), 1, "one row for two indistinguishable functions");
+    assert_eq!(rows[0].name, "nmi");
+    let report = rf_rebuild::match_recipe(
+        &at,
+        &Recipe {
+            functions: rows,
+            ..Recipe::default()
+        },
+    );
+    assert_eq!(report.matched.len(), 1);
+    assert!(report.unmatched.is_empty());
+}

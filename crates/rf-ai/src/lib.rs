@@ -4,6 +4,8 @@
 //! must implement. Do not add public API here without a ticket in plan.json.
 
 pub mod animation;
+pub mod anthropic;
+pub mod naming;
 pub mod pack;
 pub mod pipeline;
 pub mod studio;

@@ -126,6 +126,22 @@ impl Vectors {
         }
     }
 
+    /// Add the addresses of `other` to the sets (a cartridge that banks its
+    /// vector table in has several; an address seen as any vector counts).
+    pub fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in [
+            (&mut self.reset, &other.reset),
+            (&mut self.nmi, &other.nmi),
+            (&mut self.irq, &other.irq),
+        ] {
+            for &a in theirs {
+                if !mine.contains(&a) {
+                    mine.push(a);
+                }
+            }
+        }
+    }
+
     fn is_nmi(&self, entry_cpu: u32) -> bool {
         self.nmi.contains(&(entry_cpu & 0xFFFF))
     }
@@ -413,6 +429,11 @@ impl<'a> Profiler<'a> {
         }
     }
 
+    /// Learn the vectors the machine has now (called before each frame).
+    pub fn note_vectors(&mut self, v: &Vectors) {
+        self.vectors.merge(v);
+    }
+
     /// Finish: the profiles and run totals.
     #[must_use]
     pub fn finish(mut self) -> Understanding {
@@ -529,6 +550,7 @@ pub fn observe<M: EmulatorCore + ?Sized>(
     let (mut profiler, mut sink) = Profiler::new(platform, atlas, vectors);
     for (i, input) in (0u32..).zip(inputs) {
         before_frame(core, i, &input);
+        profiler.note_vectors(&Vectors::read(platform, &*core));
         if !core.run_frame_observed(&input, &mut sink, &mut profiler) {
             return Err(ObserveError::Unsupported);
         }

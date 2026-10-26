@@ -36,6 +36,17 @@ onnx-coreml = ["onnx", "ort?/coreml"]
 # a workspace dependency in five crates and already in TECH_STACK.
 sha2 = "0.11"
 
+# Opt-in naming pass (ticket W36-09, D-026). rf-rebuild: the behaviour
+# profile the request facts are derived from (a host-layer crate may depend
+# on the core-layer one; the reverse is what validate-arch forbids). serde +
+# serde_json: the request/response bodies of the Messages API and the closed
+# payload types; already resolved in Cargo.lock (docs/TECH_STACK.md section
+# 2, "Annotation JSON" row, amended). No HTTP client here: the transport is a
+# trait the app shell implements over its own `ureq`.
+rf-rebuild = { path = "../rf-rebuild" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # ort: the ONNX Runtime binding, for the offline upscale pipeline only —
 # NEVER on the frame path (FR-AI-001 says "zero AI on the frame path", and
 # `Upscaler` is called from the pack builder, not the composer).
