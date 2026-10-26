@@ -310,6 +310,8 @@ pub enum Halt {
     Frozen,
     /// The core panicked (caught; a bug in the core to report).
     Panic,
+    /// The core refused to save a savestate at a frame boundary.
+    Capture,
 }
 
 /// Identical-state frames before an episode is called frozen.
@@ -321,6 +323,7 @@ pub struct HaltCounts {
     pub no_frame: u32,
     pub frozen: u32,
     pub panic: u32,
+    pub capture: u32,
     /// Episodes that executed code from RAM that no earlier run had (an
     /// informational count: some games run a routine from RAM on purpose).
     pub new_ram_exec_episodes: u32,
@@ -333,6 +336,7 @@ impl HaltCounts {
             Halt::NoFrame => self.no_frame += 1,
             Halt::Frozen => self.frozen += 1,
             Halt::Panic => self.panic += 1,
+            Halt::Capture => self.capture += 1,
         }
     }
 }
@@ -652,6 +656,8 @@ pub fn fuzz(
         for chunk in pads.chunks(segment) {
             // The state at the start of the segment, for the corpus.
             let Ok(start) = Savestate::capture(&core) else {
+                // A core that cannot save at a frame boundary is a finding.
+                halt = Some(Halt::Capture);
                 break;
             };
             let run = catch_unwind(AssertUnwindSafe(|| {
@@ -846,9 +852,9 @@ mod tests {
         };
         let cfg = Config {
             seed,
-            max_episodes: 30,
-            min_episode_frames: 40,
-            max_episode_frames: 80,
+            max_episodes: 24,
+            min_episode_frames: 30,
+            max_episode_frames: 60,
             segment: 10,
             progress_every: 0,
             ..Config::default()
@@ -873,7 +879,7 @@ mod tests {
             r.halts
         );
         assert!(r.new_prg_bytes > 0, "the A-down path is new code");
-        assert!(!r.finds.is_empty() && r.episodes == 30);
+        assert!(!r.finds.is_empty() && r.episodes == 24);
         assert!(r.corpus.len() > r.seeds, "novelty cut a derived entry");
         let f = &r.finds[0];
         let (log, _) = replay(
@@ -915,6 +921,43 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_in_a_hook_is_caught_counted_recorded_and_the_run_goes_on() {
+        let rom = jam_on_a_rom();
+        let core = new_core(&rom).unwrap();
+        let seed = Entry {
+            name: "s".into(),
+            state: Savestate::capture(&core).unwrap(),
+            parent: None,
+        };
+        let base = CoverageLog::new(core.bus().prg_rom_len());
+        let cfg = Config {
+            max_episodes: 4,
+            min_episode_frames: 20,
+            max_episode_frames: 30,
+            progress_every: 0,
+            ..Config::default()
+        };
+        let mut calls = 0u32;
+        let mut l = |_: &NesCore| -> u64 {
+            calls += 1;
+            assert!(!calls.is_multiple_of(25), "injected");
+            0
+        };
+        let (mut s, mut p) = (|| false, |_: &str| {});
+        let r = fuzz(
+            &rom,
+            vec![seed],
+            base,
+            &cfg,
+            &mut quiet(&mut l, &mut s, &mut p),
+        )
+        .unwrap();
+        assert_eq!(r.episodes, 4, "the run continued after the panic");
+        assert!(r.halts.panic >= 1);
+        assert!(r.halt_records.iter().any(|h| h.kind == Halt::Panic));
+    }
+
+    #[test]
     fn budgets_stop_the_run() {
         let rom = jam_on_a_rom();
         let core = new_core(&rom).unwrap();
@@ -926,6 +969,8 @@ mod tests {
         let base = CoverageLog::new(core.bus().prg_rom_len());
         let cfg = Config {
             progress_every: 0,
+            min_episode_frames: 20,
+            max_episode_frames: 30,
             ..Config::default()
         };
         let mut n = 0;

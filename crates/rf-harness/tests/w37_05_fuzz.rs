@@ -457,8 +457,13 @@ fn smb_savestate_fuzz_beats_scripts_and_movies() {
         lost_fns
     );
     println!(
-        "halts: jam {}, no-frame {}, frozen {}, panic {}; episodes with new RAM-executed code {}",
-        h.jam, h.no_frame, h.frozen, h.panic, h.new_ram_exec_episodes
+        "halts: jam {}, no-frame {}, frozen {}, panic {}, capture refused {}; episodes with new RAM-executed code {}",
+        h.jam,
+        h.no_frame,
+        h.frozen,
+        h.panic,
+        h.capture,
+        h.new_ram_exec_episodes
     );
     println!("new code by RAM-fact label (segments that ran new code, new bytes; bits overlap):");
     for (bit, g) in &report.label_gains {
@@ -530,5 +535,9 @@ fn smb_savestate_fuzz_beats_scripts_and_movies() {
         atlas_after.functions.len() > atlas_before.functions.len(),
         "fuzz must add atlas functions"
     );
-    assert_eq!(h.panic, 0, "the core panicked on unseen code");
+    assert_eq!(
+        h.panic + h.capture,
+        0,
+        "the core panicked or refused a save"
+    );
 }
