@@ -63,6 +63,7 @@ use rf_core_api::{BusAccess, StepFacts, StepObserver};
 
 use crate::hw::{classify, Hit, HwClass, Platform};
 use crate::profile::RangeSet;
+use crate::recipe::{DataRegion, Grade, Recipe};
 
 /// CPU address to ROM offset (`None`: not ROM). Installed per frame.
 pub type Resolver = Box<dyn Fn(u32) -> Option<u32>>;
@@ -1143,6 +1144,42 @@ fn pointer_regions(facts: &DataFacts, key: &LinkKey, link: &LinkStat) -> Vec<Reg
         }
     }
     v
+}
+
+/// The recipe row for a region, with the grade the caller's experiment
+/// earned and a `finder:` source.
+#[must_use]
+pub fn to_row(r: &Region, grade: Grade, experiment: &str) -> DataRegion {
+    DataRegion {
+        name: r.name.clone(),
+        kind: r.kind,
+        rom: r.start,
+        size: r.size,
+        stride: r.stride.max(1),
+        part: r.part,
+        pointer_bytes: (r.pointer_bytes != 0).then_some(r.pointer_bytes),
+        index_ram: r.index_ram,
+        pointer_ram: r.pointer_ram,
+        via: r.via.clone(),
+        confidence: Some(r.confidence),
+        source: format!("finder: {}{}", r.evidence, experiment),
+        grade,
+    }
+}
+
+/// Add finder rows to a recipe. A row with the same name replaces a previous
+/// finder row and never a hand-written one (source not starting `finder:`).
+pub fn merge_rows(recipe: &mut Recipe, rows: Vec<DataRegion>) {
+    for row in rows {
+        match recipe.data_regions.iter_mut().find(|d| d.name == row.name) {
+            Some(old) if old.source.starts_with("finder:") => *old = row,
+            Some(_) => {}
+            None => recipe.data_regions.push(row),
+        }
+    }
+    recipe
+        .data_regions
+        .sort_by(|a, b| (a.rom, &a.name).cmp(&(b.rom, &b.name)));
 }
 
 // ------------------------------------------------------- level association

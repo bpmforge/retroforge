@@ -58,6 +58,24 @@
 //! grade = "candidate"
 //! source = "ai:..."
 //!
+//! # Data regions (ticket W38-01): where ROM tables and level data are, found
+//! # by the data-region finder from how the code reads ROM. Offsets and sizes
+//! # only; `rom` indexes the image the atlas indexes.
+//! [[data_region]]
+//! name = "ptrtab_000200_lo"
+//! kind = "pointer_table"               # pointer_table | element_table | stream | graphics
+//! rom = 0x000200
+//! size = 20
+//! stride = 1                           # bytes between elements
+//! part = "lo"                          # optional: lo | hi | bank (split pointer table)
+//! pointer_bytes = 2                    # optional, pointer tables: 2 or 3
+//! index_ram = 0x75F                    # optional: where the index is read from
+//! pointer_ram = 0x10                   # optional: where a stream's pointer lives
+//! via = "ptrtab_000200_lo"             # optional, streams: the table pointing here
+//! confidence = 80                      # optional, percent
+//! grade = "candidate"
+//! source = "finder: ..."               # required
+//!
 //! # A mod: bytes of a listed function to replace (ticket W36-06). Only the
 //! # NEW value is stored; the function's `exact_hash` vouches for the old one.
 //! [[patch]]
@@ -79,9 +97,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use rf_rebuild::dataregion::{Part, RegionKind};
 use rf_rebuild::{
-    EntryKind, Grade, HookPoints, ObjectTable, PatchRow, RamMeaning, Recipe, RecipeFunction,
-    TileClass, TileSemantics,
+    DataRegion, EntryKind, Grade, HookPoints, ObjectTable, PatchRow, RamMeaning, Recipe,
+    RecipeFunction, TileClass, TileSemantics,
 };
 use serde::Deserialize;
 
@@ -214,6 +233,8 @@ struct RecipeDoc {
     object_table: Vec<ObjectTableDoc>,
     #[serde(default)]
     tile: Vec<TileDoc>,
+    #[serde(default)]
+    data_region: Vec<DataRegionDoc>,
 }
 
 #[derive(Deserialize)]
@@ -274,6 +295,25 @@ struct ObjectTableDoc {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DataRegionDoc {
+    name: String,
+    kind: String,
+    rom: u32,
+    size: u32,
+    #[serde(default = "one32")]
+    stride: u32,
+    part: Option<String>,
+    pointer_bytes: Option<u8>,
+    index_ram: Option<u32>,
+    pointer_ram: Option<u32>,
+    via: Option<String>,
+    confidence: Option<u8>,
+    source: Option<String>,
+    grade: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TileDoc {
     class: String,
     first: u32,
@@ -321,11 +361,13 @@ fn grade_of(
         }),
         None => {
             *legacy += 1;
-            Ok(if source.starts_with("ai:") {
-                Grade::Candidate
-            } else {
-                Grade::Observed
-            })
+            Ok(
+                if source.starts_with("ai:") || source.starts_with("finder:") {
+                    Grade::Candidate
+                } else {
+                    Grade::Observed
+                },
+            )
         }
     }
 }
@@ -534,6 +576,48 @@ pub fn load_recipe_noted(text: &str) -> Result<(Recipe, usize), RecipeError> {
             source,
         });
     }
+    let mut data_regions: Vec<DataRegion> = Vec::new();
+    for row in doc.data_region {
+        let bad = |why| RecipeError::BadFact {
+            table: "data_region",
+            name: row.name.clone(),
+            why,
+        };
+        if data_regions.iter().any(|d| d.name == row.name) {
+            return Err(bad("appears twice"));
+        }
+        let kind = RegionKind::parse(&row.kind)
+            .ok_or_else(|| bad("kind is not pointer_table, element_table, stream or graphics"))?;
+        let part = match row.part.as_deref() {
+            None => None,
+            Some(p) => Some(Part::parse(p).ok_or_else(|| bad("part is not lo, hi or bank"))?),
+        };
+        if row.size == 0 || row.stride == 0 {
+            return Err(bad("needs a size and a stride of at least 1"));
+        }
+        if row.pointer_bytes.is_some_and(|b| !(2..=3).contains(&b)) {
+            return Err(bad("pointer_bytes is not 2 or 3"));
+        }
+        if row.confidence.is_some_and(|c| c > 100) {
+            return Err(bad("confidence is a percentage"));
+        }
+        let source = source_of("data_region", &row.name, row.source.clone())?;
+        data_regions.push(DataRegion {
+            grade: grade_of(&row.name, row.grade.as_deref(), &source, &mut legacy)?,
+            source,
+            name: row.name,
+            kind,
+            rom: row.rom,
+            size: row.size,
+            stride: row.stride,
+            part,
+            pointer_bytes: row.pointer_bytes,
+            index_ram: row.index_ram,
+            pointer_ram: row.pointer_ram,
+            via: row.via,
+            confidence: row.confidence,
+        });
+    }
     Ok((
         Recipe {
             id: doc.recipe.id,
@@ -543,6 +627,7 @@ pub fn load_recipe_noted(text: &str) -> Result<(Recipe, usize), RecipeError> {
             patches,
             object_tables,
             tiles,
+            data_regions,
         },
         legacy,
     ))
@@ -736,6 +821,40 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
             "grade = \"{}\"\nsource = {}",
             t.grade.as_str(),
             quote(&t.source)
+        );
+    }
+    for d in &recipe.data_regions {
+        let _ = writeln!(
+            out,
+            "\n[[data_region]]\nname = {}\nkind = \"{}\"\nrom = {:#08x}\nsize = {}\nstride = {}",
+            quote(&d.name),
+            d.kind.as_str(),
+            d.rom,
+            d.size,
+            d.stride
+        );
+        if let Some(p) = d.part {
+            let _ = writeln!(out, "part = \"{}\"", p.as_str());
+        }
+        if let Some(b) = d.pointer_bytes {
+            let _ = writeln!(out, "pointer_bytes = {b}");
+        }
+        for (key, v) in [("index_ram", d.index_ram), ("pointer_ram", d.pointer_ram)] {
+            if let Some(v) = v {
+                let _ = writeln!(out, "{key} = {v:#x}");
+            }
+        }
+        if let Some(v) = &d.via {
+            let _ = writeln!(out, "via = {}", quote(v));
+        }
+        if let Some(c) = d.confidence {
+            let _ = writeln!(out, "confidence = {c}");
+        }
+        let _ = writeln!(
+            out,
+            "grade = \"{}\"\nsource = {}",
+            d.grade.as_str(),
+            quote(&d.source)
         );
     }
     out
@@ -1081,5 +1200,70 @@ mod tests {
             with("name = \"lead\"", "name = \"lead\"\n        old = 1"),
             Err(RecipeError::Parse(_))
         ));
+    }
+    #[test]
+    fn data_regions_round_trip_and_bad_ones_are_refused() {
+        let text = r#"
+            [recipe]
+            format = 1
+            id = "demo"
+
+            [[data_region]]
+            name = "ptrtab_000200_lo"
+            kind = "pointer_table"
+            rom = 0x200
+            size = 20
+            part = "lo"
+            pointer_bytes = 2
+            index_ram = 0x75F
+            grade = "confirmed"
+            source = "finder: level-switch experiment"
+
+            [[data_region]]
+            name = "stream_000800"
+            kind = "stream"
+            rom = 0x800
+            size = 300
+            pointer_ram = 0x10
+            via = "ptrtab_000200_lo"
+            confidence = 70
+            source = "finder: reads"
+        "#;
+        let (r, legacy) = load_recipe_noted(text).expect("parses");
+        assert_eq!(legacy, 1, "the second row had no grade");
+        let d = &r.data_regions[0];
+        assert_eq!(
+            (d.kind, d.rom, d.size, d.stride),
+            (RegionKind::PointerTable, 0x200, 20, 1)
+        );
+        assert_eq!(
+            (d.part, d.pointer_bytes, d.index_ram),
+            (Some(Part::Lo), Some(2), Some(0x75F))
+        );
+        assert_eq!(d.grade, Grade::Confirmed);
+        assert_eq!(
+            r.data_regions[1].grade,
+            Grade::Candidate,
+            "finder source defaults to candidate"
+        );
+        let again = recipe_to_toml(&r);
+        assert_eq!(load_recipe_noted(&again), Ok((r, 0)));
+        for (what, bad) in [
+            (
+                "unknown key",
+                "kind = \"stream\"\nrom = 1\nsize = 2\nsurprise = 1",
+            ),
+            ("unknown kind", "kind = \"heap\"\nrom = 1\nsize = 2"),
+            ("empty", "kind = \"stream\"\nrom = 1\nsize = 0"),
+            (
+                "bad part",
+                "kind = \"pointer_table\"\nrom = 1\nsize = 2\npart = \"mid\"",
+            ),
+        ] {
+            let t = format!(
+                "[recipe]\nformat = 1\nid = \"d\"\n[[data_region]]\nname = \"x\"\nsource = \"s\"\n{bad}\n"
+            );
+            assert!(load_recipe_noted(&t).is_err(), "{what}");
+        }
     }
 }
