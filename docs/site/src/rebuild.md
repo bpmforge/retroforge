@@ -26,16 +26,44 @@ extras.
 
 ## Turning it on
 
-1. Open the game and the debugger's **Coverage** tab.
-2. Press **Record coverage** and play for a while. RetroForge notes every
-   instruction the game runs. Recording costs nothing when it is off.
-3. Press **Rebuild on**. RetroForge builds the code map (a second or two) and
-   switches the game to the rebuilt path. The tab shows how much of the code
-   runs rebuilt, how much falls back to the plain emulator, and why.
+Rebuild is a switch per game. Open the game, press Esc, choose
+**Enhancements** and turn on **Rebuild**. It works for any NES or SNES game,
+needs no profile and no recording first, and is off until you turn it on. It
+is part of Enhanced and Game-Aware mode; in Original mode the switch is not
+offered and nothing runs through it. RetroForge remembers the choice for that
+game.
+
+The game keeps running on the plain emulator while RetroForge builds a first
+code map from the game's start-up code; resume play and the map is installed a
+moment later. As you play, RetroForge notes the code the game runs and grows
+the map every few seconds, and keeps it for next time (built on your machine,
+from your ROM).
+
+The card under the switch says what is going on, and never says the game is
+rebuilt without the rest of the story next to it:
+
+* **Coverage**: how much of the game's code has run so far, and the size of
+  the map.
+* **Tier mix**: of the instructions run since the map was last installed, the
+  share that came from code seen in play, the share worked out from the code
+  itself, and the share that ran on the plain emulator instead, with the
+  reason (code running from RAM, code the map does not hold yet, code in a
+  coprocessor's memory).
+* **Verification**: *not checked*, or *checked: N frames in lockstep* (the
+  number of frames a rebuilt and a plain copy of this game were compared on,
+  with no difference), or a warning if they ever differed.
+* A **Proven** badge, only when the game has passed a long check: at least
+  36,000 frames (ten minutes of play) compared over at least two separate
+  runs, with no difference at all. One difference anywhere removes the claim.
+
+The debugger's **Coverage** tab stays the detailed view: record coverage by
+hand, the executor's counters, dispatch misses, hooks and naming. Its
+**Rebuild on** button is the same switch while the game is in Enhanced or
+Game-Aware mode, and a direct control in the debugger's own modes.
 
 Code the map has never seen just runs on the emulator as usual, and so does
 code a game copies into RAM. Nothing breaks when the map is incomplete; the
-fallback share goes up instead, and the tab says so.
+fallback share goes up instead, and the card says so.
 
 ## How you know it is right
 
@@ -46,7 +74,13 @@ side and compares the processor, all memories, the picture and the sound on
 every frame. If they ever differ it stops and saves a repro bundle (a save
 state from just before, the last inputs and the last functions run).
 
-Measured so far: all 32 levels of Super Mario Bros. and Yoshi's Island 1 of
+The checker's result is kept per game on your machine, and the Rebuild card
+reads it back: that is where "checked" and "proven" come from.
+
+Measured so far: on a fixed sample of 100 NES and 100 SNES games from the
+project's test library, the picture shown after 600 frames was identical with
+Rebuild on and off for all 194 that open here (the other six did not open at
+all, with or without Rebuild). Also: all 32 levels of Super Mario Bros. and Yoshi's Island 1 of
 Super Mario World, plus five Super Mario World ROM hacks, ran with zero
 differences.
 

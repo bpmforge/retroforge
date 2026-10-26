@@ -4914,3 +4914,15 @@ stories, 10 decisions).
   statically (falls back). Atlas format and cache bumped to v5. Workspace:
   **3696 passing** (a status-coalescing race in the naming core-thread test
   fixed).
+
+- **W37-03 — Rebuild switch and card** (2026-10-26). "Rebuild" in Quick Menu
+  › Enhancements for every NES/SNES game (Enhanced and Game-Aware only; off by
+  default, saved per game). The card shows coverage, map size, tier mix
+  (observed / inferred / plain emulator, with fallback reasons) and
+  verification ("not checked", "checked: N frames", "diverged", "proven"); any
+  text saying "rebuilt" must carry tier mix and verification (unit-tested). A
+  per-ROM verification record (`rebuild-verify-v1`) backs the Proven badge:
+  36,000 lockstep frames over 2+ runs with zero divergence (SMB shows Proven).
+  App-path census: 194 of 194 openable games show the same first screen with
+  Rebuild on; 6 NES children crashed in the sweep only (W37-03c). Workspace:
+  **3710 passing**.

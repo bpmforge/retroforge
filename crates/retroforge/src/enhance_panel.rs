@@ -46,6 +46,11 @@ pub fn describe(id: &str) -> &'static str {
             "Fills the gaps between the game's frames on a fast display. The frames in between are \
              invented, and every picture is shown one frame (about 17 ms) late."
         }
+        "rebuild" => {
+            "Maps the game's code as it plays and runs it through that map. The picture and \
+             sound do not change; hooks and mods need it. The card says how much of the game it \
+             has covered and how far it has been checked."
+        }
         "superfx_overclock" => {
             "Removes slowdown by giving the Super FX chip more speed only when the game needs it."
         }
@@ -80,6 +85,7 @@ pub fn works_on_any_game(id: &str) -> bool {
             | "nes_extra_lines"
             | "run_ahead"
             | "frame_interpolation"
+            | "rebuild"
             | "hd_mode7"
             | "hd2d_lens"
             | "snes_interpolation"
@@ -115,6 +121,7 @@ pub const fn player_name(id: &str) -> &'static str {
         b"nes_extra_lines" => "Less slowdown",
         b"run_ahead" => "Less input lag",
         b"frame_interpolation" => "Smoother motion",
+        b"rebuild" => "Rebuild",
         b"hd_mode7" => "Sharper Mode 7",
         b"superfx_hd" => "HD Super FX",
         b"hd2d_lens" => "Lens and lighting",

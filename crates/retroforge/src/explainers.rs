@@ -81,6 +81,16 @@ pub fn long_text(id: &str) -> &'static str {
              turn it down or off if one does. It changes the simulation, so it is off until \
              you turn it on."
         }
+        "rebuild" => {
+            "Rebuild watches which parts of the game's code run as you play and keeps a map of \
+             them, built on this computer from your copy of the game. The game then runs \
+             through that map, one instruction at a time, using the emulator's own instruction \
+             code, so the picture and sound are the same. Code the map has not seen yet just \
+             runs on the plain emulator, and the card says how much that is. A checker can run \
+             a rebuilt and a plain copy side by side and compare every frame; the card shows \
+             how many frames that has covered for this game, and only calls it proven after a \
+             long run with no difference. Off until you turn it on."
+        }
         "run_ahead" => {
             "Many games take a frame or two to react to a button press. This quietly plays \
              the game one or two frames further ahead, with your buttons held as they are, and \
@@ -314,6 +324,30 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, id: &str, tokens: &crate
             painter.rect_filled(band, egui::CornerRadius::same(2), faint);
             painter.circle_filled(band.center(), 5.0, accent);
             painter.circle_filled(band.center(), 10.0, accent.gamma_multiply(0.25));
+        }
+        "rebuild" => {
+            // A grid of code blocks: most mapped (accent), a few not yet seen (faint).
+            let cols = 12;
+            let rows = 3;
+            let cw = r.width() / cols as f32;
+            let ch = (r.height() / rows as f32).min(18.0);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let cell = egui::Rect::from_min_size(
+                        egui::pos2(
+                            r.left() + cw * col as f32 + 2.0,
+                            r.top() + (ch + 4.0) * row as f32,
+                        ),
+                        egui::vec2(cw - 4.0, ch),
+                    );
+                    let unseen = (col * 5 + row * 3) % 9 == 0;
+                    painter.rect_filled(
+                        cell,
+                        egui::CornerRadius::same(2),
+                        if unseen { faint } else { accent },
+                    );
+                }
+            }
         }
         "run_ahead" => {
             // A row of frames: the real ones in the faint colour, and the

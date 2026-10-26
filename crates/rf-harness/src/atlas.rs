@@ -14,7 +14,9 @@
 use rf_cache::{Cache, CacheError, CacheKey};
 use rf_core_api::coverage::CoverageLog;
 use rf_nes::{NesLoadError, NesRom};
-use rf_rebuild::{Atlas, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS};
+use rf_rebuild::{
+    Atlas, VerifyRecord, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS, VERIFY_ASSET, VERIFY_SETTINGS,
+};
 
 /// Build the atlas of an iNES image from a recording of it.
 ///
@@ -59,6 +61,44 @@ pub fn load_cached_atlas(cache: &mut Cache, rom_sha256: &str) -> Option<Atlas> {
 /// The cache's own I/O errors.
 pub fn store_atlas(cache: &mut Cache, rom_sha256: &str, atlas: &Atlas) -> Result<(), CacheError> {
     cache.put(&atlas_cache_key(rom_sha256), &atlas.to_bytes())
+}
+
+/// The cache key of the verification record of the ROM with this normalised
+/// SHA-256 (ticket W37-03). The shell builds the same key from the same
+/// constants; a unit test there asserts they are equal.
+#[must_use]
+pub fn verify_cache_key(rom_sha256: &str) -> CacheKey {
+    CacheKey {
+        rom_sha256: rom_sha256.to_string(),
+        asset_hash: VERIFY_ASSET.to_string(),
+        producer: CACHE_PRODUCER.to_string(),
+        settings_hash: VERIFY_SETTINGS.to_string(),
+    }
+}
+
+/// The stored verification record, `None` on a miss or a damaged entry.
+pub fn load_verify_record(cache: &mut Cache, rom_sha256: &str) -> Option<VerifyRecord> {
+    let bytes = cache.get(&verify_cache_key(rom_sha256)).ok()??;
+    VerifyRecord::decode(&bytes)
+}
+
+/// Fold one finished lockstep run (`frames` compared, `divergences` of them
+/// different) into this ROM's record and store it. Read-modify-write with no
+/// lock: the writers are sequential tools, and a lost update only costs
+/// evidence, never claims any.
+///
+/// # Errors
+/// The cache's own I/O errors.
+pub fn record_lockstep_run(
+    cache: &mut Cache,
+    rom_sha256: &str,
+    frames: u64,
+    divergences: u64,
+) -> Result<VerifyRecord, CacheError> {
+    let mut record = load_verify_record(cache, rom_sha256).unwrap_or_default();
+    record.add_run(frames, divergences);
+    cache.put(&verify_cache_key(rom_sha256), &record.encode())?;
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -136,6 +176,21 @@ mod tests {
         }
         let mut cache = Cache::open(&dir, 1 << 20).expect("reopen");
         assert_eq!(load_cached_atlas(&mut cache, &sha), Some(atlas));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lockstep_runs_accumulate_in_the_cache_and_miss_for_another_rom() {
+        let dir = std::env::temp_dir().join(format!("rf-verify-glue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sha = "aa".repeat(32);
+        let mut cache = Cache::open(&dir, 1 << 20).expect("open");
+        assert!(load_verify_record(&mut cache, &sha).is_none());
+        record_lockstep_run(&mut cache, &sha, 600, 0).expect("first");
+        let rec = record_lockstep_run(&mut cache, &sha, 400, 2).expect("second");
+        assert_eq!((rec.frames, rec.divergences, rec.runs), (1000, 2, 2));
+        assert_eq!(load_verify_record(&mut cache, &sha), Some(rec));
+        assert!(load_verify_record(&mut cache, &"bb".repeat(32)).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
