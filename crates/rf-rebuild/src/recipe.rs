@@ -16,7 +16,10 @@
 //! [`crate::Function::byte_hash`] are preferred and the match is
 //! [`Confidence::Exact`]. Several candidates left: the one whose entry
 //! address is nearest the row's address hint wins (no hint: the lowest
-//! entry). No candidate: the row is **unmatched**, the game keeps running on
+//! entry). Two rows of one recipe that share a shape (and could share a mode)
+//! cannot be told apart by their bytes; each then matches only the function at
+//! its own address hint. A row that carries an entry `mode` (65816 recipes) only considers
+//! functions entered in that mode. No candidate: the row is **unmatched**, the game keeps running on
 //! the generic rebuild and the interpreter, and the row's hooks are inactive.
 
 use crate::atlas::Atlas;
@@ -40,6 +43,13 @@ pub struct RecipeFunction {
     /// Optional: CPU address of the entry in the dump the row was observed
     /// on; breaks ties between equal shapes.
     pub address_hint: Option<u32>,
+    /// Optional: the decode mode the function is entered in
+    /// ([`crate::Function::entry_mode`]; ticket W36-10). The 65816's
+    /// instruction widths depend on `E`/`M`/`X`, and the shape hash ignores
+    /// them, so the same bytes entered in two modes are two functions with one
+    /// shape hash. A row with a mode matches only functions entered in it; a
+    /// row without one (every 6502 row) matches any mode.
+    pub mode: Option<u8>,
     pub hooks: HookPoints,
     /// Where the row came from (observation, never a disassembly). Machine
     /// proposals say `rule:<rule>` or `ai:<model>` (ticket W36-09).
@@ -150,6 +160,10 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
             .iter()
             .enumerate()
             .filter(|(_, f)| f.shape_hash == row.shape_hash)
+            .filter(|(_, f)| row.mode.is_none_or(|m| f.entry_mode == m))
+            // Rows nothing but an address tells apart (see `twins`) match
+            // only the function at their hint: never a look-alike elsewhere.
+            .filter(|(_, f)| !twins(recipe, row) || row.address_hint == Some(f.entry_cpu))
             .map(|(i, f)| (i as u32, f))
             .collect();
         let exact: Vec<(u32, &crate::atlas::Function)> = row
@@ -184,6 +198,18 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
         }
     }
     report
+}
+
+/// Whether another row of `recipe` has this row's shape hash and could be
+/// entered in the same mode. Their bytes agree (a pair of interrupt stubs, say),
+/// so a ROM where one of them changed would hand its name to the other; such
+/// rows are only trusted at the address they were observed at (ticket W36-10).
+fn twins(recipe: &Recipe, row: &RecipeFunction) -> bool {
+    recipe.functions.iter().any(|o| {
+        o.name != row.name
+            && o.shape_hash == row.shape_hash
+            && (o.mode.is_none() || row.mode.is_none() || o.mode == row.mode)
+    })
 }
 
 /// A patch row placed at a byte of the PRG image.

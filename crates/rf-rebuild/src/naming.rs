@@ -652,6 +652,9 @@ pub fn name_rows(atlas: &Atlas, accepted: &[Proposal], existing: &Recipe) -> Vec
             shape_hash: f.shape_hash,
             exact_hash: Some(f.byte_hash),
             address_hint: Some(f.entry_cpu),
+            // Rows for a multi-mode ISA (the 65816) carry the entry mode: the
+            // same bytes entered at two widths are two functions (W36-10).
+            mode: (atlas.mode_count > 1).then_some(f.entry_mode),
             hooks: HookPoints {
                 entry: true,
                 exit: true,
