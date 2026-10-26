@@ -4883,3 +4883,13 @@ stories, 10 decisions).
   On the five hacks: nmi matching unchanged and now correct (RDL and A Simple
   Story edited their NMI stub); unmatched rows classified removed / not
   reached / changed. Workspace: **3658 passing**.
+
+- **W38-01 — Data-region finder** (2026-10-26). Reconstructs ROM data reads
+  from the W36-09 observation log, follows values from ROM into RAM pointers,
+  and classifies pointer tables, streams, graphics and element tables; a
+  level-switch experiment confirms only what tracks the level. SMB (32 forced
+  levels): two level pointer tables and 50 level streams confirmed. SMW (4
+  levels reached; no RAM level select works): three level-tracking pointer
+  tables and 9 streams confirmed. Rows written as `[[data_region]]` recipe facts
+  (offsets and sizes only). Cranelift parked (D-029). Workspace: **3675
+  passing**.
