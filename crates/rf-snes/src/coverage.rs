@@ -118,11 +118,13 @@ impl SnesSystem {
                 OPERAND
             };
             match bus.target(addr) {
-                Target::Rom(o) => log.mark_prg(o, flag),
+                Target::Rom(o) if !bus.rom_bus_held_by_gsu() => log.mark_prg(o, flag),
                 Target::Wram(o) => log.mark_ram(o as u32, flag),
                 other => {
                     if i == 0 {
-                        if owned_by_coprocessor(other) {
+                        // A ROM address only reaches this arm while the Super
+                        // FX holds the ROM bus (W37-02).
+                        if owned_by_coprocessor(other) || matches!(other, Target::Rom(_)) {
                             log.coproc_exec += 1;
                         } else {
                             log.other_exec += 1;

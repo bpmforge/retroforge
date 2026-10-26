@@ -482,9 +482,19 @@ impl SnesBus {
     #[must_use]
     pub fn rom_offset(&self, addr: u32) -> Option<usize> {
         match self.target(addr) {
-            Target::Rom(i) => Some(i),
+            Target::Rom(i) if !self.rom_bus_held_by_gsu() => Some(i),
             _ => None,
         }
+    }
+
+    /// The Super FX is running and holds the Game Pak ROM bus (GO and RON;
+    /// W37-02). The SNES then reads a fixed vector table or open bus where
+    /// the ROM would be, so a [`Target::Rom`] address does **not** read
+    /// `rom[i]`: [`Self::rom_offset`] answers `None` and the recorder and the
+    /// block executor treat a fetch there as coprocessor-owned memory.
+    #[must_use]
+    pub(crate) fn rom_bus_held_by_gsu(&self) -> bool {
+        self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus())
     }
 
     fn window_ram_read(&self, i: usize) -> u8 {
@@ -1369,7 +1379,7 @@ impl CpuBus for SnesBus {
             // ROM read is open bus. GO=0 with RON=1 (a stopped chip) shows
             // real ROM -- see `Gsu::fixed_vector_byte`. `gsu` is `None` for
             // every non-GSU cartridge, so this is a no-op for them.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+            Target::Rom(_) if self.rom_bus_held_by_gsu() => {
                 crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
             }
             Target::Rom(i) => self.rom[i],
@@ -1674,7 +1684,7 @@ impl CpuBus for SnesBus {
         match self.target(addr) {
             // Same GO && RON rule as `read` above: peek must agree with
             // what a real read would show.
-            Target::Rom(_) if self.gsu.as_ref().is_some_and(|g| g.regs.owns_rom_bus()) => {
+            Target::Rom(_) if self.rom_bus_held_by_gsu() => {
                 crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
             }
             Target::Rom(i) => self.rom[i],

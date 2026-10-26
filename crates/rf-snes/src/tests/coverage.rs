@@ -4,7 +4,7 @@
 use rf_cart::SnesMapMode;
 use rf_core_api::coverage::{mode_bit, MODE_BITS, OPCODE, OPERAND};
 use rf_core_api::{CoverageLog, IndirectKind, InterruptKind};
-use rf_rebuild::{EdgeKind, Flow, Provenance, Target, Why};
+use rf_rebuild::{EdgeKind, Flow, Isa as _, Provenance, Target, Why};
 
 use crate::rebuild::{build_atlas, Wdc65816};
 use crate::system::SnesSystem;
@@ -303,6 +303,70 @@ fn fetches_from_coprocessor_memory_are_counted_not_mapped() {
     s.step().unwrap();
     let log = s.take_coverage().unwrap();
     assert_eq!((log.coproc_exec, log.other_exec), (0, 1));
+}
+
+/// W37-02: while the Super FX runs (GO and RON) the SNES does not read ROM
+/// where the map says ROM is, so a fetch there is neither recorded as ROM code
+/// nor resolved to a ROM offset; with the chip idle it is ROM again.
+#[test]
+fn rom_held_by_a_running_gsu_is_not_rom_code() {
+    let img = lorom(&[0xEA], &[], &[]);
+    let mut s = SnesSystem::load(&img).unwrap();
+    s.bus
+        .install_gsu(rf_cart::SuperFxVersion::Gsu1, img.len(), 32);
+    s.reset();
+    assert_eq!(s.bus.rom_offset(0x00_8000), Some(0), "chip idle: ROM");
+    let gsu = &mut s.bus.gsu.as_mut().unwrap().regs;
+    gsu.write(0x303A, 0x10); // SCMR: RON, the GSU owns the ROM bus
+    gsu.write(0x301E, 0x00);
+    gsu.write(0x301F, 0x00); // R15 high byte: GO
+    assert!(gsu.owns_rom_bus());
+    assert_eq!(s.bus.rom_offset(0x00_8000), None, "GO and RON: not ROM");
+    s.set_coverage(true);
+    s.cpu.pbr = 0;
+    s.cpu.pc = 0x8000;
+    s.step().unwrap();
+    let log = s.take_coverage().unwrap();
+    assert_eq!((log.coproc_exec, log.other_exec), (1, 0));
+    assert_eq!(log.executed_prg_bytes(), 0, "recorded as no ROM code");
+}
+
+/// W37-02: where the static ISA places an address on a Super FX board, it
+/// is where the bus reads it (the `$40-$5F` linear window, the GSU's RAM at
+/// `$70-$71`), and the other way round.
+#[test]
+fn the_super_fx_isa_places_addresses_where_the_bus_does() {
+    let img = lorom(&[0xEA], &[], &[]);
+    let mut s = SnesSystem::load(&img).unwrap();
+    s.bus
+        .install_gsu(rf_cart::SuperFxVersion::Gsu1, img.len(), 32);
+    let chip = rf_cart::Coprocessor::SuperFx {
+        version: rf_cart::SuperFxVersion::Gsu1,
+        ram_kib: 32,
+    };
+    let isa = Wdc65816::for_board(SnesMapMode::LoRom, img.len(), chip);
+    let plain = Wdc65816::new(SnesMapMode::LoRom, img.len());
+    let (mut checked, mut plain_differs) = (0u32, 0u32);
+    for bank in 0..=0xFFu32 {
+        for offset in (0..=0xFFFFu32).step_by(0x1FD) {
+            let addr = (bank << 16) | offset;
+            let bus = s.bus.rom_offset(addr).and_then(|o| u32::try_from(o).ok());
+            let got = isa.rom_offset(addr);
+            // Never a different place than the bus's; the linear window is
+            // placed exactly.
+            assert!(got.is_none() || got == bus, "{addr:#08x}");
+            if (0x40..=0x5F).contains(&bank) {
+                assert_eq!(got, bus, "{addr:#08x}");
+            }
+            plain_differs += u32::from(plain.rom_offset(addr) != bus);
+            checked += 1;
+        }
+    }
+    assert!(checked > 8000);
+    assert!(
+        plain_differs > 0,
+        "plain LoROM really is wrong on this board"
+    );
 }
 
 #[test]
