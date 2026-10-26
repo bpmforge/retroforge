@@ -5,7 +5,6 @@
 //! scripted transport.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rf_ai::anthropic::{
@@ -13,8 +12,9 @@ use rf_ai::anthropic::{
     RetryPolicy, Transport, API_URL, BETA, DEFAULT_MODEL,
 };
 use rf_ai::naming::{
-    build_requests, proposals_from_response, run_naming, sanitize_name, BatchOptions, MockProvider,
-    NamingError, NamingProvider, NamingRequest, NamingResponse, ProposedName,
+    audit_request, audit_text, build_requests, closed_vocabulary, proposals_from_response,
+    run_naming, sanitize_name, AuditInput, BatchOptions, MockProvider, NamingError, NamingProvider,
+    NamingRequest, NamingResponse, ProposedName,
 };
 use rf_rebuild::hw::flag;
 use rf_rebuild::naming::propose_names;
@@ -176,126 +176,40 @@ fn snes_shaped() -> (Understanding, Atlas, Vec<RamMeaning>) {
 
 // ---- the payload guard -------------------------------------------------------
 
-/// Every JSON object key a request may contain. A new field in the payload
-/// types fails this test until someone decides it is behaviour, not code.
-const ALLOWED_KEYS: &[&str] = &[
-    "payload_version",
-    "console",
-    "frames",
-    "functions",
-    "id",
-    "calls_per_100_frames",
-    "frames_active_pct",
-    "insns_per_call",
-    "main_pct",
-    "nmi_pct",
-    "irq_pct",
-    "entered_by_interrupt",
-    "callers",
-    "callees",
-    "count",
-    "registers",
-    "class",
-    "addr",
-    "reads",
-    "writes",
-    "facts",
-    "ram_read",
-    "ram_written",
-    "start",
-    "end",
-    "names",
-    "neighbour_names",
-    "name",
-    "rule_hint",
-    "confidence",
-];
-
-fn walk(v: &Value, f: &mut dyn FnMut(Option<&str>, &Value)) {
-    fn go(key: Option<&str>, v: &Value, f: &mut dyn FnMut(Option<&str>, &Value)) {
-        f(key, v);
-        match v {
-            Value::Object(m) => m.iter().for_each(|(k, v)| go(Some(k), v, f)),
-            Value::Array(a) => a.iter().for_each(|v| go(key, v, f)),
-            _ => {}
-        }
+fn audit(
+    requests: &[NamingRequest],
+    rom: &[u8],
+    atlas: &Atlas,
+    extra_strings: &[&str],
+) -> Result<(), String> {
+    assert!(!requests.is_empty());
+    let mut allowed = closed_vocabulary();
+    allowed.extend(extra_strings.iter().map(|s| (*s).to_string()));
+    let hashes: Vec<u64> = atlas
+        .functions
+        .iter()
+        .flat_map(|f| [f.byte_hash, f.shape_hash])
+        .collect();
+    for r in requests {
+        audit_request(
+            r,
+            &AuditInput {
+                rom,
+                hashes: &hashes,
+                allowed_strings: &allowed,
+            },
+        )?;
     }
-    go(None, v, f);
+    Ok(())
 }
 
 fn assert_payload_is_behaviour_only(
     requests: &[NamingRequest],
     rom: &[u8],
     atlas: &Atlas,
-    allowed_strings: &BTreeSet<String>,
+    extra_strings: &[&str],
 ) {
-    assert!(!requests.is_empty());
-    let allowed_keys: BTreeSet<&str> = ALLOWED_KEYS.iter().copied().collect();
-    for r in requests {
-        let text = serde_json::to_string(r).expect("serialises");
-        let v: Value = serde_json::from_str(&text).expect("parses");
-        walk(&v, &mut |key, node| {
-            if let Value::Object(m) = node {
-                for k in m.keys() {
-                    assert!(
-                        allowed_keys.contains(k.as_str()),
-                        "key `{k}` is not allowed"
-                    );
-                }
-            }
-            if let Value::String(s) = node {
-                assert!(
-                    allowed_strings.contains(s),
-                    "string `{s}` (under {key:?}) is outside the closed vocabulary"
-                );
-            }
-        });
-        // No hash of any function, in decimal or hex.
-        for f in &atlas.functions {
-            for h in [f.byte_hash, f.shape_hash] {
-                assert!(!text.contains(&h.to_string()), "decimal hash in payload");
-                assert!(!text.contains(&format!("{h:x}")), "hex hash in payload");
-            }
-        }
-        // No window of the ROM, as hex or as a decimal list.
-        for w in rom.windows(4) {
-            let hex: String = w.iter().map(|b| format!("{b:02x}")).collect();
-            if hex.chars().any(|c| c.is_ascii_alphabetic()) {
-                assert!(!text.to_lowercase().contains(&hex), "ROM window as hex");
-            }
-            let list = format!("{},{},{},{}", w[0], w[1], w[2], w[3]);
-            assert!(!text.contains(&list), "ROM window as a decimal list");
-        }
-    }
-}
-
-fn vocabulary(extra: &[&str]) -> BTreeSet<String> {
-    let mut s: BTreeSet<String> = [
-        "nes",
-        "snes",
-        "ppu",
-        "apu",
-        "controller",
-        "oam_dma",
-        "dma",
-        "mapper",
-        "math",
-        "cpu_status",
-        "wram_port",
-        "coprocessor",
-        "palette_addressed",
-        "nametable_addressed",
-        "vblank_flag_seen",
-        "sprite0_flag_seen",
-        "dma_to_vram",
-        "dma_to_oam",
-        "dma_to_cgram",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
-    s.extend(extra.iter().map(|s| (*s).to_string()));
-    s
+    audit(requests, rom, atlas, extra_strings).expect("payload is behaviour facts only");
 }
 
 #[test]
@@ -320,7 +234,7 @@ fn payload_nes_shaped_input_is_behaviour_facts_only() {
         .flat_map(|p| [p.name.clone(), p.base.clone()])
         .collect();
     words.extend(rule_names.iter().map(String::as_str));
-    assert_payload_is_behaviour_only(&requests, &rom, &atlas, &vocabulary(&words));
+    assert_payload_is_behaviour_only(&requests, &rom, &atlas, &words);
 
     // The facts that make the pass worth running ARE there.
     let all: Vec<_> = requests.iter().flat_map(|r| &r.functions).collect();
@@ -354,7 +268,7 @@ fn payload_snes_shaped_input_is_behaviour_facts_only() {
         .flat_map(|p| [p.name.clone(), p.base.clone()])
         .collect();
     words.extend(rule_names.iter().map(String::as_str));
-    assert_payload_is_behaviour_only(&requests, &rom, &atlas, &vocabulary(&words));
+    assert_payload_is_behaviour_only(&requests, &rom, &atlas, &words);
     let all: Vec<_> = requests.iter().flat_map(|r| &r.functions).collect();
     assert!(requests.iter().all(|r| r.console == "snes"));
     // 24-bit RAM addresses survive, folded to bank $7E.
@@ -761,7 +675,8 @@ fn client_errors_are_not_retried_and_retries_are_bounded() {
 
 // ---- the guard has teeth ------------------------------------------------------
 
-fn smuggle(into: &str) -> (Vec<NamingRequest>, Atlas, Vec<u8>, BTreeSet<String>) {
+/// A request with one extra neighbour name smuggled in, and the audit result.
+fn smuggled(into: &str, allow_it: bool) -> Result<(), String> {
     let (u, atlas, ram) = nes_shaped();
     let rom = fake_rom();
     let mut reqs = build_requests(&u, &atlas, &[], &ram, BatchOptions::default());
@@ -771,64 +686,69 @@ fn smuggle(into: &str) -> (Vec<NamingRequest>, Atlas, Vec<u8>, BTreeSet<String>)
             id: 1,
             name: into.to_string(),
         });
-    let mut allowed = vocabulary(&["lives", "player_x"]);
-    allowed.insert(into.to_string());
-    (reqs, atlas, rom, allowed)
+    let extra: Vec<&str> = if allow_it {
+        vec!["lives", "player_x", into]
+    } else {
+        vec!["lives", "player_x"]
+    };
+    audit(&reqs[..1], &rom, &atlas, &extra)
 }
 
 #[test]
-#[should_panic(expected = "outside the closed vocabulary")]
 fn guard_rejects_an_unknown_string() {
-    let (reqs, atlas, rom, _) = smuggle("lda_abs_2002");
-    assert_payload_is_behaviour_only(&reqs, &rom, &atlas, &vocabulary(&[]));
+    let e = smuggled("lda_abs_2002", false).unwrap_err();
+    assert!(e.contains("outside the closed vocabulary"), "{e}");
+    // The same string is fine once someone vouches for it as a name...
+    assert!(smuggled("lda_abs_2002", true).is_ok());
 }
 
 #[test]
-#[should_panic(expected = "hash in payload")]
 fn guard_rejects_a_function_hash_even_if_the_vocabulary_allowed_it() {
-    let (u, atlas, _) = nes_shaped();
-    let _ = u;
-    let (reqs, atlas2, rom, allowed) = smuggle(&format!("{:x}", atlas.functions[3].byte_hash));
-    assert_eq!(atlas.functions[3].byte_hash, atlas2.functions[3].byte_hash);
-    assert_payload_is_behaviour_only(&reqs, &rom, &atlas2, &allowed);
+    let (_, atlas, _) = nes_shaped();
+    let h = atlas.functions[3].byte_hash;
+    for text in [format!("{h:x}"), h.to_string()] {
+        let e = smuggled(&text, true).unwrap_err();
+        assert!(e.contains("code hash"), "{e}");
+    }
 }
 
 #[test]
-#[should_panic(expected = "ROM window as hex")]
 fn guard_rejects_a_rom_window_even_if_the_vocabulary_allowed_it() {
     let rom = fake_rom();
     let w = rom
         .windows(4)
         .find(|w| {
-            w.iter().any(|b| *b > 0x9F)
-                && format!("{:02x}{:02x}{:02x}{:02x}", w[0], w[1], w[2], w[3])
-                    .chars()
-                    .any(|c| c.is_ascii_alphabetic())
+            format!("{:02x}{:02x}{:02x}{:02x}", w[0], w[1], w[2], w[3])
+                .chars()
+                .any(|c| c.is_ascii_alphabetic())
         })
         .expect("a window with a letter in its hex");
     let hex: String = w.iter().map(|b| format!("{b:02x}")).collect();
-    let (reqs, atlas, rom, allowed) = smuggle(&hex);
-    assert_payload_is_behaviour_only(&reqs, &rom, &atlas, &allowed);
+    let e = smuggled(&hex, true).unwrap_err();
+    assert!(e.contains("window of the ROM"), "{e}");
+    let list = format!("{},{},{},{}", w[0], w[1], w[2], w[3]);
+    let e = smuggled(&list, true).unwrap_err();
+    assert!(e.contains("window of the ROM"), "{e}");
 }
 
 #[test]
-#[should_panic(expected = "is not allowed")]
 fn guard_rejects_a_new_payload_key() {
-    // A request that serialises an extra field (here through a JSON edit)
-    // fails the key allow-list.
+    // JSON no NamingRequest could produce: the extra field is a key nobody
+    // vetted, so the audit stops it before it can be sent.
     let (u, atlas, ram) = nes_shaped();
     let reqs = build_requests(&u, &atlas, &[], &ram, BatchOptions::default());
-    let mut v = serde_json::to_value(&reqs[0]).unwrap();
+    let mut v: Value = serde_json::to_value(&reqs[0]).unwrap();
     v["functions"][0]["disassembly"] = Value::String("lda #$00".into());
-    let allowed_keys: BTreeSet<&str> = ALLOWED_KEYS.iter().copied().collect();
-    walk(&v, &mut |_, node| {
-        if let Value::Object(m) = node {
-            for k in m.keys() {
-                assert!(
-                    allowed_keys.contains(k.as_str()),
-                    "key `{k}` is not allowed"
-                );
-            }
-        }
-    });
+    let allowed = closed_vocabulary();
+    let input = AuditInput {
+        rom: &fake_rom(),
+        hashes: &[],
+        allowed_strings: &allowed,
+    };
+    let e = audit_text(&v.to_string(), &input).unwrap_err();
+    assert!(e.contains("key `disassembly` is not allowed"), "{e}");
+    // Without the extra key the request passes the key check (it fails only
+    // on its own names, which this audit was not told about).
+    let e = audit_text(&serde_json::to_string(&reqs[0]).unwrap(), &input).unwrap_err();
+    assert!(!e.contains("key"), "{e}");
 }

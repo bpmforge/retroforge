@@ -97,6 +97,57 @@ impl CoreSink for Null {
     fn event(&mut self, _e: CoreEvent) {}
 }
 
+/// The opt-in AI pass's payload for this run, audited against the real
+/// cartridge: behaviour facts only (D-024).
+fn audit_ai_payload(
+    raw: &[u8],
+    atlas: &rf_rebuild::Atlas,
+    run_out: &understand::NamingRun,
+    ram: &[rf_rebuild::RamMeaning],
+) {
+    use rf_ai::naming::{
+        audit_request, build_requests, closed_vocabulary, AuditInput, BatchOptions,
+    };
+    let opts = BatchOptions {
+        per_request: 40,
+        max_requests: 64,
+        include_named: true,
+    };
+    let requests = build_requests(&run_out.understanding, atlas, &run_out.proposals, ram, opts);
+    let mut allowed = closed_vocabulary();
+    allowed.extend(ram.iter().map(|r| r.name.clone()));
+    allowed.extend(
+        run_out
+            .proposals
+            .iter()
+            .flat_map(|p| [p.name.clone(), p.base.clone()]),
+    );
+    let hashes: Vec<u64> = atlas
+        .functions
+        .iter()
+        .flat_map(|f| [f.byte_hash, f.shape_hash])
+        .collect();
+    let mut asked = 0;
+    for r in &requests {
+        audit_request(
+            r,
+            &AuditInput {
+                rom: raw,
+                hashes: &hashes,
+                allowed_strings: &allowed,
+            },
+        )
+        .expect("the payload is behaviour facts only");
+        asked += r.functions.len();
+    }
+    println!(
+        "AI payload: {} request(s), {asked} function(s), audited against {} ROM bytes: clean",
+        requests.len(),
+        raw.len()
+    );
+    assert!(asked > 0);
+}
+
 #[test]
 #[ignore = "needs Super Mario World (USA) (RF_SCREENS_ROMS_DIR); minutes in release"]
 fn smw_yoshis_island_one_names_by_rules_and_inert_hooks_keep_lockstep_green() {
@@ -137,6 +188,9 @@ fn smw_yoshis_island_one_names_by_rules_and_inert_hooks_keep_lockstep_green() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted.len(), names.len(), "names are unique");
+
+    // No SMW recipe ships yet, so the model would see no RAM names here.
+    audit_ai_payload(&raw, &atlas, &run_out, &[]);
 
     let base = rf_rebuild::Recipe {
         id: "smw-names".into(),

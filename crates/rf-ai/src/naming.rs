@@ -500,3 +500,184 @@ pub fn run_naming(
     }
     Ok(out)
 }
+
+// ---- the payload audit ---------------------------------------------------------
+
+/// Every JSON object key a serialised [`NamingRequest`] may contain. A new
+/// field in the payload types fails [`audit_request`] until someone decides
+/// it is behaviour and not code and adds it here.
+pub const ALLOWED_KEYS: &[&str] = &[
+    "payload_version",
+    "console",
+    "frames",
+    "functions",
+    "id",
+    "calls_per_100_frames",
+    "frames_active_pct",
+    "insns_per_call",
+    "main_pct",
+    "nmi_pct",
+    "irq_pct",
+    "entered_by_interrupt",
+    "callers",
+    "callees",
+    "count",
+    "registers",
+    "class",
+    "addr",
+    "reads",
+    "writes",
+    "facts",
+    "ram_read",
+    "ram_written",
+    "start",
+    "end",
+    "names",
+    "neighbour_names",
+    "name",
+    "rule_hint",
+    "confidence",
+];
+
+/// The fixed words a request may contain as string values: console labels,
+/// hardware class labels, fact names. Names (RAM names from the recipe, rule
+/// names of neighbours) are added by the caller from what it knows.
+#[must_use]
+pub fn closed_vocabulary() -> std::collections::BTreeSet<String> {
+    [
+        "nes",
+        "snes",
+        "ppu",
+        "apu",
+        "controller",
+        "oam_dma",
+        "dma",
+        "mapper",
+        "math",
+        "cpu_status",
+        "wram_port",
+        "coprocessor",
+        "palette_addressed",
+        "nametable_addressed",
+        "vblank_flag_seen",
+        "sprite0_flag_seen",
+        "dma_to_vram",
+        "dma_to_oam",
+        "dma_to_cgram",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+/// What an audit checks a request against.
+pub struct AuditInput<'a> {
+    /// The cartridge image (or any stand-in): no 4-byte window of it may
+    /// appear in the payload, as hex or as a decimal list.
+    pub rom: &'a [u8],
+    /// Hashes of the code (an atlas's `byte_hash` and `shape_hash` values):
+    /// none may appear, in decimal or hex.
+    pub hashes: &'a [u64],
+    /// Every string value the payload may hold: [`closed_vocabulary`] plus
+    /// the names the caller supplied (recipe RAM names, accepted rule names).
+    pub allowed_strings: &'a std::collections::BTreeSet<String>,
+}
+
+fn walk(v: &serde_json::Value, f: &mut dyn FnMut(&serde_json::Value)) {
+    f(v);
+    match v {
+        serde_json::Value::Object(m) => m.values().for_each(|v| walk(v, f)),
+        serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, f)),
+        _ => {}
+    }
+}
+
+/// Check that a request is behaviour facts only (D-024): every object key is
+/// in [`ALLOWED_KEYS`], every string is in `allowed_strings`, no code hash and
+/// no window of the ROM appears anywhere in the serialised text. The same
+/// check the unit tests run on synthetic data and the ROM-gated tests run on
+/// real SMB and SMW requests.
+///
+/// # Errors
+/// A sentence naming the first violation.
+pub fn audit_request(req: &NamingRequest, input: &AuditInput<'_>) -> Result<(), String> {
+    let text = serde_json::to_string(req).map_err(|e| e.to_string())?;
+    audit_text(&text, input)
+}
+
+/// [`audit_request`] over the serialised JSON itself (what actually goes on
+/// the wire), so a test can audit text that no [`NamingRequest`] could
+/// produce.
+///
+/// # Errors
+/// A sentence naming the first violation.
+pub fn audit_text(text: &str, input: &AuditInput<'_>) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let mut problem: Option<String> = None;
+    walk(&value, &mut |node| {
+        if problem.is_some() {
+            return;
+        }
+        match node {
+            serde_json::Value::Object(m) => {
+                if let Some(k) = m.keys().find(|k| !ALLOWED_KEYS.contains(&k.as_str())) {
+                    problem = Some(format!("key `{k}` is not allowed"));
+                }
+            }
+            serde_json::Value::String(s) if !input.allowed_strings.contains(s) => {
+                problem = Some(format!("string `{s}` is outside the closed vocabulary"));
+            }
+            _ => {}
+        }
+    });
+    if let Some(p) = problem {
+        return Err(p);
+    }
+    for &h in input.hashes {
+        if text.contains(&h.to_string()) || text.contains(&format!("{h:x}")) {
+            return Err("a code hash is in the payload".to_string());
+        }
+    }
+    // ROM windows. Indexed once (a cartridge is up to megabytes and the text
+    // is up to hundreds of kilobytes: scanning text for every window would be
+    // quadratic), then the text is scanned once for each way a window could
+    // be written.
+    let windows: std::collections::HashSet<u32> = input
+        .rom
+        .windows(4)
+        .map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    let lower = text.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    // As eight hex digits in a row. A window with no letter in its hex is all
+    // digits, which a count can equal by accident; the decimal form and the
+    // key/string checks cover what could matter there.
+    for i in 0..b.len().saturating_sub(7) {
+        let run = &b[i..i + 8];
+        if run.iter().all(u8::is_ascii_hexdigit) && run.iter().any(u8::is_ascii_lowercase) {
+            if let Ok(v) = u32::from_str_radix(std::str::from_utf8(run).unwrap_or(""), 16) {
+                if windows.contains(&v) {
+                    return Err("a window of the ROM is in the payload (hex)".to_string());
+                }
+            }
+        }
+    }
+    // As four byte values in a row separated by commas.
+    let mut run: Vec<u8> = Vec::new();
+    for token in text.split(|c: char| !(c.is_ascii_digit() || c == ',')) {
+        run.clear();
+        for n in token.split(',') {
+            match n.parse::<u8>() {
+                Ok(v) => run.push(v),
+                Err(_) => run.clear(),
+            }
+            if run.len() >= 4 {
+                let w = &run[run.len() - 4..];
+                if windows.contains(&u32::from_be_bytes([w[0], w[1], w[2], w[3]])) {
+                    return Err("a window of the ROM is in the payload (decimal list)".to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}

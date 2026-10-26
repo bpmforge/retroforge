@@ -4028,6 +4028,7 @@ dependencies = [
 name = "rf-harness"
 version = "0.9.1"
 dependencies = [
+ "rf-ai",
  "rf-cache",
  "rf-cart",
  "rf-core-api",
