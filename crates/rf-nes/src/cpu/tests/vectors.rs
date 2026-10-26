@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use super::json::{self, CpuState};
 use crate::cpu::bus::CpuBus;
-use crate::cpu::{Cpu, FLAG_B};
+use crate::cpu::{Cpu, ExecTier, FLAG_B};
 
 /// The 151 official 6502 opcodes this ticket implements, grouped by
 /// opcode-matrix row exactly as tallied in `cpu/exec.rs`'s module doc
@@ -198,7 +198,7 @@ fn state_matches(cpu: &Cpu, want: &CpuState) -> bool {
 
 /// Replays one test case; `Err` names the first discrepancy (register
 /// state, RAM, or bus-trace operation) found.
-fn run_one(v: &json::Vector<'_>) -> Result<(), String> {
+fn run_one(v: &json::Vector<'_>, tier: ExecTier) -> Result<(), String> {
     let mut cpu = Cpu {
         a: v.initial.a,
         x: v.initial.x,
@@ -209,6 +209,7 @@ fn run_one(v: &json::Vector<'_>) -> Result<(), String> {
         ..Cpu::default()
     };
     cpu.set_p(v.initial.p);
+    cpu.set_exec_tier(tier);
 
     let mut bus = RecordingBus::new(&v.initial.ram);
     let reported_cycles = cpu.step(&mut bus);
@@ -294,6 +295,10 @@ fn vectors_dir() -> Option<PathBuf> {
 /// Runs every case in `<dir>/<opcode>.json`; returns `(pass, fail,
 /// first_failure_message)`.
 fn run_opcode_file(dir: &Path, opcode: u8) -> (usize, usize, Option<String>) {
+    run_opcode_file_tier(dir, opcode, ExecTier::Interpreter)
+}
+
+fn run_opcode_file_tier(dir: &Path, opcode: u8, tier: ExecTier) -> (usize, usize, Option<String>) {
     let path = dir.join(format!("{opcode:02x}.json"));
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("nes6502 vectors: failed to read {}: {e}", path.display()));
@@ -302,7 +307,7 @@ fn run_opcode_file(dir: &Path, opcode: u8) -> (usize, usize, Option<String>) {
     let mut fail = 0;
     let mut first_failure = None;
     for v in &vectors {
-        match run_one(v) {
+        match run_one(v, tier) {
             Ok(()) => pass += 1,
             Err(msg) => {
                 fail += 1;
@@ -441,4 +446,47 @@ fn nes6502_unofficial_opcode_vectors() {
             UNOFFICIAL_OPCODES.len()
         );
     }
+}
+
+/// Ticket W36-12: the IR tier against the same vectors, state and
+/// cycle-by-cycle bus trace, every opcode (official and unofficial, 256
+/// files). `$AB` is held to the same documented exception as above: it is
+/// left to the interpreter by the lowering, so it fails exactly the way the
+/// interpreter does. Prints the case counts.
+#[test]
+fn nes6502_all_opcode_vectors_ir_tier() {
+    let Some(dir) = vectors_dir() else {
+        eprintln!("SKIP nes6502_all_opcode_vectors_ir_tier: vectors not found");
+        return;
+    };
+    let (mut pass, mut fail) = (0usize, 0usize);
+    let mut failing: Vec<(u8, usize, usize, String)> = Vec::new();
+    let mut lowered_cases = 0usize;
+    for opcode in 0..=255u8 {
+        let (p, f, first) = run_opcode_file_tier(&dir, opcode, ExecTier::Ir);
+        pass += p;
+        fail += f;
+        if crate::rebuild::lower::table()[usize::from(opcode)]
+            .ops()
+            .is_some()
+        {
+            lowered_cases += p + f;
+        }
+        if f > 0 && opcode != LXA_CONVENTION_CLASH_OPCODE {
+            failing.push((opcode, p, f, first.unwrap_or_default()));
+        }
+    }
+    eprintln!(
+        "nes6502 vectors, IR tier: 256 opcodes, {pass} cases passed, {fail} failed \
+         ({lowered_cases} cases ran lowered IR, {} ran the interpreter's own arm)",
+        pass + fail - lowered_cases
+    );
+    for (opcode, p, f, msg) in &failing {
+        eprintln!("  ${opcode:02X}: {p} passed, {f} failed; first failure: {msg}");
+    }
+    assert!(
+        failing.is_empty(),
+        "{} opcodes fail on the IR tier",
+        failing.len()
+    );
 }

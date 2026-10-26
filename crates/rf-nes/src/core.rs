@@ -128,6 +128,20 @@ impl NesCore {
         })
     }
 
+    /// Choose the instruction executor (ticket W36-12): the interpreter
+    /// (default) or the IR tier, which issues the identical bus-cycle
+    /// stream. A test and bench switch, not a setting: it survives reset and
+    /// reload, is never saved, and changes no observable behaviour.
+    pub fn set_exec_tier(&mut self, tier: crate::cpu::ExecTier) {
+        self.cpu.set_exec_tier(tier);
+    }
+
+    /// The executor in force.
+    #[must_use]
+    pub fn exec_tier(&self) -> crate::cpu::ExecTier {
+        self.cpu.exec_tier()
+    }
+
     /// Borrow the bus, for the shell's out-of-band reads and the
     /// debugger's viewers.
     #[must_use]
@@ -600,7 +614,9 @@ impl EmulatorCore for NesCore {
             .map_err(|e| CoreError::InvalidImage(format!("{e:?}")))?;
         // A machine setting, not cartridge state: it survives a reload.
         bus.set_extra_vblank_lines(self.bus.extra_vblank_lines());
+        let tier = self.cpu.exec_tier();
         self.cpu = Cpu::power_on(&mut bus);
+        self.cpu.set_exec_tier(tier);
         self.bus = bus;
         // A new cartridge invalidates a log sized for the old one; keep
         // recording, from scratch.
@@ -623,7 +639,9 @@ impl EmulatorCore for NesCore {
         // through the bus, which is what both kinds do on real hardware;
         // what a hard reset would additionally clear (RAM to its
         // power-on pattern) `rf-nes` does not model separately today.
+        let tier = self.cpu.exec_tier();
         self.cpu = Cpu::power_on(&mut self.bus);
+        self.cpu.set_exec_tier(tier);
         self.coverage_note_reset();
         self.reset_hook_frames();
     }

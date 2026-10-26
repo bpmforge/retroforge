@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, Criterion};
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_nes::core::NesCore;
-use rf_nes::{Cpu, CpuBus, NesBus};
+use rf_nes::{Cpu, CpuBus, ExecTier, NesBus};
 
 struct NullSink;
 
@@ -320,19 +320,22 @@ impl Workload {
 }
 
 /// Prove the replay executes the recorded stream (module doc).
-fn verify(t: &Trace) {
+fn verify(t: &Trace, tier: ExecTier) {
     let mut cpu = t.start;
+    cpu.set_exec_tier(tier);
     let mut bus = Replay::<true>::new(&t.ev, t.nmi0, t.irq0);
     for _ in 0..t.steps {
         cpu.step(&mut bus);
     }
     assert_eq!(bus.next, t.ev.len(), "replay consumed the whole trace");
     assert_eq!(cpu, t.end, "replay ended in the recorded Cpu state");
+    assert_eq!(cpu.exec_tier(), tier);
 }
 
 #[inline(never)]
-fn replay(t: &Trace) -> Cpu {
+fn replay(t: &Trace, tier: ExecTier) -> Cpu {
     let mut cpu = t.start;
+    cpu.set_exec_tier(tier);
     let mut bus = Replay::<false>::new(&t.ev, t.nmi0, t.irq0);
     for _ in 0..t.steps {
         cpu.step(&mut bus);
@@ -343,7 +346,10 @@ fn replay(t: &Trace) -> Cpu {
 fn bench_amdahl(c: &mut Criterion) {
     for w in workloads() {
         let trace = record(&w);
-        verify(&trace);
+        // The IR tier must replay the identical stream: same addresses,
+        // directions, written values and end state.
+        verify(&trace, ExecTier::Interpreter);
+        verify(&trace, ExecTier::Ir);
         eprintln!(
             "amdahl[{}]: {} frames, {} instructions, {} bus cycles ({:.1} cycles/instr)",
             w.name,
@@ -358,25 +364,37 @@ fn bench_amdahl(c: &mut Criterion) {
         g.warm_up_time(Duration::from_secs(1));
         g.measurement_time(Duration::from_secs(8));
 
-        // (a) one iteration = the whole window on the real bus.
-        g.bench_function("a_real_window", |b| {
-            b.iter_custom(|iters| {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let mut core = warmed_core(&w);
-                    let (cpu, bus) = core.parts_mut();
-                    let t0 = Instant::now();
-                    for f in 0..w.window {
-                        std::hint::black_box(real_frame(cpu, bus, w.script(w.lead_in + f)));
+        // (a) one iteration = the whole window on the real bus; once per
+        // tier. The IR arm is the same machine, the same cycles.
+        for (name, tier) in [
+            ("a_real_window", ExecTier::Interpreter),
+            ("a_real_window_ir", ExecTier::Ir),
+        ] {
+            g.bench_function(name, |b| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut core = warmed_core(&w);
+                        core.set_exec_tier(tier);
+                        let (cpu, bus) = core.parts_mut();
+                        let t0 = Instant::now();
+                        for f in 0..w.window {
+                            std::hint::black_box(real_frame(cpu, bus, w.script(w.lead_in + f)));
+                        }
+                        total += t0.elapsed();
                     }
-                    total += t0.elapsed();
-                }
-                total
+                    total
+                });
             });
-        });
+        }
         // (b) the same instruction stream on the flat bus.
         g.bench_function("b_flat_replay", |b| {
-            b.iter(|| std::hint::black_box(replay(&trace)));
+            b.iter(|| std::hint::black_box(replay(&trace, ExecTier::Interpreter)));
+        });
+        // (b) again with the IR tier evaluating the instructions: the cost
+        // of decode, dispatch and ALU when they go through the IR.
+        g.bench_function("b_flat_replay_ir", |b| {
+            b.iter(|| std::hint::black_box(replay(&trace, ExecTier::Ir)));
         });
         g.finish();
     }

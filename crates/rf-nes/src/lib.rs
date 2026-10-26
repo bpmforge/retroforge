@@ -27,7 +27,7 @@ pub mod system;
 pub mod trace;
 
 pub use apu::Apu;
-pub use cpu::{Cpu, CpuBus};
+pub use cpu::{Cpu, CpuBus, ExecTier};
 pub use mappers::Mapper;
 pub use ppu::Ppu;
 pub use state::{StateIn, StateOut, StateRegion};

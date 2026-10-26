@@ -36,10 +36,12 @@
 //! W1-02 owns, not a rewrite of this instruction-granular stepper.
 mod addressing;
 mod exec;
+mod ir_exec;
 mod ops;
 mod state;
 
 pub use bus::CpuBus;
+pub use ir_exec::{ExecTier, TierSelect};
 
 pub mod bus;
 
@@ -223,6 +225,30 @@ pub struct Cpu {
     /// inside one `run_cycled`, so it never crosses a `Cpu::step` boundary
     /// and is deliberately not serialized.
     branch_polls_one_cycle_early: bool,
+    /// Which executor runs instructions (ticket W36-12). Session setting,
+    /// not saved, ignored by equality; see [`TierSelect`].
+    exec_tier: TierSelect,
+}
+
+/// The tier a fresh `Cpu` starts in. Always the interpreter, except in this
+/// crate's own unit tests, where `RF_NES_TEST_TIER=ir` flips every `Cpu` the
+/// tests build to the IR tier, so the whole suite (interrupt timing, system
+/// and mapper ROM tests) doubles as an oracle for it (ticket W36-12).
+#[cfg(not(test))]
+fn default_tier() -> ExecTier {
+    ExecTier::Interpreter
+}
+
+#[cfg(test)]
+fn default_tier() -> ExecTier {
+    static TIER: std::sync::OnceLock<ExecTier> = std::sync::OnceLock::new();
+    *TIER.get_or_init(|| {
+        if std::env::var("RF_NES_TEST_TIER").is_ok_and(|v| v == "ir") {
+            ExecTier::Ir
+        } else {
+            ExecTier::Interpreter
+        }
+    })
 }
 
 /// A plausible cold-boot register file (`S=$FD`, `I` set, matching the
@@ -251,6 +277,7 @@ impl Default for Cpu {
             nmi_hijack_consumed: false,
             in_interrupt_entry: false,
             branch_polls_one_cycle_early: false,
+            exec_tier: TierSelect(default_tier()),
         }
     }
 }
@@ -258,6 +285,18 @@ impl Default for Cpu {
 impl Cpu {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select the executor (ticket W36-12). [`ExecTier::Interpreter`] is the
+    /// default; the IR tier issues the identical bus-cycle stream.
+    pub fn set_exec_tier(&mut self, tier: ExecTier) {
+        self.exec_tier = TierSelect(tier);
+    }
+
+    /// The executor in force.
+    #[must_use]
+    pub fn exec_tier(&self) -> ExecTier {
+        self.exec_tier.0
     }
 
     /// Set `p` from an arbitrary byte, pinning bit 5 to 1 and bit 4 to 0

@@ -13,6 +13,9 @@
 //! The atlas builder itself lives in `rf-rebuild` and is generic; a caller
 //! that sees both crates (`rf-harness`, `retroforge`) pairs them.
 
+pub mod emit;
+pub mod lower;
+
 use rf_core_api::coverage::CoverageLog;
 pub use rf_rebuild::{
     build_atlas as build_generic_atlas, entry, Atlas, Delta, Provenance, RebuildExec, TraceEntry,

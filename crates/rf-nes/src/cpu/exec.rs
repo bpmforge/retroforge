@@ -49,7 +49,8 @@
 //! sequences (interrupt entries are seven-cycle "instructions" for
 //! polling purposes too, per nesdev's own cycle tables).
 use super::bus::CpuBus;
-use super::{Cpu, FLAG_B, FLAG_C, FLAG_N, FLAG_V};
+use super::{ir_exec, Cpu, ExecTier, FLAG_B, FLAG_C, FLAG_N, FLAG_V};
+use crate::rebuild::lower::InterruptKind;
 
 /// Wraps the caller's bus so `dispatch` can report a cycle count without
 /// threading a counter through every addressing-mode helper by hand — each
@@ -227,7 +228,10 @@ fn run_cycled(
 /// [`Cpu::step`], which is cycle 1) to completion and return the total
 /// bus-cycle count including that fetch.
 pub(super) fn execute(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) -> u32 {
-    run_cycled(cpu, bus, |cpu, bus| dispatch(cpu, bus, opcode))
+    match cpu.exec_tier.0 {
+        ExecTier::Interpreter => run_cycled(cpu, bus, |cpu, bus| dispatch(cpu, bus, opcode)),
+        ExecTier::Ir => run_cycled(cpu, bus, |cpu, bus| ir_exec::dispatch_ir(cpu, bus, opcode)),
+    }
 }
 
 /// Hardware NMI entry (nesdev.org/wiki/CPU_interrupts "IRQ/NMI" cycle
@@ -245,6 +249,11 @@ pub(super) fn nmi_sequence(cpu: &mut Cpu, bus: &mut dyn CpuBus) -> u32 {
     // (see its doc) — `run_cycled` below seeds `cb` from that
     // already-cleared value, so a fresh edge arriving *during* this
     // sequence still latches correctly for a subsequent instruction.
+    if cpu.exec_tier.0 == ExecTier::Ir {
+        return run_cycled(cpu, bus, |cpu, bus| {
+            ir_exec::interrupt_ir(cpu, bus, InterruptKind::Nmi);
+        });
+    }
     run_cycled(cpu, bus, |cpu, bus| {
         bus.read(cpu.pc); // cycle 2: discarded, PC increment suppressed
         finish_interrupt_entry(cpu, bus, false, 0xFFFA, false);
@@ -258,6 +267,11 @@ pub(super) fn nmi_sequence(cpu: &mut Cpu, bus: &mut dyn CpuBus) -> u32 {
 /// poll, committed to `Cpu::pending_irq_after` — see `run_cycled`), so
 /// this never re-checks `I` itself.
 pub(super) fn irq_sequence(cpu: &mut Cpu, bus: &mut dyn CpuBus) -> u32 {
+    if cpu.exec_tier.0 == ExecTier::Ir {
+        return run_cycled(cpu, bus, |cpu, bus| {
+            ir_exec::interrupt_ir(cpu, bus, InterruptKind::Irq);
+        });
+    }
     run_cycled(cpu, bus, |cpu, bus| {
         bus.read(cpu.pc); // cycle 2: discarded, PC increment suppressed
         finish_interrupt_entry(cpu, bus, false, 0xFFFE, true);
@@ -276,7 +290,7 @@ pub(super) fn irq_sequence(cpu: &mut Cpu, bus: &mut dyn CpuBus) -> u32 {
 /// unstable-op arms below set [`Cpu::unstable_op`] instead — the marker a
 /// future trace logger consumes; see `ops.rs`'s per-op doc comments for
 /// the exact constants and their nesdev/vector citations.
-fn dispatch(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) {
+pub(super) fn dispatch(cpu: &mut Cpu, bus: &mut dyn CpuBus, opcode: u8) {
     match opcode {
         // ---- LDA ----------------------------------------------------
         0xA9 => {

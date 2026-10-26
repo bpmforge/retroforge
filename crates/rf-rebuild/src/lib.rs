@@ -11,6 +11,7 @@ pub mod atlas;
 mod build;
 pub mod exec;
 pub mod hw;
+pub mod ir;
 pub mod isa;
 pub mod naming;
 pub mod profile;

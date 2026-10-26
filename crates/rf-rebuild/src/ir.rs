@@ -40,7 +40,7 @@ pub struct Reg(pub u8);
 pub struct Flag(pub u8);
 
 /// Most temps one instruction may use (the evaluator's scratch size).
-pub const MAX_TEMPS: usize = 16;
+pub const MAX_TEMPS: usize = 32;
 
 /// An operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,10 @@ pub enum Cycle {
     Stack,
     /// Interrupt vector byte.
     Vector,
+    /// A read at an address that may be wrong: the operand read itself when
+    /// an indexed access stays in its page, a thrown-away read when it does
+    /// not (a later `Data` read then follows).
+    Probe,
     /// The hardware performs this access but its value is thrown away
     /// (unindexed probe, wrong-page read, implied-mode re-read, RMW
     /// write-back of the old value, ...). Still a bus cycle.
@@ -312,7 +316,7 @@ pub fn validate(ops: &[Op]) -> Result<(), IrError> {
         if idx == group_end {
             group_writes.clear();
         }
-        let mut use_val = |v: Val, set: &[bool; MAX_TEMPS], in_group: &[usize]| match v {
+        let use_val = |v: Val, set: &[bool; MAX_TEMPS], in_group: &[usize]| match v {
             Val::Tmp(t) => {
                 let i = usize::from(t.0);
                 if i >= MAX_TEMPS {
@@ -325,21 +329,20 @@ pub fn validate(ops: &[Op]) -> Result<(), IrError> {
             }
             _ => Ok(()),
         };
-        let mut write =
-            |d: Dst, set: &mut [bool; MAX_TEMPS], group: &mut Vec<usize>, cond: bool| {
-                if let Dst::Tmp(t) = d {
-                    let i = usize::from(t.0);
-                    if i >= MAX_TEMPS {
-                        return Err(IrError::TempOutOfRange(t));
-                    }
-                    if cond {
-                        group.push(i);
-                    } else {
-                        set[i] = true;
-                    }
+        let write = |d: Dst, set: &mut [bool; MAX_TEMPS], group: &mut Vec<usize>, cond: bool| {
+            if let Dst::Tmp(t) = d {
+                let i = usize::from(t.0);
+                if i >= MAX_TEMPS {
+                    return Err(IrError::TempOutOfRange(t));
                 }
-                Ok(())
-            };
+                if cond {
+                    group.push(i);
+                } else {
+                    set[i] = true;
+                }
+            }
+            Ok(())
+        };
         let cond = idx < group_end;
         match *op {
             Op::Read { dst, addr, .. } => {
@@ -381,4 +384,260 @@ pub fn validate(ops: &[Op]) -> Result<(), IrError> {
         }
     }
     Ok(())
+}
+
+/// The meaning of an ALU op, in one place: the evaluator, the constant folder
+/// and the emitter's prelude all agree because they share this definition.
+#[inline]
+#[must_use]
+pub fn alu_eval(op: AluOp, w: Width, a: u16, b: u16) -> u16 {
+    let r = match op {
+        AluOp::Add => a.wrapping_add(b),
+        AluOp::Sub => a.wrapping_sub(b),
+        AluOp::And => a & b,
+        AluOp::Or => a | b,
+        AluOp::Xor => a ^ b,
+        AluOp::Not => !a,
+        AluOp::Shl => a.wrapping_shl(u32::from(b)),
+        AluOp::Shr => a.wrapping_shr(u32::from(b)),
+        AluOp::Eq => u16::from(a == b),
+        AluOp::Ne => u16::from(a != b),
+        AluOp::Ge => u16::from(a >= b),
+        AluOp::Gt => u16::from(a > b),
+        AluOp::Sext8 => i16::from(a as u8 as i8) as u16,
+        AluOp::Join => (a & 0xFF) | ((b & 0xFF) << 8),
+    };
+    w.mask(r)
+}
+
+/// Specialise a program to the operand bytes an image holds: each read of a
+/// [`Cycle::Fetch`] byte at the program counter keeps its bus cycle but its
+/// value becomes a constant, and ALU ops whose inputs are then constant are
+/// folded away. `operands` is the instruction's bytes after the opcode.
+///
+/// The result is for readers and emitters (addresses like `$2002` become
+/// visible); the evaluator runs the generic program and takes operand bytes
+/// from the bus, so a bank switch under the instruction cannot be missed.
+/// Constants are only propagated outside conditional groups; a temp written
+/// inside one is unknown afterwards.
+#[must_use]
+pub fn bake(ops: &[Op], operands: &[u8], pc: Reg) -> Vec<Op> {
+    let mut known: [Option<u16>; MAX_TEMPS] = [None; MAX_TEMPS];
+    let mut out = Vec::with_capacity(ops.len());
+    let mut fetched = operands.iter();
+    let mut idx = 0usize;
+    let mut group_end = 0usize;
+    let sub = |v: Val, known: &[Option<u16>; MAX_TEMPS]| match v {
+        Val::Tmp(t) => known[usize::from(t.0)].map_or(v, Val::Imm),
+        _ => v,
+    };
+    for op in ops {
+        let in_group = idx < group_end;
+        idx += 1;
+        let new = match *op {
+            Op::Read { dst, addr, kind } => {
+                let addr = sub(addr, &known);
+                if kind == Cycle::Fetch && addr == Val::Reg(pc) {
+                    if let (Some(Dst::Tmp(t)), Some(&byte)) = (dst, fetched.next()) {
+                        if !in_group {
+                            known[usize::from(t.0)] = Some(u16::from(byte));
+                        }
+                        out.push(Op::Read {
+                            dst: None,
+                            addr,
+                            kind,
+                        });
+                        continue;
+                    }
+                }
+                if let Some(Dst::Tmp(t)) = dst {
+                    known[usize::from(t.0)] = None;
+                }
+                Op::Read { dst, addr, kind }
+            }
+            Op::Write { addr, val, kind } => Op::Write {
+                addr: sub(addr, &known),
+                val: sub(val, &known),
+                kind,
+            },
+            Op::Set { dst, src } => {
+                let src = sub(src, &known);
+                if let (Dst::Tmp(t), Val::Imm(c), false) = (dst, src, in_group) {
+                    known[usize::from(t.0)] = Some(c);
+                    continue;
+                }
+                if let Dst::Tmp(t) = dst {
+                    known[usize::from(t.0)] = None;
+                }
+                Op::Set { dst, src }
+            }
+            Op::Alu { dst, op, w, a, b } => {
+                let (a, b) = (sub(a, &known), sub(b, &known));
+                if let (Dst::Tmp(t), Val::Imm(x), Val::Imm(y), false) = (dst, a, b, in_group) {
+                    known[usize::from(t.0)] = Some(alu_eval(op, w, x, y));
+                    continue;
+                }
+                if let Dst::Tmp(t) = dst {
+                    known[usize::from(t.0)] = None;
+                }
+                Op::Alu { dst, op, w, a, b }
+            }
+            Op::SetFlag { flag, src } => Op::SetFlag {
+                flag,
+                src: sub(src, &known),
+            },
+            Op::SkipUnless { cond, n } => {
+                group_end = group_end.max(idx + usize::from(n));
+                Op::SkipUnless {
+                    cond: sub(cond, &known),
+                    n,
+                }
+            }
+            Op::Machine(m) => {
+                if let MachineOp::SelectVector { dst, .. } = m {
+                    known[usize::from(dst.0)] = None;
+                }
+                Op::Machine(m)
+            }
+        };
+        out.push(new);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PC: Reg = Reg(4);
+
+    #[test]
+    fn alu_wraps_to_width_and_shares_one_definition() {
+        assert_eq!(alu_eval(AluOp::Add, Width::W8, 0xFF, 2), 1);
+        assert_eq!(alu_eval(AluOp::Add, Width::W16, 0xFF, 2), 0x101);
+        assert_eq!(alu_eval(AluOp::Sub, Width::W8, 0, 1), 0xFF);
+        assert_eq!(alu_eval(AluOp::Not, Width::W8, 0x0F, 0), 0xF0);
+        assert_eq!(alu_eval(AluOp::Sext8, Width::W16, 0x80, 0), 0xFF80);
+        assert_eq!(alu_eval(AluOp::Sext8, Width::W16, 0x7F, 0), 0x007F);
+        assert_eq!(alu_eval(AluOp::Join, Width::W16, 0x34, 0x12), 0x1234);
+        assert_eq!(alu_eval(AluOp::Gt, Width::W16, 0x100, 0xFF), 1);
+        assert_eq!(alu_eval(AluOp::Ge, Width::W8, 3, 3), 1);
+    }
+
+    #[test]
+    fn validate_rejects_unset_temps_and_runaway_skips() {
+        let read_unset = [Op::Write {
+            addr: Val::Tmp(Tmp(0)),
+            val: Val::Imm(0),
+            kind: Cycle::Data,
+        }];
+        assert_eq!(validate(&read_unset), Err(IrError::TempUnset(Tmp(0))));
+        let skip = [Op::SkipUnless {
+            cond: Val::Imm(1),
+            n: 2,
+        }];
+        assert_eq!(validate(&skip), Err(IrError::SkipPastEnd));
+        let wide = [Op::Set {
+            dst: Dst::Tmp(Tmp(MAX_TEMPS as u8)),
+            src: Val::Imm(0),
+        }];
+        assert_eq!(
+            validate(&wide),
+            Err(IrError::TempOutOfRange(Tmp(MAX_TEMPS as u8)))
+        );
+    }
+
+    #[test]
+    fn a_temp_written_only_inside_a_skipped_group_is_not_usable_after_it() {
+        let ops = [
+            Op::SkipUnless {
+                cond: Val::Imm(0),
+                n: 1,
+            },
+            Op::Set {
+                dst: Dst::Tmp(Tmp(0)),
+                src: Val::Imm(1),
+            },
+            Op::Write {
+                addr: Val::Tmp(Tmp(0)),
+                val: Val::Imm(0),
+                kind: Cycle::Data,
+            },
+        ];
+        assert_eq!(validate(&ops), Err(IrError::TempUnset(Tmp(0))));
+    }
+
+    #[test]
+    fn cycle_range_counts_conditional_cycles_only_in_max() {
+        let ops = vec![
+            Op::Read {
+                dst: None,
+                addr: Val::Imm(0),
+                kind: Cycle::Dummy,
+            },
+            Op::SkipUnless {
+                cond: Val::Imm(0),
+                n: 1,
+            },
+            Op::Read {
+                dst: None,
+                addr: Val::Imm(0),
+                kind: Cycle::Dummy,
+            },
+        ];
+        let insn = InsnIr {
+            opcode: 0,
+            len: 1,
+            lowering: Lowering::Ir(ops),
+        };
+        assert_eq!(insn.cycle_range(), Some((1, 2)));
+        let jam = InsnIr {
+            opcode: 2,
+            len: 1,
+            lowering: Lowering::Interpret(InterpretReason::Halt),
+        };
+        assert_eq!(jam.cycle_range(), None);
+    }
+
+    #[test]
+    fn bake_turns_fetched_operands_into_constants_but_keeps_the_cycles() {
+        // t0 = fetch; t1 = t0 + 1 (folds); write [t1] <- t0
+        let ops = [
+            Op::Read {
+                dst: Some(Dst::Tmp(Tmp(0))),
+                addr: Val::Reg(PC),
+                kind: Cycle::Fetch,
+            },
+            Op::Alu {
+                dst: Dst::Tmp(Tmp(1)),
+                op: AluOp::Add,
+                w: Width::W8,
+                a: Val::Tmp(Tmp(0)),
+                b: Val::Imm(1),
+            },
+            Op::Write {
+                addr: Val::Tmp(Tmp(1)),
+                val: Val::Tmp(Tmp(0)),
+                kind: Cycle::Data,
+            },
+        ];
+        let baked = bake(&ops, &[0x41], PC);
+        assert_eq!(baked.len(), 2, "the fold dropped one op");
+        assert!(matches!(
+            baked[0],
+            Op::Read {
+                dst: None,
+                kind: Cycle::Fetch,
+                ..
+            }
+        ));
+        assert_eq!(
+            baked[1],
+            Op::Write {
+                addr: Val::Imm(0x42),
+                val: Val::Imm(0x41),
+                kind: Cycle::Data
+            }
+        );
+    }
 }
