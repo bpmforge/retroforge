@@ -193,6 +193,7 @@ fn lockstep_level(
         force_level(frame, core, level);
         if side == Side::Rebuilt {
             core.set_exec_tier(tier);
+            assert_eq!(core.exec_tier(), tier, "the rebuilt core runs the chosen tier");
         }
         if side == Side::Rebuilt {
             if frame == FINGERPRINT {
