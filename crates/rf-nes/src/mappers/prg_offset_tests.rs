@@ -237,7 +237,7 @@ fn eight_k_window_boards_follow_their_registers() {
 fn action53_every_prg_mode_and_outer_size() {
     let prg = scrambled(32 * 16 * 1024);
     let mut m = Action53::new(prg.clone());
-    let mut reg = |m: &mut Action53, select: u8, value: u8| {
+    let reg = |m: &mut Action53, select: u8, value: u8| {
         m.cpu_write_expansion(0x5000, select);
         m.cpu_write(0x8000, value, 0);
     };
