@@ -5,7 +5,11 @@
 //! the check sweeps all 32 KiB of `$8000-$FFFF` after each bank change.
 use rf_cart::Mirroring;
 
-use super::{AxRom, Bnrom, Cnrom, Cprom, GxRom, Mapper, Mmc1, Mmc3, Mmc3Revision, Nrom, UxRom};
+use super::{
+    Action53, AxRom, Bnrom, Camerica, Cnrom, ColorDreams, Cprom, DxRom, Fme7, GxRom, JalecoJf,
+    Mapper, Mmc1, Mmc2, Mmc3, Mmc3Revision, Mmc5, Nina, Nrom, Quattro, Rambo1, Sachen, Ss88006,
+    Unrom512, UxRom,
+};
 
 /// `len` bytes of deterministic noise (xorshift32), so banks differ.
 fn scrambled(len: usize) -> Vec<u8> {
@@ -138,6 +142,144 @@ fn mmc3_both_prg_modes() {
             m.cpu_write(0x8000, mode | 7, 0);
             m.cpu_write(0x8001, r7, 0);
             check(&m, &prg, "mmc3");
+        }
+    }
+}
+
+// ---- W37-02: the remaining boards --------------------------------------
+
+#[test]
+fn camerica_unrom512_quattro_follow_bank_switch() {
+    let prg = scrambled(16 * 16 * 1024);
+    let mut c = Camerica::new(prg.clone(), Mirroring::Vertical);
+    let mut u = Unrom512::new(prg.clone(), Mirroring::Horizontal);
+    let mut q = Quattro::new(prg.clone(), Mirroring::Vertical);
+    for bank in [0u8, 1, 5, 9, 15] {
+        c.cpu_write(0xC000, bank, 0);
+        u.cpu_write(0x8000, bank, 0);
+        check(&c, &prg, "camerica");
+        check(&u, &prg, "unrom512");
+    }
+    for block in 0..4u8 {
+        for bank in 0..4u8 {
+            q.cpu_write(0x8000, block << 3, 0);
+            q.cpu_write(0xC000, bank, 0);
+            check(&q, &prg, "quattro");
+        }
+    }
+}
+
+#[test]
+fn whole_window_boards_follow_their_registers() {
+    let prg = scrambled(4 * 32 * 1024);
+    let mut cd = ColorDreams::new(prg.clone(), vec![0; 8192], false, Mirroring::Vertical);
+    let mut dr =
+        ColorDreams::new_death_race(prg.clone(), vec![0; 8192], false, Mirroring::Vertical);
+    let mut nina = Nina::new(prg.clone(), vec![0; 8192], false, Mirroring::Vertical);
+    for v in [0u8, 1, 2, 3, 0x13, 0xF2] {
+        cd.cpu_write(0x8000, v, 0);
+        dr.cpu_write(0x8000, v, 0);
+        nina.cpu_write_expansion(0x4100, v);
+        check(&cd, &prg, "color dreams");
+        check(&dr, &prg, "death race");
+        check(&nina, &prg, "nina");
+    }
+    let mut sa = Sachen::new(prg.clone(), vec![0; 8192], false, Mirroring::Vertical);
+    for v in [0u8, 8, 0xFF] {
+        sa.cpu_write(0x8000, v, 0);
+        check(&sa, &prg, "sachen");
+    }
+    let jf = JalecoJf::new(prg.clone(), vec![0; 8192], false, Mirroring::Vertical);
+    check(&jf, &prg, "jaleco jf");
+}
+
+#[test]
+fn eight_k_window_boards_follow_their_registers() {
+    let prg = scrambled(32 * 8 * 1024);
+    let mut mmc2 = Mmc2::new(prg.clone(), vec![0; 32 * 4096]);
+    let mut dx = DxRom::new(prg.clone(), vec![0; 64 * 1024], false, Mirroring::Vertical);
+    let mut fme = Fme7::new(prg.clone(), vec![0; 64 * 1024], false);
+    let mut ss = Ss88006::new(prg.clone(), vec![0; 64 * 1024], false);
+    let mut rb = Rambo1::new(prg.clone(), vec![0; 64 * 1024], false);
+    for (a, b, c) in [(0u8, 1u8, 2u8), (3, 7, 9), (15, 22, 31), (30, 17, 5)] {
+        mmc2.cpu_write(0xA000, a & 0x0F, 0);
+        check(&mmc2, &prg, "mmc2");
+        for (reg, v) in [(6u8, a), (7, b)] {
+            dx.cpu_write(0x8000, reg, 0);
+            dx.cpu_write(0x8001, v, 0);
+        }
+        check(&dx, &prg, "dxrom");
+        for (cmd, v) in [(9u8, a), (10, b), (11, c)] {
+            fme.cpu_write(0x8000, cmd, 0);
+            fme.cpu_write(0xA000, v, 0);
+        }
+        check(&fme, &prg, "fme7");
+        for (lo, hi, v) in [
+            (0x8000u16, 0x8001u16, a),
+            (0x8002, 0x8003, b),
+            (0x9000, 0x9001, c),
+        ] {
+            ss.cpu_write(lo, v & 0x0F, 0);
+            ss.cpu_write(hi, v >> 4, 0);
+        }
+        check(&ss, &prg, "ss88006");
+        for mode in [0x00u8, 0x40] {
+            for (reg, v) in [(6u8, a), (7, b), (15, c)] {
+                rb.cpu_write(0x8000, mode | reg, 0);
+                rb.cpu_write(0x8001, v, 0);
+            }
+            check(&rb, &prg, "rambo1");
+        }
+    }
+}
+
+#[test]
+fn action53_every_prg_mode_and_outer_size() {
+    let prg = scrambled(32 * 16 * 1024);
+    let mut m = Action53::new(prg.clone());
+    let mut reg = |m: &mut Action53, select: u8, value: u8| {
+        m.cpu_write_expansion(0x5000, select);
+        m.cpu_write(0x8000, value, 0);
+    };
+    // `$80` mode (PRG mode bits 3-2, outer size bits 5-4), `$81` outer,
+    // `$01` inner.
+    for mode in 0..0x40u8 {
+        reg(&mut m, 0x80, mode);
+        for outer in [0u8, 1, 2, 7, 0x3F] {
+            for inner in [0u8, 1, 6, 0xF] {
+                reg(&mut m, 0x81, outer);
+                reg(&mut m, 0x01, inner);
+                check(&m, &prg, "action53");
+            }
+        }
+    }
+}
+
+#[test]
+fn mmc5_all_prg_modes_and_ram_windows() {
+    let prg = scrambled(64 * 8 * 1024);
+    let mut m = Mmc5::new(prg.clone(), vec![0; 64 * 1024], false);
+    for mode in 0..4u8 {
+        m.cpu_write_expansion(0x5100, mode);
+        for regs in [
+            [0x80u8, 0x81, 0x82, 0x83],
+            [0x84, 0x8B, 0xA2, 0xBF],
+            [0x00, 0x91, 0xC2, 0xFF],
+        ] {
+            for (i, r) in regs.into_iter().enumerate() {
+                m.cpu_write_expansion(0x5114 + i as u16, r);
+            }
+            for addr in 0x8000..=0xFFFFu16 {
+                match m.prg_ram_window(addr) {
+                    // RAM selected: not ROM, the bus never asks, and the
+                    // mapper does not claim a ROM offset for it.
+                    Some(_) => assert_eq!(m.prg_rom_offset(addr), None, "mmc5 ram {addr:04X}"),
+                    None => {
+                        let off = m.prg_rom_offset(addr).expect("a ROM window has an offset");
+                        assert_eq!(prg[off], m.cpu_read(addr), "mmc5 m{mode} {addr:04X}");
+                    }
+                }
+            }
         }
     }
 }

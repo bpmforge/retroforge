@@ -78,6 +78,13 @@ impl Nina {
 }
 
 impl Mapper for Nina {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let bank = ((self.bank_select >> 3) & 0x01) as usize % self.prg_bank_count();
+        let offset = (addr as usize - 0x8000) % PRG_BANK_SIZE;
+        Some((bank * PRG_BANK_SIZE + offset) % self.prg_rom.len())
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         debug_assert!(!self.prg_rom.is_empty(), "NINA image with empty PRG ROM");
         let bank = ((self.bank_select >> 3) & 0x01) as usize % self.prg_bank_count();
