@@ -690,6 +690,83 @@ fn write_function(out: &mut String, f: &RecipeFunction) {
     let _ = writeln!(out, "source = {}", quote(&f.source));
 }
 
+fn write_data_region(out: &mut String, d: &DataRegion) {
+    let _ = writeln!(
+        out,
+        "\n[[data_region]]\nname = {}\nkind = \"{}\"\nrom = {:#08x}\nsize = {}\nstride = {}",
+        quote(&d.name),
+        d.kind.as_str(),
+        d.rom,
+        d.size,
+        d.stride
+    );
+    if let Some(p) = d.part {
+        let _ = writeln!(out, "part = \"{}\"", p.as_str());
+    }
+    if let Some(b) = d.pointer_bytes {
+        let _ = writeln!(out, "pointer_bytes = {b}");
+    }
+    for (key, v) in [("index_ram", d.index_ram), ("pointer_ram", d.pointer_ram)] {
+        if let Some(v) = v {
+            let _ = writeln!(out, "{key} = {v:#x}");
+        }
+    }
+    if let Some(v) = &d.via {
+        let _ = writeln!(out, "via = {}", quote(v));
+    }
+    if let Some(c) = d.confidence {
+        let _ = writeln!(out, "confidence = {c}");
+    }
+    let _ = writeln!(
+        out,
+        "grade = \"{}\"\nsource = {}",
+        d.grade.as_str(),
+        quote(&d.source)
+    );
+}
+
+/// First line of the block [`region_rows_block`] writes.
+pub const REGION_BLOCK_BEGIN: &str =
+    "# ---- data-region finder: ROM tables and level data (finder: sources) ----";
+/// Last line of that block.
+pub const REGION_BLOCK_END: &str = "# ---- end data-region finder ----";
+
+/// `rows` as `[[data_region]]` tables between marker comments, to splice into
+/// a recipe file without rewriting the rest of it (ticket W38-01).
+#[must_use]
+pub fn region_rows_block(rows: &[DataRegion]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n{REGION_BLOCK_BEGIN}\n");
+    for d in rows {
+        write_data_region(&mut out, d);
+    }
+    let _ = writeln!(out, "\n{REGION_BLOCK_END}");
+    out
+}
+
+/// `text` with any earlier region block replaced by `block`.
+#[must_use]
+pub fn splice_region_block(text: &str, block: &str) -> String {
+    let mut kept = String::with_capacity(text.len() + block.len());
+    let mut skipping = false;
+    for line in text.lines() {
+        if line.trim_end() == REGION_BLOCK_BEGIN {
+            skipping = true;
+        }
+        if !skipping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        if skipping && line.trim_end() == REGION_BLOCK_END {
+            skipping = false;
+        }
+    }
+    let trimmed = kept.trim_end_matches('\n');
+    format!("{trimmed}\n{block}")
+}
+
 /// First line of the block [`name_rows_block`] writes.
 pub const NAME_BLOCK_BEGIN: &str =
     "# ---- understand pass: machine-proposed names (rule:/ai: sources) ----";
@@ -824,38 +901,7 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
         );
     }
     for d in &recipe.data_regions {
-        let _ = writeln!(
-            out,
-            "\n[[data_region]]\nname = {}\nkind = \"{}\"\nrom = {:#08x}\nsize = {}\nstride = {}",
-            quote(&d.name),
-            d.kind.as_str(),
-            d.rom,
-            d.size,
-            d.stride
-        );
-        if let Some(p) = d.part {
-            let _ = writeln!(out, "part = \"{}\"", p.as_str());
-        }
-        if let Some(b) = d.pointer_bytes {
-            let _ = writeln!(out, "pointer_bytes = {b}");
-        }
-        for (key, v) in [("index_ram", d.index_ram), ("pointer_ram", d.pointer_ram)] {
-            if let Some(v) = v {
-                let _ = writeln!(out, "{key} = {v:#x}");
-            }
-        }
-        if let Some(v) = &d.via {
-            let _ = writeln!(out, "via = {}", quote(v));
-        }
-        if let Some(c) = d.confidence {
-            let _ = writeln!(out, "confidence = {c}");
-        }
-        let _ = writeln!(
-            out,
-            "grade = \"{}\"\nsource = {}",
-            d.grade.as_str(),
-            quote(&d.source)
-        );
+        write_data_region(&mut out, d);
     }
     out
 }
@@ -1265,5 +1311,30 @@ mod tests {
             );
             assert!(load_recipe_noted(&t).is_err(), "{what}");
         }
+    }
+    #[test]
+    fn the_region_block_is_replaced_not_duplicated() {
+        let row = |name: &str| DataRegion {
+            name: name.to_string(),
+            kind: RegionKind::Stream,
+            rom: 0x10,
+            size: 4,
+            stride: 1,
+            part: None,
+            pointer_bytes: None,
+            index_ram: None,
+            pointer_ram: None,
+            via: None,
+            confidence: Some(50),
+            source: "finder: test".to_string(),
+            grade: Grade::Candidate,
+        };
+        let base = "[recipe]\nformat = 1\nid = \"d\"\n# keep me\n";
+        let once = splice_region_block(base, &region_rows_block(&[row("a")]));
+        let twice = splice_region_block(&once, &region_rows_block(&[row("b")]));
+        assert_eq!(twice.matches(REGION_BLOCK_BEGIN).count(), 1);
+        assert!(twice.contains("# keep me") && twice.contains("\"b\"") && !twice.contains("\"a\""));
+        let r = load_recipe_str(&twice).expect("parses");
+        assert_eq!(r.data_regions.len(), 1);
     }
 }

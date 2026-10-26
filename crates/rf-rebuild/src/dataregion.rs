@@ -78,6 +78,10 @@ const ENTRY_CAP: usize = 8192;
 const RING: usize = 16;
 /// A store matches a ROM read at most this many steps old.
 const WINDOW: u64 = 8;
+/// A pointer is used as loaded, or after the code stepped it past a short
+/// header (a level's two header bytes before its objects): reads whose base
+/// is this far above a table entry's target still belong to that target.
+const TARGET_SLACK: u32 = 8;
 /// RAM reads remembered as candidate index sources.
 const RAM_RECENT: usize = 8;
 /// An index source is a RAM read at most this many steps before the read.
@@ -306,6 +310,14 @@ struct Pointer {
     bytes: u8,
 }
 
+/// Why a step recorded no data read.
+enum Skip {
+    /// Not a ROM data read at all (no ROM read, a return, a branch).
+    NotData,
+    /// A ROM read that fits neither addressing shape.
+    Unknown,
+}
+
 /// The observer: hand it to `run_frame_observed`, with the resolver set for
 /// the frame, then [`Self::take_facts`].
 pub struct DataReader {
@@ -353,6 +365,12 @@ impl DataReader {
         )
     }
 
+    /// Counters so far.
+    #[must_use]
+    pub fn stats(&self) -> ReadStats {
+        self.facts.stats
+    }
+
     /// The longest instruction the prefix scan accepts.
     fn max_prefix(&self) -> usize {
         match self.platform {
@@ -369,10 +387,10 @@ impl DataReader {
     }
 
     /// Find and classify the ROM data read of one instruction.
-    fn classify_step(&self, acc: &[BusAccess]) -> Option<(u32, DataRead)> {
-        let first = *acc.first()?;
+    fn classify_step(&self, acc: &[BusAccess]) -> Result<(u32, DataRead), Skip> {
+        let first = *acc.first().ok_or(Skip::NotData)?;
         if first.write {
-            return None;
+            return Err(Skip::NotData);
         }
         let pc = first.addr;
         let cap = self.max_prefix();
@@ -384,13 +402,30 @@ impl DataReader {
         {
             prefix += 1;
         }
-        let pc_rom = (self.resolver)(pc)?;
+        // Relative branches (6502 and 65816: `xxy10000`, plus `BRA`/`BRL`) read
+        // a dummy byte when taken across a page; that is not data.
+        if first.value & 0x1F == 0x10
+            || (self.platform == Platform::Snes && matches!(first.value, 0x80 | 0x82))
+        {
+            return Err(Skip::NotData);
+        }
+        let pc_rom = (self.resolver)(pc).ok_or(Skip::NotData)?;
         // Candidate data reads: ROM reads after the prefix, outside the
         // instruction's own bytes.
         let is_data = |a: &BusAccess| {
             !a.write && a.addr.wrapping_sub(pc) > cap as u32 && (self.resolver)(a.addr).is_some()
         };
-        let last = (prefix..acc.len()).rev().find(|&i| is_data(&acc[i]))?;
+        let last = (prefix..acc.len())
+            .rev()
+            .find(|&i| is_data(&acc[i]))
+            .ok_or(Skip::NotData)?;
+        // A return pulls its address off the stack and then reads the byte
+        // there: an instruction fetch in all but name.
+        if (prefix..last).any(|i| {
+            !acc[i].write && matches!(classify(self.platform, acc[i].addr, false), Hit::Stack)
+        }) {
+            return Err(Skip::NotData);
+        }
         let mut first_i = last;
         if last > prefix
             && is_data(&acc[last - 1])
@@ -398,7 +433,7 @@ impl DataReader {
         {
             first_i = last - 1;
         }
-        let rom = (self.resolver)(acc[first_i].addr)?;
+        let rom = (self.resolver)(acc[first_i].addr).ok_or(Skip::NotData)?;
         let width = (last - first_i + 1) as u8;
         let data = acc[first_i].addr;
         // RAM reads between the prefix and the data read.
@@ -416,7 +451,7 @@ impl DataReader {
         };
         if rams.is_empty() {
             if prefix < 3 {
-                return None;
+                return Err(Skip::Unknown);
             }
             let operand = u32::from(acc[1].value) | (u32::from(acc[2].value) << 8);
             let base_cpu = if prefix >= 4 {
@@ -426,16 +461,16 @@ impl DataReader {
             };
             read.index = (data & 0xFFFF).wrapping_sub(operand) & 0xFFFF;
             read.base = (self.resolver)(base_cpu).unwrap_or_else(|| rom.wrapping_sub(read.index));
-            return Some((pc_rom, read));
+            return Ok((pc_rom, read));
         }
         // Through a pointer: its bytes are the last RAM reads before the data.
         let n = rams.len();
         if n < 2 {
-            return None;
+            return Err(Skip::Unknown);
         }
         let (a, b) = (rams[n - 2], rams[n - 1]);
         if acc[b].addr != acc[a].addr.wrapping_add(1) {
-            return None;
+            return Err(Skip::Unknown);
         }
         let ptr16 = u32::from(acc[a].value) | (u32::from(acc[b].value) << 8);
         let mut pointer = Pointer {
@@ -460,7 +495,7 @@ impl DataReader {
         read.index = index;
         read.base = rom.wrapping_sub(index);
         read.pointer = Some(pointer);
-        Some((pc_rom, read))
+        Ok((pc_rom, read))
     }
 
     fn push_ring(&mut self, e: RingEntry) {
@@ -541,17 +576,14 @@ impl StepObserver for DataReader {
         if facts.interrupt || acc.is_empty() {
             return;
         }
-        let classified = self.classify_step(acc);
-        let is_jump_ind = classified.is_none() && acc[0].value == 0x6C;
-        let _ = is_jump_ind;
         let mut here: Option<(u32, DataRead)> = None;
-        if let Some((pc_rom, r)) = classified {
-            self.record(pc_rom, facts.function, acc[0].addr, &r);
-            here = Some((pc_rom, r));
-        } else if acc.iter().skip(1).any(|a| {
-            !a.write && a.addr.wrapping_sub(acc[0].addr) > 4 && (self.resolver)(a.addr).is_some()
-        }) {
-            self.facts.stats.unknown += 1;
+        match self.classify_step(acc) {
+            Ok((pc_rom, r)) => {
+                self.record(pc_rom, facts.function, acc[0].addr, &r);
+                here = Some((pc_rom, r));
+            }
+            Err(Skip::Unknown) => self.facts.stats.unknown += 1,
+            Err(Skip::NotData) => {}
         }
         // The pointer link, if this read went through a pointer the ROM made.
         if let Some((pc_rom, r)) = here {
@@ -819,6 +851,17 @@ pub struct Region {
     pub evidence: String,
 }
 
+/// Bytes of `[lo, hi)` that `set` holds.
+fn covered(set: &RangeSet, lo: u32, hi: u32) -> u32 {
+    set.ranges()
+        .iter()
+        .map(|&(a, b)| {
+            let (a, b) = (a.max(lo), b.saturating_add(1).min(hi));
+            b.saturating_sub(a)
+        })
+        .sum()
+}
+
 fn gcd(mut a: u32, mut b: u32) -> u32 {
     // `b` strictly decreases (it becomes `a % b < b`), so this ends.
     while b != 0 {
@@ -882,15 +925,20 @@ pub fn infer(facts: &DataFacts) -> Vec<Region> {
             let link = &facts.links[k];
             link.entries
                 .values()
-                .any(|e| e.targets.contains(&target))
+                .any(|e| {
+                    e.targets
+                        .iter()
+                        .any(|&t| target >= t && target - t <= TARGET_SLACK)
+                })
                 .then(|| rs[0].name.clone())
         })
     };
 
     // 2. Everything else, by site.
     let mut gfx: Vec<(u32, &Site)> = Vec::new();
+    let mut indirect: Vec<(u32, &Site)> = Vec::new();
     for (&pc, site) in &facts.sites {
-        if claimed.contains(&pc) || site.hits < 2 {
+        if claimed.contains(&pc) || (site.hits < 2 && !site.indirect) {
             continue;
         }
         let segs: Vec<(u32, u32)> = site.segments.values().map(|s| (s.lo, s.hi)).collect();
@@ -900,36 +948,7 @@ pub fn infer(facts: &DataFacts) -> Vec<Region> {
         }
         let walks = site.sequential * 10 >= site.hits * 4 && site.hits >= 4;
         if site.indirect {
-            let ranges = merge_overlapping(segs);
-            let kind = if walks {
-                RegionKind::Stream
-            } else {
-                RegionKind::ElementTable
-            };
-            for (lo, hi) in ranges {
-                if hi - lo < 2 {
-                    continue;
-                }
-                let mut r = region(kind, lo, hi - lo, 1);
-                r.reads = site.hits;
-                r.sites = vec![pc];
-                r.pointer_ram = top_ram(&site.pointer_ram, site.hits, 0.5);
-                r.via = site
-                    .segments
-                    .keys()
-                    .filter(|&&b| (lo..hi).contains(&b))
-                    .find_map(|&b| table_name(b));
-                r.confidence = clamp_conf(
-                    35.0 + (site.sequential as f64 / site.hits as f64) * 30.0
-                        + (f64::from(hi - lo)).log2() * 2.0
-                        + if r.via.is_some() { 15.0 } else { 0.0 },
-                );
-                r.evidence = format!(
-                    "{} reads through a RAM pointer, {} sequential",
-                    site.hits, site.sequential
-                );
-                out.push(r);
-            }
+            indirect.push((pc, site));
         } else if site.indices.len() >= 2 {
             let stride = stride_of(&site.indices).max(1);
             let kind = if walks && stride == 1 {
@@ -956,6 +975,7 @@ pub fn infer(facts: &DataFacts) -> Vec<Region> {
             }
         }
     }
+    out.extend(indirect_regions(&indirect, &table_name));
     for (pc, site) in gfx {
         let hits = site.hits;
         let segs: Vec<(u32, u32)> = site.segments.values().map(|s| (s.lo, s.hi)).collect();
@@ -982,7 +1002,98 @@ pub fn infer(facts: &DataFacts) -> Vec<Region> {
         }
     }
     out = merge_same_region(out);
-    out.sort_by(|a, b| (a.start, a.kind, a.part).cmp(&(b.start, b.kind, b.part)));
+    out.sort_by(|a, b| (a.start, a.kind, a.part, a.size).cmp(&(b.start, b.kind, b.part, b.size)));
+    // Names are start-based; two regions that start together get a suffix.
+    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    for r in &mut out {
+        let n = seen.entry(r.name.clone()).or_default();
+        if *n > 0 {
+            r.name = format!("{}_{}", r.name, *n);
+        }
+        *n += 1;
+    }
+    out
+}
+
+/// Data read through RAM pointers. Sites that use the same pointer are one
+/// reader (a level parser reads its object stream from many places, each
+/// touching a different field), so density and direction are judged on what
+/// they read together. Reads from bases within [`TARGET_SLACK`] of each other
+/// are one stream (the code steps the pointer past a header).
+fn indirect_regions(
+    sites: &[(u32, &Site)],
+    table_name: &impl Fn(u32) -> Option<String>,
+) -> Vec<Region> {
+    let mut groups: BTreeMap<(u8, u32), Vec<(u32, &Site)>> = BTreeMap::new();
+    for &(pc, site) in sites {
+        let key = match top_ram(&site.pointer_ram, site.hits, 0.5) {
+            Some(ram) => (0, ram),
+            None => (1, pc),
+        };
+        groups.entry(key).or_default().push((pc, site));
+    }
+    let mut out = Vec::new();
+    for (key, members) in groups {
+        let hits: u64 = members.iter().map(|(_, s)| s.hits).sum();
+        let sequential: u64 = members.iter().map(|(_, s)| s.sequential).sum();
+        let mut union = RangeSet::default();
+        for (_, s) in &members {
+            for &(a, b) in s.offsets.ranges() {
+                for x in a..=b {
+                    union.insert(x);
+                }
+            }
+        }
+        let mut segs: Vec<(u32, u32, u32)> = members
+            .iter()
+            .flat_map(|(_, s)| s.segments.iter().map(|(&b, g)| (b, g.lo, g.hi)))
+            .collect();
+        segs.sort_unstable_by_key(|&(base, lo, _)| (lo, base));
+        // (first base, last base, lo, hi)
+        let mut ranges: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for (base, lo, hi) in segs {
+            match ranges.last_mut() {
+                Some(r) if lo < r.3 || (base <= r.1 + TARGET_SLACK && lo <= r.3) => {
+                    r.1 = r.1.max(base);
+                    r.3 = r.3.max(hi);
+                }
+                _ => ranges.push((base, base, lo, hi)),
+            }
+        }
+        let pointer_ram = (key.0 == 0).then_some(key.1);
+        for (first_base, last_base, lo, hi) in ranges {
+            if hi - lo < 2 {
+                continue;
+            }
+            // A stream when the bytes read fill their span (a parser re-reads
+            // an object many times, so steps forward alone undercount) or the
+            // reads step forward.
+            let cover = covered(&union, lo, hi);
+            let dense = cover >= 4 && u64::from(cover) * 4 >= u64::from(hi - lo) * 3;
+            let walks = sequential * 10 >= hits * 4 && hits >= 4;
+            let kind = if walks || dense {
+                RegionKind::Stream
+            } else {
+                RegionKind::ElementTable
+            };
+            let mut r = region(kind, lo, hi - lo, 1);
+            r.reads = hits;
+            r.sites = members.iter().map(|(pc, _)| *pc).collect();
+            r.pointer_ram = pointer_ram;
+            r.via = table_name(first_base).or_else(|| table_name(last_base));
+            r.confidence = clamp_conf(
+                35.0 + (cover as f64 / f64::from(hi - lo)) * 25.0
+                    + (f64::from(hi - lo)).log2() * 2.0
+                    + if r.via.is_some() { 15.0 } else { 0.0 },
+            );
+            r.evidence = format!(
+                "{hits} reads through a RAM pointer by {} site(s), {cover} of {} bytes read",
+                members.len(),
+                hi - lo
+            );
+            out.push(r);
+        }
+    }
     out
 }
 
@@ -1216,12 +1327,16 @@ pub struct LevelLink {
 
 impl LevelLink {
     /// The entry index follows the level: nearly every run used an entry of
-    /// its own, the entries differ, and each led to a stream.
+    /// its own, at least half as many different entries as runs were seen
+    /// (levels may share an area; a handful of entries over many levels is a
+    /// coarse class, not the level), and each led to a stream read in that
+    /// run.
     #[must_use]
     pub fn tracks_level(&self) -> bool {
         self.runs >= 2
             && u64::from(self.own_entry) * 10 >= u64::from(self.runs) * 9
-            && self.distinct_entries >= self.own_entry
+            && self.distinct_entries >= 2
+            && u64::from(self.distinct_entries) * 2 >= u64::from(self.runs)
             && self.stream_found >= self.own_entry
     }
 }
@@ -1301,15 +1416,58 @@ pub fn associate(runs: &[(u32, &DataFacts)]) -> Vec<LevelLink> {
 
 static EMPTY_LINK: std::sync::LazyLock<LinkStat> = std::sync::LazyLock::new(LinkStat::default);
 
-/// The stream a run read from `target`: the extent, over the run's indirect
-/// sites, of the segment whose base is `target`.
+/// The stream a run read from `target`: the extent of everything the run's
+/// indirect sites read from a base within [`TARGET_SLACK`] above it.
 fn stream_from(f: &DataFacts, target: u32) -> Option<(u32, u32)> {
-    f.sites
+    let segs: Vec<Segment> = f
+        .sites
         .values()
         .filter(|s| s.indirect)
-        .filter_map(|s| s.segments.get(&target))
-        .map(|seg| (seg.lo, seg.hi - seg.lo))
-        .max_by_key(|&(_, n)| n)
+        .flat_map(|s| s.segments.range(target..=target + TARGET_SLACK))
+        .map(|(_, seg)| *seg)
+        .collect();
+    let lo = segs.iter().map(|s| s.lo).min()?;
+    let hi = segs.iter().map(|s| s.hi).max()?;
+    Some((lo, hi - lo))
+}
+
+/// Recipe rows for `regions`, graded by what the level-switch experiment
+/// proved: a pointer table fed by a [`LevelLink::tracks_level`] link, and a
+/// stream some run read from one of that link's targets, are
+/// [`Grade::Confirmed`]; every other row stays [`Grade::Candidate`]. `note`
+/// says what was varied ("forced $075F/$0760 over 32 levels").
+#[must_use]
+pub fn grade_rows(regions: &[Region], levels: &[LevelLink], note: &str) -> Vec<DataRegion> {
+    let tracking: Vec<&LevelLink> = levels.iter().filter(|l| l.tracks_level()).collect();
+    regions
+        .iter()
+        .map(|r| {
+            let table = tracking.iter().find(|l| {
+                r.kind == RegionKind::PointerTable
+                    && [Some(l.link.lo), Some(l.link.hi), l.link.bank]
+                        .into_iter()
+                        .flatten()
+                        .any(|s| r.sites.contains(&s))
+            });
+            let stream = tracking.iter().find(|l| {
+                r.kind == RegionKind::Stream
+                    && l.per_run.iter().filter_map(|p| p.stream).any(|(start, size)| {
+                        start < r.start + r.size && r.start < start + size
+                    })
+            });
+            match table.or(stream) {
+                Some(l) => to_row(
+                    r,
+                    Grade::Confirmed,
+                    &format!(
+                        "; confirmed by level-switch experiment: {note}, {} of {} runs used an entry of their own",
+                        l.own_entry, l.runs
+                    ),
+                ),
+                None => to_row(r, Grade::Candidate, ""),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1581,6 +1739,19 @@ mod tests {
         assert_eq!(l.stream_found, 3);
         assert!(l.tracks_level());
         assert_eq!(l.per_run[1].index, Some(2));
+        let merged = {
+            let mut m = a.clone();
+            m.merge(&b);
+            m.merge(&c);
+            m
+        };
+        let rows = grade_rows(&infer(&merged), &links, "test");
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == RegionKind::PointerTable && r.grade == Grade::Confirmed));
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == RegionKind::Stream && r.grade == Grade::Confirmed));
         assert_eq!(
             l.per_run[1].target,
             Some(0x800 + 0x100 - 0x100 + 0x100 - 0x100 + 0x100)

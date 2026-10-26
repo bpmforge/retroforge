@@ -31,6 +31,7 @@ mod accuracy;
 pub mod atlas;
 mod blargg;
 pub mod blargg_evidence;
+pub mod data_regions;
 mod fetch;
 pub mod fuzz;
 mod golden_frame;
