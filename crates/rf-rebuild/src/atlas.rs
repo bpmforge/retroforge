@@ -25,7 +25,7 @@ use crate::isa::Flow;
 
 /// Bumped on any change to the encoded shape. Part of the cache name
 /// ([`CACHE_SETTINGS`]); a different number is a clean cache miss.
-pub const ATLAS_FORMAT_VERSION: u32 = 4;
+pub const ATLAS_FORMAT_VERSION: u32 = 5;
 /// `rf-cache` key `producer` component.
 pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
