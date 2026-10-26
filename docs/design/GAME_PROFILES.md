@@ -616,6 +616,21 @@ each such row `observed` (`candidate` for an `ai:` source), and
 returns how many rows were defaulted (0 = already v1). Unknown keys stay load
 errors. No bytes of the game appear anywhere (law 5, D-021).
 
+**Data regions (ticket W38-01).** `[[data_region]]` rows say where a game keeps
+ROM tables and level data: `name`, `kind` (`pointer_table` | `element_table` |
+`stream` | `graphics`), `rom` and `size` (an offset into the image the atlas
+indexes: the PRG image on the NES, the header-stripped ROM on the SNES, never
+bytes), `stride`, and optionally `part` (`lo` | `hi` | `bank` for a pointer
+table split into byte tables), `pointer_bytes`, `index_ram`, `pointer_ram`,
+`via` (the pointer table a stream is reached through) and `confidence`.
+`rf_rebuild::dataregion` writes them from how the code reads ROM (no hints);
+the source starts with `finder:` and the grade defaults to `candidate`. A row
+is `confirmed` only when a level-switch experiment proved it (the entry the
+pointer is loaded from changes with the level and each level's stream starts
+at the entry's target). Extents are what the game was seen reading: a lower
+bound. `rf_profiles::recipe::region_rows_block` / `splice_region_block` write
+and replace the marked block of finder rows in a hand-commented recipe.
+
 **Unmatched reasons.** For a row with `insn_count`, `rf_rebuild::classify_unmatched`
 scans a ROM image (every offset, the row's decode mode, shape hash only) and
 says why the row found nothing: `removed` (no code of that shape anywhere),

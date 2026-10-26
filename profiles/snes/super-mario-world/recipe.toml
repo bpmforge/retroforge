@@ -445,3 +445,1732 @@ width = 3
 name = "timer_digits"
 grade = "observed"
 source = "profile.toml [[memory_map]] timer_digits"
+
+# ---- data-region finder: ROM tables and level data (finder: sources) ----
+
+[[data_region]]
+name = "stream_000000"
+kind = "stream"
+rom = 0x000000
+size = 856
+stride = 1
+confidence = 79
+grade = "candidate"
+source = "finder: 3384 reads through a RAM pointer by 1 site(s), 846 of 856 bytes read"
+
+[[data_region]]
+name = "ptrtab_0004d0"
+kind = "pointer_table"
+rom = 0x0004d0
+size = 21
+stride = 3
+pointer_bytes = 3
+pointer_ram = 0x7e0000
+confidence = 73
+grade = "candidate"
+source = "finder: 2929 pointers built from table reads, 4 entries, high byte +1 from low"
+
+[[data_region]]
+name = "gfx_000c88"
+kind = "graphics"
+rom = 0x000c88
+size = 111
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 16 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000cfe"
+kind = "graphics"
+rom = 0x000cfe
+size = 1
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 16 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000e06"
+kind = "graphics"
+rom = 0x000e06
+size = 2
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 15847 of 12583 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_00127d"
+kind = "graphics"
+rom = 0x00127d
+size = 2
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_001c1f"
+kind = "graphics"
+rom = 0x001c1f
+size = 3
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 88 of 22 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_001e6c"
+kind = "graphics"
+rom = 0x001e6c
+size = 4
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 916 of 232 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_002481"
+kind = "graphics"
+rom = 0x002481
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 315385 of 18709 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_002bd3"
+kind = "graphics"
+rom = 0x002bd3
+size = 9
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 2550 of 32 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0030b0"
+kind = "graphics"
+rom = 0x0030b0
+size = 72
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_003158"
+kind = "graphics"
+rom = 0x003158
+size = 80
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_003250"
+kind = "graphics"
+rom = 0x003250
+size = 120
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0032db"
+kind = "graphics"
+rom = 0x0032db
+size = 1
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 18410 of 18410 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_003318"
+kind = "graphics"
+rom = 0x003318
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0033d8"
+kind = "graphics"
+rom = 0x0033d8
+size = 56
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_003528"
+kind = "graphics"
+rom = 0x003528
+size = 292
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_003674"
+kind = "graphics"
+rom = 0x003674
+size = 42
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 21797 of 6396 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "ptrtab_003992_lo"
+kind = "pointer_table"
+rom = 0x003992
+size = 44
+stride = 1
+part = "lo"
+pointer_bytes = 3
+pointer_ram = 0x7e008a
+confidence = 82
+grade = "candidate"
+source = "finder: 229 pointers built from table reads, 20 entries, high byte +50 from low"
+
+[[data_region]]
+name = "ptrtab_003992_hi"
+kind = "pointer_table"
+rom = 0x0039c4
+size = 44
+stride = 1
+part = "hi"
+pointer_bytes = 3
+pointer_ram = 0x7e008a
+confidence = 82
+grade = "candidate"
+source = "finder: 229 pointers built from table reads, 20 entries, high byte +50 from low"
+
+[[data_region]]
+name = "ptrtab_003992_bank"
+kind = "pointer_table"
+rom = 0x0039f6
+size = 44
+stride = 1
+part = "bank"
+pointer_bytes = 3
+pointer_ram = 0x7e008a
+confidence = 82
+grade = "candidate"
+source = "finder: 229 pointers built from table reads, 20 entries, high byte +50 from low"
+
+[[data_region]]
+name = "gfx_003e28"
+kind = "graphics"
+rom = 0x003e28
+size = 2
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 19260 of 921 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_004b12"
+kind = "stream"
+rom = 0x004b12
+size = 127
+stride = 1
+pointer_ram = 0x7e0004
+confidence = 73
+grade = "candidate"
+source = "finder: 5306 reads through a RAM pointer by 3 site(s), 127 of 127 bytes read"
+
+[[data_region]]
+name = "gfx_00600c"
+kind = "graphics"
+rom = 0x00600c
+size = 63
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 19168 of 13705 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0060cc"
+kind = "graphics"
+rom = 0x0060cc
+size = 63
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 19120 of 13705 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_006604"
+kind = "graphics"
+rom = 0x006604
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 364 of 48 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_00690d"
+kind = "graphics"
+rom = 0x00690d
+size = 4
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 232 of 46 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_00706f"
+kind = "graphics"
+rom = 0x00706f
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 8 of 2 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0076ad"
+kind = "graphics"
+rom = 0x0076ad
+size = 10
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 1028904 of 11596 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0119ec"
+kind = "graphics"
+rom = 0x0119ec
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 208 of 52 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0127ac"
+kind = "graphics"
+rom = 0x0127ac
+size = 5
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 617 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0127f9"
+kind = "graphics"
+rom = 0x0127f9
+size = 3
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 33032 of 7309 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_01b5a8"
+kind = "graphics"
+rom = 0x01b5a8
+size = 55
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 8112 of 6869 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_01b620"
+kind = "graphics"
+rom = 0x01b620
+size = 55
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 12 of 4 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_020006"
+kind = "graphics"
+rom = 0x020006
+size = 128
+stride = 1
+confidence = 77
+grade = "candidate"
+source = "finder: 6731 of 8976 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_022400"
+kind = "stream"
+rom = 0x022400
+size = 307
+stride = 1
+pointer_ram = 0x7e0000
+via = "ptrtab_0004d0"
+confidence = 83
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 205 of 307 bytes read"
+
+[[data_region]]
+name = "gfx_022404"
+kind = "graphics"
+rom = 0x022404
+size = 302
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 175 of 175 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_022533"
+kind = "stream"
+rom = 0x022533
+size = 6904
+stride = 1
+pointer_ram = 0x7e0000
+confidence = 85
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 6904 of 6904 bytes read"
+
+[[data_region]]
+name = "stream_02402b"
+kind = "stream"
+rom = 0x02402b
+size = 5709
+stride = 1
+pointer_ram = 0x7e0000
+confidence = 84
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 5709 of 5709 bytes read"
+
+[[data_region]]
+name = "stream_025679"
+kind = "stream"
+rom = 0x025679
+size = 92
+stride = 1
+index_ram = 0x7e0000
+confidence = 84
+grade = "candidate"
+source = "finder: 920 reads indexed by a register, 92 distinct indices"
+
+[[data_region]]
+name = "ptrtab_028000"
+kind = "pointer_table"
+rom = 0x028000
+size = 16
+stride = 14
+pointer_bytes = 2
+pointer_ram = 0x7e000a
+confidence = 68
+grade = "candidate"
+source = "finder: 72 pointers built from table reads, 2 entries, high byte +1 from low"
+
+[[data_region]]
+name = "gfx_028417"
+kind = "graphics"
+rom = 0x028417
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 208 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_028497"
+kind = "graphics"
+rom = 0x028497
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 187390 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0284d7"
+kind = "graphics"
+rom = 0x0284d7
+size = 4
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 4390 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02a5d9"
+kind = "graphics"
+rom = 0x02a5d9
+size = 1053
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 855 of 843 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_02b0ff"
+kind = "stream"
+rom = 0x02b0ff
+size = 7
+stride = 1
+pointer_ram = 0x7e0000
+via = "ptrtab_0004d0"
+confidence = 73
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 5 of 7 bytes read"
+
+[[data_region]]
+name = "gfx_02b103"
+kind = "graphics"
+rom = 0x02b103
+size = 1987
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 175 of 175 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02b93b"
+kind = "graphics"
+rom = 0x02b93b
+size = 48
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 231168 of 12695 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02b999"
+kind = "graphics"
+rom = 0x02b999
+size = 312
+stride = 1
+confidence = 78
+grade = "candidate"
+source = "finder: 29319 of 38085 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d000"
+kind = "graphics"
+rom = 0x02d000
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d018"
+kind = "graphics"
+rom = 0x02d018
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d038"
+kind = "graphics"
+rom = 0x02d038
+size = 32
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d068"
+kind = "graphics"
+rom = 0x02d068
+size = 48
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d0a0"
+kind = "graphics"
+rom = 0x02d0a0
+size = 56
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d0e0"
+kind = "graphics"
+rom = 0x02d0e0
+size = 56
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d150"
+kind = "graphics"
+rom = 0x02d150
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d160"
+kind = "graphics"
+rom = 0x02d160
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d180"
+kind = "graphics"
+rom = 0x02d180
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d1a8"
+kind = "graphics"
+rom = 0x02d1a8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d1e8"
+kind = "graphics"
+rom = 0x02d1e8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d1f8"
+kind = "graphics"
+rom = 0x02d1f8
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d210"
+kind = "graphics"
+rom = 0x02d210
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d238"
+kind = "graphics"
+rom = 0x02d238
+size = 56
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d288"
+kind = "graphics"
+rom = 0x02d288
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d2b0"
+kind = "graphics"
+rom = 0x02d2b0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d2c0"
+kind = "graphics"
+rom = 0x02d2c0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d2d0"
+kind = "graphics"
+rom = 0x02d2d0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d2e8"
+kind = "graphics"
+rom = 0x02d2e8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d2f8"
+kind = "graphics"
+rom = 0x02d2f8
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d318"
+kind = "graphics"
+rom = 0x02d318
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d330"
+kind = "graphics"
+rom = 0x02d330
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d340"
+kind = "graphics"
+rom = 0x02d340
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d370"
+kind = "graphics"
+rom = 0x02d370
+size = 40
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d3a0"
+kind = "graphics"
+rom = 0x02d3a0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d3c0"
+kind = "graphics"
+rom = 0x02d3c0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d3d0"
+kind = "graphics"
+rom = 0x02d3d0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d3e8"
+kind = "graphics"
+rom = 0x02d3e8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d410"
+kind = "graphics"
+rom = 0x02d410
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d438"
+kind = "graphics"
+rom = 0x02d438
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d448"
+kind = "graphics"
+rom = 0x02d448
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d468"
+kind = "graphics"
+rom = 0x02d468
+size = 56
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d4b8"
+kind = "graphics"
+rom = 0x02d4b8
+size = 104
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d538"
+kind = "graphics"
+rom = 0x02d538
+size = 168
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 of 10240 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d70a"
+kind = "graphics"
+rom = 0x02d70a
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20099 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d720"
+kind = "graphics"
+rom = 0x02d720
+size = 6
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 2072 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02d74a"
+kind = "graphics"
+rom = 0x02d74a
+size = 2
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 121676 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "ptrtab_02e000"
+kind = "pointer_table"
+rom = 0x02e000
+size = 789
+stride = 3
+pointer_bytes = 3
+pointer_ram = 0x7e0065
+confidence = 74
+grade = "confirmed"
+source = "finder: 144 pointers built from table reads, 5 entries, high byte +1 from low; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "ptrtab_02e600"
+kind = "pointer_table"
+rom = 0x02e600
+size = 788
+stride = 3
+pointer_bytes = 2
+pointer_ram = 0x7e0068
+confidence = 74
+grade = "confirmed"
+source = "finder: 10925 pointers built from table reads, 5 entries, high byte +1 from low; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "ptrtab_02ec00"
+kind = "pointer_table"
+rom = 0x02ec00
+size = 526
+stride = 2
+pointer_bytes = 2
+pointer_ram = 0x7e00ce
+confidence = 74
+grade = "confirmed"
+source = "finder: 82064 pointers built from table reads, 5 entries, high byte +1 from low; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_02f2c5"
+kind = "graphics"
+rom = 0x02f2c5
+size = 66
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 440447 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_02f6c5"
+kind = "graphics"
+rom = 0x02f6c5
+size = 66
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 7208 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_0305b5"
+kind = "stream"
+rom = 0x0305b5
+size = 102
+stride = 1
+pointer_ram = 0x7e0065
+via = "ptrtab_02e000"
+confidence = 88
+grade = "candidate"
+source = "finder: 4033 reads through a RAM pointer by 15 site(s), 102 of 102 bytes read"
+
+[[data_region]]
+name = "gfx_0305b6"
+kind = "graphics"
+rom = 0x0305b6
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0305b9"
+kind = "graphics"
+rom = 0x0305b9
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 9972 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_030604"
+kind = "graphics"
+rom = 0x030604
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_030607"
+kind = "graphics"
+rom = 0x030607
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 9972 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_0308dd"
+kind = "stream"
+rom = 0x0308dd
+size = 283
+stride = 1
+pointer_ram = 0x7e0065
+via = "ptrtab_02e000"
+confidence = 91
+grade = "confirmed"
+source = "finder: 4033 reads through a RAM pointer by 15 site(s), 283 of 283 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_0308de"
+kind = "graphics"
+rom = 0x0308de
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0308e1"
+kind = "graphics"
+rom = 0x0308e1
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 9972 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_030a2f"
+kind = "stream"
+rom = 0x030a2f
+size = 388
+stride = 1
+pointer_ram = 0x7e0065
+via = "ptrtab_02e000"
+confidence = 92
+grade = "confirmed"
+source = "finder: 4033 reads through a RAM pointer by 15 site(s), 388 of 388 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_030a30"
+kind = "graphics"
+rom = 0x030a30
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_030a33"
+kind = "graphics"
+rom = 0x030a33
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 9972 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03802d"
+kind = "stream"
+rom = 0x03802d
+size = 33
+stride = 1
+pointer_ram = 0x7e0065
+via = "ptrtab_02e000"
+confidence = 85
+grade = "confirmed"
+source = "finder: 4033 reads through a RAM pointer by 15 site(s), 33 of 33 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_03802e"
+kind = "graphics"
+rom = 0x03802e
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_038031"
+kind = "graphics"
+rom = 0x038031
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 9972 of 16 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03c427"
+kind = "stream"
+rom = 0x03c427
+size = 6
+stride = 1
+pointer_ram = 0x7e00ce
+via = "ptrtab_02ec00"
+confidence = 80
+grade = "candidate"
+source = "finder: 81958 reads through a RAM pointer by 7 site(s), 6 of 6 bytes read"
+
+[[data_region]]
+name = "gfx_03c42a"
+kind = "graphics"
+rom = 0x03c42a
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 361 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03c441"
+kind = "stream"
+rom = 0x03c441
+size = 5
+stride = 1
+pointer_ram = 0x7e00ce
+via = "ptrtab_02ec00"
+confidence = 79
+grade = "confirmed"
+source = "finder: 81958 reads through a RAM pointer by 7 site(s), 5 of 5 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_03c444"
+kind = "graphics"
+rom = 0x03c444
+size = 1
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 361 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03c4ca"
+kind = "stream"
+rom = 0x03c4ca
+size = 21
+stride = 1
+pointer_ram = 0x7e00ce
+via = "ptrtab_02ec00"
+confidence = 82
+grade = "confirmed"
+source = "finder: 81958 reads through a RAM pointer by 7 site(s), 20 of 21 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_03c4cd"
+kind = "graphics"
+rom = 0x03c4cd
+size = 13
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 361 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03c532"
+kind = "stream"
+rom = 0x03c532
+size = 45
+stride = 1
+pointer_ram = 0x7e00ce
+via = "ptrtab_02ec00"
+confidence = 85
+grade = "confirmed"
+source = "finder: 81958 reads through a RAM pointer by 7 site(s), 45 of 45 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_03c535"
+kind = "graphics"
+rom = 0x03c535
+size = 40
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 361 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_03e759"
+kind = "stream"
+rom = 0x03e759
+size = 20
+stride = 1
+pointer_ram = 0x7e00ce
+via = "ptrtab_02ec00"
+confidence = 83
+grade = "confirmed"
+source = "finder: 81958 reads through a RAM pointer by 7 site(s), 20 of 20 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_03e75c"
+kind = "graphics"
+rom = 0x03e75c
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 361 of 107 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_03f335"
+kind = "graphics"
+rom = 0x03f335
+size = 190
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 428 of 126 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_043fc0"
+kind = "graphics"
+rom = 0x043fc0
+size = 123
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 11954565 of 572779 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0459f9"
+kind = "graphics"
+rom = 0x0459f9
+size = 2104
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 11954565 of 572779 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_04e6e5"
+kind = "graphics"
+rom = 0x04e6e5
+size = 4298
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 11954565 of 572779 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_05547e"
+kind = "graphics"
+rom = 0x05547e
+size = 3894
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 11954565 of 572779 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_05c06c"
+kind = "graphics"
+rom = 0x05c06c
+size = 5965
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 11954565 of 572779 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_060d00"
+kind = "stream"
+rom = 0x060d00
+size = 1642
+stride = 1
+pointer_ram = 0x7e0002
+confidence = 81
+grade = "candidate"
+source = "finder: 16068 reads through a RAM pointer by 6 site(s), 1642 of 1642 bytes read"
+
+[[data_region]]
+name = "stream_065900"
+kind = "stream"
+rom = 0x065900
+size = 441
+stride = 1
+pointer_ram = 0x7e0068
+via = "ptrtab_02e600"
+confidence = 89
+grade = "confirmed"
+source = "finder: 9914 reads through a RAM pointer by 4 site(s), 385 of 441 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_065901"
+kind = "graphics"
+rom = 0x065901
+size = 438
+stride = 1
+confidence = 87
+grade = "candidate"
+source = "finder: 963 of 1014 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_065f59"
+kind = "stream"
+rom = 0x065f59
+size = 426
+stride = 1
+pointer_ram = 0x7e0068
+via = "ptrtab_02e600"
+confidence = 90
+grade = "candidate"
+source = "finder: 9914 reads through a RAM pointer by 4 site(s), 391 of 426 bytes read"
+
+[[data_region]]
+name = "gfx_065f5a"
+kind = "graphics"
+rom = 0x065f5a
+size = 419
+stride = 1
+confidence = 87
+grade = "candidate"
+source = "finder: 963 of 1014 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_066c82"
+kind = "stream"
+rom = 0x066c82
+size = 766
+stride = 1
+pointer_ram = 0x7e0068
+via = "ptrtab_02e600"
+confidence = 91
+grade = "confirmed"
+source = "finder: 9914 reads through a RAM pointer by 4 site(s), 681 of 766 bytes read; confirmed by level-switch experiment: levels entered by the W36-08 script and the W37-00 movies, 4 of 4 runs used an entry of their own"
+
+[[data_region]]
+name = "gfx_066c83"
+kind = "graphics"
+rom = 0x066c83
+size = 756
+stride = 1
+confidence = 87
+grade = "candidate"
+source = "finder: 963 of 1014 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_0677df"
+kind = "stream"
+rom = 0x0677df
+size = 2048
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 20480 reads indexed by a register, 2048 distinct indices"
+
+[[data_region]]
+name = "gfx_068128"
+kind = "graphics"
+rom = 0x068128
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 12 of 6 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068158"
+kind = "graphics"
+rom = 0x068158
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068168"
+kind = "graphics"
+rom = 0x068168
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0681f8"
+kind = "graphics"
+rom = 0x0681f8
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068228"
+kind = "graphics"
+rom = 0x068228
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068248"
+kind = "graphics"
+rom = 0x068248
+size = 96
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0682b8"
+kind = "graphics"
+rom = 0x0682b8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0682d0"
+kind = "graphics"
+rom = 0x0682d0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0682e8"
+kind = "graphics"
+rom = 0x0682e8
+size = 40
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068318"
+kind = "graphics"
+rom = 0x068318
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068358"
+kind = "graphics"
+rom = 0x068358
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068398"
+kind = "graphics"
+rom = 0x068398
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0683b0"
+kind = "graphics"
+rom = 0x0683b0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068468"
+kind = "graphics"
+rom = 0x068468
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068478"
+kind = "graphics"
+rom = 0x068478
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0684d8"
+kind = "graphics"
+rom = 0x0684d8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 12 of 6 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068570"
+kind = "graphics"
+rom = 0x068570
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0685a0"
+kind = "graphics"
+rom = 0x0685a0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0685d8"
+kind = "graphics"
+rom = 0x0685d8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 12 of 6 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0687c0"
+kind = "graphics"
+rom = 0x0687c0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068980"
+kind = "graphics"
+rom = 0x068980
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0689c8"
+kind = "graphics"
+rom = 0x0689c8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068a28"
+kind = "graphics"
+rom = 0x068a28
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068a70"
+kind = "graphics"
+rom = 0x068a70
+size = 64
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068b70"
+kind = "graphics"
+rom = 0x068b70
+size = 16
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068ba0"
+kind = "graphics"
+rom = 0x068ba0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068c00"
+kind = "graphics"
+rom = 0x068c00
+size = 24
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068ce0"
+kind = "graphics"
+rom = 0x068ce0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068cf0"
+kind = "graphics"
+rom = 0x068cf0
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_068d08"
+kind = "graphics"
+rom = 0x068d08
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_069058"
+kind = "graphics"
+rom = 0x069058
+size = 32
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_069100"
+kind = "graphics"
+rom = 0x069100
+size = 3136
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 27648 of 13824 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_06e5c0"
+kind = "graphics"
+rom = 0x06e5c0
+size = 256
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_06e7a8"
+kind = "graphics"
+rom = 0x06e7a8
+size = 8
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 49732 of 24867 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_06eb93"
+kind = "stream"
+rom = 0x06eb93
+size = 159
+stride = 1
+confidence = 73
+grade = "candidate"
+source = "finder: 450 reads indexed by a register, 150 distinct indices"
+
+[[data_region]]
+name = "stream_070000"
+kind = "stream"
+rom = 0x070000
+size = 11990
+stride = 1
+pointer_ram = 0x7e0000
+confidence = 87
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 11990 of 11990 bytes read"
+
+[[data_region]]
+name = "stream_072ed6"
+kind = "stream"
+rom = 0x072ed6
+size = 16901
+stride = 1
+pointer_ram = 0x7e0000
+confidence = 88
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 16901 of 16901 bytes read"
+
+[[data_region]]
+name = "stream_078000"
+kind = "stream"
+rom = 0x078000
+size = 28540
+stride = 1
+pointer_ram = 0x7e0000
+confidence = 89
+grade = "candidate"
+source = "finder: 545859 reads through a RAM pointer by 16 site(s), 28540 of 28540 bytes read"
+
+# ---- end data-region finder ----

@@ -167,3 +167,1387 @@ offset = 59
 value = 0xff
 grade = "confirmed"
 source = "observed: the immediate subtracted from the left edge in the 'too far left, remove' test (enemies removed about 74 px left of the screen in 1-1, 1-2, 2-1, 3-1 and 5-1 play); widened to the largest a byte can hold"
+
+# ---- data-region finder: ROM tables and level data (finder: sources) ----
+
+[[data_region]]
+name = "ptrtab_00005a_lo"
+kind = "pointer_table"
+rom = 0x00005a
+size = 12
+stride = 1
+part = "lo"
+pointer_bytes = 2
+pointer_ram = 0x0
+confidence = 77
+grade = "candidate"
+source = "finder: 5019 pointers built from table reads, 7 entries, high byte +19 from low"
+
+[[data_region]]
+name = "ptrtab_00005a_hi"
+kind = "pointer_table"
+rom = 0x00006d
+size = 12
+stride = 1
+part = "hi"
+pointer_bytes = 2
+pointer_ram = 0x0
+confidence = 77
+grade = "candidate"
+source = "finder: 5019 pointers built from table reads, 7 entries, high byte +19 from low"
+
+[[data_region]]
+name = "stream_000218"
+kind = "stream"
+rom = 0x000218
+size = 4
+stride = 1
+pointer_ram = 0x4
+confidence = 64
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "table_00023d"
+kind = "element_table"
+rom = 0x00023d
+size = 2
+stride = 1
+pointer_ram = 0x4
+confidence = 62
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 2 of 2 bytes read"
+
+[[data_region]]
+name = "stream_00056d"
+kind = "stream"
+rom = 0x00056d
+size = 26
+stride = 1
+pointer_ram = 0x4
+confidence = 67
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 24 of 26 bytes read"
+
+[[data_region]]
+name = "gfx_0005cf"
+kind = "graphics"
+rom = 0x0005cf
+size = 12
+stride = 1
+confidence = 79
+grade = "candidate"
+source = "finder: 120 of 202 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000752"
+kind = "graphics"
+rom = 0x000752
+size = 70
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 7760 of 5056 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0009c3"
+kind = "graphics"
+rom = 0x0009c3
+size = 6
+stride = 1
+confidence = 82
+grade = "candidate"
+source = "finder: 3290 of 3915 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_0009d1"
+kind = "graphics"
+rom = 0x0009d1
+size = 16
+stride = 1
+confidence = 79
+grade = "candidate"
+source = "finder: 12387 of 15660 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000a39"
+kind = "graphics"
+rom = 0x000a39
+size = 20
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 24 of 24 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "ptrtab_000b08_lo"
+kind = "pointer_table"
+rom = 0x000b08
+size = 4
+stride = 1
+part = "lo"
+pointer_bytes = 2
+pointer_ram = 0x6
+confidence = 72
+grade = "candidate"
+source = "finder: 127738 pointers built from table reads, 4 entries, high byte +4 from low"
+
+[[data_region]]
+name = "ptrtab_000b08_hi"
+kind = "pointer_table"
+rom = 0x000b0c
+size = 4
+stride = 1
+part = "hi"
+pointer_bytes = 2
+pointer_ram = 0x6
+confidence = 72
+grade = "candidate"
+source = "finder: 127738 pointers built from table reads, 4 entries, high byte +4 from low"
+
+[[data_region]]
+name = "gfx_000b10"
+kind = "graphics"
+rom = 0x000b10
+size = 140
+stride = 1
+confidence = 89
+grade = "candidate"
+source = "finder: 63837 of 63869 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000bc0"
+kind = "graphics"
+rom = 0x000bc0
+size = 148
+stride = 1
+confidence = 89
+grade = "candidate"
+source = "finder: 63837 of 63869 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000c64"
+kind = "graphics"
+rom = 0x000c64
+size = 32
+stride = 1
+confidence = 89
+grade = "candidate"
+source = "finder: 63837 of 63869 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000c8c"
+kind = "graphics"
+rom = 0x000c8c
+size = 20
+stride = 1
+confidence = 89
+grade = "candidate"
+source = "finder: 63837 of 63869 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "table_000ca4"
+kind = "element_table"
+rom = 0x000ca4
+size = 3
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 78
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 3 of 3 bytes read"
+
+[[data_region]]
+name = "gfx_000ca7"
+kind = "graphics"
+rom = 0x000ca7
+size = 32
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000cc7"
+kind = "stream"
+rom = 0x000cc7
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000ccb"
+kind = "graphics"
+rom = 0x000ccb
+size = 32
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000ceb"
+kind = "stream"
+rom = 0x000ceb
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000cef"
+kind = "graphics"
+rom = 0x000cef
+size = 32
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000d0f"
+kind = "stream"
+rom = 0x000d0f
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000d13"
+kind = "graphics"
+rom = 0x000d13
+size = 32
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000d33"
+kind = "stream"
+rom = 0x000d33
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000d37"
+kind = "graphics"
+rom = 0x000d37
+size = 4
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000d3b"
+kind = "stream"
+rom = 0x000d3b
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000d3f"
+kind = "graphics"
+rom = 0x000d3f
+size = 4
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_000d43"
+kind = "stream"
+rom = 0x000d43
+size = 4
+stride = 1
+pointer_ram = 0x0
+via = "ptrtab_00005a_lo"
+confidence = 79
+grade = "candidate"
+source = "finder: 612 reads through a RAM pointer by 3 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "gfx_000d47"
+kind = "graphics"
+rom = 0x000d47
+size = 4
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 4560 of 4560 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_000ef7"
+kind = "graphics"
+rom = 0x000ef7
+size = 9
+stride = 1
+confidence = 64
+grade = "candidate"
+source = "finder: 504 of 1013 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_00112e"
+kind = "graphics"
+rom = 0x00112e
+size = 2
+stride = 1
+confidence = 90
+grade = "candidate"
+source = "finder: 60 of 60 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "stream_0012cb"
+kind = "stream"
+rom = 0x0012cb
+size = 16
+stride = 1
+pointer_ram = 0x4
+confidence = 68
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 16 of 16 bytes read"
+
+[[data_region]]
+name = "stream_0012fa"
+kind = "stream"
+rom = 0x0012fa
+size = 144
+stride = 1
+confidence = 72
+grade = "candidate"
+source = "finder: 1626 reads indexed by a register, 138 distinct indices"
+
+[[data_region]]
+name = "stream_0013b1"
+kind = "stream"
+rom = 0x0013b1
+size = 39
+stride = 1
+confidence = 61
+grade = "candidate"
+source = "finder: 9529 reads indexed by a register, 39 distinct indices"
+
+[[data_region]]
+name = "table_001667"
+kind = "element_table"
+rom = 0x001667
+size = 94
+stride = 1
+pointer_ram = 0x4
+confidence = 62
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 54 of 94 bytes read"
+
+[[data_region]]
+name = "stream_001746"
+kind = "stream"
+rom = 0x001746
+size = 6
+stride = 1
+pointer_ram = 0x4
+confidence = 65
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 6 of 6 bytes read"
+
+[[data_region]]
+name = "gfx_0017cf"
+kind = "graphics"
+rom = 0x0017cf
+size = 55
+stride = 1
+confidence = 82
+grade = "candidate"
+source = "finder: 1212 of 1410 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "gfx_001b3d"
+kind = "graphics"
+rom = 0x001b3d
+size = 4
+stride = 1
+confidence = 95
+grade = "candidate"
+source = "finder: 117 of 73 reads went to a picture-unit data port"
+
+[[data_region]]
+name = "table_001cb4"
+kind = "element_table"
+rom = 0x001cb4
+size = 48
+stride = 1
+index_ram = 0x75f
+confidence = 63
+grade = "candidate"
+source = "finder: 74 reads indexed by a register, 8 distinct indices"
+
+[[data_region]]
+name = "ptrtab_001ce4_lo"
+kind = "pointer_table"
+rom = 0x001ce4
+size = 33
+stride = 1
+part = "lo"
+pointer_bytes = 2
+pointer_ram = 0xe9
+confidence = 86
+grade = "confirmed"
+source = "finder: 457383 pointers built from table reads, 26 entries, high byte +34 from low; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "ptrtab_001ce4_hi"
+kind = "pointer_table"
+rom = 0x001d06
+size = 33
+stride = 1
+part = "hi"
+pointer_bytes = 2
+pointer_ram = 0xe9
+confidence = 86
+grade = "confirmed"
+source = "finder: 457383 pointers built from table reads, 26 entries, high byte +34 from low; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "ptrtab_001d2c_lo"
+kind = "pointer_table"
+rom = 0x001d2c
+size = 34
+stride = 1
+part = "lo"
+pointer_bytes = 2
+pointer_ram = 0xe7
+confidence = 85
+grade = "confirmed"
+source = "finder: 148 pointers built from table reads, 26 entries, high byte +34 from low; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "ptrtab_001d2c_hi"
+kind = "pointer_table"
+rom = 0x001d4e
+size = 34
+stride = 1
+part = "hi"
+pointer_bytes = 2
+pointer_ram = 0xe7
+confidence = 85
+grade = "confirmed"
+source = "finder: 148 pointers built from table reads, 26 entries, high byte +34 from low; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001d70"
+kind = "stream"
+rom = 0x001d70
+size = 10
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 10 of 10 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001db0"
+kind = "stream"
+rom = 0x001db0
+size = 10
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 10 of 10 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001ddf"
+kind = "stream"
+rom = 0x001ddf
+size = 12
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 82
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 12 of 12 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001e1f"
+kind = "stream"
+rom = 0x001e1f
+size = 4
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 79
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 4 of 4 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001e59"
+kind = "stream"
+rom = 0x001e59
+size = 6
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 6 of 6 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001e7e"
+kind = "stream"
+rom = 0x001e7e
+size = 6
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 6 of 6 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001e9b"
+kind = "stream"
+rom = 0x001e9b
+size = 9
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 9 of 9 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001ea9"
+kind = "stream"
+rom = 0x001ea9
+size = 7
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 7 of 7 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001ed0"
+kind = "stream"
+rom = 0x001ed0
+size = 11
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 11 of 11 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001f01"
+kind = "stream"
+rom = 0x001f01
+size = 13
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 82
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 13 of 13 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001f1f"
+kind = "stream"
+rom = 0x001f1f
+size = 6
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 6 of 6 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001f3c"
+kind = "stream"
+rom = 0x001f3c
+size = 4
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 79
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 4 of 4 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001f51"
+kind = "stream"
+rom = 0x001f51
+size = 8
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 8 of 8 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001f7b"
+kind = "stream"
+rom = 0x001f7b
+size = 7
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 7 of 7 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001fa9"
+kind = "stream"
+rom = 0x001fa9
+size = 6
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 6 of 6 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001fce"
+kind = "stream"
+rom = 0x001fce
+size = 4
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 79
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 4 of 4 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001ff1"
+kind = "stream"
+rom = 0x001ff1
+size = 8
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 8 of 8 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_001ffb"
+kind = "stream"
+rom = 0x001ffb
+size = 11
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 11 of 11 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002035"
+kind = "stream"
+rom = 0x002035
+size = 15
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 82
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 15 of 15 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002060"
+kind = "stream"
+rom = 0x002060
+size = 10
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 10 of 10 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00208e"
+kind = "stream"
+rom = 0x00208e
+size = 7
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 7 of 7 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0020b3"
+kind = "stream"
+rom = 0x0020b3
+size = 6
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 80
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 6 of 6 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0020d8"
+kind = "stream"
+rom = 0x0020d8
+size = 8
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 8 of 8 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002105"
+kind = "stream"
+rom = 0x002105
+size = 4
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 79
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 4 of 4 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002171"
+kind = "stream"
+rom = 0x002171
+size = 29
+stride = 1
+pointer_ram = 0xe9
+via = "ptrtab_001ce4_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 472167 reads through a RAM pointer by 14 site(s), 29 of 29 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0021af"
+kind = "stream"
+rom = 0x0021af
+size = 38
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 85
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 38 of 38 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00228f"
+kind = "stream"
+rom = 0x00228f
+size = 28
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 28 of 28 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002302"
+kind = "stream"
+rom = 0x002302
+size = 26
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 26 of 26 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0023fa"
+kind = "stream"
+rom = 0x0023fa
+size = 20
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 20 of 20 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00246b"
+kind = "stream"
+rom = 0x00246b
+size = 16
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 16 of 16 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0024ce"
+kind = "stream"
+rom = 0x0024ce
+size = 16
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 16 of 16 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002537"
+kind = "stream"
+rom = 0x002537
+size = 20
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 20 of 20 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00258a"
+kind = "stream"
+rom = 0x00258a
+size = 24
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 24 of 24 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002619"
+kind = "stream"
+rom = 0x002619
+size = 22
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 22 of 22 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00268e"
+kind = "stream"
+rom = 0x00268e
+size = 22
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 22 of 22 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0026f3"
+kind = "stream"
+rom = 0x0026f3
+size = 20
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 20 of 20 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002748"
+kind = "stream"
+rom = 0x002748
+size = 26
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 26 of 26 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0027cd"
+kind = "stream"
+rom = 0x0027cd
+size = 28
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 28 of 28 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002832"
+kind = "stream"
+rom = 0x002832
+size = 17
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 17 of 17 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00288f"
+kind = "stream"
+rom = 0x00288f
+size = 24
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 24 of 24 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0028f6"
+kind = "stream"
+rom = 0x0028f6
+size = 18
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 18 of 18 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_00295b"
+kind = "stream"
+rom = 0x00295b
+size = 28
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 28 of 28 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_0029ff"
+kind = "stream"
+rom = 0x0029ff
+size = 12
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 82
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 12 of 12 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002a92"
+kind = "stream"
+rom = 0x002a92
+size = 42
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 85
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 42 of 42 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002b05"
+kind = "stream"
+rom = 0x002b05
+size = 22
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 22 of 22 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002b7e"
+kind = "stream"
+rom = 0x002b7e
+size = 22
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 83
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 22 of 22 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002c02"
+kind = "stream"
+rom = 0x002c02
+size = 8
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 81
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 8 of 8 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002c35"
+kind = "stream"
+rom = 0x002c35
+size = 30
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 30 of 30 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002cd8"
+kind = "stream"
+rom = 0x002cd8
+size = 30
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 84
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 30 of 30 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002e45"
+kind = "stream"
+rom = 0x002e45
+size = 44
+stride = 1
+pointer_ram = 0xe7
+via = "ptrtab_001d2c_lo"
+confidence = 85
+grade = "confirmed"
+source = "finder: 45074 reads through a RAM pointer by 19 site(s), 44 of 44 bytes read; confirmed by level-switch experiment: forced world/level RAM $075F/$0760 over 32 levels, 32 of 32 runs used an entry of their own"
+
+[[data_region]]
+name = "stream_002ee2"
+kind = "stream"
+rom = 0x002ee2
+size = 8
+stride = 1
+pointer_ram = 0x4
+confidence = 66
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 8 of 8 bytes read"
+
+[[data_region]]
+name = "stream_003351"
+kind = "stream"
+rom = 0x003351
+size = 6
+stride = 1
+pointer_ram = 0x4
+confidence = 65
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 6 of 6 bytes read"
+
+[[data_region]]
+name = "stream_003dc0"
+kind = "stream"
+rom = 0x003dc0
+size = 4
+stride = 1
+pointer_ram = 0x4
+confidence = 64
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 4 of 4 bytes read"
+
+[[data_region]]
+name = "table_00490a"
+kind = "element_table"
+rom = 0x00490a
+size = 42
+stride = 1
+pointer_ram = 0x4
+confidence = 62
+grade = "candidate"
+source = "finder: 527000 reads through a RAM pointer by 2 site(s), 28 of 42 bytes read"
+
+[[data_region]]
+name = "table_004cc7"
+kind = "element_table"
+rom = 0x004cc7
+size = 45
+stride = 1
+confidence = 62
+grade = "candidate"
+source = "finder: 10038 reads indexed by a register, 45 distinct indices"
+
+[[data_region]]
+name = "stream_0063da"
+kind = "stream"
+rom = 0x0063da
+size = 10
+stride = 1
+index_ram = 0x4
+confidence = 64
+grade = "candidate"
+source = "finder: 184055 reads indexed by a register, 10 distinct indices"
+
+[[data_region]]
+name = "table_00673e"
+kind = "element_table"
+rom = 0x00673e
+size = 256
+stride = 2
+confidence = 68
+grade = "candidate"
+source = "finder: 132915 reads indexed by a register, 89 distinct indices"
+
+[[data_region]]
+name = "table_006840"
+kind = "element_table"
+rom = 0x006840
+size = 54
+stride = 1
+index_ram = 0xef
+confidence = 70
+grade = "candidate"
+source = "finder: 44305 reads indexed by a register, 18 distinct indices"
+
+[[data_region]]
+name = "table_006e77"
+kind = "element_table"
+rom = 0x006e77
+size = 96
+stride = 2
+confidence = 61
+grade = "candidate"
+source = "finder: 125204 reads indexed by a register, 36 distinct indices"
+
+[[data_region]]
+name = "table_0073b1"
+kind = "element_table"
+rom = 0x0073b1
+size = 14
+stride = 1
+index_ram = 0x7bb
+confidence = 67
+grade = "candidate"
+source = "finder: 742 reads indexed by a register, 14 distinct indices"
+
+[[data_region]]
+name = "ptrtab_00790e"
+kind = "pointer_table"
+rom = 0x00790e
+size = 167
+stride = 2
+pointer_bytes = 2
+pointer_ram = 0xf5
+confidence = 78
+grade = "candidate"
+source = "finder: 8158 pointers built from table reads, 9 entries, high byte +1 from low"
+
+[[data_region]]
+name = "stream_007a01"
+kind = "stream"
+rom = 0x007a01
+size = 72
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 87
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 72 of 72 bytes read"
+
+[[data_region]]
+name = "stream_007a49"
+kind = "stream"
+rom = 0x007a49
+size = 44
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 85
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 44 of 44 bytes read"
+
+[[data_region]]
+name = "stream_007a75"
+kind = "stream"
+rom = 0x007a75
+size = 40
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 85
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 40 of 40 bytes read"
+
+[[data_region]]
+name = "stream_007ab9"
+kind = "stream"
+rom = 0x007ab9
+size = 9
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 81
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 9 of 9 bytes read"
+
+[[data_region]]
+name = "stream_007af9"
+kind = "stream"
+rom = 0x007af9
+size = 43
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 85
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 43 of 43 bytes read"
+
+[[data_region]]
+name = "stream_007b72"
+kind = "stream"
+rom = 0x007b72
+size = 45
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 85
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 45 of 45 bytes read"
+
+[[data_region]]
+name = "stream_007ba4"
+kind = "stream"
+rom = 0x007ba4
+size = 49
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 86
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 49 of 49 bytes read"
+
+[[data_region]]
+name = "stream_007c06"
+kind = "stream"
+rom = 0x007c06
+size = 25
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 84
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 25 of 25 bytes read"
+
+[[data_region]]
+name = "stream_007c37"
+kind = "stream"
+rom = 0x007c37
+size = 7
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 80
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 7 of 7 bytes read"
+
+[[data_region]]
+name = "stream_007d11"
+kind = "stream"
+rom = 0x007d11
+size = 65
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 87
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 65 of 65 bytes read"
+
+[[data_region]]
+name = "stream_007d52"
+kind = "stream"
+rom = 0x007d52
+size = 60
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 86
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 60 of 60 bytes read"
+
+[[data_region]]
+name = "stream_007dba"
+kind = "stream"
+rom = 0x007dba
+size = 38
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 85
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 38 of 38 bytes read"
+
+[[data_region]]
+name = "stream_007df2"
+kind = "stream"
+rom = 0x007df2
+size = 52
+stride = 1
+pointer_ram = 0xf5
+via = "ptrtab_00790e"
+confidence = 86
+grade = "candidate"
+source = "finder: 8158 reads through a RAM pointer by 6 site(s), 52 of 52 bytes read"
+
+[[data_region]]
+name = "table_007f05"
+kind = "element_table"
+rom = 0x007f05
+size = 129
+stride = 1
+confidence = 60
+grade = "candidate"
+source = "finder: 4896 reads indexed by a register, 34 distinct indices"
+
+[[data_region]]
+name = "table_007f9a"
+kind = "element_table"
+rom = 0x007f9a
+size = 49
+stride = 1
+confidence = 62
+grade = "candidate"
+source = "finder: 23169 reads indexed by a register, 9 distinct indices"
+
+# ---- end data-region finder ----

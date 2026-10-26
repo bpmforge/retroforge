@@ -23,6 +23,7 @@
 //! the generic rebuild and the interpreter, and the row's hooks are inactive.
 
 use crate::atlas::{entry, Atlas};
+use crate::dataregion::{Part, RegionKind};
 
 /// How far a row can be trusted (ticket W38-00).
 ///
@@ -256,6 +257,35 @@ pub struct TileSemantics {
     pub grade: Grade,
 }
 
+/// A region of the ROM image and what the game uses it for (ticket W38-01).
+/// Offsets and sizes only: the bytes stay in the cartridge (law 5). `rom` is
+/// an offset into the image the atlas indexes (the PRG image on the NES, the
+/// header-stripped ROM on the SNES).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataRegion {
+    pub name: String,
+    pub kind: RegionKind,
+    pub rom: u32,
+    pub size: u32,
+    /// Bytes between elements (1 for a byte table or a stream).
+    pub stride: u32,
+    /// For a split pointer table, which byte of each pointer this holds.
+    pub part: Option<Part>,
+    /// A pointer table: pointer width in bytes.
+    pub pointer_bytes: Option<u8>,
+    /// RAM address the index is read from.
+    pub index_ram: Option<u32>,
+    /// RAM address of the pointer a stream is read through.
+    pub pointer_ram: Option<u32>,
+    /// A stream: the pointer table whose entries point into it.
+    pub via: Option<String>,
+    pub confidence: Option<u8>,
+    pub source: String,
+    /// Finder output is [`Grade::Candidate`] until a level-switch experiment
+    /// confirms it.
+    pub grade: Grade,
+}
+
 /// One byte of a function to replace when its mod is on (ticket W36-06).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PatchRow {
@@ -287,6 +317,7 @@ pub struct Recipe {
     pub patches: Vec<PatchRow>,
     pub object_tables: Vec<ObjectTable>,
     pub tiles: Vec<TileSemantics>,
+    pub data_regions: Vec<DataRegion>,
 }
 
 impl Recipe {
