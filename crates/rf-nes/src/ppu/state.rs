@@ -132,6 +132,9 @@ impl Ppu {
             // session, and worse, would make a save state's contents
             // depend on what someone was debugging when they wrote it.
             watches: _,
+            // Ticket W36-09: the access log is the understand pass's session
+            // observation, drained after every instruction; never state.
+            access_log: _,
             // Caller configuration too, and excluded for the same reason
             // (ticket W3-07): `accuracy_mode` is what the *app* asked for
             // via `CoreConfig`, not something the machine evolved into.

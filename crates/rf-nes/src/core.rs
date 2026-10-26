@@ -339,6 +339,14 @@ impl NesCore {
         }
     }
 
+    /// Push the config's watch table to the bus when it changed.
+    fn sync_watches(&mut self) {
+        if self.config.watches != self.pushed_watches {
+            self.bus.set_watches(self.config.watches);
+            self.pushed_watches = self.config.watches;
+        }
+    }
+
     fn refresh_observing(&mut self) {
         self.observing = self.coverage.is_some() || self.rebuild.is_some();
     }
@@ -634,10 +642,7 @@ impl EmulatorCore for NesCore {
         // core through, and this is what makes that true for watchpoints:
         // a caller sets `core.config().watches` and the next step picks it
         // up, with no second setter to keep in sync (ticket W13-02e).
-        if self.config.watches != self.pushed_watches {
-            self.bus.set_watches(self.config.watches);
-            self.pushed_watches = self.config.watches;
-        }
+        self.sync_watches();
         let start_frame = self.bus.frame_count();
         let start_cycle = self.bus.master_cycle();
         let deadline = start_cycle + self.cycle_budget;
@@ -771,6 +776,55 @@ impl EmulatorCore for NesCore {
 
     fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
         self.rebuild.as_deref().map(RebuildExec::stats)
+    }
+
+    /// Ticket W36-09. The loop of [`EmulatorCore::step`] for `Step::Frame`
+    /// (same latch, same budget, same instructions in the same order) with
+    /// the access log on and the observer called after each `tick`. The
+    /// `observed_frame_is_run_frame` test holds the two together.
+    fn run_frame_observed(
+        &mut self,
+        input: &InputFrame,
+        sink: &mut dyn CoreSink,
+        observer: &mut dyn rf_core_api::StepObserver,
+    ) -> bool {
+        self.bus.set_controller_buttons(0, input.ports[0] as u8);
+        self.bus.set_controller_buttons(1, input.ports[1] as u8);
+        self.config.watches.set_observe(true);
+        let own_trace = self
+            .rebuild
+            .as_deref_mut()
+            .is_some_and(|x| !x.trace_enabled());
+        if own_trace {
+            self.set_rebuild_trace(2);
+        }
+        self.sync_watches();
+        let start_frame = self.bus.frame_count();
+        let deadline = self.bus.master_cycle() + self.cycle_budget;
+        let mut seen = self.rebuild.as_deref().map_or(0, RebuildExec::trace_total);
+        self.bus.clear_access_log();
+        while self.bus.master_cycle() < deadline {
+            let crossed = self.tick(sink, start_frame);
+            let facts = self.rebuild.as_deref().map_or_else(Default::default, |x| {
+                if x.trace_total() == seen {
+                    return rf_core_api::StepFacts::default();
+                }
+                seen = x.trace_total();
+                x.last_step().unwrap_or_default()
+            });
+            observer.step(facts, self.bus.access_log());
+            self.bus.clear_access_log();
+            if crossed {
+                break;
+            }
+        }
+        observer.frame_end();
+        if own_trace {
+            self.set_rebuild_trace(0);
+        }
+        self.config.watches.set_observe(false);
+        self.sync_watches();
+        true
     }
 
     fn take_coverage(&mut self) -> Option<CoverageLog> {

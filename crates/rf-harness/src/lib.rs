@@ -42,6 +42,7 @@ pub mod mode_diff;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
 mod tolerance;
+pub mod understand;
 mod vector_json;
 
 pub use accuracy::{

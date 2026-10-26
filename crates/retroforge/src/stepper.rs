@@ -1776,6 +1776,51 @@ impl EmuStepper {
         self.machine.as_core().set_rebuild_atlas(atlas)
     }
 
+    /// The installed code atlas, cloned (ticket W36-09: the understand pass
+    /// runs on a private copy of the machine and needs its own).
+    #[must_use]
+    pub fn rebuild_atlas_clone(&self) -> Option<rf_rebuild::Atlas> {
+        match &self.machine {
+            Machine::Nes(c) => c.rebuild_atlas().cloned(),
+            Machine::Snes(c) => c.rebuild_atlas().cloned(),
+        }
+    }
+
+    /// Ticket W36-09: run `frames` frames under the understand-pass observer
+    /// (every instruction attributed to its atlas function and every CPU-bus
+    /// access to a hardware class or RAM range) with `input` held, and return
+    /// what each function was seen doing. `atlas` is installed for the run;
+    /// every function is hooked, so call this on a **private copy** of the
+    /// machine, never the live one (it replaces the executor and its hooks,
+    /// and the frames bypass the shell's per-frame bookkeeping).
+    ///
+    /// # Errors
+    /// The atlas is for another cartridge, or the core cannot be observed.
+    pub fn understand(
+        &mut self,
+        atlas: &rf_rebuild::Atlas,
+        frames: u32,
+        input: InputFrame,
+    ) -> Result<rf_rebuild::profile::Understanding, String> {
+        let platform = match &self.machine {
+            Machine::Nes(_) => rf_rebuild::Platform::Nes,
+            Machine::Snes(_) => rf_rebuild::Platform::Snes,
+        };
+        // The SNES core reads the pad from the bus, the NES core is handed
+        // `input` every frame; latching once covers both.
+        self.latch_input(input);
+        let u = rf_rebuild::profile::observe(
+            self.machine.as_core(),
+            platform,
+            atlas,
+            vec![input; frames as usize],
+            |_, _, _| {},
+        )
+        .map_err(|e| e.to_string())?;
+        self.frames += u64::from(frames);
+        Ok(u)
+    }
+
     /// Install (or drop) the function-hook host and tell the core which atlas
     /// functions to report (ticket W36-05). The ids come from
     /// [`rf_plugin_sdk::HookHost::function_ids`], so resolve the host against

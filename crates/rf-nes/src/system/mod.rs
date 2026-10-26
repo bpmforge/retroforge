@@ -561,6 +561,18 @@ impl NesBus {
         self.ppu.set_watches(watches);
     }
 
+    /// The CPU-bus accesses logged since the last clear while the access
+    /// log is on (ticket W36-09; [`rf_core_api::WatchTable::set_observe`]).
+    #[must_use]
+    pub fn access_log(&self) -> &[rf_core_api::BusAccess] {
+        self.ppu.access_log()
+    }
+
+    /// Empty the access log.
+    pub fn clear_access_log(&mut self) {
+        self.ppu.clear_access_log();
+    }
+
     pub fn set_event_mask(&mut self, mask: EventMask) {
         self.ppu.set_event_mask(mask);
     }
@@ -1589,6 +1601,17 @@ impl CpuBus for NesBus {
 
     fn write(&mut self, addr: u16, value: u8) {
         if addr == 0x4014 {
+            // Ticket W36-09: this write never reaches `write_untimed`, where
+            // the other CPU-bus writes are reported to watchpoints and to
+            // the access log; report it here, with the value arriving.
+            if self.ppu.watches().is_armed() {
+                self.ppu.note_watch_access(
+                    rf_core_api::WatchSpace::Cpu,
+                    rf_core_api::WatchAccess::Write,
+                    0x4014,
+                    value,
+                );
+            }
             let needs_alignment_cycle = self.master_cycle.is_multiple_of(2);
             self.open_bus = value;
             self.tick_master(1); // the $4014 write's own cycle

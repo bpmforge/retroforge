@@ -32,6 +32,7 @@
 //! makes that testable in practice rather than in principle.
 
 pub mod accessibility;
+pub mod ai_naming;
 pub mod annotation_store;
 pub mod app;
 pub mod app_bindings;

@@ -378,6 +378,58 @@ Script B: 75.29 M instructions, 75.08 M observed / 371 inferred, fallback
 entries, 454,576 indirect transfers checked, 136 misses (100 distinct). Test:
 `crates/retroforge/tests/w36_08b_lockstep_smw.rs` (`--ignored`, 275 s).
 
+### W36-09: the understand pass and opt-in AI naming (built 2026-10-25)
+
+Method and numbers: `docs/research/W36-09-naming.md`.
+
+**Observe.** `EmulatorCore::run_frame_observed` (both cores) runs a frame
+exactly as `run_frame` does and calls a `StepObserver` after every instruction
+with the atlas function it ran in (the executor's trace ring) and the CPU-bus
+accesses it made (`WatchTable::set_observe`: the cores' existing "is anything
+watching" test goes true, so with it off nothing changed). `rf_rebuild::profile`
+hooks every atlas function and builds a `FunctionProfile` per function from
+that: calls and arrivals, frames active, instructions by context (main / NMI /
+IRQ), callers and callees, hardware registers by class and address with read and
+write counts (`rf_rebuild::hw`, nesdev and fullsnes cited), RAM ranges read and
+written, and a few value-derived facts (palette address set, vblank flag seen,
+DMA channel pointed at VRAM/OAM/CGRAM). The NES `$4014` write now reaches the
+watch hook too (it was intercepted before it).
+
+**Name.** `rf_rebuild::naming` applies generic hardware rules (the table is in
+the research note) and proposes a name with a confidence and the evidence in
+words. Names are unique per atlas; the same code entered at two 65816 widths is
+two functions, and the busiest keeps the bare `nmi`/`irq`. Export makes recipe
+name rows (`source = "rule:<rule>"` or `"ai:<model>"`, `confidence`, exact hash
+and address hint); rows people wrote win; each row must resolve to its own
+function; `rf_profiles::recipe::splice_name_block` writes them as a marked block
+so a re-run replaces its own rows and leaves comments and other rows alone.
+
+**Ask (D-026).** `rf-ai::naming` holds the `NamingProvider` trait, the
+`MockProvider`, and the request/response types. Why `rf-ai` and not
+`rf-rebuild`: `rf-rebuild` is a core-layer crate with no serde (validate-arch
+2b) and AI must stay off the frame path (FR-AI-001); `rf-ai` may depend on it.
+The payload (`FunctionFacts`) is a closed type of behaviour facts: counts, ids,
+register classes and addresses, RAM ranges with the recipe's RAM names, accepted
+names of neighbours, the rules' name as a hint. It has no field for ROM bytes,
+disassembly, lifted code, hashes or any static property of the code (no size,
+no entry address). `audit_request` enforces that (key allow-list, closed string
+vocabulary, no code hash, no 4-byte window of the ROM) and is run on synthetic
+data in `rf-ai` and on the real SMB and SMW requests in the ROM tests.
+`rf_ai::anthropic` is the Messages API as pure functions (body, headers,
+`stop_reason`-first response parser, 429/5xx backoff over a `Transport`); the
+shell implements `Transport` with its existing `ureq` (`ai_naming.rs`). Off by
+default: `[ai_naming] enabled`, `model`, optional `api_key` (else
+`ANTHROPIC_API_KEY`), settable in Settings, Paths. The key prints as `***`, goes
+only into the `x-api-key` header, and is never written into a recipe or a
+savestate. Model output is untrusted: names are re-sanitised, ids must have
+been asked about, and a name changes no execution (the ROM tests hook every
+proposed name and the lockstep stays green).
+
+**Use.** Coverage tab, Rebuild section, "Name functions" (needs Rebuild on): the
+core thread snapshots the machine and a worker runs the pass on a private copy,
+so the live game is not paused or touched. The panel lists proposals (rule and,
+if opted in, model) with a pick per function and an Export button.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

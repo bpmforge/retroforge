@@ -4803,3 +4803,15 @@ stories, 10 decisions).
   margin dots changed). Limits: the walk-only scout stops at the first pipe, so
   the right margin past it is sky (W37-03); the left margin is play history.
   Workspace: **3539 passing**.
+
+- **W36-09 — Understand pass and opt-in AI naming** (2026-10-26). An observed
+  frame run attributes every CPU-bus access to its atlas function (normal path
+  unchanged; observed runs end bit-identical to plain runs on SMB and SMW). A
+  rules namer (21 hardware rules: reset, nmi, read_controllers, oam_dma,
+  vram_upload, sound_update, palette_upload, wait_for_vblank, ...) named 25 SMB
+  and 29 SMW functions from long scripts. Opt-in Claude naming (D-026, off by
+  default, default model claude-opus-5-5) sends behaviour facts only; a payload
+  audit on real requests found no ROM bytes, hashes or code. No live API call
+  made yet. Names export as recipe rows and are inert (lockstep green with all
+  names hooked). "Name functions" in the Coverage tab (not rendered by eye).
+  Workspace: **3580 passing**.

@@ -413,6 +413,11 @@ const SETTINGS_INDEX: &[(&str, SettingsTab, &str)] = &[
         "download covers thumbnails",
     ),
     (
+        "Allow AI naming of functions",
+        SettingsTab::Paths,
+        "claude anthropic rebuild names api key model cloud",
+    ),
+    (
         "UI scale",
         SettingsTab::Accessibility,
         "size zoom text bigger",
@@ -3257,11 +3262,13 @@ impl RetroForgeApp {
                 rebuild_request: None,
                 hooks: Vec::new(),
                 hook_request: None,
+                naming: crate::debug_dock::NamingPanel::default(),
             })
         });
         if let Some(req) = panel.hook_request.take() {
             self.handle_hook_request(req);
         }
+        self.pump_naming();
         let Some(panel) = self.debug_panels.data.coverage.as_mut() else {
             return;
         };
@@ -4138,10 +4145,108 @@ impl RetroForgeApp {
     }
 
     /// Ticket W36-06: the recipe next to the profile that claims the open
-    /// ROM, if it has one.
+    /// ROM, if it has one (or the player's own, see
+    /// [`Self::recipe_path_for_rom`]).
     fn recipe_for_rom(&self, hashes: &rf_cart::RomHashes) -> Option<rf_rebuild::Recipe> {
-        let (_, profile_path) = self.find_profile(hashes)?;
-        rf_profiles::load_recipe_file(&profile_path.with_file_name("recipe.toml")).ok()
+        rf_profiles::load_recipe_file(&self.recipe_path_for_rom(hashes)?).ok()
+    }
+
+    /// Ticket W36-09: where this game's recipe lives: `recipe.toml` next to
+    /// the profile that claims it, else the player's own
+    /// `<config>/recipes/<rom sha256>.toml`.
+    fn recipe_path_for_rom(&self, hashes: &rf_cart::RomHashes) -> Option<std::path::PathBuf> {
+        if let Some((_, profile_path)) = self.find_profile(hashes) {
+            return Some(profile_path.with_file_name("recipe.toml"));
+        }
+        self.config_root
+            .as_ref()
+            .map(|root| root.join("recipes").join(format!("{}.toml", hashes.sha256)))
+    }
+
+    /// Ticket W36-09: act on the Name functions section of the Coverage tab.
+    /// The AI pass is gated here (`ai_naming::ai_gate`): no opt-in, no key,
+    /// no request carrying a key.
+    fn pump_naming(&mut self) {
+        let env_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let gate = crate::ai_naming::ai_gate(&self.settings.ai_naming, env_key.as_deref());
+        let model = self.settings.ai_naming.model.clone();
+        let ram = self
+            .mod_recipe
+            .as_ref()
+            .map(|r| r.ram.clone())
+            .or_else(|| {
+                let h = self.current_game_hashes.clone()?;
+                Some(self.recipe_for_rom(&h)?.ram)
+            })
+            .unwrap_or_default();
+        let Some(panel) = self.debug_panels.data.coverage.as_mut() else {
+            return;
+        };
+        let n = &mut panel.naming;
+        n.ai = match &gate {
+            crate::ai_naming::AiGate::Off => crate::debug_dock::AiPanelState::Off,
+            crate::ai_naming::AiGate::NoKey => crate::debug_dock::AiPanelState::NoKey,
+            crate::ai_naming::AiGate::Ready(_) => {
+                crate::debug_dock::AiPanelState::Ready(model.clone())
+            }
+        };
+        let request = n.request.take();
+        let export = std::mem::take(&mut n.export_request);
+        if let Some(with_ai) = request {
+            n.status = crate::ai_naming::NamingStatus::Running;
+            n.export_note.clear();
+            let ai = match (&gate, with_ai) {
+                (crate::ai_naming::AiGate::Ready(key), true) => Some((key.clone(), model)),
+                _ => None,
+            };
+            let job = crate::ai_naming::NameJob {
+                frames: crate::ai_naming::DEFAULT_FRAMES,
+                ram,
+                ai,
+            };
+            self.send_command(CoreCommand::NameFunctions(Box::new(job)));
+        }
+        if export {
+            let note = self.export_names();
+            if let Some(panel) = self.debug_panels.data.coverage.as_mut() {
+                panel.naming.export_note = note;
+            }
+        }
+    }
+
+    /// Ticket W36-09: write the names the player accepted into the game's
+    /// recipe. Returns the line to show.
+    fn export_names(&mut self) -> String {
+        use crate::ai_naming::{export_recipe_text, picked, NamingStatus};
+        let Some(panel) = self.debug_panels.data.coverage.as_ref() else {
+            return "Nothing to export.".into();
+        };
+        let NamingStatus::Done(outcome) = &panel.naming.status else {
+            return "Nothing to export.".into();
+        };
+        let accepted = picked(outcome, &panel.naming.picks);
+        let Some(hashes) = self.current_game_hashes.clone() else {
+            return "This game has no identity to key a recipe by.".into();
+        };
+        let Some(path) = self.recipe_path_for_rom(&hashes) else {
+            return "No place to write a recipe (no config folder).".into();
+        };
+        let existing = std::fs::read_to_string(&path).ok();
+        let id = format!("game-{}", &hashes.sha256[..hashes.sha256.len().min(12)]);
+        let (text, rows) =
+            match export_recipe_text(existing.as_deref(), &id, &outcome.atlas, &accepted) {
+                Ok(v) => v,
+                Err(e) => return format!("Export failed: {e}"),
+            };
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return format!("Export failed: {e}");
+            }
+        }
+        match std::fs::write(&path, text) {
+            Ok(()) => format!("Wrote {rows} name(s) to {}", path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        }
     }
 
     /// Ticket W36-06: list the matched profile's recipe mods and apply the
@@ -5003,6 +5108,15 @@ impl RetroForgeApp {
                 }
                 if let Some(r) = &msg.rebuild {
                     cov.rebuild = r.clone();
+                }
+                if let Some(st) = &msg.naming {
+                    cov.naming.status = st.clone();
+                    cov.naming.picks = match st {
+                        crate::ai_naming::NamingStatus::Done(o) => {
+                            crate::ai_naming::default_picks(o)
+                        }
+                        _ => std::collections::BTreeMap::new(),
+                    };
                 }
                 if let Some(h) = &msg.hooks {
                     cov.hooks.clone_from(h);
@@ -8462,6 +8576,62 @@ impl RetroForgeApp {
                                     .changed()
                                 {
                                     changed = true;
+                                }
+
+                                ui.separator();
+                                // Ticket W36-09, ruling D-026: the only
+                                // setting that can send anything to an AI
+                                // service. Off by default; read by
+                                // `ai_naming::ai_gate` and nowhere else.
+                                if ui
+                                    .checkbox(
+                                        &mut self.settings.ai_naming.enabled,
+                                        "Allow AI naming of functions",
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.small(
+                                    "Off by default. The Rebuild lab can name a game's functions \
+                                     from how they behave. With this on, the \"Name functions\" \
+                                     action can also send those behaviour facts (how often a \
+                                     function runs, which hardware registers it touches, RAM \
+                                     ranges and names, call-graph shape) to Anthropic to propose \
+                                     names for the ones the rules could not. Never game code or \
+                                     ROM bytes. Needs your own API key.",
+                                );
+                                if self.settings.ai_naming.enabled {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Model");
+                                        if ui
+                                            .text_edit_singleline(&mut self.settings.ai_naming.model)
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("API key");
+                                        let mut key = self
+                                            .settings
+                                            .ai_naming
+                                            .api_key
+                                            .clone()
+                                            .unwrap_or_default();
+                                        if ui
+                                            .add(egui::TextEdit::singleline(&mut key).password(true))
+                                            .changed()
+                                        {
+                                            self.settings.ai_naming.api_key = (!key.trim().is_empty())
+                                                .then(|| key.trim().to_string());
+                                            changed = true;
+                                        }
+                                    });
+                                    ui.small(
+                                        "Stored in your settings file. Empty = the \
+                                         ANTHROPIC_API_KEY environment variable.",
+                                    );
                                 }
                             }
                         }
@@ -15047,6 +15217,7 @@ impl RetroForgeApp {
             audio_traces: Vec::new(),
             coverage: None,
             rebuild: None,
+            naming: None,
             hooks: None,
             snes: Some(Box::new(snes)),
             vram: Box::new([0u8; 0x1000]),

@@ -20,7 +20,11 @@
 //! exact_hash = "0xfedcba9876543210"    # optional: raises confidence
 //! address_hint = 0x8E19                # optional: CPU entry on the observed dump
 //! hooks = ["entry", "exit"]            # which sides a hook may attach to
+//! confidence = 90                      # optional, percent: machine-made names
 //! source = "observed: NMI vector target of a 1-1 recording"   # required
+//! # Names proposed by the understand pass (ticket W36-09) say where they came
+//! # from: source = "rule:read_controllers" or source = "ai:<model>", with a
+//! # confidence. Names people wrote (any other source) win over them.
 //!
 //! [[ram]]
 //! addr = 0x075A
@@ -84,6 +88,11 @@ pub enum RecipeError {
         why: &'static str,
     },
     DuplicatePatch(String),
+    /// A `confidence` above 100 (it is a percentage).
+    BadConfidence {
+        function: String,
+        value: u8,
+    },
 }
 
 impl std::fmt::Display for RecipeError {
@@ -114,6 +123,10 @@ impl std::fmt::Display for RecipeError {
             Self::DuplicateFunction(n) => write!(f, "function `{n}` appears twice"),
             Self::BadPatch { patch, why } => write!(f, "[[patch]] `{patch}`: {why}"),
             Self::DuplicatePatch(n) => write!(f, "patch `{n}` appears twice"),
+            Self::BadConfidence { function, value } => write!(
+                f,
+                "function `{function}`: confidence {value} is not a percentage (0-100)"
+            ),
         }
     }
 }
@@ -151,6 +164,7 @@ struct FunctionRow {
     #[serde(default)]
     hooks: Vec<String>,
     source: Option<String>,
+    confidence: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -238,7 +252,14 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
                 }
             }
         }
+        if let Some(c) = row.confidence.filter(|&c| c > 100) {
+            return Err(RecipeError::BadConfidence {
+                function: row.name,
+                value: c,
+            });
+        }
         functions.push(RecipeFunction {
+            confidence: row.confidence,
             shape_hash: parse_hash(&row.name, "shape_hash", &row.shape_hash)?,
             exact_hash: row
                 .exact_hash
@@ -320,6 +341,74 @@ fn quote(s: &str) -> String {
     out
 }
 
+fn write_function(out: &mut String, f: &RecipeFunction) {
+    let _ = writeln!(out, "\n[[function]]\nname = {}", quote(&f.name));
+    let _ = writeln!(out, "shape_hash = \"{:#018x}\"", f.shape_hash);
+    if let Some(h) = f.exact_hash {
+        let _ = writeln!(out, "exact_hash = \"{h:#018x}\"");
+    }
+    if let Some(a) = f.address_hint {
+        let _ = writeln!(out, "address_hint = {a:#06x}");
+    }
+    let mut hooks = Vec::new();
+    if f.hooks.entry {
+        hooks.push("\"entry\"");
+    }
+    if f.hooks.exit {
+        hooks.push("\"exit\"");
+    }
+    let _ = writeln!(out, "hooks = [{}]", hooks.join(", "));
+    if let Some(c) = f.confidence {
+        let _ = writeln!(out, "confidence = {c}");
+    }
+    let _ = writeln!(out, "source = {}", quote(&f.source));
+}
+
+/// First line of the block [`name_rows_block`] writes.
+pub const NAME_BLOCK_BEGIN: &str =
+    "# ---- understand pass: machine-proposed names (rule:/ai: sources) ----";
+/// Last line of that block.
+pub const NAME_BLOCK_END: &str = "# ---- end understand pass ----";
+
+/// `rows` as `[[function]]` tables between marker comments, for appending to
+/// a recipe file without rewriting (and losing the comments of) the rest of
+/// it (ticket W36-09). Empty `rows` give an empty string.
+#[must_use]
+pub fn name_rows_block(rows: &[RecipeFunction]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n{NAME_BLOCK_BEGIN}\n");
+    for f in rows {
+        write_function(&mut out, f);
+    }
+    let _ = writeln!(out, "\n{NAME_BLOCK_END}");
+    out
+}
+
+/// `text` with any earlier marked block removed and `block` (from
+/// [`name_rows_block`]) appended: re-running the understand pass replaces its
+/// own rows and leaves every other row, comment and table as it was.
+#[must_use]
+pub fn splice_name_block(text: &str, block: &str) -> String {
+    let mut kept = String::with_capacity(text.len() + block.len());
+    let mut skipping = false;
+    for line in text.lines() {
+        if line.trim_end() == NAME_BLOCK_BEGIN {
+            skipping = true;
+        }
+        if !skipping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        if skipping && line.trim_end() == NAME_BLOCK_END {
+            skipping = false;
+        }
+    }
+    let trimmed = kept.trim_end_matches('\n');
+    format!("{trimmed}\n{block}")
+}
+
 /// Write `recipe` as TOML that [`load_recipe_str`] reads back to an equal
 /// recipe. Meant for tools that build a recipe by observation; comments are
 /// the author's to add.
@@ -333,23 +422,7 @@ pub fn recipe_to_toml(recipe: &Recipe) -> String {
         quote(&recipe.engine)
     );
     for f in &recipe.functions {
-        let _ = writeln!(out, "\n[[function]]\nname = {}", quote(&f.name));
-        let _ = writeln!(out, "shape_hash = \"{:#018x}\"", f.shape_hash);
-        if let Some(h) = f.exact_hash {
-            let _ = writeln!(out, "exact_hash = \"{h:#018x}\"");
-        }
-        if let Some(a) = f.address_hint {
-            let _ = writeln!(out, "address_hint = {a:#06x}");
-        }
-        let mut hooks = Vec::new();
-        if f.hooks.entry {
-            hooks.push("\"entry\"");
-        }
-        if f.hooks.exit {
-            hooks.push("\"exit\"");
-        }
-        let _ = writeln!(out, "hooks = [{}]", hooks.join(", "));
-        let _ = writeln!(out, "source = {}", quote(&f.source));
+        write_function(&mut out, f);
     }
     for r in &recipe.ram {
         let _ = writeln!(
@@ -399,6 +472,20 @@ mod tests {
         shape_hash = "0x12"
         source = "observed"
 
+        [[function]]
+        name = "read_controllers"
+        shape_hash = "0x34"
+        exact_hash = "0x56"
+        address_hint = 0x8E80
+        confidence = 92
+        source = "rule:read_controllers"
+
+        [[function]]
+        name = "vram_upload_c3a1"
+        shape_hash = "0x78"
+        confidence = 70
+        source = "ai:claude-opus-5-5"
+
         [[ram]]
         addr = 0x075A
         name = "lives"
@@ -422,6 +509,10 @@ mod tests {
         assert_eq!(r.functions[0].address_hint, Some(0x8E19));
         assert!(r.functions[0].hooks.entry && !r.functions[0].hooks.exit);
         assert_eq!(r.functions[1].exact_hash, None);
+        assert_eq!(r.functions[1].confidence, None);
+        assert_eq!(r.functions[2].confidence, Some(92));
+        assert_eq!(r.functions[2].source, "rule:read_controllers");
+        assert_eq!(r.functions[3].source, "ai:claude-opus-5-5");
         assert!(r.functions[1].hooks.entry && r.functions[1].hooks.exit);
         assert_eq!((r.ram[0].addr, r.ram[0].width), (0x75A, 1));
         assert_eq!(r.patches.len(), 1);
@@ -440,11 +531,46 @@ mod tests {
     }
 
     #[test]
+    fn a_spliced_block_replaces_its_own_rows_and_nothing_else() {
+        let r = load_recipe_str(GOOD).unwrap();
+        let rows: Vec<RecipeFunction> = r
+            .functions
+            .iter()
+            .filter(|f| f.source.starts_with("rule:") || f.source.starts_with("ai:"))
+            .cloned()
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let human = "# comment kept\n[recipe]\nformat = 1\nid = \"demo\"\n\n[[function]]\nname = \"tick\"\nshape_hash = \"0x1\"\nsource = \"observed\"\n";
+        let once = splice_name_block(human, &name_rows_block(&rows));
+        let parsed = load_recipe_str(&once).expect("spliced recipe parses");
+        assert_eq!(parsed.functions.len(), 3);
+        assert_eq!(parsed.functions[1], rows[0]);
+        assert!(once.starts_with("# comment kept"));
+        // A second run replaces the block, it does not stack another.
+        let twice = splice_name_block(&once, &name_rows_block(&rows[..1]));
+        let parsed2 = load_recipe_str(&twice).expect("parses");
+        assert_eq!(parsed2.functions.len(), 2);
+        assert_eq!(twice.matches(NAME_BLOCK_BEGIN).count(), 1);
+        // No rows: the block is gone, the human part is untouched.
+        let none = splice_name_block(&twice, &name_rows_block(&[]));
+        assert_eq!(load_recipe_str(&none).unwrap().functions.len(), 1);
+        assert!(none.contains("# comment kept"));
+    }
+
+    #[test]
     fn bad_input_is_refused_with_a_reason() {
         let with = |from: &str, to: &str| load_recipe_str(&GOOD.replace(from, to));
         assert!(matches!(
             with("format = 1", "format = 2"),
             Err(RecipeError::Format { found: 2, .. })
+        ));
+        assert!(matches!(
+            with("confidence = 92", "confidence = 101"),
+            Err(RecipeError::BadConfidence { value: 101, .. })
+        ));
+        assert!(matches!(
+            with("confidence = 92", "confidence = -1"),
+            Err(RecipeError::Parse(_))
         ));
         assert!(matches!(
             with("\"0x12\"", "\"12\""),

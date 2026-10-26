@@ -390,6 +390,9 @@ pub struct FrameMsg {
     /// while on). Sent every [`COVERAGE_REFRESH_FRAMES`] frames while it is
     /// not `Off`, and on the next frame after any change; `None` otherwise.
     pub rebuild: Option<crate::rebuild::RebuildStatus>,
+    /// Ticket W36-09: where the Name functions action stands. Sent once on
+    /// each change (started, finished, failed); `None` otherwise.
+    pub naming: Option<crate::ai_naming::NamingStatus>,
     /// Ticket W36-05: the function-hook panel lines (which hooks are active
     /// or inactive, the host's state, the mod write ledger). Sent when they
     /// change, checked every [`COVERAGE_REFRESH_FRAMES`] frames; `None`
@@ -808,6 +811,35 @@ fn rebuild_report(
     std::mem::take(dirty).then(|| status.clone())
 }
 
+/// Ticket W36-09: collect a finished Name functions run and say what the panel
+/// should hear (once per change).
+fn naming_report(
+    job: &mut Option<Receiver<Result<crate::ai_naming::NamingOutcome, String>>>,
+    status: &mut crate::ai_naming::NamingStatus,
+    dirty: &mut bool,
+) -> Option<crate::ai_naming::NamingStatus> {
+    use crate::ai_naming::NamingStatus;
+    if let Some(rx) = job.as_ref() {
+        match rx.try_recv() {
+            Ok(done) => {
+                *job = None;
+                *dirty = true;
+                *status = match done {
+                    Ok(outcome) => NamingStatus::Done(Arc::new(outcome)),
+                    Err(e) => NamingStatus::Failed(e),
+                };
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                *job = None;
+                *dirty = true;
+                *status = NamingStatus::Failed("the naming worker ended unexpectedly".to_string());
+            }
+        }
+    }
+    std::mem::take(dirty).then(|| status.clone())
+}
+
 /// The core thread's function-hook bookkeeping (ticket W36-05).
 #[derive(Default)]
 struct HookState {
@@ -1139,6 +1171,11 @@ pub enum CoreCommand {
     /// Ticket W36-03: turn the block executor on for this ROM (find or build
     /// the atlas in the background, install it here) or off. Off by default.
     SetRebuild(bool),
+    /// Ticket W36-09: observe the running game on a private copy of the
+    /// machine (needs Rebuild on, for the atlas), name its functions by rules
+    /// and, if the job carries an AI configuration (the player opted in),
+    /// ask the model about the rest. The live game is not paused or touched.
+    NameFunctions(Box<crate::ai_naming::NameJob>),
     /// Ticket W36-05: load Lua function hooks (built on this thread, resolved
     /// against the installed atlas now and whenever one is installed), or
     /// `None` to drop them. Needs Rebuild on for any hook to fire. A hook
@@ -1684,6 +1721,9 @@ fn core_thread_main(
     let mut rebuild_job: Option<Receiver<crate::rebuild::RebuildBuild>> = None;
     let mut rebuild_dirty = false;
     let rebuild_sha = rom_sha256.clone();
+    let mut naming_status = crate::ai_naming::NamingStatus::Idle;
+    let mut naming_job: Option<Receiver<Result<crate::ai_naming::NamingOutcome, String>>> = None;
+    let mut naming_dirty = false;
     // Ticket W36-05: function hooks (Lua state lives here, on this thread).
     let mut hook_state = HookState::default();
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
@@ -2164,6 +2204,28 @@ fn core_thread_main(
                     } else {
                         rebuild_status = crate::rebuild::RebuildStatus::Off;
                     }
+                }
+                CoreCommand::NameFunctions(job) => {
+                    naming_job = None;
+                    naming_dirty = true;
+                    naming_status = match (stepper.rebuild_atlas_clone(), stepper.snapshot()) {
+                        (Some(atlas), Ok(snap)) => {
+                            naming_job = Some(crate::ai_naming::spawn_job(
+                                rom.clone(),
+                                snap,
+                                atlas,
+                                input.load(),
+                                *job,
+                            ));
+                            crate::ai_naming::NamingStatus::Running
+                        }
+                        (None, _) => crate::ai_naming::NamingStatus::Failed(
+                            "Turn Rebuild on first: naming needs the code atlas".to_string(),
+                        ),
+                        (_, Err(e)) => crate::ai_naming::NamingStatus::Failed(format!(
+                            "could not copy the running machine: {e:?}"
+                        )),
+                    };
                 }
                 // Ticket W15-06 (FR-ENH-008): the fast-forward hotkey,
                 // held. `pacer.set_enabled` alone is not the whole story —
@@ -2794,6 +2856,7 @@ fn core_thread_main(
                     &mut rebuild_dirty,
                     &mut hook_state,
                 ),
+                naming: naming_report(&mut naming_job, &mut naming_status, &mut naming_dirty),
                 hooks: hook_state.report(&stepper),
                 audio_traces: if audio_capture {
                     // ~64 points is more than a 32-pixel-tall scope can
@@ -3197,6 +3260,7 @@ mod tests {
             audio_traces: Vec::new(),
             coverage: None,
             rebuild: None,
+            naming: None,
             hooks: None,
             snes: None,
             vram: Box::new([0u8; 0x1000]),
@@ -4025,6 +4089,98 @@ mod tests {
         rebuild_toggle_round_trip(synthetic_nrom());
     }
 
+    /// Ticket W36-09: Name functions needs the atlas (a clear refusal without
+    /// it), then runs on a private copy and reports once: the result arrives
+    /// on a frame message while the live machine keeps stepping.
+    #[test]
+    fn name_functions_refuses_without_an_atlas_then_reports_once() {
+        use crate::ai_naming::{NameJob, NamingStatus};
+        use crate::rebuild::RebuildStatus;
+        let core = spawn(synthetic_nrom()).expect("synthetic cartridge must spawn a core thread");
+        let send = |c| core.cmd_tx.send(c).expect("accepted");
+        let job = || {
+            Box::new(NameJob {
+                frames: 10,
+                ram: Vec::new(),
+                ai: None,
+            })
+        };
+        // The next frame message that carries a naming status.
+        let next_naming = |limit: usize| {
+            for _ in 0..limit {
+                send(CoreCommand::StepFrame);
+                let CoreEvent::Frame(msg) = core
+                    .evt_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("frame")
+                else {
+                    continue;
+                };
+                core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+                if let Some(n) = msg.naming {
+                    return Some((n, msg.rebuild));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            None
+        };
+
+        send(CoreCommand::NameFunctions(job()));
+        match next_naming(20) {
+            Some((NamingStatus::Failed(why), _)) => assert!(why.contains("Rebuild"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        send(CoreCommand::SetCoverage(true));
+        for _ in 0..3 {
+            send(CoreCommand::StepFrame);
+        }
+        send(CoreCommand::SetCoverage(false));
+        send(CoreCommand::SetRebuild(true));
+        let mut on = false;
+        for _ in 0..400 {
+            send(CoreCommand::StepFrame);
+            let CoreEvent::Frame(msg) = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("frame")
+            else {
+                continue;
+            };
+            core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+            if matches!(msg.rebuild, Some(RebuildStatus::On(_))) {
+                on = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(on, "Rebuild never turned on");
+
+        send(CoreCommand::NameFunctions(job()));
+        let mut running = false;
+        let mut done = None;
+        for _ in 0..2000 {
+            let Some((n, _)) = next_naming(1) else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            match n {
+                NamingStatus::Running => running = true,
+                NamingStatus::Done(o) => {
+                    done = Some(o);
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(running, "the start is reported");
+        let o = done.expect("the run finishes");
+        assert_eq!(o.frames, 10);
+        assert!(o.ai.is_empty(), "no AI configuration was sent");
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
     /// Ticket W36-08b: the same toggle on a SNES cartridge. The core thread
     /// builds the 65816 atlas from the session's recording, installs it, and
     /// turns it off again; a fresh session starts with Rebuild off.
@@ -4175,6 +4331,7 @@ mod tests {
             .find(|f| f.entry_cpu == 0x8060)
             .expect("the NMI handler is an atlas function");
         let row = |name: &str, shape: u64| rf_rebuild::RecipeFunction {
+            confidence: None,
             name: name.to_string(),
             shape_hash: shape,
             exact_hash: None,

@@ -70,6 +70,7 @@ fn observe_nmi_row(raw: &[u8], atlas: &Atlas) -> RecipeFunction {
         .find(|f| f.entry_cpu == u32::from(vector) && f.entry_kinds & entry::INTERRUPT != 0)
         .expect("the NMI vector's target is an interrupt entry of the atlas");
     RecipeFunction {
+        confidence: None,
         name: "nmi".to_string(),
         shape_hash: f.shape_hash,
         exact_hash: Some(f.byte_hash),
@@ -153,6 +154,7 @@ fn lua_count_host() -> HookHost {
 /// A recipe row that matches nothing in any atlas.
 fn bogus_row() -> RecipeFunction {
     RecipeFunction {
+        confidence: None,
         name: "nothing".to_string(),
         shape_hash: 0xDEAD_BEEF_DEAD_BEEF,
         exact_hash: None,
