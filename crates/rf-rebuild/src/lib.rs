@@ -9,6 +9,7 @@
 
 pub mod atlas;
 mod build;
+pub mod covio;
 pub mod dataregion;
 pub mod exec;
 pub mod hw;
@@ -26,6 +27,7 @@ pub use atlas::{
     CACHE_PRODUCER, CACHE_SETTINGS,
 };
 pub use build::build_atlas;
+pub use covio::{decode_coverage, encode_coverage, COVERAGE_ASSET, COVERAGE_SETTINGS};
 pub use exec::{
     Delta, Dispatch, Fetch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,

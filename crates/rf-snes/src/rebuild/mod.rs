@@ -70,6 +70,77 @@ pub fn build_atlas_from_image(raw: &[u8], log: &CoverageLog) -> Result<Atlas, rf
     Ok(build_atlas(rom, header.map_mode, log))
 }
 
+/// [`build_atlas_from_image`] with the hardware vectors added as seeds
+/// (ticket W37-01); see [`add_vector_seeds`]. An empty `log`
+/// ([`CoverageLog::new`] of length 0) gives the vectors-only atlas.
+///
+/// # Errors
+/// Whatever `rf-cart` rejects.
+pub fn build_seeded_atlas_from_image(
+    raw: &[u8],
+    log: &CoverageLog,
+) -> Result<Atlas, rf_cart::CartError> {
+    let rf_cart::Cartridge::Snes { header, .. } = rf_cart::Cartridge::load(raw)? else {
+        return Err(rf_cart::CartError::InvalidHeader(
+            "not a SNES cartridge (an iNES header was found)".to_string(),
+        ));
+    };
+    let rom = if header.had_copier_header {
+        &raw[512..]
+    } else {
+        raw
+    };
+    let mut seeded = log.clone();
+    add_vector_seeds(rom, header.map_mode, &mut seeded);
+    Ok(build_atlas(rom, header.map_mode, &seeded))
+}
+
+/// Add the interrupt vectors of `rom` to `log` as entries (fullsnes, "SNES
+/// Memory Map": the vectors are the last 32 bytes of bank `$00`).
+///
+/// RESET always starts in emulation mode (mode 0). The emulation-mode NMI and
+/// IRQ/BRK vectors are seeded in mode 0. The native-mode NMI and IRQ vectors
+/// are seeded in all four native width states: the handler's first
+/// instruction is usually the `REP`/`SEP` that sets them, but nothing static
+/// says which state an interrupt arrives in, and an unexecuted decode in the
+/// wrong state is harmless (it is never entered) while a missing one is a
+/// fallback. COP and the native BRK vector are not seeded.
+pub fn add_vector_seeds(rom: &[u8], map_mode: SnesMapMode, log: &mut CoverageLog) {
+    use rf_core_api::coverage::{CodeAddr, InterruptEntry, InterruptKind};
+    let isa = Wdc65816::new(map_mode, rom.len());
+    let word = |addr: u32| -> Option<u16> {
+        let at = isa.rom_offset(addr)? as usize;
+        Some(u16::from_le_bytes([*rom.get(at)?, *rom.get(at + 1)?]))
+    };
+    // (vector address, kind, modes it is entered in)
+    let table: [(u32, InterruptKind, &[u8]); 5] = [
+        (0xFFFC, InterruptKind::Reset, &[0]),
+        (0xFFFA, InterruptKind::Nmi, &[0]),
+        (0xFFFE, InterruptKind::Irq, &[0]),
+        (0xFFEA, InterruptKind::Nmi, &[1, 2, 3, 4]),
+        (0xFFEE, InterruptKind::Irq, &[1, 2, 3, 4]),
+    ];
+    for (vector, kind, modes) in table {
+        let Some(cpu) = word(vector).filter(|&c| c != 0 && c != 0xFFFF) else {
+            continue;
+        };
+        let Some(rom_off) = isa.rom_offset(u32::from(cpu)) else {
+            continue;
+        };
+        for &mode in modes {
+            log.note_interrupt(InterruptEntry {
+                kind,
+                target: CodeAddr {
+                    cpu,
+                    pbr: 0,
+                    mode,
+                    rom: Some(rom_off),
+                },
+            });
+        }
+    }
+}
+
 /// The accumulator and index widths (`m8`, `x8`) of a decode mode. Mode 0 is
 /// emulation (both 8-bit); an index past the last mode reads as emulation.
 #[must_use]
@@ -524,5 +595,43 @@ mod tests {
         assert_eq!(LO.rom_offset(0x00_8000), LO.rom_offset(0x80_8000));
         assert_eq!(HI.rom_offset(0x40_8000), HI.rom_offset(0xC0_8000));
         assert_eq!(LO.rom_offset(0x01_8000), Some(0x8000));
+    }
+
+    /// Ticket W37-01: a LoROM with only its vectors set seeds RESET in
+    /// emulation mode and the native NMI in all four width states, every
+    /// node `Inferred`.
+    #[test]
+    fn the_vectors_alone_seed_an_all_inferred_atlas() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFC..0x7FFE].copy_from_slice(&0x8000u16.to_le_bytes());
+        rom[0x7FEA..0x7FEC].copy_from_slice(&0x8010u16.to_le_bytes());
+        rom[0..2].copy_from_slice(&[0x80, 0xFE]); // BRA *
+        rom[0x10..0x15].copy_from_slice(&[0xC2, 0x30, 0xE6, 0x30, 0x40]); // REP #$30 ; INC $30 ; RTI
+        let a = build_seeded_atlas_from_image(&rom, &CoverageLog::new(0)).expect("builds");
+        assert_eq!(a.stats.observed_insns, 0);
+        assert!(a
+            .insns()
+            .all(|i| i.prov == rf_rebuild::Provenance::Inferred));
+        let modes = |rom_off: u32| -> Vec<u8> {
+            let mut m: Vec<u8> = a
+                .functions
+                .iter()
+                .filter(|f| f.entry_rom == rom_off)
+                .map(|f| f.entry_mode)
+                .collect();
+            m.sort_unstable();
+            m
+        };
+        assert_eq!(modes(0), vec![0], "reset runs in emulation mode");
+        assert_eq!(modes(0x10), vec![1, 2, 3, 4], "native NMI: every width");
+        // An image with no vectors seeds nothing and still builds.
+        let blank = vec![0u8; 0x8000];
+        let mut b = blank.clone();
+        b[0x7FD5] = 0x20;
+        b[0x7FD7] = 0x08;
+        let none = build_seeded_atlas_from_image(&b, &CoverageLog::new(0)).expect("builds");
+        assert!(none.functions.is_empty());
     }
 }

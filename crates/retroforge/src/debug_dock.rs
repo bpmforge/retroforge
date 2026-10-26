@@ -1597,31 +1597,14 @@ fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
     match &data.rebuild {
         RebuildStatus::Off => {}
         RebuildStatus::Building => {
-            ui.label("Building the atlas\u{2026}");
-        }
-        RebuildStatus::NeedCoverage => {
             ui.label(
-                "No atlas for this ROM yet \u{2014} record coverage first, then turn Rebuild on.",
+                "Building the first atlas\u{2026} the game keeps running on the interpreter meanwhile.",
             );
         }
         RebuildStatus::Failed(e) => {
             ui.label(format!("Rebuild failed: {e}"));
         }
-        RebuildStatus::On(s) => {
-            ui.label(format!(
-                "{} atlas functions  |  {} instructions: {} observed, {} inferred, {} fallback ({:.2}% fallback)",
-                s.atlas_functions,
-                s.instructions(),
-                s.observed,
-                s.inferred,
-                s.fallback,
-                s.fallback_rate() * 100.0
-            ));
-            ui.label(format!(
-                "{} interrupt entries  |  {} indirect transfers checked, {} dispatch misses ({} distinct, {} dropped)",
-                s.interrupt_entries, s.indirect_checked, s.dispatch_misses, s.delta_len, s.delta_dropped
-            ));
-        }
+        RebuildStatus::On(info) => rebuild_on_lines(ui, info),
     }
     ui.horizontal(|ui| {
         if ui.button("Load hook script\u{2026}").clicked() {
@@ -1641,6 +1624,45 @@ fn rebuild_section(ui: &mut egui::Ui, data: &mut CoveragePanelData) {
     ui.separator();
     naming_section(ui, data);
     ui.separator();
+}
+
+/// The lines under the toggle while Rebuild is on (ticket W37-01): the atlas
+/// size and its fallback rate (the share of instructions the atlas had no
+/// node for, which falls as it grows), the swaps so far and the build state.
+fn rebuild_on_lines(ui: &mut egui::Ui, info: &crate::rebuild::RebuildInfo) {
+    use crate::rebuild::AtlasSource;
+    let s = &info.stats;
+    ui.label(format!(
+        "on (atlas {} functions, {:.2}% fallback){}",
+        s.atlas_functions,
+        s.fallback_rate() * 100.0,
+        if info.rebuilding {
+            " \u{2014} growing the atlas\u{2026}"
+        } else {
+            ""
+        }
+    ));
+    let source = match info.source {
+        AtlasSource::Vectors => "from the interrupt vectors only",
+        AtlasSource::Cached => "from the cache",
+        AtlasSource::Coverage => "from recorded coverage",
+    };
+    ui.label(format!(
+        "atlas {source}, built in {:.2}s  |  {} swaps since Rebuild went on (the counters below restart at each swap)",
+        info.last_build.as_secs_f64(),
+        info.swaps
+    ));
+    ui.label(format!(
+        "{} instructions: {} observed, {} inferred, {} fallback",
+        s.instructions(),
+        s.observed,
+        s.inferred,
+        s.fallback
+    ));
+    ui.label(format!(
+        "{} interrupt entries  |  {} indirect transfers checked, {} dispatch misses ({} distinct, {} dropped)",
+        s.interrupt_entries, s.indirect_checked, s.dispatch_misses, s.delta_len, s.delta_dropped
+    ));
 }
 
 /// The Name functions action (ticket W36-09): observe the game, name

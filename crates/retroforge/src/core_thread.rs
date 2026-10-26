@@ -763,52 +763,25 @@ fn coverage_merge(stepper: &mut EmuStepper, acc: &mut Option<rf_core_api::Covera
 }
 
 /// Advance Rebuild's state by one frame and say what the panel should hear
-/// (ticket W36-03): finish a background build by installing the atlas on
-/// this thread, refresh the counters every [`COVERAGE_REFRESH_FRAMES`]
-/// frames, and report any change once. `None` while off and unchanged.
+/// (tickets W36-03, W37-01): install a finished atlas on this thread, start a
+/// grow job when coverage grew, refresh the counters every
+/// [`COVERAGE_REFRESH_FRAMES`] frames, and report any change once. `None`
+/// while off and unchanged.
 fn rebuild_report(
     stepper: &mut EmuStepper,
-    status: &mut crate::rebuild::RebuildStatus,
-    job: &mut Option<Receiver<crate::rebuild::RebuildBuild>>,
-    dirty: &mut bool,
+    ctl: &mut crate::rebuild::RebuildCtl,
+    coverage_on: bool,
+    coverage_acc: &mut Option<rf_core_api::CoverageLog>,
     hooks: &mut HookState,
 ) -> Option<crate::rebuild::RebuildStatus> {
-    use crate::rebuild::{RebuildBuild, RebuildStatus};
-    if let Some(rx) = job.as_ref() {
-        match rx.try_recv() {
-            Ok(done) => {
-                *job = None;
-                *dirty = true;
-                *status = match done {
-                    RebuildBuild::Ready(atlas) => match stepper.set_rebuild_atlas(Some(atlas)) {
-                        Ok(()) => {
-                            // The atlas the hook names resolve against is
-                            // new (ticket W36-05).
-                            hooks.resolve(stepper);
-                            RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default())
-                        }
-                        Err(e) => RebuildStatus::Failed(e.to_string()),
-                    },
-                    RebuildBuild::NeedCoverage => RebuildStatus::NeedCoverage,
-                    RebuildBuild::Failed(e) => RebuildStatus::Failed(e),
-                };
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                *job = None;
-                *dirty = true;
-                *status = RebuildStatus::Failed("atlas build thread ended".to_string());
-            }
-        }
+    if ctl.advance(stepper, coverage_on, coverage_acc) {
+        // The atlas the hook names resolve against is new (ticket W36-05).
+        hooks.resolve(stepper);
     }
     let tick = stepper
         .frame_count()
         .is_multiple_of(COVERAGE_REFRESH_FRAMES);
-    if matches!(status, RebuildStatus::On(_)) && tick {
-        *status = RebuildStatus::On(stepper.rebuild_stats().unwrap_or_default());
-        *dirty = true;
-    }
-    std::mem::take(dirty).then(|| status.clone())
+    ctl.report(stepper, tick)
 }
 
 /// Ticket W36-09: collect a finished Name functions run and say what the panel
@@ -1719,11 +1692,9 @@ fn core_thread_main(
     // log merged from every take since arming.
     let mut coverage_on = false;
     let mut coverage_acc: Option<rf_core_api::CoverageLog> = None;
-    // Ticket W36-03: Rebuild's status, the background atlas build (if one is
-    // running) and whether the panel has yet to hear of a change.
-    let mut rebuild_status = crate::rebuild::RebuildStatus::Off;
-    let mut rebuild_job: Option<Receiver<crate::rebuild::RebuildBuild>> = None;
-    let mut rebuild_dirty = false;
+    // Tickets W36-03, W37-01: Rebuild's status, the background atlas builds
+    // and the session that grows the atlas from recorded coverage.
+    let mut rebuild = crate::rebuild::RebuildCtl::default();
     let rebuild_sha = rom_sha256.clone();
     let mut naming_status = crate::ai_naming::NamingStatus::Idle;
     let mut naming_job: Option<Receiver<Result<crate::ai_naming::NamingOutcome, String>>> = None;
@@ -2179,7 +2150,10 @@ fn core_thread_main(
                 CoreCommand::SetCoverage(on) => {
                     // Disarming keeps what was recorded, so "record, stop,
                     // then turn Rebuild on" has coverage to build from.
-                    // Arming starts a fresh accumulator.
+                    // Arming starts a fresh accumulator. While Rebuild is on
+                    // the recorder is Rebuild's too: what it holds is kept
+                    // for it first, and disarming re-arms it.
+                    rebuild.before_coverage_toggle(&mut stepper, coverage_on);
                     if coverage_on && !on {
                         coverage_merge(&mut stepper, &mut coverage_acc);
                     }
@@ -2188,29 +2162,26 @@ fn core_thread_main(
                     if on {
                         coverage_acc = None;
                     }
+                    rebuild.after_coverage_toggle(&mut stepper, on);
                 }
                 CoreCommand::SetHooks(setup) => hook_state.set(&mut stepper, setup),
                 CoreCommand::SetRebuild(on) => {
-                    rebuild_job = None;
-                    let _ = stepper.set_rebuild_atlas(None);
-                    rebuild_dirty = true;
                     if on {
                         if coverage_on {
                             coverage_merge(&mut stepper, &mut coverage_acc);
                         }
                         // Built off this thread: a big ROM's atlas should not
-                        // stall frames. Installing stays here (law 4).
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let (ines, sha, log) =
-                            (rom.clone(), rebuild_sha.clone(), coverage_acc.clone());
-                        thread::spawn(move || {
-                            let _ =
-                                tx.send(crate::rebuild::find_or_build(&ines, &sha, log.as_ref()));
-                        });
-                        rebuild_job = Some(rx);
-                        rebuild_status = crate::rebuild::RebuildStatus::Building;
+                        // stall frames, and the game runs on the interpreter
+                        // until it is ready. Installing stays here (law 4).
+                        rebuild.start(
+                            &mut stepper,
+                            &rom,
+                            &rebuild_sha,
+                            coverage_on,
+                            coverage_acc.as_ref(),
+                        );
                     } else {
-                        rebuild_status = crate::rebuild::RebuildStatus::Off;
+                        rebuild.stop(&mut stepper, coverage_on);
                     }
                 }
                 CoreCommand::NameFunctions(job) => {
@@ -2868,9 +2839,9 @@ fn core_thread_main(
                 },
                 rebuild: rebuild_report(
                     &mut stepper,
-                    &mut rebuild_status,
-                    &mut rebuild_job,
-                    &mut rebuild_dirty,
+                    &mut rebuild,
+                    coverage_on,
+                    &mut coverage_acc,
                     &mut hook_state,
                 ),
                 naming: naming_report(&mut naming_job, &mut naming_status, &mut naming_dirty),
@@ -4115,6 +4086,173 @@ mod tests {
     #[test]
     fn rebuild_builds_from_recorded_coverage_installs_and_reports() {
         rebuild_toggle_round_trip(synthetic_nrom());
+    }
+
+    /// 16 KiB NROM that counts forever (`INX ; JMP $C000`), reset vector
+    /// `$C000`. `tag` makes the image (and so its cache entries) unique.
+    fn counting_nrom(tag: u8) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&[0u8; 10]);
+        let mut prg = vec![0xEAu8; 16 * 1024];
+        prg[0..4].copy_from_slice(&[0xE8, 0x4C, 0x00, 0xC0]);
+        prg[0x100] = tag;
+        prg[0x3FFC..0x3FFE].copy_from_slice(&0xC000u16.to_le_bytes());
+        data.extend(prg);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    /// 32 KiB LoROM that loops `NOP ; BRA -3` from its reset vector.
+    fn counting_lorom(tag: u8) -> Vec<u8> {
+        let mut rom = synthetic_lorom();
+        rom[0..3].copy_from_slice(&[0xEA, 0x80, 0xFD]);
+        rom[0x100] = tag;
+        rom
+    }
+
+    /// Run `image` with Rebuild on and nothing recorded by the player until
+    /// `done` accepts the status, returning every distinct status heard and
+    /// the number of frames stepped.
+    fn run_cold(
+        image: Vec<u8>,
+        done: impl Fn(&crate::rebuild::RebuildStatus) -> bool,
+    ) -> (Vec<crate::rebuild::RebuildStatus>, u32) {
+        let core = spawn(image).expect("synthetic cartridge must spawn a core thread");
+        let send = |c| core.cmd_tx.send(c).expect("accepted");
+        send(CoreCommand::SetRebuild(true));
+        let mut heard: Vec<crate::rebuild::RebuildStatus> = Vec::new();
+        let mut frames = 0;
+        'run: for _ in 0..3000 {
+            send(CoreCommand::StepFrame);
+            let CoreEvent::Frame(msg) = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("frame")
+            else {
+                continue;
+            };
+            core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+            frames += 1;
+            if let Some(r) = msg.rebuild {
+                // Counters change every refresh; keep the first of each shape.
+                let same = |a: &crate::rebuild::RebuildStatus,
+                            b: &crate::rebuild::RebuildStatus| {
+                    match (a, b) {
+                        (
+                            crate::rebuild::RebuildStatus::On(x),
+                            crate::rebuild::RebuildStatus::On(y),
+                        ) => x.swaps == y.swaps && x.source == y.source,
+                        _ => a == b,
+                    }
+                };
+                let stop = done(&r);
+                if heard.last().is_none_or(|l| !same(l, &r)) {
+                    heard.push(r);
+                }
+                if stop {
+                    break 'run;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+        (heard, frames)
+    }
+
+    /// Ticket W37-01: Rebuild on a cold ROM, nothing recorded. The game keeps
+    /// stepping while the first (vectors-only) atlas builds; the atlas grows
+    /// from coverage the core records underneath and is swapped in at a frame
+    /// boundary; the next session finds the stored atlas at once.
+    fn cold_rebuild_round_trip(make: fn(u8) -> Vec<u8>, tag: u8) {
+        use crate::rebuild::{AtlasSource, RebuildStatus};
+        let grown = |s: &RebuildStatus| matches!(s, RebuildStatus::On(i) if i.swaps >= 1);
+        let (heard, frames) = run_cold(make(tag), grown);
+        assert!(
+            !heard.iter().any(|s| matches!(s, RebuildStatus::Failed(_))),
+            "{heard:?}"
+        );
+        let RebuildStatus::On(first) = heard
+            .iter()
+            .find(|s| matches!(s, RebuildStatus::On(_)))
+            .expect("turned on")
+        else {
+            unreachable!()
+        };
+        assert_eq!(first.source, AtlasSource::Vectors, "{heard:?}");
+        assert_eq!(first.swaps, 0);
+        assert!(first.stats.atlas_functions > 0, "{first:?}");
+        let Some(RebuildStatus::On(last)) = heard.last() else {
+            panic!("never grew: {heard:?}");
+        };
+        assert!(last.swaps >= 1, "{heard:?}");
+        assert_eq!(last.source, AtlasSource::Coverage);
+        assert!(last.stats.atlas_functions > 0);
+        assert!(
+            frames as u64 >= crate::rebuild::GROW_CHECK_FRAMES,
+            "grew after {frames} frames"
+        );
+
+        // A second session over the same cartridge starts from the cache.
+        let (heard, _) = run_cold(make(tag), |s| matches!(s, RebuildStatus::On(_)));
+        let Some(RebuildStatus::On(again)) = heard.last() else {
+            panic!("second session never turned on: {heard:?}");
+        };
+        assert_eq!(again.source, AtlasSource::Cached, "{heard:?}");
+        assert!(again.stats.atlas_functions >= last.stats.atlas_functions);
+    }
+
+    #[test]
+    fn rebuild_turns_on_cold_for_an_nes_cartridge_and_the_atlas_grows() {
+        cold_rebuild_round_trip(counting_nrom, 0x11);
+    }
+
+    #[test]
+    fn rebuild_turns_on_cold_for_a_snes_cartridge_and_the_atlas_grows() {
+        cold_rebuild_round_trip(counting_lorom, 0x22);
+    }
+
+    /// Turning Rebuild off hands the recorder back: it is disarmed if Rebuild
+    /// armed it, and left armed (with its log) if the player had.
+    #[test]
+    fn rebuild_off_disarms_only_the_recorder_it_armed() {
+        use crate::rebuild::RebuildStatus;
+        let core = spawn(counting_nrom(0x33)).expect("spawn");
+        let send = |c| core.cmd_tx.send(c).expect("accepted");
+        let next = |c: &CoreHandle| loop {
+            send(CoreCommand::StepFrame);
+            let CoreEvent::Frame(msg) = c
+                .evt_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("frame")
+            else {
+                continue;
+            };
+            c.pending_frames.fetch_sub(1, Ordering::AcqRel);
+            return msg;
+        };
+        // Rebuild alone: the player's coverage summary stays absent.
+        send(CoreCommand::SetRebuild(true));
+        for _ in 0..5 {
+            assert!(next(&core).coverage.is_none(), "not the player's recording");
+        }
+        // The player arms it too, then Rebuild goes off: still recording.
+        send(CoreCommand::SetCoverage(true));
+        send(CoreCommand::SetRebuild(false));
+        let mut summary = None;
+        for _ in 0..40 {
+            let m = next(&core);
+            summary = summary.or(m.coverage);
+        }
+        assert!(summary.is_some(), "the player's recorder survived");
+        send(CoreCommand::SetCoverage(false));
+        let off = (0..20).find_map(|_| next(&core).rebuild);
+        assert!(off.is_none() || off == Some(RebuildStatus::Off));
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
     }
 
     /// Ticket W36-09: Name functions needs the atlas (a clear refusal without
