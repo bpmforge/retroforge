@@ -4827,3 +4827,10 @@ stories, 10 decisions).
   matched. Twin nmi/irq stubs now match only at their address hint, so moved
   copies go unmatched (W38-00 to disambiguate by vector kind). Workspace:
   **3584 passing**.
+
+- **W36-11 — Public guide** (2026-10-26). `docs/site/src/rebuild.md` ("Rebuild
+  mode: how it works"), linked from the book's summary: what ships vs what is
+  built locally, turning it on, the lockstep checker, hooks, mods, naming, the
+  opt-in Claude naming (facts only), limits, and the clean-room rules
+  (D-024..D-028). Docs-only; docs-gate OK; no code changed since the
+  3584-passing gate.
