@@ -34,6 +34,91 @@ pub fn build_atlas(prg: &[u8], log: &CoverageLog) -> Atlas {
     build_generic_atlas(&Mos6502, prg, log)
 }
 
+/// [`build_atlas`] with the hardware vectors added as seeds (ticket W37-01):
+/// RESET, NMI and IRQ/BRK are entry points of every cartridge, so they are
+/// decoded statically even where no recording has run. An empty `log`
+/// ([`CoverageLog::new`] of any length) gives the vectors-only atlas a game
+/// can start under before anything has been recorded; its nodes are all
+/// `Inferred`. Behaviour is unaffected: the executor is the interpreter with
+/// a map, and an unplaced or wrong seed only costs a fallback.
+#[must_use]
+pub fn build_seeded_atlas(prg: &[u8], log: &CoverageLog) -> Atlas {
+    let mut seeded = log.clone();
+    add_vector_seeds(prg, &mut seeded);
+    build_atlas(prg, &seeded)
+}
+
+/// Add the RESET/NMI/IRQ vectors of `prg` to `log` as interrupt entries.
+///
+/// Where the vectors are depends on the mapper's bank at `$F000-$FFFF`
+/// (nesdev, "CPU memory map" and each mapper's page). If the log recorded
+/// window maps, every distinct bank seen at `$F000` is read through the map
+/// it was seen in. With none, the common layout is assumed: the last 16 KiB
+/// at `$C000` and, for a 32 KiB or larger image, the 16 KiB before it at
+/// `$8000` (a 16 KiB image is mirrored). That map is also added to the log so
+/// the builder can place the seeds' static targets.
+pub fn add_vector_seeds(prg: &[u8], log: &mut CoverageLog) {
+    use rf_core_api::coverage::{
+        CodeAddr, InterruptEntry, InterruptKind, WindowMap, NO_ROM, WINDOW_BASE, WINDOW_PAGES,
+    };
+    const PAGE: usize = 0x1000;
+    if prg.len() < 4 * PAGE {
+        return;
+    }
+    if log.windows.is_empty() {
+        let mut m = WindowMap::EMPTY;
+        for (page, slot) in m.0.iter_mut().enumerate() {
+            let off = if prg.len() == 4 * PAGE {
+                (page % 4) * PAGE
+            } else if page >= 4 {
+                prg.len() - 4 * PAGE + (page - 4) * PAGE
+            } else {
+                prg.len() - 8 * PAGE + page * PAGE
+            };
+            *slot = u32::try_from(off).unwrap_or(NO_ROM);
+        }
+        log.note_windows(m);
+    }
+    let mut seen_bases = Vec::new();
+    for map in log.windows.clone() {
+        let top = map.0[WINDOW_PAGES - 1];
+        if top == NO_ROM || seen_bases.contains(&top) {
+            continue;
+        }
+        seen_bases.push(top);
+        let vec_at = top as usize + PAGE - 6;
+        let Some(v) = prg.get(vec_at..vec_at + 6) else {
+            continue;
+        };
+        let word = |i: usize| u16::from_le_bytes([v[i], v[i + 1]]);
+        for (kind, cpu) in [
+            (InterruptKind::Nmi, word(0)),
+            (InterruptKind::Reset, word(2)),
+            (InterruptKind::Irq, word(4)),
+        ] {
+            if cpu < WINDOW_BASE {
+                continue;
+            }
+            let page = usize::from((cpu - WINDOW_BASE) >> 12);
+            let rom = Some(map.0[page])
+                .filter(|&b| b != NO_ROM)
+                .map(|b| b + u32::from(cpu & 0xFFF))
+                .filter(|&r| (r as usize) < prg.len());
+            if rom.is_some() {
+                log.note_interrupt(InterruptEntry {
+                    kind,
+                    target: CodeAddr {
+                        cpu,
+                        pbr: 0,
+                        mode: 0,
+                        rom,
+                    },
+                });
+            }
+        }
+    }
+}
+
 /// The NES CPU's instruction set (2A03 = 6502 without decimal mode; decode
 /// is unaffected by that).
 #[derive(Debug, Clone, Copy, Default)]
@@ -199,5 +284,70 @@ mod tests {
             .decode(&[0x20, 0x34], 0, DecodeMode::default())
             .is_none());
         assert!(Mos6502.decode(&[], 0, DecodeMode::default()).is_none());
+    }
+
+    fn nrom(prg_len: usize, reset: u16, nmi: u16) -> Vec<u8> {
+        let mut prg = vec![0xEAu8; prg_len]; // NOP sled
+        let top = prg_len - 6;
+        prg[top..top + 2].copy_from_slice(&nmi.to_le_bytes());
+        prg[top + 2..top + 4].copy_from_slice(&reset.to_le_bytes());
+        prg[top + 4..top + 6].copy_from_slice(&0u16.to_le_bytes());
+        // reset: JSR $9000 ; JMP *   at the reset target.
+        let r = prg_len - 0x4000 + usize::from(reset - 0xC000);
+        prg[r..r + 6].copy_from_slice(&[0x20, 0x00, 0x90, 0x4C, r as u8, 0xC0]);
+        prg
+    }
+
+    #[test]
+    fn the_vectors_alone_seed_an_all_inferred_atlas() {
+        let prg = nrom(0x8000, 0xC000, 0xC100);
+        let a = build_seeded_atlas(&prg, &CoverageLog::new(0));
+        assert_eq!(a.stats.observed_insns, 0);
+        assert!(a.stats.inferred_insns > 2, "{:?}", a.stats);
+        assert!(a.functions.len() >= 2, "reset and NMI at least");
+        assert!(a.insns().all(|i| i.prov == Provenance::Inferred));
+        // Reset and NMI are entries, tagged as such.
+        let flags = |rom: u32| {
+            a.functions
+                .iter()
+                .filter(|f| f.entry_rom == rom)
+                .fold(0u8, |m, f| m | f.entry_kinds)
+        };
+        assert_ne!(flags(0x4000) & entry::RESET, 0);
+        assert_ne!(flags(0x4100) & entry::NMI, 0);
+    }
+
+    #[test]
+    fn a_16k_image_mirrors_and_a_tiny_one_is_left_alone() {
+        let prg = nrom(0x4000, 0xC000, 0xC100);
+        let a = build_seeded_atlas(&prg, &CoverageLog::new(0));
+        assert!(a.functions.len() >= 2);
+        let tiny = vec![0xEAu8; 0x2000];
+        assert!(build_seeded_atlas(&tiny, &CoverageLog::new(0))
+            .functions
+            .is_empty());
+    }
+
+    #[test]
+    fn recorded_windows_pick_the_bank_the_vectors_are_read_from() {
+        use rf_core_api::coverage::{WindowMap, NO_ROM};
+        // 64 KiB, 32 KiB banks (GxROM-like): bank 1 is on screen.
+        let mut prg = vec![0xEAu8; 0x1_0000];
+        prg[0xFFFA..0x1_0000].copy_from_slice(&[0x00, 0x90, 0x00, 0x80, 0x00, 0x90]);
+        prg[0x7FFA..0x8000].copy_from_slice(&[0x00, 0xA0, 0x00, 0xA0, 0x00, 0xA0]);
+        let mut log = CoverageLog::new(prg.len());
+        let mut m = WindowMap::EMPTY;
+        for (p, s) in m.0.iter_mut().enumerate() {
+            *s = 0x8000 + (p as u32) * 0x1000;
+        }
+        log.note_windows(m);
+        add_vector_seeds(&prg, &mut log);
+        let reset = log
+            .interrupts
+            .iter()
+            .find(|i| i.kind == rf_core_api::coverage::InterruptKind::Reset)
+            .expect("reset seeded");
+        assert_eq!((reset.target.cpu, reset.target.rom), (0x8000, Some(0x8000)));
+        assert!(log.windows.iter().all(|w| w.0[0] != NO_ROM));
     }
 }
