@@ -31,8 +31,10 @@ pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
 pub const CACHE_ASSET: &str = "code-atlas";
 /// `rf-cache` key `settings_hash` component, `-vN` like rf-cache's other
-/// users (e.g. `canvas-chunk-v3`).
-pub const CACHE_SETTINGS: &str = "code-atlas-v4";
+/// users (e.g. `canvas-chunk-v3`). v5 (W37-02): the atlas shape is the same
+/// as v4, but v4 atlases of Super FX, S-DD1 and LoROM carts could hold
+/// inferred nodes at wrongly placed static offsets, so they are not reused.
+pub const CACHE_SETTINGS: &str = "code-atlas-v5";
 
 const MAGIC: [u8; 4] = *b"RFAT";
 /// Upper bound on what `from_bytes` will allocate, so a corrupt cache entry

@@ -21,7 +21,7 @@
 //!    mid-run and compare every frame). Atlas building never runs on the core
 //!    thread (law 4: only the install does).
 //!
-//! The cache keeps two entries per ROM: the atlas (`code-atlas-v4`) and the
+//! The cache keeps two entries per ROM: the atlas (`code-atlas-v5`) and the
 //! merged recording (`code-coverage-v1`). The atlas cannot absorb new coverage
 //! by itself (its blocks and functions are derived, and the NES window maps the
 //! builder resolves targets by are not recoverable from it), so a rebuild is
