@@ -25,14 +25,14 @@ use crate::isa::Flow;
 
 /// Bumped on any change to the encoded shape. Part of the cache name
 /// ([`CACHE_SETTINGS`]); a different number is a clean cache miss.
-pub const ATLAS_FORMAT_VERSION: u32 = 3;
+pub const ATLAS_FORMAT_VERSION: u32 = 4;
 /// `rf-cache` key `producer` component.
 pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
 pub const CACHE_ASSET: &str = "code-atlas";
 /// `rf-cache` key `settings_hash` component, `-vN` like rf-cache's other
 /// users (e.g. `canvas-chunk-v3`).
-pub const CACHE_SETTINGS: &str = "code-atlas-v3";
+pub const CACHE_SETTINGS: &str = "code-atlas-v4";
 
 const MAGIC: [u8; 4] = *b"RFAT";
 /// Upper bound on what `from_bytes` will allocate, so a corrupt cache entry
@@ -170,6 +170,17 @@ pub mod entry {
     /// Executed code no other entry reaches (e.g. entered from RAM code);
     /// listed so every executed instruction belongs to some function.
     pub const ORPHAN: u8 = 8;
+    // Which interrupt (W38-00): [`INTERRUPT`] is always set beside one of
+    // these, so older filters keep working. A function can carry several
+    // (a vector table whose NMI and IRQ entries point at one handler).
+    /// Target of a reset entry.
+    pub const RESET: u8 = 16;
+    /// Target of an NMI entry.
+    pub const NMI: u8 = 32;
+    /// Target of an IRQ entry.
+    pub const IRQ: u8 = 64;
+    /// Target of a `BRK` entry.
+    pub const BRK: u8 = 128;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]

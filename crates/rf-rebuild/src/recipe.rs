@@ -22,7 +22,116 @@
 //! functions entered in that mode. No candidate: the row is **unmatched**, the game keeps running on
 //! the generic rebuild and the interpreter, and the row's hooks are inactive.
 
-use crate::atlas::Atlas;
+use crate::atlas::{entry, Atlas};
+
+/// How far a row can be trusted (ticket W38-00).
+///
+/// Only [`Grade::Candidate`] is restricted: a candidate row never drives a
+/// patch and never drives a hook on a host that may write memory. It may
+/// still drive read-only hooks and labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Grade {
+    /// Measured by RetroForge tooling on a real run.
+    #[default]
+    Observed,
+    /// Proposed by a finder or an AI and not verified yet.
+    Candidate,
+    /// Verified: a lockstep test passed, or a person checked it.
+    Confirmed,
+}
+
+impl Grade {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Candidate => "candidate",
+            Self::Confirmed => "confirmed",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "observed" => Some(Self::Observed),
+            "candidate" => Some(Self::Candidate),
+            "confirmed" => Some(Self::Confirmed),
+            _ => None,
+        }
+    }
+
+    /// Whether a row of this grade may drive a patch or a write-capable
+    /// hook.
+    #[must_use]
+    pub const fn may_write(self) -> bool {
+        !matches!(self, Self::Candidate)
+    }
+}
+
+/// How a function was entered, in the atlas's terms ([`crate::entry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Nmi,
+    Irq,
+    Reset,
+    Brk,
+    Call,
+    Indirect,
+}
+
+impl EntryKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nmi => "nmi",
+            Self::Irq => "irq",
+            Self::Reset => "reset",
+            Self::Brk => "brk",
+            Self::Call => "call",
+            Self::Indirect => "indirect",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "nmi" => Self::Nmi,
+            "irq" => Self::Irq,
+            "reset" => Self::Reset,
+            "brk" => Self::Brk,
+            "call" => Self::Call,
+            "indirect" => Self::Indirect,
+            _ => return None,
+        })
+    }
+
+    /// The [`crate::entry`] bit the atlas sets for this kind.
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        match self {
+            Self::Nmi => entry::NMI,
+            Self::Irq => entry::IRQ,
+            Self::Reset => entry::RESET,
+            Self::Brk => entry::BRK,
+            Self::Call => entry::CALL,
+            Self::Indirect => entry::INDIRECT,
+        }
+    }
+
+    /// The single interrupt kind among `kinds`, `None` when there is none or
+    /// several (one handler behind two vectors tells nothing apart).
+    #[must_use]
+    pub fn sole_interrupt(kinds: u8) -> Option<Self> {
+        let hit: Vec<Self> = [Self::Nmi, Self::Irq, Self::Reset, Self::Brk]
+            .into_iter()
+            .filter(|k| kinds & k.bit() != 0)
+            .collect();
+        match hit.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+}
 
 /// Which side of a function a hook may attach to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -32,7 +141,7 @@ pub struct HookPoints {
 }
 
 /// One function the recipe knows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecipeFunction {
     /// The name hooks register by (`rf.on_enter("nmi", ...)`).
     pub name: String,
@@ -43,6 +152,15 @@ pub struct RecipeFunction {
     /// Optional: CPU address of the entry in the dump the row was observed
     /// on; breaks ties between equal shapes.
     pub address_hint: Option<u32>,
+    /// Optional: how the function is entered (ticket W38-00). When present,
+    /// only atlas functions entered that way can match, which separates twin
+    /// stubs (an NMI and an IRQ handler with identical bytes) wherever a
+    /// hack moved them.
+    pub entry: Option<EntryKind>,
+    /// Optional: instructions in the function on the observed dump. A count,
+    /// not bytes; it bounds the scan that tells a removed function from one
+    /// the drive did not reach ([`classify_unmatched`]).
+    pub insn_count: Option<u32>,
     /// Optional: the decode mode the function is entered in
     /// ([`crate::Function::entry_mode`]; ticket W36-10). The 65816's
     /// instruction widths depend on `E`/`M`/`X`, and the shape hash ignores
@@ -57,20 +175,89 @@ pub struct RecipeFunction {
     /// How sure the source is, 0-100; `None` for facts people established
     /// (ticket W36-09).
     pub confidence: Option<u8>,
+    pub grade: Grade,
 }
 
 /// What a RAM byte (or run) means.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RamMeaning {
     pub addr: u32,
     /// Width in bytes.
     pub width: u8,
     pub name: String,
     pub source: String,
+    pub grade: Grade,
+}
+
+/// A table of game objects in RAM (ticket W38-00): `slots` entries, field
+/// `f` of slot `i` at `base + f.offset + i * stride`. That covers both a
+/// record per slot (stride = record size, small offsets) and a column per
+/// field (stride 1, offsets = distance between columns).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObjectTable {
+    pub name: String,
+    pub base: u32,
+    pub slots: u32,
+    pub stride: u32,
+    pub x_lo: Option<u32>,
+    pub x_hi: Option<u32>,
+    pub y: Option<u32>,
+    pub y_hi: Option<u32>,
+    /// Offset of the object type id.
+    pub kind: Option<u32>,
+    /// Offset of the byte that says the slot is in use or what it is doing.
+    pub state: Option<u32>,
+    pub source: String,
+    pub grade: Grade,
+}
+
+/// What a tile id range means to the game's physics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileClass {
+    Solid,
+    OneWay,
+    Water,
+    Hazard,
+}
+
+impl TileClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Solid => "solid",
+            Self::OneWay => "one_way",
+            Self::Water => "water",
+            Self::Hazard => "hazard",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "solid" => Self::Solid,
+            "one_way" => Self::OneWay,
+            "water" => Self::Water,
+            "hazard" => Self::Hazard,
+            _ => return None,
+        })
+    }
+}
+
+/// Tile ids `first..=last` behave as `class`, on one layer and/or tileset
+/// when those are given (ticket W38-00).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileSemantics {
+    pub class: TileClass,
+    pub first: u32,
+    pub last: u32,
+    pub layer: Option<u8>,
+    pub tileset: Option<String>,
+    pub source: String,
+    pub grade: Grade,
 }
 
 /// One byte of a function to replace when its mod is on (ticket W36-06).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PatchRow {
     /// Short label for reports and the ledger (`"spawn-lead"`).
     pub name: String,
@@ -86,6 +273,8 @@ pub struct PatchRow {
     pub value: u8,
     /// Where the row came from (observation, never a disassembly).
     pub source: String,
+    /// A [`Grade::Candidate`] row is never applied.
+    pub grade: Grade,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -96,6 +285,8 @@ pub struct Recipe {
     pub functions: Vec<RecipeFunction>,
     pub ram: Vec<RamMeaning>,
     pub patches: Vec<PatchRow>,
+    pub object_tables: Vec<ObjectTable>,
+    pub tiles: Vec<TileSemantics>,
 }
 
 impl Recipe {
@@ -130,6 +321,8 @@ pub struct Match {
     pub confidence: Confidence,
     /// How many atlas functions had this shape (1 = unambiguous).
     pub candidates: u32,
+    /// The grade of the row that matched.
+    pub grade: Grade,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -148,6 +341,16 @@ impl MatchReport {
             .find(|m| m.name == name)
             .map(|m| m.function)
     }
+
+    /// Like [`Self::function_of`] but for a hook that may write memory: a
+    /// [`Grade::Candidate`] row resolves to nothing (ticket W38-00).
+    #[must_use]
+    pub fn function_of_writable(&self, name: &str) -> Option<u32> {
+        self.matched
+            .iter()
+            .find(|m| m.name == name && m.grade.may_write())
+            .map(|m| m.function)
+    }
 }
 
 /// Pair every row of `recipe` with at most one function of `atlas`.
@@ -161,6 +364,9 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
             .enumerate()
             .filter(|(_, f)| f.shape_hash == row.shape_hash)
             .filter(|(_, f)| row.mode.is_none_or(|m| f.entry_mode == m))
+            // A row that says how its function is entered only takes
+            // functions entered that way (what separates twin stubs).
+            .filter(|(_, f)| row.entry.is_none_or(|k| f.entry_kinds & k.bit() != 0))
             // Rows nothing but an address tells apart (see `twins`) match
             // only the function at their hint: never a look-alike elsewhere.
             .filter(|(_, f)| !twins(recipe, row) || row.address_hint == Some(f.entry_cpu))
@@ -193,6 +399,7 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
                 function,
                 confidence,
                 candidates: by_shape.len() as u32,
+                grade: row.grade,
             }),
             None => report.unmatched.push(row.name.clone()),
         }
@@ -200,15 +407,19 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
     report
 }
 
-/// Whether another row of `recipe` has this row's shape hash and could be
-/// entered in the same mode. Their bytes agree (a pair of interrupt stubs, say),
-/// so a ROM where one of them changed would hand its name to the other; such
-/// rows are only trusted at the address they were observed at (ticket W36-10).
+/// Whether another row of `recipe` has this row's shape hash, could be
+/// entered in the same mode and is not told apart by its `entry` kind. Their
+/// bytes agree (a pair of interrupt stubs, say), so a ROM where one of them
+/// changed would hand its name to the other; such rows are only trusted at the
+/// address they were observed at (ticket W36-10). Rows with different entry
+/// kinds are not twins: the atlas knows which function the NMI vector reached
+/// (ticket W38-00).
 fn twins(recipe: &Recipe, row: &RecipeFunction) -> bool {
     recipe.functions.iter().any(|o| {
         o.name != row.name
             && o.shape_hash == row.shape_hash
             && (o.mode.is_none() || row.mode.is_none() || o.mode == row.mode)
+            && (o.entry.is_none() || row.entry.is_none() || o.entry == row.entry)
     })
 }
 
@@ -254,6 +465,9 @@ pub enum PatchRefusal {
     },
     /// Two rows edit the same byte.
     Overlap { first: String, second: String },
+    /// The patch row, or the function row it edits, is a
+    /// [`Grade::Candidate`]: not verified, so never applied.
+    Candidate { row: String, function: String },
 }
 
 impl std::fmt::Display for PatchRefusal {
@@ -295,6 +509,11 @@ impl std::fmt::Display for PatchRefusal {
             Self::Overlap { first, second } => {
                 write!(f, "patches `{first}` and `{second}` edit the same byte")
             }
+            Self::Candidate { row, function } => write!(
+                f,
+                "patch `{row}`: it or `{function}` is only a candidate (not verified yet), \
+                 so it was not applied"
+            ),
         }
     }
 }
@@ -337,6 +556,9 @@ pub fn resolve_patches(
         let Some(func) = wanted.functions.iter().find(|f| f.name == row.function) else {
             return Err(PatchRefusal::UnknownFunction { row: r, function });
         };
+        if !row.grade.may_write() || !func.grade.may_write() {
+            return Err(PatchRefusal::Candidate { row: r, function });
+        }
         let Some(m) = report.matched.iter().find(|m| m.name == row.function) else {
             return Err(PatchRefusal::Unmatched { row: r, function });
         };
@@ -404,4 +626,106 @@ fn stream_offset(atlas: &Atlas, f: &crate::atlas::Function, index: u32) -> Optio
         left -= u32::from(len);
     }
     None
+}
+
+/// Why a recipe row found no function in an atlas (ticket W38-00).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnmatchedReason {
+    /// Nothing in the image has the row's shape at the row's decode mode: the
+    /// function is gone, or edited so far its hash moved.
+    Removed,
+    /// Code of that shape sits in bytes the recording never executed: the
+    /// drive did not reach it.
+    NotReached,
+    /// Code of that shape exists and ran, yet the row did not match it: the
+    /// entry kind or decode mode the row insists on is not how it was entered.
+    Changed,
+}
+
+impl UnmatchedReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::NotReached => "not_reached",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// Tell why `row` is unmatched by a superset scan: decode `row.insn_count`
+/// instructions at **every** offset of `prg` (linearly, following the decode
+/// mode through `REP`/`SEP`) and compare the shape hash, which is blind to
+/// where the code sits. `executed(offset)` says whether the recording ran the
+/// byte. A hit on an unexecuted byte wins ([`UnmatchedReason::NotReached`]),
+/// then a hit on an executed one ([`UnmatchedReason::Changed`]), else
+/// [`UnmatchedReason::Removed`].
+///
+/// This is a linear-sweep approximation: a function laid out in pieces (its
+/// extent is the blocks control flow reaches, not a contiguous run) hashes
+/// differently here and reads as removed. `None` when the row has no
+/// `insn_count` to scan with.
+///
+/// Terminates by construction: one pass over the offsets, each decoding at
+/// most `insn_count` instructions, every one of which consumes at least one
+/// byte.
+#[must_use]
+pub fn classify_unmatched(
+    isa: &dyn crate::Isa,
+    prg: &[u8],
+    executed: &dyn Fn(usize) -> bool,
+    row: &RecipeFunction,
+) -> Option<UnmatchedReason> {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let want = row.insn_count.filter(|&n| n > 0)?;
+    let modes: Vec<u8> = match row.mode {
+        Some(m) => vec![m],
+        None => (0..isa.mode_count().max(1) as u8).collect(),
+    };
+    let cpu = |i: usize| {
+        if isa.fixed_mapping() {
+            isa.cpu_for_rom(i as u32)
+        } else {
+            0
+        }
+    };
+    let mut seen_executed = false;
+    for start in 0..prg.len() {
+        for &m0 in &modes {
+            let (mut at, mut mode, mut shape) = (start, m0, FNV_OFFSET);
+            let mut ok = true;
+            for _ in 0..want {
+                let end = (at + isa.max_len().max(1)).min(prg.len());
+                let Some(d) = isa.decode(&prg[at..end], cpu(at), crate::DecodeMode(mode)) else {
+                    ok = false;
+                    break;
+                };
+                let len = usize::from(d.len).max(1);
+                let insn = &prg[at..(at + len).min(prg.len())];
+                let masked = isa.masked_operand(insn, crate::DecodeMode(mode));
+                for (i, &b) in insn.iter().enumerate() {
+                    let kept = if masked.contains(&i) { 0 } else { b };
+                    shape = (shape ^ u64::from(kept)).wrapping_mul(FNV_PRIME);
+                }
+                at += len;
+                match d.after {
+                    crate::ModeAfter::Same => {}
+                    crate::ModeAfter::Set(m) => mode = m.0,
+                    crate::ModeAfter::Unknown => {}
+                }
+            }
+            if ok && shape == row.shape_hash {
+                if !executed(start) {
+                    return Some(UnmatchedReason::NotReached);
+                }
+                seen_executed = true;
+            }
+        }
+    }
+    Some(if seen_executed {
+        UnmatchedReason::Changed
+    } else {
+        UnmatchedReason::Removed
+    })
 }

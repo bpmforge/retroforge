@@ -279,6 +279,9 @@ fn export_carries_source_and_confidence_and_human_names_win() {
         id: "x".into(),
         functions: vec![
             RecipeFunction {
+                grade: rf_rebuild::Grade::Observed,
+                entry: None,
+                insn_count: None,
                 mode: None,
                 name: "sprite_dma_by_hand".into(),
                 shape_hash: 0x2001,
@@ -289,6 +292,9 @@ fn export_carries_source_and_confidence_and_human_names_win() {
                 confidence: None,
             },
             RecipeFunction {
+                grade: rf_rebuild::Grade::Observed,
+                entry: None,
+                insn_count: None,
                 mode: None,
                 name: "mapper_bank_switch".into(),
                 shape_hash: 0xdead,
@@ -308,6 +314,10 @@ fn export_carries_source_and_confidence_and_human_names_win() {
     assert_eq!(r.source, "rule:mapper_bank_switch");
     assert_eq!(r.confidence, Some(85));
     assert_eq!((r.exact_hash, r.address_hint), (Some(0x1002), Some(0x8400)));
+    // W38-00: a rule measured it (observed), it carries the function's size,
+    // and a call target names no interrupt entry.
+    assert_eq!(r.grade, rf_rebuild::Grade::Observed);
+    assert_eq!((r.insn_count, r.entry), (Some(4), None));
 
     // Merging replaces earlier machine rows and leaves human ones.
     assert_eq!(merge_name_rows(&mut recipe, &at, &ps), 1);

@@ -344,6 +344,9 @@ fn a_real_6502_function_moved_and_repointed_keeps_its_shape_hash() {
     let at = |a: &Atlas, rom: u32| a.functions.iter().find(|f| f.entry_rom == rom).cloned();
     let original = at(&atlas_for(&build(0x8100, 0xAD, 0x10)), 0x100).expect("function at $8100");
     let row = |f: &rf_rebuild::Function| RecipeFunction {
+        grade: rf_rebuild::Grade::Observed,
+        entry: None,
+        insn_count: None,
         mode: None,
         confidence: None,
         name: "f".to_string(),
@@ -362,6 +365,7 @@ fn a_real_6502_function_moved_and_repointed_keeps_its_shape_hash() {
         functions: vec![row(&original)],
         ram: vec![],
         patches: vec![],
+        ..Default::default()
     };
 
     let moved_atlas = atlas_for(&build(0x8300, 0xAD, 0x10));

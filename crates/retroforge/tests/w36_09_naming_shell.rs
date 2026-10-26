@@ -253,6 +253,7 @@ fn name_functions_runs_on_a_copy_and_the_live_machine_is_untouched() {
     let job = NameJob {
         frames: 60,
         ram: vec![rf_rebuild::RamMeaning {
+            grade: rf_rebuild::Grade::Observed,
             addr: 0x20,
             width: 1,
             name: "counter".into(),

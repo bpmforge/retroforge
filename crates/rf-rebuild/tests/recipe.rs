@@ -10,8 +10,9 @@ use rf_core_api::coverage::{
 };
 use rf_core_api::CodeAddr;
 use rf_rebuild::{
-    build_atlas, match_recipe, resolve_patches, Atlas, AtlasError, Confidence, DecodeMode, Decoded,
-    Flow, HookPoints, Isa, PatchRefusal, PatchRow, Recipe, RecipeFunction, ATLAS_FORMAT_VERSION,
+    build_atlas, entry, match_recipe, resolve_patches, Atlas, AtlasError, Confidence, DecodeMode,
+    Decoded, EntryKind, Flow, Grade, HookPoints, Isa, PatchRefusal, PatchRow, Recipe,
+    RecipeFunction, UnmatchedReason, ATLAS_FORMAT_VERSION,
 };
 
 struct Toy;
@@ -56,15 +57,22 @@ fn put_fn(img: &mut [u8], rom: usize, first_op: u8) {
 }
 
 fn atlas_of(img: &[u8], entries: &[usize]) -> Atlas {
+    let tagged: Vec<(usize, InterruptKind)> =
+        entries.iter().map(|&e| (e, InterruptKind::Nmi)).collect();
+    atlas_with(img, &tagged)
+}
+
+/// Like [`atlas_of`], with the interrupt each entry was reached by.
+fn atlas_with(img: &[u8], entries: &[(usize, InterruptKind)]) -> Atlas {
     let mut log = CoverageLog::new(img.len());
     let mut m = WindowMap::EMPTY;
     for (p, s) in m.0.iter_mut().enumerate() {
         *s = (p as u32) * 0x1000;
     }
     log.note_windows(m);
-    for &rom in entries {
+    for &(rom, kind) in entries {
         log.note_interrupt(InterruptEntry {
-            kind: InterruptKind::Nmi,
+            kind,
             target: CodeAddr {
                 cpu: 0x8000 + rom as u16,
                 pbr: 0,
@@ -91,6 +99,9 @@ fn func_at(a: &Atlas, rom: u32) -> &rf_rebuild::Function {
 
 fn row(name: &str, f: &rf_rebuild::Function, exact: bool, hint: Option<u32>) -> RecipeFunction {
     RecipeFunction {
+        grade: rf_rebuild::Grade::Observed,
+        entry: None,
+        insn_count: None,
         mode: None,
         confidence: None,
         name: name.to_string(),
@@ -112,6 +123,7 @@ fn recipe(rows: Vec<RecipeFunction>) -> Recipe {
         functions: rows,
         ram: vec![],
         patches: vec![],
+        ..Recipe::default()
     }
 }
 
@@ -204,8 +216,8 @@ fn the_v3_atlas_round_trips_its_hashes_and_a_v2_cache_entry_is_a_miss() {
     let bytes = a.to_bytes();
     assert_eq!(Atlas::from_bytes(&bytes), Ok(a.clone()));
 
-    assert_eq!(ATLAS_FORMAT_VERSION, 3);
-    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v3");
+    assert_eq!(ATLAS_FORMAT_VERSION, 4);
+    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v4");
     let mut v2 = bytes;
     v2[4..8].copy_from_slice(&2u32.to_le_bytes());
     assert_eq!(Atlas::from_bytes(&v2), Err(AtlasError::Version(2)));
@@ -213,6 +225,7 @@ fn the_v3_atlas_round_trips_its_hashes_and_a_v2_cache_entry_is_a_miss() {
 
 fn patch(name: &str, function: &str, offset: u32, value: u8) -> PatchRow {
     PatchRow {
+        grade: rf_rebuild::Grade::Observed,
         name: name.to_string(),
         mod_name: "m".to_string(),
         function: function.to_string(),
@@ -382,4 +395,167 @@ fn rows_with_one_shape_match_only_at_their_own_address() {
     let lone = recipe(vec![row("a", &f, false, Some(0x8100))]);
     let m = match_recipe(&atlas_of(&moved, &[0x500]), &lone);
     assert_eq!(m.matched.len(), 1);
+}
+
+// ---- recipe format v1 (ticket W38-00) -----------------------------------
+
+const TWIN_IMG: usize = 0x1000;
+
+/// Two byte-identical stubs, `first` reached by an NMI and `second` by an
+/// IRQ.
+fn twin_atlas(first: usize, second: usize) -> Atlas {
+    let mut img = vec![0u8; TWIN_IMG];
+    put_fn(&mut img, first, 0x0A);
+    put_fn(&mut img, second, 0x0A);
+    atlas_with(
+        &img,
+        &[(first, InterruptKind::Nmi), (second, InterruptKind::Irq)],
+    )
+}
+
+fn twin_rows(a: &Atlas, with_entry: bool) -> Recipe {
+    let (nmi, irq) = (func_at(a, 0x100), func_at(a, 0x300));
+    let mut rn = row("nmi", nmi, true, Some(nmi.entry_cpu));
+    let mut ri = row("irq", irq, true, Some(irq.entry_cpu));
+    if with_entry {
+        rn.entry = Some(EntryKind::Nmi);
+        ri.entry = Some(EntryKind::Irq);
+    }
+    recipe(vec![rn, ri])
+}
+
+#[test]
+fn the_atlas_tells_an_nmi_target_from_an_irq_one() {
+    let a = twin_atlas(0x100, 0x300);
+    let (nmi, irq) = (func_at(&a, 0x100), func_at(&a, 0x300));
+    // (The toy stub also JSRs itself, so CALL rides along.)
+    let intr = entry::INTERRUPT | entry::CALL;
+    assert_eq!(nmi.entry_kinds, intr | entry::NMI);
+    assert_eq!(irq.entry_kinds, intr | entry::IRQ);
+    assert_eq!(
+        EntryKind::sole_interrupt(nmi.entry_kinds),
+        Some(EntryKind::Nmi)
+    );
+    assert_eq!(
+        EntryKind::sole_interrupt(entry::NMI | entry::IRQ),
+        None,
+        "one handler behind two vectors names no single kind"
+    );
+}
+
+#[test]
+fn twin_stubs_a_hack_moved_resolve_by_entry_kind_not_by_address() {
+    // As observed: NMI stub at $8100, IRQ stub at $8300.
+    let original = twin_atlas(0x100, 0x300);
+    // The hack swapped them: the NMI vector now reaches $8300.
+    let hacked = twin_atlas(0x300, 0x100);
+    let id =
+        |a: &Atlas, rom: u32| a.functions.iter().position(|f| f.entry_rom == rom).unwrap() as u32;
+
+    // Without entry kinds the rows are pinned to their hints, so each takes
+    // the function at its old address: the NMI row lands on the IRQ stub.
+    let legacy = match_recipe(&hacked, &twin_rows(&original, false));
+    assert_eq!(legacy.function_of("nmi"), Some(id(&hacked, 0x100)));
+
+    // With them, each follows the vector that reaches it.
+    let v1 = match_recipe(&hacked, &twin_rows(&original, true));
+    assert_eq!(v1.function_of("nmi"), Some(id(&hacked, 0x300)));
+    assert_eq!(v1.function_of("irq"), Some(id(&hacked, 0x100)));
+    // And on the dump they were observed on, nothing changes.
+    let same = match_recipe(&original, &twin_rows(&original, true));
+    assert_eq!(same.function_of("nmi"), Some(id(&original, 0x100)));
+    assert_eq!(same.function_of("irq"), Some(id(&original, 0x300)));
+}
+
+#[test]
+fn a_row_with_an_entry_kind_no_function_has_is_unmatched() {
+    let original = twin_atlas(0x100, 0x300);
+    let mut img = vec![0u8; TWIN_IMG];
+    put_fn(&mut img, 0x300, 0x0A);
+    // Only an IRQ stub survives: the NMI row must not take it.
+    let hacked = atlas_with(&img, &[(0x300, InterruptKind::Irq)]);
+    let report = match_recipe(&hacked, &twin_rows(&original, true));
+    assert_eq!(report.unmatched, ["nmi"]);
+    assert!(report.function_of("irq").is_some());
+}
+
+#[test]
+fn a_candidate_row_never_drives_a_patch_or_a_writing_hook() {
+    let mut img = vec![0u8; TWIN_IMG];
+    put_fn(&mut img, 0x100, 0x0A);
+    let a = atlas_of(&img, &[0x100]);
+    let f = func_at(&a, 0x100);
+    let mut p = patch("lead", "tick", 2, 0x77);
+    p.mod_name = "m".to_string();
+
+    // Observed and confirmed rows are applied.
+    for g in [Grade::Observed, Grade::Confirmed] {
+        let mut r = patched_recipe(
+            f,
+            true,
+            vec![PatchRow {
+                grade: g,
+                ..p.clone()
+            }],
+        );
+        r.functions[0].grade = g;
+        assert!(resolve_patches(&a, &r, "m").is_ok(), "{g:?}");
+    }
+    // A candidate patch row, or a patch on a candidate function, is refused.
+    let mut cand_patch = patched_recipe(f, true, vec![p.clone()]);
+    cand_patch.patches[0].grade = Grade::Candidate;
+    assert!(matches!(
+        resolve_patches(&a, &cand_patch, "m"),
+        Err(PatchRefusal::Candidate { .. })
+    ));
+    let mut cand_fn = patched_recipe(f, true, vec![p]);
+    cand_fn.functions[0].grade = Grade::Candidate;
+    assert!(matches!(
+        resolve_patches(&a, &cand_fn, "m"),
+        Err(PatchRefusal::Candidate { .. })
+    ));
+
+    // A candidate function row still matches (labels, read-only hooks) but a
+    // write-capable host gets nothing for it.
+    let report = match_recipe(&a, &cand_fn);
+    assert!(report.function_of("tick").is_some());
+    assert_eq!(report.function_of_writable("tick"), None);
+    let ok = match_recipe(&a, &patched_recipe(f, true, vec![]));
+    assert!(ok.function_of_writable("tick").is_some());
+}
+
+#[test]
+fn an_unmatched_row_is_removed_not_reached_or_changed() {
+    let mut orig_img = vec![0u8; TWIN_IMG];
+    put_fn(&mut orig_img, 0x100, 0x0A);
+    let original = atlas_with(&orig_img, &[(0x100, InterruptKind::Nmi)]);
+    let mut r = row("nmi", func_at(&original, 0x100), true, Some(0x8100));
+    r.insn_count = Some(func_at(&original, 0x100).insn_count);
+    assert_eq!(r.insn_count, Some(3));
+    let why = |img: &[u8], ran: &[usize], row: &RecipeFunction| {
+        let run = |o: usize| ran.iter().any(|&b| (b..b + 7).contains(&o));
+        rf_rebuild::classify_unmatched(&Toy, img, &run, row)
+    };
+
+    // Removed: nothing of that shape anywhere.
+    assert_eq!(
+        why(&vec![0u8; TWIN_IMG], &[], &r),
+        Some(UnmatchedReason::Removed)
+    );
+    // Not reached: the code is there, moved, and the drive never ran it.
+    let mut moved = vec![0u8; TWIN_IMG];
+    put_fn(&mut moved, 0x500, 0x0A);
+    assert_eq!(why(&moved, &[], &r), Some(UnmatchedReason::NotReached));
+    // Changed: it ran, but not the way the row insists on (an IRQ stub now).
+    let mut irq = r.clone();
+    irq.entry = Some(EntryKind::Irq);
+    let ran = atlas_with(&moved, &[(0x500, InterruptKind::Nmi)]);
+    assert_eq!(
+        match_recipe(&ran, &recipe(vec![irq.clone()])).unmatched,
+        ["nmi"]
+    );
+    assert_eq!(why(&moved, &[0x500], &irq), Some(UnmatchedReason::Changed));
+    // No instruction count, no scan.
+    r.insn_count = None;
+    assert_eq!(why(&moved, &[], &r), None);
 }

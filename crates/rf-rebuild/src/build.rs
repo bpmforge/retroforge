@@ -205,7 +205,12 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
     };
     for i in &log.interrupts {
         if let Some((rom, mode)) = usable(&i.target) {
-            *entry_flags.entry((rom, mode)).or_insert(0) |= entry::INTERRUPT;
+            let which = match i.kind {
+                rf_core_api::coverage::InterruptKind::Reset => entry::RESET,
+                rf_core_api::coverage::InterruptKind::Nmi => entry::NMI,
+                rf_core_api::coverage::InterruptKind::Irq => entry::IRQ,
+            };
+            *entry_flags.entry((rom, mode)).or_insert(0) |= entry::INTERRUPT | which;
             entry_seeds.push((rom, cpu24(&i.target), mode));
         }
     }
@@ -239,7 +244,8 @@ pub fn build_atlas(isa: &dyn Isa, prg: &[u8], log: &CoverageLog) -> Atlas {
         let flags = entry_flags.entry((rom, mode)).or_insert(0);
         match e.kind {
             IndirectKind::JmpIndirect | IndirectKind::JsrIndirect => *flags |= entry::INDIRECT,
-            IndirectKind::Brk | IndirectKind::Cop => *flags |= entry::INTERRUPT,
+            IndirectKind::Brk => *flags |= entry::INTERRUPT | entry::BRK,
+            IndirectKind::Cop => *flags |= entry::INTERRUPT,
             IndirectKind::Rts | IndirectKind::Rtl => {
                 if !plain_return(rom, e.kind == IndirectKind::Rtl) {
                     *flags |= entry::INDIRECT;

@@ -189,7 +189,7 @@ fn observed_and_inferred_instructions_and_edges() {
 
     // Entries: reset target + the call target.
     let main = fn_at(&a, 0);
-    assert_eq!(main.entry_kinds, entry::INTERRUPT);
+    assert_eq!(main.entry_kinds, entry::INTERRUPT | entry::RESET);
     let callee = fn_at(&a, 0x10);
     assert_eq!(callee.entry_kinds, entry::CALL);
     // The callee is not inside the caller's extent (calls are not followed).

@@ -652,6 +652,16 @@ pub fn name_rows(atlas: &Atlas, accepted: &[Proposal], existing: &Recipe) -> Vec
             shape_hash: f.shape_hash,
             exact_hash: Some(f.byte_hash),
             address_hint: Some(f.entry_cpu),
+            // How the vector reached it, when that is one kind alone: the
+            // atlas tells an NMI target from an IRQ one (W38-00).
+            entry: crate::recipe::EntryKind::sole_interrupt(f.entry_kinds),
+            insn_count: Some(f.insn_count),
+            // A rule measured it; an AI proposed it and nobody checked yet.
+            grade: if p.source.starts_with("ai:") {
+                crate::recipe::Grade::Candidate
+            } else {
+                crate::recipe::Grade::Observed
+            },
             // Rows for a multi-mode ISA (the 65816) carry the entry mode: the
             // same bytes entered at two widths are two functions (W36-10).
             mode: (atlas.mode_count > 1).then_some(f.entry_mode),

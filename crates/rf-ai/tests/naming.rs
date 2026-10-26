@@ -126,12 +126,14 @@ fn nes_shaped() -> (Understanding, Atlas, Vec<RamMeaning>) {
     };
     let ram = vec![
         RamMeaning {
+            grade: rf_rebuild::Grade::Observed,
             addr: 0x075A,
             width: 1,
             name: "lives".into(),
             source: "profile".into(),
         },
         RamMeaning {
+            grade: rf_rebuild::Grade::Observed,
             addr: 0x0086,
             width: 1,
             name: "player_x".into(),
@@ -166,6 +168,7 @@ fn snes_shaped() -> (Understanding, Atlas, Vec<RamMeaning>) {
         unattributed_insns: 0,
     };
     let ram = vec![RamMeaning {
+        grade: rf_rebuild::Grade::Observed,
         addr: 0x7E_0094,
         width: 2,
         name: "player_x".into(),

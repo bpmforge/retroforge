@@ -18,7 +18,10 @@ mod shape;
 
 pub use error::ProfileError;
 pub use loader::{load_file, load_str, LoadOutcome};
-pub use recipe::{load_recipe_file, load_recipe_str, recipe_to_toml, RecipeError, RECIPE_FORMAT};
+pub use recipe::{
+    load_recipe_file, load_recipe_noted, load_recipe_str, recipe_to_toml, RecipeError,
+    RECIPE_FORMAT,
+};
 pub use schema::{
     AntiFlicker, Atmosphere, AtmosphereLadder, AxisSpec, Camera, Capabilities, CollisionSpec,
     Console, Decode, Entities, EntityTable, FieldSpec, Heights, HudSpec, IdentityEntry, Loading,

@@ -70,6 +70,9 @@ fn observe_nmi_row(raw: &[u8], atlas: &Atlas) -> RecipeFunction {
         .find(|f| f.entry_cpu == u32::from(vector) && f.entry_kinds & entry::INTERRUPT != 0)
         .expect("the NMI vector's target is an interrupt entry of the atlas");
     RecipeFunction {
+        grade: rf_rebuild::Grade::Observed,
+        entry: None,
+        insn_count: None,
         mode: None,
         confidence: None,
         name: "nmi".to_string(),
@@ -155,6 +158,9 @@ fn lua_count_host() -> HookHost {
 /// A recipe row that matches nothing in any atlas.
 fn bogus_row() -> RecipeFunction {
     RecipeFunction {
+        grade: rf_rebuild::Grade::Observed,
+        entry: None,
+        insn_count: None,
         mode: None,
         confidence: None,
         name: "nothing".to_string(),
@@ -342,12 +348,14 @@ fn synthetic_cartridge_poke_diverges_at_the_hooked_frame_and_read_only_hooks_do_
         engine: "synthetic".to_string(),
         functions: vec![row],
         ram: vec![RamMeaning {
+            grade: rf_rebuild::Grade::Observed,
             addr: 0x0012,
             width: 1,
             name: "nmi_count".to_string(),
             source: "the handler increments it".to_string(),
         }],
         patches: vec![],
+        ..Default::default()
     };
     // The recipe survives its own file format.
     let recipe = load_recipe_str(&recipe_to_toml(&recipe)).expect("round trip");
@@ -459,6 +467,7 @@ fn smb_nmi_hooks_poke_diverges_read_only_and_inert_hooks_do_not() {
             engine: "smb1".to_string(),
             functions: vec![observed.clone()],
             ram: vec![RamMeaning {
+                grade: rf_rebuild::Grade::Observed,
                 addr: LIVES,
                 width: 1,
                 name: "lives".to_string(),
@@ -466,6 +475,7 @@ fn smb_nmi_hooks_poke_diverges_read_only_and_inert_hooks_do_not() {
                     .to_string(),
             }],
             patches: vec![],
+            ..Default::default()
         };
         std::fs::write(&committed, recipe_to_toml(&recipe)).expect("writes the recipe");
         println!("wrote {}", committed.display());
