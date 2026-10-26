@@ -183,8 +183,11 @@ fn cached_atlas_in(root: &std::path::Path, rom_sha256: &str) -> Option<Atlas> {
     Atlas::from_bytes(&bytes).ok()
 }
 
-fn insns_of(a: &Atlas) -> u64 {
-    u64::from(a.stats.observed_insns) + u64::from(a.stats.inferred_insns)
+/// How much recorded code an atlas stands on. Never shrinks as coverage is
+/// added (the executed set only grows), unlike the total: a newly executed
+/// byte can displace inferred decodes that overlapped it.
+fn observed_of(a: &Atlas) -> u64 {
+    u64::from(a.stats.observed_insns)
 }
 
 /// The atlas of `image` (an iNES file, or a SNES cartridge with or without a
@@ -275,17 +278,17 @@ fn first_atlas_in(
 
 /// A grow job: rebuild from `log` (the whole recording: cached, this
 /// session's and the player's) and store the result. The atlas is stored only
-/// if it has at least `keep_insns` instructions, so a thin session never
-/// replaces a richer atlas that had no recording to grow from; the recording
+/// if it rests on at least `keep_observed` recorded instructions, so a thin
+/// session never replaces a richer atlas that had no recording to grow from; the recording
 /// is always stored. Blocking; run it on its own thread.
 #[must_use]
 pub fn grow_atlas(
     image: &[u8],
     rom_sha256: &str,
     log: &CoverageLog,
-    keep_insns: u64,
+    keep_observed: u64,
 ) -> RebuildBuild {
-    grow_atlas_in(&cache_root(), image, rom_sha256, log, keep_insns)
+    grow_atlas_in(&cache_root(), image, rom_sha256, log, keep_observed)
 }
 
 fn grow_atlas_in(
@@ -293,13 +296,13 @@ fn grow_atlas_in(
     image: &[u8],
     sha: &str,
     log: &CoverageLog,
-    keep_insns: u64,
+    keep_observed: u64,
 ) -> RebuildBuild {
     let t = Instant::now();
     match build_for(image, log) {
         Ok(atlas) => {
             let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
-            store(cache.as_mut(), sha, &atlas, Some(log), keep_insns);
+            store(cache.as_mut(), sha, &atlas, Some(log), keep_observed);
             RebuildBuild::Ready(Box::new(BuildOutcome {
                 atlas: Box::new(atlas),
                 source: AtlasSource::Coverage,
@@ -318,10 +321,10 @@ fn store(
     sha: &str,
     atlas: &Atlas,
     log: Option<&CoverageLog>,
-    keep_insns: u64,
+    keep_observed: u64,
 ) {
     let Some(c) = cache else { return };
-    if insns_of(atlas) >= keep_insns {
+    if observed_of(atlas) >= keep_observed {
         let _ = c.put(&key(sha), &atlas.to_bytes());
     }
     if let Some(l) = log {
@@ -361,7 +364,7 @@ struct Session {
     armed_here: bool,
     first_installed: bool,
     swaps: u32,
-    installed_insns: u64,
+    installed_observed: u64,
     source: AtlasSource,
     last_build: Duration,
     last_growth: Growth,
@@ -423,7 +426,7 @@ impl RebuildCtl {
             armed_here: !coverage_on,
             first_installed: false,
             swaps: 0,
-            installed_insns: 0,
+            installed_observed: 0,
             source: AtlasSource::Vectors,
             last_build: Duration::ZERO,
             last_growth: Growth::default(),
@@ -512,11 +515,11 @@ impl RebuildCtl {
                 return false;
             }
         };
-        let insns = insns_of(&out.atlas);
+        let insns = observed_of(&out.atlas);
         let first = !s.first_installed;
-        // A grown atlas that is smaller than the one running (a thin session
-        // over a richer cache) is not an improvement.
-        if !first && insns < s.installed_insns {
+        // A grown atlas that rests on less recorded code than the one running
+        // (a thin session over a richer cache) is not an improvement.
+        if !first && insns < s.installed_observed {
             s.last_build = out.elapsed;
             return false;
         }
@@ -528,7 +531,7 @@ impl RebuildCtl {
                 } else {
                     s.swaps += 1;
                 }
-                s.installed_insns = insns;
+                s.installed_observed = insns;
                 s.source = out.source;
                 s.last_build = out.elapsed;
                 // Grow checks start from the first install.
@@ -583,7 +586,7 @@ impl RebuildCtl {
         }
         let Some(log) = log else { return };
         let (tx, rx) = mpsc::channel();
-        let (img, sha, keep) = (Arc::clone(&s.image), s.sha.clone(), s.installed_insns);
+        let (img, sha, keep) = (Arc::clone(&s.image), s.sha.clone(), s.installed_observed);
         std::thread::spawn(move || {
             let _ = tx.send(grow_atlas(&img, &sha, &log, keep));
         });
@@ -767,7 +770,7 @@ mod tests {
         let root = dir("thin");
         let (ines, sha) = (tiny_ines(), "56".repeat(32));
         let rich = ready(first_atlas_in(&root, &ines, &sha, Some(&nes_log())));
-        let keep = insns_of(&rich.atlas) + 1;
+        let keep = observed_of(&rich.atlas) + 1;
         let thin = ready(grow_atlas_in(
             &root,
             &ines,
@@ -775,7 +778,7 @@ mod tests {
             &CoverageLog::new(0x8000),
             keep,
         ));
-        assert!(insns_of(&thin.atlas) < keep);
+        assert!(observed_of(&thin.atlas) < keep);
         assert_eq!(cached_atlas_in(&root, &sha).as_ref(), Some(&*rich.atlas));
         let _ = std::fs::remove_dir_all(&root);
     }
