@@ -4815,3 +4815,15 @@ stories, 10 decisions).
   made yet. Names export as recipe rows and are inert (lockstep green with all
   names hooked). "Name functions" in the Coverage tab (not rendered by eye).
   Workspace: **3580 passing**.
+
+- **W36-10 — ROM hacks** (2026-10-26). SMW recipe
+  (`profiles/snes/super-mario-world/recipe.toml`, 29 function rows with entry
+  mode, 11 RAM rows); SNES rows match on (shape hash, mode). Five SMW Central
+  hacks (downloaded with Brad's OK, applied in memory, nothing committed):
+  Super Skyler World, Return to Dinosaur Land, Kaizo Mario World, A Simple
+  Story, Brutal Mario Demo 7. All reach a level and run rebuilt in lockstep with
+  zero divergence (fallback 0.22-0.50%, all work-RAM code); recipe rows matched
+  15-27 of 29; the NMI hook count equals the real NMI count where the row
+  matched. Twin nmi/irq stubs now match only at their address hint, so moved
+  copies go unmatched (W38-00 to disambiguate by vector kind). Workspace:
+  **3584 passing**.
