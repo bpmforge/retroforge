@@ -272,6 +272,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         nes || snes,
         "an NES or SNES game (the layers come from the console's picture unit)",
     );
+    // Ticket W37-03: Rebuild runs the game through its code map. Any NES or SNES game, no profile.
+    // It leaves the simulation as it was but is an overlay on the reference, so it is Enhanced and
+    // Game-Aware only (law 6) and, like interpolation, absent from Accuracy Mode (retain below).
+    let (rebuild_av, rebuild_on) = also(
+        generic(settings.rebuild),
+        nes || snes,
+        "an NES or SNES game",
+    );
     // Ticket W30-09: SNES sound only (the NES has no S-DSP). Presentation,
     // so no cartridge or profile condition.
     let (interp_av, interp_on) = also(
@@ -429,6 +437,14 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
             heuristic: None,
         },
         FeatureRow {
+            id: "rebuild",
+            label: "Rebuild",
+            scope: "generic, NES and SNES",
+            enabled: rebuild_on,
+            availability: rebuild_av,
+            heuristic: None,
+        },
+        FeatureRow {
             id: "snes_interpolation",
             label: "Audio interpolation",
             scope: "generic, SNES",
@@ -514,7 +530,7 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
     // Ticket W36-07: absent from Accuracy Mode, not merely disabled (law 6; FRAME_INTERPOLATION.md
     // section 6). Every other row stays visible there with the mode it needs.
     if !enhancement {
-        rows.retain(|r| r.id != "frame_interpolation");
+        rows.retain(|r| r.id != "frame_interpolation" && r.id != "rebuild");
     }
     rows
 }
@@ -1572,5 +1588,48 @@ mod tests {
         assert_eq!(badge_text("SNES", &s, &facts), "SNES · Enhanced");
         facts.fog_rendered = true;
         assert!(badge_text("SNES", &s, &facts).contains('\u{e2de}'));
+    }
+
+    /// Ticket W37-03: Rebuild is a per-game option for any NES or SNES game: off by default, in
+    /// effect only in Enhanced and Game-Aware, and absent (not merely greyed) from Accuracy Mode.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn rebuild_is_off_by_default_enhanced_only_and_absent_from_accuracy() {
+        let facts = GameFacts::new(false, false, false);
+        let row = |s: &GameSettings| {
+            feature_rows(s, &facts)
+                .into_iter()
+                .find(|r| r.id == "rebuild")
+        };
+        let mut s = GameSettings::default();
+        s.mode = Mode::Enhanced;
+        let fresh = row(&s).expect("offered in Enhanced");
+        assert!(!fresh.enabled && fresh.availability == Availability::Available);
+        s.rebuild = true;
+        assert!(row(&s).expect("row").effective());
+        s.mode = Mode::GameAware;
+        assert!(
+            row(&s).expect("row").effective(),
+            "any game, no profile needed"
+        );
+        for mode in [Mode::Accuracy, Mode::Compatibility, Mode::ResearchDebug] {
+            s.mode = mode;
+            assert!(
+                row(&s).is_none(),
+                "{mode:?}: the row is absent, and so never counted"
+            );
+        }
+        // Neither console: nothing to rebuild.
+        s.mode = Mode::Enhanced;
+        let none = GameFacts {
+            nes: false,
+            snes: false,
+            ..facts
+        };
+        let r = feature_rows(&s, &none)
+            .into_iter()
+            .find(|r| r.id == "rebuild")
+            .expect("row");
+        assert!(!r.effective());
     }
 }

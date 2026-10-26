@@ -288,6 +288,11 @@ pub struct GameSettings {
     /// input delay (NES). Invents the frames between the game's own, so off by default (law 6) and
     /// written only when on.
     pub frame_interpolation: bool,
+    /// Ticket W37-03: run the game through its rebuilt code map (Rebuild). It does not change what
+    /// the simulation does, but it is an overlay on the reference and what hooks and recipe mods
+    /// need, so it follows the enhancement rules: off by default (law 6), written only when on,
+    /// and in effect only in Enhanced and Game-Aware.
+    pub rebuild: bool,
     /// Ticket W30-02: redraw Mode 7 floors at a finer step (presentation
     /// only; the simulation is untouched). Off by default (law 6).
     pub hd_mode7: bool,
@@ -468,6 +473,7 @@ impl Default for GameSettings {
             nes_extra_lines: 0,
             run_ahead: 0,
             frame_interpolation: false,
+            rebuild: false,
             hd_mode7: false,
             hd_mode7_scale: HD_MODE7_SCALE_DEFAULT,
             hd_mode7_supersample: false,
@@ -634,6 +640,9 @@ impl GameSettings {
         }
         if self.frame_interpolation {
             fields.insert("frame_interpolation".to_string(), "true".to_string());
+        }
+        if self.rebuild {
+            fields.insert("rebuild".to_string(), "true".to_string());
         }
         // Ticket W30-02: the scale and perspective flag are written only
         // when they differ from their defaults (2, on).
@@ -838,6 +847,7 @@ impl GameSettings {
                     }
                 }
                 "frame_interpolation" => settings.frame_interpolation = value == "true",
+                "rebuild" => settings.rebuild = value == "true",
                 "run_ahead" => {
                     if let Ok(frames) = value.parse::<u8>() {
                         settings.run_ahead = frames.min(RUN_AHEAD_MAX);
@@ -1407,6 +1417,25 @@ mod mode_and_feature_persistence_tests {
         assert!(!restored.mode.enhancement_active());
     }
 
+    /// Ticket W37-03: Rebuild is off by default, written only when on, and read back.
+    #[test]
+    fn rebuild_defaults_off_and_persists_only_when_on() {
+        assert!(!GameSettings::default().rebuild);
+        assert!(!GameSettings::default().to_text().contains("rebuild"));
+        let on = GameSettings {
+            rebuild: true,
+            ..GameSettings::default()
+        };
+        assert!(on.to_text().contains("rebuild=true"));
+        assert!(
+            GameSettings::from_text(&on.to_text())
+                .expect("parses")
+                .rebuild
+        );
+        let off = GameSettings::from_text(&format!("{MAGIC}\nrebuild=false\n")).expect("parses");
+        assert!(!off.rebuild);
+    }
+
     /// Ticket W35-16: "Objects past the edge" is off by default, written only when on, and read back.
     #[test]
     fn frame_interpolation_defaults_off_and_persists_only_when_on() {
@@ -1467,6 +1496,7 @@ mod mode_and_feature_persistence_tests {
             "nes_extra_lines",
             "run_ahead",
             "frame_interpolation",
+            "rebuild",
             "hd_mode7",
             "superfx_hd",
             "lens_",

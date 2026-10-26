@@ -374,6 +374,8 @@ pub fn apply_toggle(
         "run_ahead" => ctx_settings.run_ahead = u8::from(enabled),
         // Ticket W36-07: read every frame by `sync_frame_interpolation`.
         "frame_interpolation" => ctx_settings.frame_interpolation = enabled,
+        // Ticket W37-03: read every frame by `sync_rebuild`, the one sender of the core command.
+        "rebuild" => ctx_settings.rebuild = enabled,
         // Ticket W30-02: likewise read every frame by `sync_hd_mode7`.
         "hd_mode7" => ctx_settings.hd_mode7 = enabled,
         // Ticket W31-03: read every frame by `sync_superfx_hd`.

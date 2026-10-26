@@ -785,6 +785,11 @@ pub struct RetroForgeApp {
     /// frame and composes the pictures between; `frame_interp_sent` is what the core was last told.
     frame_interp: crate::frame_interp::Presenter,
     frame_interp_sent: Option<bool>,
+    /// Ticket W37-03: whether Rebuild was last asked on for this core (`None` until the first sync
+    /// after a launch), and the status the core thread last reported, which the Enhancements card
+    /// shows whether or not the debugger's Coverage tab is open.
+    rebuild_sent: Option<bool>,
+    rebuild_status: crate::rebuild::RebuildStatus,
     /// A console frame arrived in this repaint's drain (so there is no gap to fill this time).
     frame_interp_arrived: bool,
     /// Test hook: every picture the Presenter presented, in order.
@@ -1918,6 +1923,8 @@ impl RetroForgeApp {
             run_ahead_sent: None,
             frame_interp: crate::frame_interp::Presenter::new(),
             frame_interp_sent: None,
+            rebuild_sent: None,
+            rebuild_status: crate::rebuild::RebuildStatus::Off,
             frame_interp_arrived: false,
             presented_log: None,
             hd_mode7_sent: None,
@@ -3276,7 +3283,22 @@ impl RetroForgeApp {
             if !on {
                 panel.rebuild = crate::rebuild::RebuildStatus::Off;
             }
-            self.send_command(CoreCommand::SetRebuild(on));
+            // Ticket W37-03: where the game's Rebuild switch applies (Enhanced, Game-Aware) this
+            // button is the same switch, so `sync_rebuild` stays the one sender; in the other
+            // modes it is the research surface's direct control, as before.
+            let applies =
+                crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                    .iter()
+                    .any(|r| {
+                        r.id == "rebuild"
+                            && r.availability == crate::enhance_ui::Availability::Available
+                    });
+            if applies {
+                self.current_game_settings.rebuild = on;
+                self.save_current_game_settings();
+            } else {
+                self.send_command(CoreCommand::SetRebuild(on));
+            }
         }
         let Some(on) = self
             .debug_panels
@@ -4430,6 +4452,8 @@ impl RetroForgeApp {
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
         self.frame_interp_sent = None;
+        self.rebuild_sent = None;
+        self.rebuild_status = crate::rebuild::RebuildStatus::Off;
         self.frame_interp.reset();
         self.mod_session_sent = false;
         self.hd_mode7_sent = None;
@@ -5105,6 +5129,9 @@ impl RetroForgeApp {
                 }
             }
             self.copies_refused_by_hooks = msg.copies_refused_by_hooks;
+            if let Some(r) = &msg.rebuild {
+                self.rebuild_status.clone_from(r);
+            }
             if let Some(cov) = self.debug_panels.data.coverage.as_mut() {
                 if cov.armed && msg.coverage.is_some() {
                     cov.summary = msg.coverage.clone();
@@ -10121,6 +10148,11 @@ impl RetroForgeApp {
                         actions.settings_changed = true;
                     }
                 }
+                // Ticket W37-03: the Rebuild card -- coverage, map size, tier mix and the
+                // verification state, together or not at all.
+                if row.id == "rebuild" && available {
+                    self.rebuild_card_body(ui, tokens, row.enabled);
+                }
                 // Ticket W22-05: "What is this?" — the longer explanation
                 // and a diagram, folded away until asked for.
                 egui::CollapsingHeader::new(format!("What is {name}?"))
@@ -10212,6 +10244,50 @@ impl RetroForgeApp {
                     });
                 }
             });
+    }
+
+    /// Ticket W37-03: the lines under the Rebuild switch (`crate::rebuild_card`). A component of the
+    /// Enhancements section, not a surface of its own: that section sits inside the Quick Menu's
+    /// scroll area, and the card is a handful of wrapped lines.
+    fn rebuild_card_body(&self, ui: &mut egui::Ui, tokens: &crate::theme::Tokens, enabled: bool) {
+        let Some(card) = crate::rebuild_card::card(enabled, &self.rebuild_status) else {
+            return;
+        };
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(&card.headline)
+                    .font(egui::FontId::proportional(
+                        crate::theme::type_scale::CAPTION,
+                    ))
+                    .strong()
+                    .color(tokens.ink),
+            );
+            if card.proven {
+                egui::Frame::new()
+                    .fill(tokens.ok_soft)
+                    .corner_radius(egui::CornerRadius::same(3))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Proven")
+                                .font(egui::FontId::proportional(10.0))
+                                .strong()
+                                .color(tokens.ok),
+                        );
+                    });
+            }
+        });
+        for line in &card.lines {
+            let warn = card.diverged && line.starts_with("Verification:");
+            ui.label(
+                egui::RichText::new(line)
+                    .font(egui::FontId::proportional(
+                        crate::theme::type_scale::CAPTION,
+                    ))
+                    .color(if warn { tokens.warn } else { tokens.muted }),
+            );
+        }
     }
 
     /// Ticket W22-01: three mode cards — Original, Enhanced, Game-Aware —
@@ -17698,6 +17774,40 @@ impl RetroForgeApp {
 
     /// Ticket W36-07: keep the core's layer capture matching the row's EFFECTIVE state (Enhanced mode,
     /// toggle on, an NES or SNES game), off whenever a video recording is running; sends only on a change.
+    fn sync_rebuild(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let want = crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+            .iter()
+            .any(|r| r.id == "rebuild" && r.effective());
+        // Edge-triggered: the debugger's own switch (Research/Debug mode, where this row does
+        // not apply) must not be undone every frame, and a start is not repeated.
+        if want != self.rebuild_sent.unwrap_or(false) {
+            self.send_command(CoreCommand::SetRebuild(want));
+            if !want {
+                // A paused core (the menu is open) reports nothing; do not show a stale card.
+                self.rebuild_status = crate::rebuild::RebuildStatus::Off;
+            }
+        }
+        self.rebuild_sent = Some(want);
+    }
+
+    /// Ticket W37-03 test hook: switch the setting on for the loaded game (Enhanced mode), the
+    /// way the Enhancements card's switch does, and let `sync_rebuild` ask the core.
+    #[doc(hidden)]
+    pub fn set_rebuild_for_test(&mut self, on: bool) {
+        self.current_game_settings.rebuild = on;
+        self.sync_rebuild();
+    }
+
+    /// Ticket W37-03 test hook: what the core last reported about Rebuild.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rebuild_status_for_test(&self) -> &crate::rebuild::RebuildStatus {
+        &self.rebuild_status
+    }
+
     fn sync_frame_interpolation(&mut self) {
         if self.core.is_none() {
             return;
@@ -18918,6 +19028,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_snes_interpolation();
         self.sync_run_ahead();
         self.sync_frame_interpolation();
+        self.sync_rebuild();
         self.sync_mod_session();
         self.sync_patch_widescreen();
         // Ticket W14-02: adopt a background library scan the moment it
