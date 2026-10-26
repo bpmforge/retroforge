@@ -32,6 +32,7 @@ pub mod atlas;
 mod blargg;
 pub mod blargg_evidence;
 mod fetch;
+pub mod fuzz;
 mod golden_frame;
 mod json;
 pub mod level_decode_evidence;
