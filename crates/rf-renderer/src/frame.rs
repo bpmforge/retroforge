@@ -10,7 +10,9 @@
 //! acceptable pre-W3"). It does not touch the network, a GPU device, or
 //! `egui` at all — the `retroforge` crate's app layer is the only thing
 //! that turns [`FrameBuffer::rgba`] into an `egui::ColorImage`/texture.
-use rf_core_api::{ColorMathOp, CoreEvent, CoreSink, OverlayPixel, PixelLayer, PpuPixel, SubPixel};
+use rf_core_api::{
+    ColorMathOp, CoreEvent, CoreSink, LineRegisters, OverlayPixel, PixelLayer, PpuPixel, SubPixel,
+};
 
 use crate::palette::{bgr555_to_rgb, color_math_bgr555, resolve_index, LinePalette};
 
@@ -54,10 +56,40 @@ pub struct FrameBuffer {
     /// Ticket W35-16: per pixel, the OAM index of the sprite that won it, `NO_SPRITE` for none.
     /// `None` (the default) means capture is off: nothing is allocated or written.
     sprite_ids: Option<Vec<u8>>,
+    /// Ticket W37-06: per pixel, which layer produced it and its priority bits ([`layer_code`]).
+    /// `None` (the default) means capture is off: nothing is allocated or written.
+    layer_codes: Option<Vec<u8>>,
+    /// Ticket W37-06: the register state each row was drawn with ([`CoreSink::line_registers`]).
+    /// `None` (the default) means the sink does not ask for them, so the core never builds them.
+    line_regs: Option<Vec<Option<LineRegisters>>>,
 }
 
 /// [`FrameBuffer::sprite_ids`] value for a dot no sprite won.
 pub const NO_SPRITE: u8 = 0xFF;
+
+/// [`layer_code`] low bits for a sprite dot (backgrounds are `0..=3`).
+pub const LAYER_SPRITE: u8 = 4;
+/// [`layer_code`] low bits for a dot nothing opaque covered (the backdrop).
+pub const LAYER_BACKDROP: u8 = 5;
+
+/// [`FrameBuffer::layer_codes`] flag (bit 5): the dot is the main screen's backdrop with a sub-screen
+/// background added to it by colour math, so what is seen is that background (the layer in bits 0-2).
+/// Super Mario World draws its far hills this way: the main screen shows the backdrop, the sub screen
+/// the hills, and "add" shows them through.
+pub const LAYER_SUB: u8 = 0x20;
+
+/// What [`FrameBuffer::layer_codes`] records for a dot: the layer in bits 0-2 (`0..=3` a background,
+/// [`LAYER_SPRITE`], [`LAYER_BACKDROP`]) and the pixel's priority (`PpuPixel::priority`, 0-3) in bits 3-4
+/// (and [`LAYER_SUB`], set by [`FrameBuffer::video_scanline`] where it applies).
+#[must_use]
+pub fn layer_code(pixel: &PpuPixel) -> u8 {
+    let layer = match pixel.layer {
+        PixelLayer::Background(n) => n.min(3),
+        PixelLayer::Sprite => LAYER_SPRITE,
+        PixelLayer::Backdrop => LAYER_BACKDROP,
+    };
+    layer | ((pixel.priority & 3) << 3)
+}
 
 impl FrameBuffer {
     /// A buffer pre-filled with opaque black, matching what an unbooted
@@ -87,6 +119,8 @@ impl FrameBuffer {
             subs: vec![None; height],
             mode7_mask: None,
             sprite_ids: None,
+            layer_codes: None,
+            line_regs: None,
             width,
             height,
         }
@@ -150,6 +184,34 @@ impl FrameBuffer {
         self.sprite_ids.as_deref()
     }
 
+    /// Ticket W37-06: turn per-pixel layer capture on or off. Off (the default) costs nothing; on, every
+    /// `video_scanline` also records which layer drew each dot and at what priority. Turning it on starts
+    /// all-backdrop.
+    pub fn set_layer_capture(&mut self, on: bool) {
+        self.layer_codes = on.then(|| vec![LAYER_BACKDROP; self.width * self.height]);
+    }
+
+    /// Ticket W37-06: `width() * height()` [`layer_code`]s, row major, when capture is on. Rows not yet
+    /// drawn this frame keep last frame's, like [`Self::rgba`].
+    #[must_use]
+    pub fn layer_codes(&self) -> Option<&[u8]> {
+        self.layer_codes.as_deref()
+    }
+
+    /// Ticket W37-06: ask the core for each row's register state (scroll, brightness, backdrop colour) and
+    /// keep it. Off (the default) means [`CoreSink::wants_line_registers`] stays false and the core builds
+    /// nothing. Turning it on starts with every row unknown.
+    pub fn set_line_register_capture(&mut self, on: bool) {
+        self.line_regs = on.then(|| vec![None; self.height]);
+    }
+
+    /// Ticket W37-06: row `y`'s registers for the frame being drawn, when capture is on and the core sent
+    /// them.
+    #[must_use]
+    pub fn line_regs(&self) -> Option<&[Option<LineRegisters>]> {
+        self.line_regs.as_deref()
+    }
+
     /// Copy of [`Self::rgba`] for callers (e.g. a cross-thread channel)
     /// that need an owned, 'static buffer rather than a borrow tied to
     /// this `FrameBuffer`'s lifetime.
@@ -192,6 +254,26 @@ impl CoreSink for FrameBuffer {
                 }
             }
         }
+        if let Some(codes) = &mut self.layer_codes {
+            // Dots the core did not send this row are the backdrop's.
+            let row_codes = &mut codes[row * self.width..(row + 1) * self.width];
+            row_codes.fill(LAYER_BACKDROP);
+            for (x, (slot, pixel)) in row_codes.iter_mut().zip(pixels).enumerate() {
+                *slot = layer_code(pixel);
+                // A backdrop dot that colour math adds a sub-screen background to shows that background.
+                if pixel.layer == PixelLayer::Backdrop {
+                    let shown = sub.as_ref().and_then(|(s, _)| s.get(x)).and_then(|sp| {
+                        match (sp.op != ColorMathOp::None && !sp.fixed, sp.layer) {
+                            (true, PixelLayer::Background(n)) => Some(n.min(3)),
+                            _ => None,
+                        }
+                    });
+                    if let Some(n) = shown {
+                        *slot = n | LAYER_SUB;
+                    }
+                }
+            }
+        }
         for (x, pixel) in pixels.iter().enumerate().take(self.width) {
             if let Some(mask) = &mut self.mode7_mask {
                 // Colour math only runs when a palette AND a sub-screen
@@ -229,6 +311,21 @@ impl CoreSink for FrameBuffer {
             self.rgba[offset + 1] = g;
             self.rgba[offset + 2] = b;
             self.rgba[offset + 3] = 0xFF;
+        }
+    }
+
+    /// Ticket W37-06: only when capture is on, so the core builds the registers for nobody else.
+    fn wants_line_registers(&self) -> bool {
+        self.line_regs.is_some()
+    }
+
+    fn line_registers(&mut self, y: u16, regs: &LineRegisters) {
+        if let Some(slot) = self
+            .line_regs
+            .as_mut()
+            .and_then(|r| r.get_mut(usize::from(y)))
+        {
+            *slot = Some(*regs);
         }
     }
 
@@ -288,6 +385,121 @@ impl CoreSink for FrameBuffer {
 
 #[cfg(test)]
 mod tests {
+    /// Ticket W37-06: with layer capture on, a dot records the layer that drew it and its priority, a dot
+    /// the core did not send is the backdrop, and capture never changes the picture.
+    #[test]
+    fn layer_capture_records_layer_and_priority_and_leaves_the_picture_alone() {
+        let px = |layer, priority| PpuPixel {
+            palette_index: 0x20,
+            layer,
+            sprite_id: None,
+            priority,
+        };
+        let row: Vec<PpuPixel> = (0..NES_WIDTH)
+            .map(|x| match x % 4 {
+                0 => px(PixelLayer::Background(2), 1),
+                1 => px(PixelLayer::Sprite, 3),
+                2 => px(PixelLayer::Backdrop, 0),
+                _ => px(PixelLayer::Background(0), 0),
+            })
+            .collect();
+        let mut plain = FrameBuffer::new();
+        let mut capturing = FrameBuffer::new();
+        assert!(capturing.layer_codes().is_none(), "off by default");
+        capturing.set_layer_capture(true);
+        for fb in [&mut plain, &mut capturing] {
+            fb.video_scanline(3, &row);
+        }
+        assert_eq!(
+            plain.rgba(),
+            capturing.rgba(),
+            "capture must not touch the picture"
+        );
+        let codes = capturing.layer_codes().expect("on");
+        let at = |x: usize| codes[3 * NES_WIDTH + x];
+        assert_eq!(at(0), 2 | (1 << 3));
+        assert_eq!(at(1), LAYER_SPRITE | (3 << 3));
+        assert_eq!(at(2), LAYER_BACKDROP);
+        assert_eq!(at(3), 0);
+        assert!(codes[..3 * NES_WIDTH].iter().all(|&c| c == LAYER_BACKDROP));
+        // A short row leaves the rest of the row backdrop.
+        capturing.video_scanline(4, &row[..8]);
+        assert_eq!(codes_at(&capturing, 4, 9), LAYER_BACKDROP);
+        capturing.set_layer_capture(false);
+        assert!(capturing.layer_codes().is_none());
+    }
+
+    /// Ticket W37-06: line registers are asked for only while capture is on, and kept per row.
+    #[test]
+    fn line_register_capture_is_off_until_asked_for() {
+        let mut fb = FrameBuffer::with_size(256, 224);
+        assert!(!fb.wants_line_registers() && fb.line_regs().is_none());
+        let regs = LineRegisters {
+            hofs: [7, 0, 0, 0],
+            brightness: 15,
+            ..LineRegisters::default()
+        };
+        fb.line_registers(3, &regs); // ignored while off
+        fb.set_line_register_capture(true);
+        assert!(fb.wants_line_registers());
+        assert!(fb.line_regs().expect("on").iter().all(Option::is_none));
+        fb.line_registers(3, &regs);
+        fb.line_registers(999, &regs); // out of range: dropped, not a panic
+        assert_eq!(fb.line_regs().expect("on")[3], Some(regs));
+        fb.set_line_register_capture(false);
+        assert!(!fb.wants_line_registers());
+    }
+
+    /// Ticket W37-06: a backdrop dot that colour math adds a sub-screen BACKGROUND to is recorded as that
+    /// background (flagged), so it can move with it; fixed-colour math, a transparent sub screen and
+    /// "no math" leave it the backdrop.
+    #[test]
+    fn a_backdrop_dot_with_a_sub_screen_background_added_is_that_background() {
+        let main = |layer| PpuPixel {
+            palette_index: 0,
+            layer,
+            sprite_id: None,
+            priority: 0,
+        };
+        let sub = |op, fixed, layer| SubPixel {
+            palette_index: 5,
+            layer,
+            op,
+            fixed,
+            main_black: false,
+        };
+        let mut fb = FrameBuffer::with_size(256, 224);
+        fb.set_layer_capture(true);
+        let row: Vec<PpuPixel> = (0..256)
+            .map(|x| match x {
+                4 => main(PixelLayer::Background(0)), // a main-screen layer keeps its own code
+                _ => main(PixelLayer::Backdrop),
+            })
+            .collect();
+        let subs: Vec<SubPixel> = (0..256)
+            .map(|x| match x {
+                0 => sub(ColorMathOp::Add, false, PixelLayer::Background(1)),
+                1 => sub(ColorMathOp::Add, true, PixelLayer::Background(1)), // the fixed colour
+                2 => sub(ColorMathOp::None, false, PixelLayer::Background(1)), // no math here
+                3 => sub(ColorMathOp::Add, false, PixelLayer::Backdrop), // a transparent sub screen
+                4 => sub(ColorMathOp::Add, false, PixelLayer::Background(1)),
+                _ => sub(ColorMathOp::None, true, PixelLayer::Backdrop),
+            })
+            .collect();
+        fb.sub_scanline(7, &subs, 0);
+        fb.video_scanline(7, &row);
+        let at = |x: usize| fb.layer_codes().expect("on")[7 * 256 + x];
+        assert_eq!(at(0), 1 | LAYER_SUB);
+        assert_eq!(at(1), LAYER_BACKDROP);
+        assert_eq!(at(2), LAYER_BACKDROP);
+        assert_eq!(at(3), LAYER_BACKDROP);
+        assert_eq!(at(4), 0, "the main screen's own layer is not replaced");
+    }
+
+    fn codes_at(fb: &FrameBuffer, y: usize, x: usize) -> u8 {
+        fb.layer_codes().expect("on")[y * fb.width() + x]
+    }
+
     /// Ticket W35-16: with sprite capture on, a dot records the OAM index of the sprite that won it
     /// (255 for a background dot), and capture never changes the picture.
     #[test]

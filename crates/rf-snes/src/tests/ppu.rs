@@ -2036,3 +2036,96 @@ fn convention_is_inert_off_and_at_256() {
         assert_eq!((l.palette_index, l.layer), (r.palette_index, r.layer));
     }
 }
+
+/// Ticket W37-06: `priority_slots` is the order composition uses, front to back, in `(layer, priority)`
+/// pairs (4 = OBJ), and it is a function of the latched mode and BG3 bit, not of the live registers.
+#[test]
+fn priority_slots_are_the_modes_front_to_back_order() {
+    use crate::ppu::priority_slots;
+    let m1 = priority_slots(1, false);
+    assert_eq!(m1.first(), Some(&(4, 3)), "sprites at level 3 are in front");
+    assert_eq!(
+        m1.last(),
+        Some(&(2, 0)),
+        "BG3's low-priority tiles are at the back"
+    );
+    assert_eq!(m1.len(), 10);
+    let m1b = priority_slots(1, true);
+    assert_eq!(
+        m1b.first(),
+        Some(&(2, 1)),
+        "$2105 bit 3 lifts BG3's tiles above everything"
+    );
+    assert_eq!(priority_slots(0, false).len(), 12);
+    assert_eq!(priority_slots(2, false), priority_slots(5, false));
+    assert_eq!(priority_slots(6, false).len(), 6);
+    // Every slot of every mode is a layer 0-4 with a priority that exists for it.
+    for mode in 0..8u8 {
+        for bg3 in [false, true] {
+            for (layer, pri) in priority_slots(mode, bg3) {
+                assert!(
+                    layer <= 4 && pri <= if layer == 4 { 3 } else { 1 },
+                    "{mode} {layer} {pri}"
+                );
+            }
+        }
+    }
+}
+
+/// Ticket W37-06: `line_facts` reports, per latched row, what makes a line unfit to move layer by layer
+/// (mode 7, hires, mosaic, a window that hides something, interlace, forced blank), reading the latched
+/// registers rather than the live ones, and says nothing is wrong with an ordinary line.
+#[test]
+fn line_facts_report_the_hazards_of_each_latched_line() {
+    use crate::ppu::line_hazard as hz;
+    let mut p = Ppu::new();
+    p.forced_blank = false;
+    p.brightness = 0x0F;
+    p.bg_mode = 1;
+    p.bg3_priority = true;
+    p.write_register(0x212C, 0x11); // TM: BG1 + OBJ
+    p.latch_line(1); // row 0: plain
+
+    p.bg_mode = 7;
+    p.latch_line(2); // row 1: mode 7
+    p.bg_mode = 5;
+    p.latch_line(3); // row 2: true hires
+    p.bg_mode = 1;
+    p.write_register(0x2106, 0x31); // mosaic 4 on BG1
+    p.latch_line(4); // row 3: mosaic
+    p.write_register(0x2106, 0x00);
+    p.write_register(0x2123, 0x02); // W12SEL: BG1 window 1 enabled
+    p.write_register(0x212E, 0x01); // masked on the main screen
+    p.write_register(0x2126, 10);
+    p.write_register(0x2127, 20);
+    p.latch_line(5); // row 4: a window that hides dots 10..=20
+    p.write_register(0x2126, 200);
+    p.write_register(0x2127, 100); // left > right: an empty window hides nothing
+    p.latch_line(6); // row 5
+    p.write_register(0x212E, 0x00);
+    p.forced_blank = true;
+    p.latch_line(7); // row 6: force-blanked
+
+    let facts = |y| p.line_facts(y);
+    assert_eq!(
+        (facts(0).bg_mode, facts(0).bg3_priority, facts(0).hazards),
+        (1, true, 0)
+    );
+    assert_eq!(facts(1).hazards & hz::MODE7, hz::MODE7);
+    assert_eq!(facts(2).hazards & hz::HIRES, hz::HIRES);
+    assert_eq!(facts(3).hazards & hz::MOSAIC, hz::MOSAIC);
+    assert_eq!(facts(4).hazards & hz::WINDOW, hz::WINDOW);
+    assert_eq!(
+        facts(5).hazards & hz::WINDOW,
+        0,
+        "an empty window hides nothing"
+    );
+    assert_eq!(facts(6).hazards & hz::FORCED_BLANK, hz::FORCED_BLANK);
+    // The rows keep their own facts after the registers moved on.
+    p.bg_mode = 0;
+    assert_eq!(p.line_facts(1).bg_mode, 7);
+    assert_eq!(p.line_facts(0).bg_mode, 1);
+    // Interlace is a property of the live SETINI.
+    p.write_register(0x2133, 0x01);
+    assert_eq!(p.line_facts(0).hazards & hz::INTERLACE, hz::INTERLACE);
+}

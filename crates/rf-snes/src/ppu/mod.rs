@@ -1786,62 +1786,203 @@ impl Ppu {
     /// piece a mode-0/1 renderer most often gets silently wrong, because
     /// most test content never sets the bit.
     fn priority_order(&self) -> Vec<Slot> {
-        use Slot::{Bg, Obj};
-        match self.bg_mode {
-            1 if self.bg3_priority => vec![
-                Bg(2, 1),
-                Obj(3),
-                Bg(0, 1),
-                Bg(1, 1),
-                Obj(2),
-                Bg(0, 0),
-                Bg(1, 0),
-                Obj(1),
-                Obj(0),
-                Bg(2, 0),
-            ],
-            1 => vec![
-                Obj(3),
-                Bg(0, 1),
-                Bg(1, 1),
-                Obj(2),
-                Bg(0, 0),
-                Bg(1, 0),
-                Obj(1),
-                Bg(2, 1),
-                Obj(0),
-                Bg(2, 0),
-            ],
-            // Modes 2-5 share one order: two layers, each with two
-            // priority levels, interleaved with the four sprite levels.
-            2..=5 => vec![
-                Obj(3),
-                Bg(0, 1),
-                Obj(2),
-                Bg(1, 1),
-                Obj(1),
-                Bg(0, 0),
-                Obj(0),
-                Bg(1, 0),
-            ],
-            // Mode 6 has BG1 only.
-            6 => vec![Obj(3), Bg(0, 1), Obj(2), Obj(1), Bg(0, 0), Obj(0)],
-            // Mode 0: four 2bpp layers, BG3/BG4 behind BG1/BG2.
-            _ => vec![
-                Obj(3),
-                Bg(0, 1),
-                Bg(1, 1),
-                Obj(2),
-                Bg(0, 0),
-                Bg(1, 0),
-                Obj(1),
-                Bg(2, 1),
-                Bg(3, 1),
-                Obj(0),
-                Bg(2, 0),
-                Bg(3, 0),
-            ],
+        slot_order(self.bg_mode, self.bg3_priority)
+    }
+}
+
+/// [`Ppu::priority_order`] for a mode: a free function so a presentation layer can ask what a LATCHED
+/// line's order was (the live registers are whatever the frame ended with).
+fn slot_order(bg_mode: u8, bg3_priority: bool) -> Vec<Slot> {
+    use Slot::{Bg, Obj};
+    match bg_mode {
+        1 if bg3_priority => vec![
+            Bg(2, 1),
+            Obj(3),
+            Bg(0, 1),
+            Bg(1, 1),
+            Obj(2),
+            Bg(0, 0),
+            Bg(1, 0),
+            Obj(1),
+            Obj(0),
+            Bg(2, 0),
+        ],
+        1 => vec![
+            Obj(3),
+            Bg(0, 1),
+            Bg(1, 1),
+            Obj(2),
+            Bg(0, 0),
+            Bg(1, 0),
+            Obj(1),
+            Bg(2, 1),
+            Obj(0),
+            Bg(2, 0),
+        ],
+        // Modes 2-5 share one order: two layers, each with two
+        // priority levels, interleaved with the four sprite levels.
+        2..=5 => vec![
+            Obj(3),
+            Bg(0, 1),
+            Obj(2),
+            Bg(1, 1),
+            Obj(1),
+            Bg(0, 0),
+            Obj(0),
+            Bg(1, 0),
+        ],
+        // Mode 6 has BG1 only.
+        6 => vec![Obj(3), Bg(0, 1), Obj(2), Obj(1), Bg(0, 0), Obj(0)],
+        // Mode 0: four 2bpp layers, BG3/BG4 behind BG1/BG2.
+        _ => vec![
+            Obj(3),
+            Bg(0, 1),
+            Bg(1, 1),
+            Obj(2),
+            Bg(0, 0),
+            Bg(1, 0),
+            Obj(1),
+            Bg(2, 1),
+            Bg(3, 1),
+            Obj(0),
+            Bg(2, 0),
+            Bg(3, 0),
+        ],
+    }
+}
+
+/// Ticket W37-06: a mode's priority order, front to back, as `(layer, priority)` pairs: layer `0..=3` is
+/// BG1-BG4 and `4` is OBJ, priority is the tilemap bit (backgrounds, 0-1) or the sprite level (0-3).
+/// fullsnes "SNES PPU Background Modes"/"SNES PPU Sprites"; `bg3_priority` is `$2105` bit 3.
+#[must_use]
+pub fn priority_slots(bg_mode: u8, bg3_priority: bool) -> Vec<(u8, u8)> {
+    slot_order(bg_mode, bg3_priority)
+        .into_iter()
+        .map(|s| match s {
+            Slot::Obj(p) => (4, p),
+            Slot::Bg(n, p) => (n, p),
+        })
+        .collect()
+}
+
+/// Why a latched line cannot be moved layer by layer ([`LineFacts::hazards`] bits; W37-06).
+pub mod line_hazard {
+    /// BG mode 7 (the "layer" is an affine plane).
+    pub const MODE7: u8 = 1;
+    /// A 512-dot line (modes 5/6 or pseudo-hires).
+    pub const HIRES: u8 = 2;
+    /// Mosaic on a background (blocks that do not move with the scroll).
+    pub const MOSAIC: u8 = 4;
+    /// A window hides part of a layer on the main screen (fixed to the screen, not the layer).
+    pub const WINDOW: u8 = 8;
+    /// Interlace (the picture alternates fields).
+    pub const INTERLACE: u8 = 16;
+    /// A register was written during the line's active display (the scroll changes mid-line).
+    pub const MIDLINE: u8 = 32;
+    /// The line was force-blanked.
+    pub const FORCED_BLANK: u8 = 64;
+    /// Direct colour (pixel values are colours, not palette indices).
+    pub const DIRECT_COLOR: u8 = 128;
+}
+
+/// What a presentation layer needs to know about how one picture line was drawn (ticket W37-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineFacts {
+    /// `$2105` bits 0-2 as latched for the line.
+    pub bg_mode: u8,
+    /// `$2105` bit 3 as latched.
+    pub bg3_priority: bool,
+    /// [`line_hazard`] bits.
+    pub hazards: u8,
+    /// Colour math can change a pixel on this line (carried by the pixel's colour, so informational).
+    pub color_math: bool,
+}
+
+impl Ppu {
+    /// Row `y`'s drawing facts (0-based visible row, as [`Ppu::line_registers`]). Metadata only: reads the
+    /// same completed-frame record composition does, writes nothing, and is not part of a save state.
+    #[must_use]
+    pub fn line_facts(&self, y: u16) -> LineFacts {
+        let idx = usize::from(y + 1);
+        let completed = self.line_uses_completed(idx);
+        let state = if completed {
+            self.completed_line_state[idx]
+        } else {
+            self.line_state.get(idx).copied().flatten()
+        };
+        let Some(s) = state else {
+            // A line the frame never latched: the live registers are all there is.
+            return LineFacts {
+                bg_mode: self.bg_mode,
+                bg3_priority: self.bg3_priority,
+                hazards: self.hazards_of(
+                    self.bg_mode,
+                    &self.windows,
+                    &self.mosaic,
+                    self.forced_blank,
+                    false,
+                ),
+                color_math: self.line_color_math_active(y),
+            };
+        };
+        let writes = if completed {
+            self.completed_line_writes.get(idx)
+        } else {
+            self.line_writes.get(idx)
+        };
+        LineFacts {
+            bg_mode: s.bg_mode,
+            bg3_priority: s.bg3_priority,
+            hazards: self.hazards_of(
+                s.bg_mode,
+                &s.windows,
+                &s.mosaic,
+                s.forced_blank,
+                writes.is_some_and(|w| !w.is_empty()),
+            ),
+            color_math: self.line_color_math_active(y),
         }
+    }
+
+    fn hazards_of(
+        &self,
+        bg_mode: u8,
+        windows: &window::Windows,
+        mosaic: &window::Mosaic,
+        forced_blank: bool,
+        midline: bool,
+    ) -> u8 {
+        use line_hazard as hz;
+        let mut h = 0;
+        if bg_mode == 7 {
+            h |= hz::MODE7;
+        }
+        if self.setini.hires_requested(bg_mode) || matches!(bg_mode, 5 | 6) {
+            h |= hz::HIRES;
+        }
+        if mosaic.enable != 0 && mosaic.size > 1 {
+            h |= hz::MOSAIC;
+        }
+        // A window matters only where it hides something: a layer masked on the main screen whose
+        // window covers some dot of the line.
+        if (0..5)
+            .any(|l| windows.main_mask & (1 << l) != 0 && (0..=255u8).any(|x| windows.masks(l, x)))
+        {
+            h |= hz::WINDOW;
+        }
+        if self.setini.interlace || self.setini.obj_interlace {
+            h |= hz::INTERLACE;
+        }
+        if midline {
+            h |= hz::MIDLINE;
+        }
+        if forced_blank {
+            h |= hz::FORCED_BLANK;
+        }
+        if self.direct_color {
+            h |= hz::DIRECT_COLOR;
+        }
+        h
     }
 }
 

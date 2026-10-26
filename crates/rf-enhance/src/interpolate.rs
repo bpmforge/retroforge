@@ -21,6 +21,12 @@
 //! a scroll jump, a background that is not the previous one shifted. Nothing here feeds the
 //! simulation; it reads two finished frames.
 //!
+//! **Colours are carried as RGB** (`0x00RRGGBB` keys), not as palette indices (W37-06): the picture
+//! may be wider than the console's (widescreen margins have no palette index), and a pair whose
+//! palette cycles still draws every dot with the colour it had in the frame it is taken from, which
+//! is "frame N's pixels with N's palette" by construction. The NES palette rule is
+//! [`palette_verdict`].
+//!
 //! Law 8: every walk is a `for` over a range or an iterator; the one hand-rolled helper
 //! ([`median`]) sorts a slice.
 
@@ -42,6 +48,16 @@ pub const MIN_BG_MATCH_PERMILLE: u32 = 800;
 pub const NO_SPRITE: u8 = 0xFF;
 /// OAM entries on the NES.
 pub const OAM_ENTRIES: usize = 64;
+/// OAM entries on the largest console handled (the SNES): sizes the shared movement helpers.
+pub const MAX_ENTRIES: usize = 128;
+/// Background entries in the NES palette (`$3F00-$3F0F`); the rest (`$3F10-$3F1F`) are sprite entries.
+pub const NES_BG_ENTRIES: usize = 16;
+/// Palette entries on the NES.
+pub const NES_PALETTE_ENTRIES: usize = 32;
+/// A pair whose background palette differs in at most this many entries (the backdrop untouched) is
+/// palette cycling (a shimmer, a coin glint), not a fade or a flash: it is interpolated, every dot
+/// drawn with the colour it had in the frame it came from.
+pub const MAX_CYCLED_ENTRIES: usize = 2;
 
 /// A place the caller knows an object to be on this frame (a recipe's object slot): sprites whose
 /// pixels sit within `reach` of it are one object.
@@ -62,23 +78,27 @@ pub struct Layers {
     pub height: usize,
     /// The frame as the console showed it, `width * height * 4` RGBA.
     pub rgba: Vec<u8>,
-    /// Background colour index under every dot (`width * height`), sprites ignored.
-    pub bg: Vec<u8>,
+    /// Background colour under every dot (`width * height`, `0x00RRGGBB`), sprites ignored.
+    pub bg: Vec<u32>,
     /// OAM index that won each dot ([`NO_SPRITE`] for none), `width * height`.
     pub ids: Vec<u8>,
     /// Scroll at the start of each picture line: `(x in 0..512, vertical offset in 0..480)`. The offset
     /// is the nametable row the line shows less the line number, so it is constant across a band.
     pub scroll: Vec<(u16, u16)>,
-    /// The colour index shown where the background is transparent (`$3F00`).
-    pub backdrop: u8,
+    /// The colour shown where the background is transparent (`$3F00`), `0x00RRGGBB`.
+    pub backdrop: u32,
     /// Per OAM entry: drawn behind opaque background.
     pub behind: [bool; OAM_ENTRIES],
     /// Object places the game's own tables give (empty without a recipe).
     pub anchors: Vec<Anchor>,
     /// Completed-frame count.
     pub index: u64,
-    /// Any change disqualifies the pair ([`FrameContext::palette_digest`]).
+    /// A digest of the palette: a change disqualifies the pair ([`FrameContext::palette_digest`]) unless
+    /// [`palette_verdict`] finds it to be cycling.
     pub palette_digest: u64,
+    /// The 32 NES palette entries as `0x00RRGGBB` (`$3F00-$3F1F`; empty when the caller has none, in
+    /// which case any digest change refuses). See [`palette_verdict`].
+    pub palette: Vec<u32>,
 }
 
 impl Layers {
@@ -173,14 +193,15 @@ pub fn detect_hud(prev: &Layers, next: &Layers) -> Vec<HudRegion> {
 /// `(min_x, min_y, max_x, max_y, count)` of one OAM entry's dots.
 type DotBox = (i32, i32, i32, i32, u32);
 
-/// Bounding box and dot count of each OAM entry's dots.
-fn boxes(l: &Layers) -> [Option<DotBox>; OAM_ENTRIES] {
-    let mut out: [Option<DotBox>; OAM_ENTRIES] = [None; OAM_ENTRIES];
-    for (i, &id) in l.ids.iter().enumerate() {
+/// Bounding box and dot count of each OAM entry's dots in a `width`-wide picture of per-dot ids.
+fn boxes(ids: &[u8], width: usize) -> [Option<DotBox>; MAX_ENTRIES] {
+    let mut out: [Option<DotBox>; MAX_ENTRIES] = [None; MAX_ENTRIES];
+    let width = width.max(1);
+    for (i, &id) in ids.iter().enumerate() {
         let Some(slot) = out.get_mut(usize::from(id)) else {
             continue;
         };
-        let (x, y) = ((i % l.width) as i32, (i / l.width) as i32);
+        let (x, y) = ((i % width) as i32, (i / width) as i32);
         *slot = Some(match *slot {
             None => (x, y, x, y, 1),
             Some((x0, y0, x1, y1, n)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y), n + 1),
@@ -189,11 +210,17 @@ fn boxes(l: &Layers) -> [Option<DotBox>; OAM_ENTRIES] {
     out
 }
 
-/// The per-OAM-entry movement N to N+1: `Some((dx, dy))` when the entry is drawn in both frames with
-/// a box of the same size and it moved a believable distance, `None` otherwise.
-fn entry_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIES] {
-    let (a, b) = (boxes(prev), boxes(next));
-    let mut out = [None; OAM_ENTRIES];
+/// The per-OAM-entry movement N to N+1 from the per-dot ids of the two pictures: `Some((dx, dy))` when
+/// the entry is drawn in both with a box of the same size and it moved a believable distance, `None`
+/// otherwise. Shared by the NES and SNES composers.
+#[must_use]
+pub fn entry_deltas(
+    prev_ids: &[u8],
+    next_ids: &[u8],
+    width: usize,
+) -> [Option<(i32, i32)>; MAX_ENTRIES] {
+    let (a, b) = (boxes(prev_ids, width), boxes(next_ids, width));
+    let mut out = [None; MAX_ENTRIES];
     for (slot, (pa, pb)) in out.iter_mut().zip(a.iter().zip(b.iter())) {
         if let (Some((x0, y0, x1, y1, _)), Some((u0, v0, u1, v1, _))) = (pa, pb) {
             let same_size = x1 - x0 == u1 - u0 && y1 - y0 == v1 - v0;
@@ -210,15 +237,15 @@ fn entry_deltas(prev: &Layers, next: &Layers) -> [Option<(i32, i32)>; OAM_ENTRIE
 fn group_deltas(
     prev: &Layers,
     next: &Layers,
-) -> ([Option<(i32, i32)>; OAM_ENTRIES], [bool; OAM_ENTRIES]) {
-    let own = entry_deltas(prev, next);
-    let mut grouped = [false; OAM_ENTRIES];
+) -> ([Option<(i32, i32)>; MAX_ENTRIES], [bool; MAX_ENTRIES]) {
+    let own = entry_deltas(&prev.ids, &next.ids, prev.width);
+    let mut grouped = [false; MAX_ENTRIES];
     if prev.anchors.is_empty() {
         return (own, grouped);
     }
-    let boxes_n = boxes(prev);
+    let boxes_n = boxes(&prev.ids, prev.width);
     // Which anchor owns each entry: the nearest whose reach contains the entry's centre.
-    let mut owner = [None::<usize>; OAM_ENTRIES];
+    let mut owner = [None::<usize>; MAX_ENTRIES];
     for (slot, b) in owner.iter_mut().zip(boxes_n.iter()) {
         let Some((x0, y0, x1, y1, _)) = b else {
             continue;
@@ -259,28 +286,158 @@ fn group_deltas(
     (out, grouped)
 }
 
+/// Embed the layers of a console frame in the wider picture widescreen made of it (W37-06).
+///
+/// `wide_rgba` is the picture as shown (`wide_width * rows * 4`): the console's own dots in the middle
+/// (`pad = (wide_width - core.width) / 2` columns in, widescreen keeps them) and the margins on either
+/// side from the scout's canvas or the level image, with the margin enemy strips already drawn in
+/// (W36-06b). The result describes THAT picture, so [`compose`] works on it unchanged:
+///
+/// * the margin dots are background: the same per-line scroll that moves the console's dots moves them,
+///   so scenery stays where the world is. Objects drawn into the margin (the enemy strips) are part of
+///   that background, so they move with the scroll too: an object standing in the world is exact, one
+///   walking drifts from its true place by its own speed times `alpha` (under a dot at the speeds
+///   these games use) until the next console frame redraws it;
+/// * the console's dots keep their sprites (moved by their own OAM deltas as before); a console dot
+///   that no sprite won takes its background colour from the picture as shown, so a dot widescreen
+///   repainted (a wrapped copy of an edge object) is the picture's own;
+/// * recipe anchors move with the picture's centre.
+///
+/// `None` when the picture does not fit: narrower than the console's, or the wrong number of bytes.
+#[must_use]
+pub fn widen(core: &Layers, wide_rgba: &[u8], wide_width: usize, rows: usize) -> Option<Layers> {
+    let (cw, rows) = (core.width, rows.min(core.height));
+    if wide_width < cw
+        || rows == 0
+        || wide_rgba.len() != wide_width * rows * 4
+        || !core.is_well_formed()
+    {
+        return None;
+    }
+    let pad = (wide_width - cw) / 2;
+    let n = wide_width * rows;
+    let mut bg = vec![0u32; n];
+    let mut ids = vec![NO_SPRITE; n];
+    for y in 0..rows {
+        for x in 0..wide_width {
+            let at = y * wide_width + x;
+            let shown = rgb_key([
+                wide_rgba[at * 4],
+                wide_rgba[at * 4 + 1],
+                wide_rgba[at * 4 + 2],
+            ]);
+            bg[at] = shown;
+            if x >= pad && x - pad < cw {
+                let c = y * cw + (x - pad);
+                ids[at] = core.ids[c];
+                if core.ids[c] != NO_SPRITE {
+                    bg[at] = core.bg[c]; // the background under a sprite is the console's
+                }
+            }
+        }
+    }
+    Some(Layers {
+        width: wide_width,
+        height: rows,
+        rgba: wide_rgba.to_vec(),
+        bg,
+        ids,
+        scroll: core.scroll[..rows].to_vec(),
+        backdrop: core.backdrop,
+        behind: core.behind,
+        anchors: core
+            .anchors
+            .iter()
+            .map(|a| Anchor {
+                x: a.x + pad as i32,
+                ..*a
+            })
+            .collect(),
+        index: core.index,
+        palette_digest: core.palette_digest,
+        palette: core.palette.clone(),
+    })
+}
+
 /// Whether the layers describe the picture they came with: the background colour under every dot no
 /// sprite won must be the colour the console frame shows there. A frame captured part-way (a state just
 /// loaded, a rendering toggle) or drawn through a colour effect the layers cannot see (greyscale,
 /// emphasis, a mid-frame palette fade) fails it, and is refused rather than rebuilt wrongly.
-pub fn describes_its_picture(l: &Layers, resolve: &dyn Fn(u8) -> [u8; 3]) -> bool {
+#[must_use]
+pub fn describes_its_picture(l: &Layers) -> bool {
     let (mut total, mut bad) = (0usize, 0usize);
-    for ((&idx, &id), px) in l.bg.iter().zip(&l.ids).zip(l.rgba.chunks_exact(4)) {
+    for ((&key, &id), px) in l.bg.iter().zip(&l.ids).zip(l.rgba.chunks_exact(4)) {
         if id != NO_SPRITE {
             continue;
         }
         total += 1;
-        if px[..3] != resolve(idx) {
+        if px[..3] != rgb_of(key) {
             bad += 1;
         }
     }
     bad * 200 <= total
 }
 
+/// `0x00RRGGBB` to its bytes.
+#[must_use]
+pub fn rgb_of(key: u32) -> [u8; 3] {
+    [(key >> 16) as u8, (key >> 8) as u8, key as u8]
+}
+
+/// `[r, g, b]` to `0x00RRGGBB`.
+#[must_use]
+pub fn rgb_key(rgb: [u8; 3]) -> u32 {
+    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2])
+}
+
+/// What a change of palette between two frames is (`FRAME_INTERPOLATION.md` section 3.4, as built in
+/// W37-06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteVerdict {
+    /// Nothing the picture is made of changed colour.
+    Same,
+    /// A few background entries cycled (or only sprite entries changed): interpolate. The listed
+    /// colours are the ones the cycling moved between, so a dot that differs between the frames only
+    /// by being one of them is the same dot (see [`compose_verified`]'s background-fit test).
+    Cycling(Vec<u32>),
+    /// A fade, a flash, a new palette: refuse.
+    Changed,
+}
+
+/// Decide whether the palette change between two frames is cycling or a real change.
+///
+/// Cycling is the SMB question-block shimmer: one or two background entries step through colours while
+/// everything else stays. It is allowed when at most [`MAX_CYCLED_ENTRIES`] of the 15 background entries
+/// differ and neither backdrop entry (`$3F00`, mirrored at `$3F10`) does. The sprite entries (`$3F11-$3F1F`)
+/// are free to change: sprites are drawn from frame N's own pixels, so a star-power cycle never shows a
+/// colour of N+1 on an N sprite. A palette that is not 32 entries long cannot be judged: any digest change
+/// is `Changed`.
+#[must_use]
+pub fn palette_verdict(prev: &Layers, next: &Layers) -> PaletteVerdict {
+    if prev.palette_digest == next.palette_digest {
+        return PaletteVerdict::Same;
+    }
+    let (a, b) = (&prev.palette, &next.palette);
+    if a.len() != NES_PALETTE_ENTRIES || b.len() != NES_PALETTE_ENTRIES {
+        return PaletteVerdict::Changed;
+    }
+    let differs = |i: usize| a[i] != b[i];
+    if differs(0) || differs(NES_BG_ENTRIES) {
+        return PaletteVerdict::Changed;
+    }
+    let bg: Vec<usize> = (1..NES_BG_ENTRIES).filter(|&i| differs(i)).collect();
+    if bg.len() > MAX_CYCLED_ENTRIES {
+        return PaletteVerdict::Changed;
+    }
+    let mut colours: Vec<u32> = bg.iter().flat_map(|&i| [a[i], b[i]]).collect();
+    colours.sort_unstable();
+    colours.dedup();
+    PaletteVerdict::Cycling(colours)
+}
+
 /// Compose the intermediate frame `alpha`/256 of the way from `prev` to `next` into `out`
 /// (`width * height * 4` RGBA).
 ///
-/// `resolve` turns a colour index into RGB (the same table the console frame was drawn with).
 /// `alpha == 0` is `prev.rgba` exactly. On `Err` nothing useful is in `out` and the caller repeats
 /// `prev`.
 ///
@@ -291,16 +448,15 @@ pub fn compose(
     prev: &Layers,
     next: &Layers,
     alpha: u8,
-    resolve: &dyn Fn(u8) -> [u8; 3],
     out: &mut Vec<u8>,
 ) -> Result<Stats, Refusal> {
     if !prev.is_well_formed() || !next.is_well_formed() {
         return Err(Refusal::Malformed);
     }
-    if !describes_its_picture(prev, resolve) || !describes_its_picture(next, resolve) {
+    if !describes_its_picture(prev) || !describes_its_picture(next) {
         return Err(Refusal::Malformed);
     }
-    compose_verified(prev, next, alpha, resolve, out)
+    compose_verified(prev, next, alpha, out)
 }
 
 /// [`compose`] for layers the caller has already checked with [`describes_its_picture`] (once per console
@@ -312,7 +468,6 @@ pub fn compose_verified(
     prev: &Layers,
     next: &Layers,
     alpha: u8,
-    resolve: &dyn Fn(u8) -> [u8; 3],
     out: &mut Vec<u8>,
 ) -> Result<Stats, Refusal> {
     if !prev.is_well_formed()
@@ -323,12 +478,23 @@ pub fn compose_verified(
         return Err(Refusal::Malformed);
     }
     let (w, h) = (prev.width, prev.height);
+    // A palette that cycles (a few background entries, never the backdrop) is not a palette change.
+    let verdict = palette_verdict(prev, next);
+    let excused: &[u32] = match &verdict {
+        PaletteVerdict::Cycling(colours) => colours,
+        _ => &[],
+    };
+    let cycling = !matches!(verdict, PaletteVerdict::Changed);
     let ctx = |l: &Layers| FrameContext {
         index: l.index,
         // The NES edge signature is flat (scene_identity module doc), so scene identity is not a
         // usable cut detector here; the background-fit test below is.
         scene: SceneId(0),
-        palette_digest: l.palette_digest,
+        palette_digest: if cycling {
+            prev.palette_digest
+        } else {
+            l.palette_digest
+        },
     };
     let hud = detect_hud(prev, next);
     let rows = match candidacy(ctx(prev), ctx(next), &hud, h as u16) {
@@ -379,7 +545,9 @@ pub fn compose_verified(
                 continue;
             }
             seen += 1;
-            if prev.bg[sy as usize * w + sx as usize] == next.bg[y * w + x] {
+            let (a, b) = (prev.bg[sy as usize * w + sx as usize], next.bg[y * w + x]);
+            // A dot that only changed between two colours the palette cycles through is the same dot.
+            if a == b || (excused.contains(&a) && excused.contains(&b)) {
                 same += 1;
             }
         }
@@ -390,7 +558,7 @@ pub fn compose_verified(
 
     // The background layer, row by row.
     let mut stats = Stats::default();
-    let mut bg_row = vec![0u8; w * h]; // indices actually shown, for the behind-background test
+    let mut bg_row = vec![0u32; w * h]; // colours actually shown, for the behind-background test
     for y in 0..h {
         if !allowed[y] {
             continue;
@@ -404,17 +572,16 @@ pub fn compose_verified(
             let (px, py) = (x as i32 + sx, y as i32 + sy);
             let from_prev = (0..w as i32).contains(&px) && (0..h as i32).contains(&py);
             let (qx, qy) = (px - dx, py - dy);
-            let idx = if from_prev {
+            let key = if from_prev {
                 prev.bg[py as usize * w + px as usize]
             } else if (0..w as i32).contains(&qx) && (0..h as i32).contains(&qy) {
                 next.bg[qy as usize * w + qx as usize]
             } else {
                 prev.bg[y * w + x]
             };
-            bg_row[y * w + x] = idx;
+            bg_row[y * w + x] = key;
             let at = (y * w + x) * 4;
-            let rgb = resolve(idx);
-            out[at..at + 3].copy_from_slice(&rgb);
+            out[at..at + 3].copy_from_slice(&rgb_of(key));
             out[at + 3] = 0xFF;
         }
     }
@@ -479,17 +646,17 @@ mod tests {
     /// A frame whose background is a ramp in x (so a shift is visible) and whose scroll is `sx` on
     /// every line; `sprite` is `(oam, x, y)` of a 2x2 sprite of colour 200.
     fn frame(index: u64, sx: u16, sprite: Option<(u8, usize, usize)>) -> Layers {
-        let mut bg = vec![0u8; W * H];
+        let mut bg = vec![0u32; W * H];
         for y in 0..H {
             for x in 0..W {
                 // World column `sx + x`: the picture is a window onto a fixed world.
-                bg[y * W + x] = ((usize::from(sx) + x) % 100 + 10) as u8;
+                bg[y * W + x] = rgb_key(resolve(((usize::from(sx) + x) % 100 + 10) as u8));
             }
         }
         let mut ids = vec![NO_SPRITE; W * H];
         let mut rgba = vec![0u8; W * H * 4];
         for i in 0..W * H {
-            rgba[i * 4..i * 4 + 3].copy_from_slice(&resolve(bg[i]));
+            rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb_of(bg[i]));
             rgba[i * 4 + 3] = 255;
         }
         if let Some((id, sx_, sy_)) = sprite {
@@ -512,12 +679,13 @@ mod tests {
             anchors: Vec::new(),
             index,
             palette_digest: 1,
+            palette: Vec::new(),
         }
     }
 
     fn run(p: &Layers, n: &Layers, alpha: u8) -> Result<(Vec<u8>, Stats), Refusal> {
         let mut out = Vec::new();
-        compose(p, n, alpha, &resolve, &mut out).map(|s| (out, s))
+        compose(p, n, alpha, &mut out).map(|s| (out, s))
     }
 
     /// t = 0 is frame N, byte for byte, whatever happened next.
@@ -646,8 +814,8 @@ mod tests {
         // A cut: the same small scroll step, a different picture.
         let mut cut = frame(2, 6, None);
         for (i, b) in cut.bg.iter_mut().enumerate() {
-            *b = b.wrapping_add(50);
-            cut.rgba[i * 4..i * 4 + 3].copy_from_slice(&resolve(*b));
+            *b = b.wrapping_add(0x0032_1932);
+            cut.rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb_of(*b));
         }
         assert_eq!(run(&p, &cut, 128).err(), Some(Refusal::Discontinuity));
         // Not consecutive.
@@ -693,6 +861,169 @@ mod tests {
         for alpha in 0..=255u8 {
             assert!(run(&p, &n, alpha).is_ok(), "alpha {alpha}");
         }
+    }
+
+    /// A 32-entry NES palette (distinct colours) for the palette rule tests.
+    fn pal() -> Vec<u32> {
+        (0..32u32).map(|i| 0x0010_2030 + i * 0x0001_0101).collect()
+    }
+
+    /// `frame` with a palette whose `changes` entries are replaced, digest following the change, and every
+    /// dot of the left half of the picture painted with the colour of entry `paint` (to make a cycling
+    /// area).
+    fn with_palette(mut l: Layers, changes: &[(usize, u32)], paint: Option<usize>) -> Layers {
+        let mut p = pal();
+        for &(i, c) in changes {
+            p[i] = c;
+        }
+        l.palette_digest = p
+            .iter()
+            .fold(7u64, |h, &c| h.wrapping_mul(31) ^ u64::from(c));
+        if let Some(e) = paint {
+            for i in 0..W * H {
+                if i % W < W / 2 {
+                    l.bg[i] = p[e];
+                    l.rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb_of(p[e]));
+                }
+            }
+        }
+        l.palette = p;
+        l
+    }
+
+    /// W37-06: one background entry cycling (the question-block shimmer) is interpolated, and the dots
+    /// of the cycled colour are drawn with frame N's colour, not N+1's and not a blend.
+    #[test]
+    fn a_cycling_palette_entry_is_interpolated_with_n_s_palette() {
+        let p = with_palette(frame(1, 4, None), &[], Some(13));
+        let n = with_palette(frame(2, 6, None), &[(13, 0x00AA_5500)], Some(13));
+        assert_eq!(
+            palette_verdict(&p, &n),
+            PaletteVerdict::Cycling(vec![pal()[13], 0x00AA_5500])
+        );
+        let (out, _) = run(&p, &n, 128).expect("cycling is not a palette change");
+        // Half of the picture is the cycled colour; at alpha 128 the scroll is 1 dot, so the dot at x = 2
+        // (world column 3 of the left half, painted) shows N's colour for entry 13.
+        let at = |x: usize| rgb_key([out[x * 4], out[x * 4 + 1], out[x * 4 + 2]]);
+        assert_eq!(at(2), pal()[13], "frame N's palette");
+        assert_ne!(at(2), 0x00AA_5500);
+    }
+
+    /// A cycled colour covering half the picture still passes the background-fit test (the dots that only
+    /// changed between the cycled colours are the same dots), where the same change as a plain recolour does
+    /// not.
+    #[test]
+    fn a_large_cycled_area_is_excused_but_a_recolour_is_not() {
+        let p = with_palette(frame(1, 4, None), &[], Some(13));
+        let cycled = with_palette(frame(2, 4, None), &[(13, 0x00AA_5500)], Some(13));
+        assert!(run(&p, &cycled, 128).is_ok());
+        // Same picture change but the palette says nothing cycled (digest differs, no entry listed): refused.
+        let mut recoloured = cycled.clone();
+        recoloured.palette.clear();
+        assert_eq!(
+            run(&p, &recoloured, 128).err(),
+            Some(Refusal::PaletteChanged)
+        );
+    }
+
+    /// Fades and flashes stay refused: more than two background entries, or either backdrop entry.
+    #[test]
+    fn fades_and_backdrop_changes_are_still_refused() {
+        let p = with_palette(frame(1, 4, None), &[], None);
+        let fade = with_palette(frame(2, 6, None), &[(1, 1), (2, 2), (3, 3)], None);
+        assert_eq!(run(&p, &fade, 128).err(), Some(Refusal::PaletteChanged));
+        let flash = with_palette(frame(2, 6, None), &[(0, 0x00FF_FFFF)], None);
+        assert_eq!(run(&p, &flash, 128).err(), Some(Refusal::PaletteChanged));
+        let mirror = with_palette(frame(2, 6, None), &[(16, 0x00FF_FFFF)], None);
+        assert_eq!(run(&p, &mirror, 128).err(), Some(Refusal::PaletteChanged));
+        // Exactly two cycling entries is the limit.
+        let two = with_palette(frame(2, 6, None), &[(5, 1), (6, 2)], None);
+        assert!(run(&p, &two, 128).is_ok());
+    }
+
+    /// Sprite-palette changes alone (star power) do not refuse: sprites are drawn from N's pixels.
+    #[test]
+    fn sprite_palette_changes_alone_are_not_refused() {
+        let p = with_palette(frame(1, 4, Some((3, 2, 2))), &[], None);
+        let n = with_palette(
+            frame(2, 6, Some((3, 4, 2))),
+            &[(17, 1), (18, 2), (19, 3), (21, 4), (22, 5), (23, 6)],
+            None,
+        );
+        assert!(matches!(palette_verdict(&p, &n), PaletteVerdict::Cycling(c) if c.is_empty()));
+        assert!(run(&p, &n, 128).is_ok());
+    }
+
+    /// The wide picture a widescreen shell makes of `core`: the same world, `pad` more columns each side.
+    fn wide_of(core: &Layers, pad: usize) -> Vec<u8> {
+        let sx = usize::from(core.scroll[0].0);
+        let ww = W + 2 * pad;
+        let mut rgba = vec![0u8; ww * H * 4];
+        for y in 0..H {
+            for x in 0..ww {
+                let col = (sx + x + 100 - pad) % 100 + 10;
+                let at = (y * ww + x) * 4;
+                rgba[at..at + 3].copy_from_slice(&resolve(col as u8));
+                rgba[at + 3] = 255;
+            }
+        }
+        // The console's own dots (sprite included) are kept as they were.
+        for y in 0..H {
+            let dst = (y * ww + pad) * 4;
+            rgba[dst..dst + W * 4].copy_from_slice(&core.rgba[y * W * 4..(y + 1) * W * 4]);
+        }
+        rgba
+    }
+
+    /// W37-06: with widescreen on, the margins move with the same scroll delta as the console's dots, so the
+    /// midpoint is the exact wide picture of the middle scroll, margins included; the sprite still moves by
+    /// its own delta.
+    #[test]
+    fn widescreen_margins_move_with_the_scroll_delta() {
+        let pad = 4;
+        let (p, n) = (
+            frame(1, 10, Some((3, 6, 2))),
+            frame(2, 14, Some((3, 10, 2))),
+        );
+        let (wp, wn) = (
+            widen(&p, &wide_of(&p, pad), W + 2 * pad, H).expect("fits"),
+            widen(&n, &wide_of(&n, pad), W + 2 * pad, H).expect("fits"),
+        );
+        assert_eq!((wp.width, wp.height), (W + 2 * pad, H));
+        assert!(describes_its_picture(&wp));
+        let mut out = Vec::new();
+        let stats = compose(&wp, &wn, 128, &mut out).expect("composes");
+        assert_eq!(stats.sprites_moved, 1);
+        let ww = W + 2 * pad;
+        for x in 0..ww {
+            if (8 + pad..10 + pad).contains(&x) {
+                continue; // the sprite's own dots
+            }
+            let want = resolve(((12 + x + 100 - pad) % 100 + 10) as u8);
+            assert_eq!(&out[(3 * ww + x) * 4..(3 * ww + x) * 4 + 3], &want, "x {x}");
+        }
+        // Frame N's sprite sits at x 6..8 of the console picture; halfway to 10 it covers 8..10.
+        assert_eq!(
+            &out[(2 * ww + pad + 8) * 4..(2 * ww + pad + 8) * 4 + 3],
+            &[200, 1, 2]
+        );
+        // alpha 0 is the wide frame N exactly.
+        compose(&wp, &wn, 0, &mut out).expect("composes");
+        assert_eq!(out, wp.rgba);
+    }
+
+    #[test]
+    fn widen_refuses_pictures_that_do_not_fit() {
+        let p = frame(1, 10, None);
+        assert!(widen(&p, &wide_of(&p, 2), W + 3, H).is_none(), "bytes");
+        assert!(
+            widen(&p, &vec![0; (W - 2) * H * 4], W - 2, H).is_none(),
+            "narrower"
+        );
+        assert!(widen(&p, &[], W, 0).is_none(), "no rows");
+        // Exactly the console's width is the identity.
+        let same = widen(&p, &p.rgba, W, H).expect("fits");
+        assert_eq!(same.bg, p.bg);
     }
 
     /// A frame whose background layer is not the picture it came with (captured part-way) is refused.

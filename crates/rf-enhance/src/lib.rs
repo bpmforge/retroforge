@@ -22,6 +22,7 @@ pub mod hdpack;
 pub mod heights;
 pub mod hud;
 pub mod interpolate;
+pub mod interpolate_snes;
 pub mod interpolation;
 pub mod level_view;
 pub mod loading;

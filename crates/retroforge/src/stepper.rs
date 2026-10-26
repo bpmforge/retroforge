@@ -1461,6 +1461,23 @@ impl EmuStepper {
         matches!(&self.machine, Machine::Snes(core) if core.has_gsu())
     }
 
+    /// Whether the machine is an SNES (ticket W37-06).
+    #[must_use]
+    pub fn is_snes(&self) -> bool {
+        matches!(self.machine, Machine::Snes(_))
+    }
+
+    /// Ticket W37-06: how picture row `y` (0-based) of the frame that just ran was drawn (mode, BG3 bit,
+    /// and what makes a line unfit to move layer by layer): `rf_snes::ppu::Ppu::line_facts`. Read-only;
+    /// `None` on a NES.
+    #[must_use]
+    pub fn snes_line_facts(&self, y: u16) -> Option<rf_snes::ppu::LineFacts> {
+        match &self.machine {
+            Machine::Snes(core) => Some(core.system().bus.ppu.line_facts(y)),
+            _ => None,
+        }
+    }
+
     /// Ticket W30-09: choose the S-DSP's voice interpolation for the main
     /// mix. SNES-only; the NES has no S-DSP.
     pub fn set_snes_interpolation(&mut self, mode: rf_snes::apu::dsp::Interpolation) {

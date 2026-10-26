@@ -49,6 +49,26 @@ pub enum Refusal {
     /// W36-07: the layers handed over do not describe a picture (zero size, buffers of the wrong
     /// length, two sizes).
     Malformed,
+    /// W37-06 (SNES): the picture is BG mode 7, whose "layer" is an affine plane that a scroll delta does
+    /// not describe.
+    Mode7,
+    /// W37-06 (SNES): a 512-dot line (modes 5/6 or pseudo-hires): the two half-dots are two screens.
+    Hires,
+    /// W37-06 (SNES): mosaic on a background: its blocks are fixed to the screen, not to the layer.
+    Mosaic,
+    /// W37-06 (SNES): a window hides part of a layer on the main screen: the window is fixed to the screen,
+    /// not to the layer, so a layer moved under it would show the wrong part.
+    Window,
+    /// W37-06 (SNES): interlace: the picture alternates fields.
+    Interlace,
+    /// W37-06 (SNES): master brightness or the backdrop colour changed between the frames (a fade or a
+    /// flash): colour, not motion (section 3.4).
+    Fade,
+    /// W37-06 (SNES): a register was written during the active display of the lines (the scroll changes
+    /// mid-line, so there is no one step to move them by).
+    MidLine,
+    /// W37-06 (SNES): the lines were force-blanked, or use direct colour: there are no layers to move.
+    Blanked,
 }
 
 /// The honesty label of frame interpolation (D-028): the whole picture between two console frames is
@@ -80,6 +100,14 @@ impl std::fmt::Display for Refusal {
             Refusal::Discontinuity => "the second frame's background is not the first one shifted",
             Refusal::HudOnly => "every row of the frame is excluded as HUD",
             Refusal::Malformed => "the frame layers do not describe a picture",
+            Refusal::Mode7 => "mode 7 is an affine plane, not a scrolling layer",
+            Refusal::Hires => "a 512-dot line is two screens, not one",
+            Refusal::Mosaic => "mosaic blocks are fixed to the screen, not to the layer",
+            Refusal::Window => "a window hides part of a layer and is fixed to the screen",
+            Refusal::Interlace => "an interlaced picture alternates fields",
+            Refusal::Fade => "the brightness or the backdrop colour changed: colour, not motion",
+            Refusal::MidLine => "a register changed mid-line, so the scroll has no single step",
+            Refusal::Blanked => "the lines are blanked or in direct colour",
         };
         f.write_str(s)
     }

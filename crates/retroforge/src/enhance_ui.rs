@@ -265,12 +265,12 @@ pub fn feature_rows(settings: &GameSettings, facts: &GameFacts) -> Vec<FeatureRo
         "an NES game whose profile allows extra vblank lines",
     );
     let (run_ahead_av, run_ahead_on) = generic(settings.run_ahead > 0);
-    // Ticket W36-07 (D-028): interpolated presentation. NES only for now (the layers come from the
-    // NES PPU's captures); the row does not exist at all in Accuracy Mode (see the retain below).
+    // Ticket W36-07 (D-028): interpolated presentation; the NES (W36-07) and the SNES (W37-06). The row
+    // does not exist at all in Accuracy Mode (see the retain below).
     let (interp_frames_av, interp_frames_on) = also(
         generic(settings.frame_interpolation),
-        nes,
-        "an NES game (the layers come from the NES picture unit)",
+        nes || snes,
+        "an NES or SNES game (the layers come from the console's picture unit)",
     );
     // Ticket W30-09: SNES sound only (the NES has no S-DSP). Presentation,
     // so no cartridge or profile condition.
@@ -1391,9 +1391,9 @@ mod tests {
     }
 
     /// Ticket W36-07 (D-028): frame interpolation is off on a fresh install, ABSENT from Accuracy
-    /// Mode (not a greyed row), Enhanced-only, and NES-only.
+    /// Mode (not a greyed row), Enhanced-only, and for NES and SNES games (W37-06).
     #[test]
-    fn frame_interpolation_row_is_opt_in_absent_in_accuracy_and_nes_only() {
+    fn frame_interpolation_row_is_opt_in_absent_in_accuracy_and_for_nes_and_snes() {
         let find = |s: &GameSettings, f: &GameFacts| {
             feature_rows(s, f)
                 .into_iter()
@@ -1416,7 +1416,16 @@ mod tests {
             snes: true,
             ..nes
         };
-        assert!(!find(&s, &facts_snes).unwrap().effective());
+        assert!(find(&s, &facts_snes).unwrap().effective(), "SNES games too");
+        let neither = GameFacts {
+            nes: false,
+            snes: false,
+            ..nes
+        };
+        assert!(
+            !find(&s, &neither).unwrap().effective(),
+            "a game that is neither console has nothing to read layers from"
+        );
     }
 
     /// Ticket W30-09: the audio interpolation row — Enhanced-only, SNES
