@@ -79,6 +79,17 @@ impl Mmc2 {
 }
 
 impl Mapper for Mmc2 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let count = self.prg_bank_count();
+        let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);
+        let bank = match window {
+            0 => usize::from(self.prg_bank & 0x0F) % count,
+            w => (count + w).saturating_sub(4) % count,
+        };
+        Some(bank * PRG_BANK_8K + usize::from(addr - 0x8000) % PRG_BANK_8K)
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let count = self.prg_bank_count();
         let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);

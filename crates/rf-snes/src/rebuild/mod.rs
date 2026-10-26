@@ -28,7 +28,7 @@
 //! the site (branches wrap inside the bank); `JumpLong`/`CallLong` carry the
 //! full 24-bit address. [`Wdc65816::rom_offset`] resolves either through the
 //! LoROM/HiROM cartridge map, which is fixed, so no bank-switch recording is
-//! needed; boards that switch ROM banks (SA-1, S-DD1) are outside this map.
+//! needed; boards that switch ROM banks (SA-1, S-DD1) are outside this map and place nothing statically in their switched banks (W37-02).
 
 use rf_cart::SnesMapMode;
 use rf_core_api::coverage::CoverageLog;
@@ -49,6 +49,22 @@ pub fn build_atlas(rom: &[u8], map_mode: SnesMapMode, log: &CoverageLog) -> Atla
     build_generic_atlas(&Wdc65816::new(map_mode, rom.len()), rom, log)
 }
 
+/// [`build_atlas`] for a cartridge with `coprocessor` (see
+/// [`Wdc65816::for_board`]).
+#[must_use]
+pub fn build_atlas_on(
+    rom: &[u8],
+    map_mode: SnesMapMode,
+    coprocessor: rf_cart::Coprocessor,
+    log: &CoverageLog,
+) -> Atlas {
+    build_generic_atlas(
+        &Wdc65816::for_board(map_mode, rom.len(), coprocessor),
+        rom,
+        log,
+    )
+}
+
 /// [`build_atlas`] for a raw cartridge image as a player has it: the map mode
 /// and any 512-byte copier header come from the cartridge header, exactly as
 /// [`crate::SnesSystem::load`] reads them, so the ROM offsets in the atlas
@@ -67,7 +83,12 @@ pub fn build_atlas_from_image(raw: &[u8], log: &CoverageLog) -> Result<Atlas, rf
     } else {
         raw
     };
-    Ok(build_atlas(rom, header.map_mode, log))
+    Ok(build_atlas_on(
+        rom,
+        header.map_mode,
+        header.coprocessor,
+        log,
+    ))
 }
 
 /// [`build_atlas_from_image`] with the hardware vectors added as seeds
@@ -92,7 +113,12 @@ pub fn build_seeded_atlas_from_image(
     };
     let mut seeded = log.clone();
     add_vector_seeds(rom, header.map_mode, &mut seeded);
-    Ok(build_atlas(rom, header.map_mode, &seeded))
+    Ok(build_atlas_on(
+        rom,
+        header.map_mode,
+        header.coprocessor,
+        &seeded,
+    ))
 }
 
 /// Add the interrupt vectors of `rom` to `log` as entries (fullsnes, "SNES
@@ -156,6 +182,10 @@ pub const fn widths(mode: u8) -> (bool, bool) {
 pub struct Wdc65816 {
     map: SnesMapMode,
     rom_len: usize,
+    /// A Super FX board: its `$40-$5F` ROM window is linear 64 KiB banks and
+    /// `$70-$71` is the GSU's RAM, neither of which plain LoROM says
+    /// (`mapping::gsu_target`; W37-02).
+    super_fx: bool,
 }
 
 impl Wdc65816 {
@@ -163,7 +193,28 @@ impl Wdc65816 {
     /// smaller images exactly as the bus does.
     #[must_use]
     pub const fn new(map: SnesMapMode, rom_len: usize) -> Self {
-        Self { map, rom_len }
+        Self {
+            map,
+            rom_len,
+            super_fx: false,
+        }
+    }
+
+    /// The ISA for a cartridge whose header names `coprocessor`: the boards
+    /// whose fixed ROM windows differ from plain LoROM/HiROM place addresses
+    /// as the bus does (Super FX), and the ones whose ROM banks switch place
+    /// nothing in the switched banks (S-DD1, SA-1; see [`Self::rom_offset`]).
+    #[must_use]
+    pub const fn for_board(
+        map: SnesMapMode,
+        rom_len: usize,
+        coprocessor: rf_cart::Coprocessor,
+    ) -> Self {
+        Self {
+            map,
+            rom_len,
+            super_fx: matches!(coprocessor, rf_cart::Coprocessor::SuperFx { .. }),
+        }
     }
 }
 
@@ -187,6 +238,36 @@ impl Isa for Wdc65816 {
 
     fn rom_offset(&self, cpu: u32) -> Option<u32> {
         let bank = ((cpu >> 16) & 0xFF) as u8;
+        // An S-DD1 cartridge's `$C0-$FF` is a bank-register-selected view of
+        // the ROM; the plain LoROM arithmetic would place it on `$40-$7F`
+        // (W37-02). Unresolved here, so static targets there stay unresolved
+        // and only recorded code in those banks gets nodes, at the offsets
+        // the bus really read. SA-1 maps nothing statically (`map` answers
+        // open bus for it).
+        if self.map == SnesMapMode::Sdd1 && bank >= 0xC0 {
+            return None;
+        }
+        // LoROM save RAM: `$70-$7D:0000-7FFF` is SRAM on a board that has
+        // any and a ROM mirror on one that has none; the ISA does not know
+        // which, so it places nothing there rather than guess.
+        if matches!(self.map, SnesMapMode::LoRom | SnesMapMode::Sdd1)
+            && (0x70..0x7E).contains(&bank)
+            && cpu & 0xFFFF < 0x8000
+        {
+            return None;
+        }
+        if self.super_fx {
+            match bank {
+                // `gsu_target`: `$40-$5F` is 64 KiB linear ROM banks.
+                0x40..=0x5F if self.rom_len > 0 => {
+                    let index = (usize::from(bank - 0x40) << 16) | (cpu & 0xFFFF) as usize;
+                    return u32::try_from(index % self.rom_len).ok();
+                }
+                // The GSU's own RAM, whole banks.
+                0x70..=0x71 => return None,
+                _ => {}
+            }
+        }
         mapping::rom_offset(self.map, bank, (cpu & 0xFFFF) as u16, self.rom_len, 0)
             .and_then(|o| u32::try_from(o).ok())
     }
@@ -583,6 +664,20 @@ mod tests {
                 let cpu = isa.cpu_for_rom(rom);
                 assert_eq!(isa.rom_offset(cpu), Some(rom), "{rom:#x} via {cpu:#08x}");
             }
+        }
+    }
+
+    #[test]
+    fn switched_boards_place_nothing_statically_in_their_switched_banks() {
+        let sdd1 = Wdc65816::new(SnesMapMode::Sdd1, 0x10_0000);
+        assert_eq!(sdd1.rom_offset(0x00_8000), Some(0));
+        assert_eq!(sdd1.rom_offset(0x80_8000), Some(0));
+        for cpu in [0xC0_0000u32, 0xC0_8000, 0xDF_FFFF, 0xFF_8000] {
+            assert_eq!(sdd1.rom_offset(cpu), None, "{cpu:#08x}");
+        }
+        let sa1 = Wdc65816::new(SnesMapMode::Sa1, 0x10_0000);
+        for cpu in [0x00_8000u32, 0x80_8000, 0xC0_0000, 0xFF_FFFF] {
+            assert_eq!(sa1.rom_offset(cpu), None, "{cpu:#08x}");
         }
     }
 

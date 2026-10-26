@@ -153,6 +153,13 @@ impl Rambo1 {
 }
 
 impl Mapper for Rambo1 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);
+        let bank = self.prg_windows()[window];
+        Some(bank * PRG_BANK_8K + usize::from(addr - 0x8000) % PRG_BANK_8K)
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let window = usize::from((addr - 0x8000) / PRG_BANK_8K as u16);
         let bank = self.prg_windows()[window];

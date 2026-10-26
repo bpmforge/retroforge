@@ -154,6 +154,18 @@ impl Action53 {
 }
 
 impl Mapper for Action53 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let banks = self.prg_rom.len() / BANK_SIZE;
+        if banks == 0 {
+            // `cpu_read` answers 0 for an empty image and reads bank 0
+            // otherwise; an image shorter than one bank has no byte to name.
+            return None;
+        }
+        let bank = self.bank_for(addr) % banks;
+        Some(bank * BANK_SIZE + (usize::from(addr) & (BANK_SIZE - 1)))
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         if self.prg_rom.is_empty() {
             return 0;

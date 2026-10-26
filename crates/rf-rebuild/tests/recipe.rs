@@ -216,8 +216,8 @@ fn the_v3_atlas_round_trips_its_hashes_and_a_v2_cache_entry_is_a_miss() {
     let bytes = a.to_bytes();
     assert_eq!(Atlas::from_bytes(&bytes), Ok(a.clone()));
 
-    assert_eq!(ATLAS_FORMAT_VERSION, 4);
-    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v4");
+    assert_eq!(ATLAS_FORMAT_VERSION, 5);
+    assert_eq!(rf_rebuild::CACHE_SETTINGS, "code-atlas-v5");
     let mut v2 = bytes;
     v2[4..8].copy_from_slice(&2u32.to_le_bytes());
     assert_eq!(Atlas::from_bytes(&v2), Err(AtlasError::Version(2)));

@@ -146,6 +146,19 @@ impl Unrom512 {
 }
 
 impl Mapper for Unrom512 {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let (bank, offset) = match addr {
+            0x8000..=0xBFFF => (
+                (self.prg_bank as usize) % self.prg_bank_count(),
+                addr - 0x8000,
+            ),
+            0xC000..=0xFFFF => (self.prg_bank_count() - 1, addr - 0xC000),
+            _ => return None,
+        };
+        Some(bank * PRG_BANK_SIZE + usize::from(offset))
+    }
+
     /// Same shape as [`super::UxRom::cpu_read`]: a switchable 16 KiB
     /// window at `$8000-$BFFF`, the last bank fixed at `$C000-$FFFF`.
     fn cpu_read(&self, addr: u16) -> u8 {

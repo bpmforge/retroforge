@@ -125,6 +125,19 @@ impl DxRom {
 }
 
 impl Mapper for DxRom {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let count = self.prg_bank_count();
+        let (bank, offset) = match addr {
+            0x8000..=0x9FFF => (self.registers[6] as usize % count, addr - 0x8000),
+            0xA000..=0xBFFF => (self.registers[7] as usize % count, addr - 0xA000),
+            0xC000..=0xDFFF => (count.saturating_sub(2), addr - 0xC000),
+            0xE000..=0xFFFF => (count - 1, addr - 0xE000),
+            _ => return None,
+        };
+        Some((bank * PRG_BANK_8K + offset as usize) % self.prg_rom.len())
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let count = self.prg_bank_count();
         let (bank, offset) = match addr {

@@ -4903,3 +4903,14 @@ stories, 10 decisions).
   Cold starts in lockstep, zero divergence: SMB 1-1 (12 swaps), 32 levels x 2
   (96 swaps), SMW YI1 two scripts; SMW fallback falls from 99% in the first
   epoch to under 1%. Workspace: **3688 passing**.
+
+- **W37-02 — Generic tier across the library** (2026-10-26). All 23 NES
+  mappers report PRG ROM offsets. Census: 463 ROMs (200 NES, 200 SNES, all 39
+  SNES coprocessor carts, 24 extra NES boards) cold in lockstep for 600 frames:
+  0 panics, 0 divergences; fallback medians NES 2.9%, SNES 21.7% (mostly
+  unseen code at boot). Fixed: Super FX holding the ROM bus no longer counts
+  main-CPU fetches as ROM; the static SNES map places Super FX windows and
+  leaves S-DD1 switched banks and LoROM $70-$7D unresolved; SA-1 maps nothing
+  statically (falls back). Atlas format and cache bumped to v5. Workspace:
+  **3696 passing** (a status-coalescing race in the naming core-thread test
+  fixed).

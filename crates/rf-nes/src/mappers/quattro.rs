@@ -48,6 +48,16 @@ impl Quattro {
 }
 
 impl Mapper for Quattro {
+    /// Byte offset into this board's PRG ROM that `cpu_read(addr)` returns (W37-02).
+    fn prg_rom_offset(&self, addr: u16) -> Option<usize> {
+        let bank = if addr < 0xC000 {
+            self.bank_16k(usize::from(self.bank))
+        } else {
+            self.bank_16k(3)
+        };
+        Some((bank * PRG_BANK_16K + usize::from(addr - 0x8000) % PRG_BANK_16K) % self.prg_rom.len())
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         let bank = if addr < 0xC000 {
             self.bank_16k(usize::from(self.bank))

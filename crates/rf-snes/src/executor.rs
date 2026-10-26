@@ -89,7 +89,11 @@ impl SnesSystem {
         let addr = cpu.pc24();
         let bus = &self.bus;
         let fetch = match bus.target(addr) {
-            Target::Rom(o) => u32::try_from(o).map_or(Fetch::Other, Fetch::Rom),
+            // Not while the Super FX holds the ROM bus: the CPU would read
+            // the vector table or open bus, not `rom[o]` (W37-02).
+            Target::Rom(o) if !bus.rom_bus_held_by_gsu() => {
+                u32::try_from(o).map_or(Fetch::Other, Fetch::Rom)
+            }
             Target::Wram(_) => Fetch::Ram,
             _ => Fetch::Other,
         };
