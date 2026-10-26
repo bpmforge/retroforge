@@ -9,6 +9,7 @@
 
 pub mod atlas;
 mod build;
+pub mod dataregion;
 pub mod exec;
 pub mod hw;
 pub mod ir;
