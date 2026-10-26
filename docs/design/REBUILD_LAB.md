@@ -92,6 +92,35 @@ catch up at hardware accesses (sync points). The NES core ticks devices on
 every bus cycle, so that is a scheduling change, not an executor feature. It
 will be decided once the lockstep checker (W36-04) can prove it.
 
+**Amdahl bound on that tension (W36-12, measured 2026-10-26).**
+`crates/rf-nes/benches/amdahl.rs` records the bus operations of a window of
+real frames (value, address, direction, and the NMI/IRQ level after each op),
+then replays the same instruction stream through `Cpu::step` against a flat
+bus with no devices that hands the recorded values and line levels back. The
+setup asserts the replayed `Cpu` equals the recorded end state and that every
+address and direction matched, so (b) is the identical stream. Release build,
+Apple M2 Max, **measured on a loaded shared machine** (load average 3.9 to
+5.0 during the runs, other sessions building), so read the ratios, not the
+absolute milliseconds.
+
+| workload (window) | instr | bus cycles | (a) real | (b) flat | (c) = a-b | b/a |
+|---|---|---|---|---|---|---|
+| synthetic loop (30 fr) | 137,448 | 893,412 | 1.56 ms/fr | 0.086 ms/fr | 1.47 ms/fr | 5.5% |
+| RF-Scroller homebrew (60 fr) | 604,536 | 1,757,574 | 1.73 ms/fr | 0.110 ms/fr | 1.63 ms/fr | 6.3% |
+| SMB multicart, scripted play (60 fr) | 577,685 | 1,756,023 | 1.91 ms/fr | 0.117 ms/fr | 1.79 ms/fr | 6.1% |
+
+(a) includes the per-instruction video/audio drains a host pays. (b) still
+runs the interpreter's decode, dispatch and ALU and the `dyn CpuBus` calls and
+interrupt sampling, so it is an **upper bound** on what any executor that
+issues the same cycle stream can remove. Even a tier whose CPU work cost
+nothing would speed a frame up by 1/(1-0.06), about **1.06x to 1.07x**. The
+other 94% is the PPU, APU, mapper and DMA work ticked on every bus cycle.
+The guide's "3 to 5 times" is therefore unreachable by compiling instruction
+semantics alone; it needs CPU-only runs between hardware accesses, which is
+the scheduling change described above, and stays undecided until the
+lockstep checker can prove it. W36-12's IR tiers are measured against this
+bound in `docs/research/W36-12-ir.md`.
+
 **W36-06 as built (2026-10-25):** the NES widescreen enemy mod is three
 recipe patch rows (`rf_rebuild::PatchRow`; TOML `[[patch]]`; stream index plus
 new byte), not a hook and not a replacement function. Resolved against the
