@@ -522,8 +522,44 @@ fn census_child() {
             .unwrap_or_default();
         row.put("panic", msg.replace(['\t', '\n'], " "));
     }
+    record_run(&raw, &row);
     row.put("wall_ms", t.elapsed().as_millis());
     print_row(&row);
+}
+
+/// `RF_W37_RECORD=<cache dir>` (ticket W37-03): fold this lockstep run into the
+/// ROM's verification record in that cache, the one the Rebuild card reads.
+/// The shell's cache is `<temp dir>/retroforge-atlas-cache`. Off by default:
+/// the census is a census, not a stamp, and a run that did not boot or panicked
+/// records nothing.
+fn record_run(raw: &[u8], row: &Row) {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let Ok(dir) = std::env::var("RF_W37_RECORD") else {
+        return;
+    };
+    let get = |k: &str| {
+        row.fields
+            .iter()
+            .find(|(n, _)| *n == k)
+            .map(|(_, v)| v.as_str())
+    };
+    if get("booted") != Some("yes") || get("panic").is_some() {
+        return;
+    }
+    let Some(frames) = get("frames").and_then(|f| f.parse::<u64>().ok()) else {
+        return;
+    };
+    // The run stops at its first difference, so a difference is one frame.
+    let divergences = u64::from(get("divergence").is_some_and(|d| d != "-"));
+    let sha = Sha256::digest(raw).iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    let mut cache = rf_cache::Cache::open(&dir, 64 * 1024 * 1024).expect("open the cache");
+    let rec = rf_harness::atlas::record_lockstep_run(&mut cache, &sha, frames, divergences)
+        .expect("record");
+    println!("recorded: {rec:?}");
 }
 
 fn print_row(row: &Row) {
