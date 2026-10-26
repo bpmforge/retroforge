@@ -4845,3 +4845,14 @@ stories, 10 decisions).
   zero divergence. It is 12-15% slower than the interpreter. The Rust emitter
   output for RF-Scroller compiles. Cranelift (W36-12b) awaits Brad's call
   (park / build / scheduler instead). Workspace: **3596 passing**.
+
+- **W37-00 — Input-movie import** (2026-10-26). Parsers for .fm2, .bk2,
+  .lsmv and .smv (rf-harness, robust to truncation and garbage) and a replay
+  harness with the coverage recorder armed. Four TASVideos movies (downloaded
+  with Brad's OK, not committed): none replays to its end. SMB warpless and
+  warps desync at movie frames 1,016 and 4,955 (the multicart's SMB is not
+  byte-identical to the movie's ROM); SMW warps (lsnes, same ROM hash as ours)
+  drifts by frame 4,618-5,980 and the Snes9x 96-exit movie by 5,209-17,978,
+  a core timing finding carried to W37-00b. Coverage still grew: SMB 25.3% to
+  27.3% of PRG (412 functions), SMW 4.9% to 6.1% (813). The acceptance line
+  "replays to the end" is not met. Workspace: **3621 passing**.

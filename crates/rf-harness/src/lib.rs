@@ -39,6 +39,8 @@ pub mod lockstep;
 pub mod lockstep_snes;
 mod manifest;
 pub mod mode_diff;
+pub mod movie;
+pub mod movie_replay;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
 mod tolerance;
