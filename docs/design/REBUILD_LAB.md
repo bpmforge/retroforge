@@ -70,7 +70,7 @@ Rebuild Player Guide). So R1 splits the roles into tiers that share one IR:
   made explicit, cycle cost attached), run inside the core. No compiler, no
   platform code; it is the reference for the JIT and the fallback for any
   platform the JIT does not support.
-- **Cranelift JIT (W36-12):** the same IR compiled to native arm64/x86-64 at
+- **Cranelift JIT (W36-12b):** the same IR compiled to native arm64/x86-64 at
   launch and on each new function. The ticket adds the dependency (decision
   row in `docs/TECH_STACK.md` section 2) and measures it against the block
   executor on the SMB atlas before it becomes the default generic tier.
@@ -91,6 +91,56 @@ emitter move to W36-12, whose JIT is their first executing consumer.
 catch up at hardware accesses (sync points). The NES core ticks devices on
 every bus cycle, so that is a scheduling change, not an executor feature. It
 will be decided once the lockstep checker (W36-04) can prove it.
+
+**Amdahl bound on that tension (W36-12, measured 2026-10-26).**
+`crates/rf-nes/benches/amdahl.rs` records the bus operations of a window of
+real frames (value, address, direction, and the NMI/IRQ level after each op),
+then replays the same instruction stream through `Cpu::step` against a flat
+bus with no devices that hands the recorded values and line levels back. The
+setup asserts the replayed `Cpu` equals the recorded end state and that every
+address and direction matched, so (b) is the identical stream. Release build,
+Apple M2 Max, **measured on a loaded shared machine** (load average 3.9 to
+5.0 during the runs, other sessions building), so read the ratios, not the
+absolute milliseconds.
+
+| workload (window) | instr | bus cycles | (a) real | (b) flat | (c) = a-b | b/a |
+|---|---|---|---|---|---|---|
+| synthetic loop (30 fr) | 137,448 | 893,412 | 1.51 ms/fr | 0.085 ms/fr | 1.42 ms/fr | 5.7% |
+| RF-Scroller homebrew (60 fr) | 604,536 | 1,757,574 | 1.68 ms/fr | 0.109 ms/fr | 1.57 ms/fr | 6.5% |
+| SMB multicart, scripted play (60 fr) | 577,685 | 1,756,023 | 1.82 ms/fr | 0.114 ms/fr | 1.71 ms/fr | 6.3% |
+
+(Second of two runs; the first gave 5.5%, 6.3% and 6.1%. Load average 3.1 to
+4.6 throughout.) (a) includes the per-instruction video/audio drains a host pays. (b) still
+runs the interpreter's decode, dispatch and ALU and the `dyn CpuBus` calls and
+interrupt sampling, so it is an **upper bound** on what any executor that
+issues the same cycle stream can remove. Even a tier whose CPU work cost
+nothing would speed a frame up by 1/(1-0.06), about **1.06x to 1.07x** (1/(1-0.057) to 1/(1-0.065)). The
+other 94% is the PPU, APU, mapper and DMA work ticked on every bus cycle.
+The guide's "3 to 5 times" is therefore unreachable by compiling instruction
+semantics alone; it needs CPU-only runs between hardware accesses, which is
+the scheduling change described above, and stays undecided until the
+lockstep checker can prove it. W36-12's IR tiers are measured against this
+bound in `docs/research/W36-12-ir.md`.
+
+**W36-12 as built (2026-10-26): the IR, an IR interpreter tier, the Rust
+emitter, and a measured "no gain".** `rf_rebuild::ir` holds ISA-neutral op
+types (read and write cycles with their kind, `Set`/`Alu`/`SetFlag`,
+forward-only `SkipUnless` for page-cross and taken-branch cycles, and
+`Machine` ops for the interrupt-poll bookkeeping); `rf-nes/src/rebuild/lower.rs`
+lowers the 6502 to it (236 opcodes plus `BRK` and the hardware `NMI`/`IRQ`
+entries; `JAM` and the unstable unofficial opcodes stay `Interpret`).
+`cpu/ir_exec.rs` evaluates it inside `run_cycled`, so polling and the cycle
+wrapper are the interpreter's own code; `Cpu::set_exec_tier` /
+`NesCore::set_exec_tier` pick it (off by default, no UI). It passes the
+SingleStepTests nes6502 vectors cycle for cycle (2,555,578 of 2,560,000;
+the 4,422 are `$AB`, the documented LXA clash the interpreter fails the same
+way), nestest 8991/8991, and the SMB 32-level lockstep with zero divergence.
+`rebuild::emit` writes readable Rust per atlas function (cycle comments,
+dummy cycles marked); its output for RF-Scroller compiles with `rustc`.
+**The IR tier is slower, not faster**: 2.4x the interpreter's CPU work on
+the flat bus, +13% a frame on SMB. See `docs/research/W36-12-ir.md`. The
+Amdahl bound above is why a native-code tier (W36-12b) is not worth its
+dependency on this per-cycle core unless the scheduling change lands first.
 
 **W36-06 as built (2026-10-25):** the NES widescreen enemy mod is three
 recipe patch rows (`rf_rebuild::PatchRow`; TOML `[[patch]]`; stream index plus
@@ -194,7 +244,7 @@ lockstep are.
 | W36-09 | Understand pass + opt-in AI naming | Names exported as recipe facts; lockstep green |
 | W36-10 | ROM-hack support: recipe matching on a Lunar Magic SMW hack | Hack boots rebuilt; matched functions get Super Enhanced features |
 | W36-11 | Public guide: how Rebuild works | In docs/site |
-| W36-12 | Cranelift JIT tier behind the block interface; spike vs block executor | SMB plays on the JIT in lockstep; compile time and frame cost measured for both tiers |
+| W36-12 | Semantic 6502 IR, IR interpreter tier, Rust dev emitter, Amdahl bench (Cranelift moved to W36-12b) | IR passes the nes6502 vectors, nestest and the SMB lockstep; the JIT ceiling measured, not assumed |
 
 ### W36-06b: how a margin object is drawn (built 2026-10-25)
 

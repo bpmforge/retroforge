@@ -41,6 +41,10 @@ impl Cpu {
             in_interrupt_entry: _,
             // Same reasoning as above (ticket W2-21).
             branch_polls_one_cycle_early: _,
+            // Session setting (ticket W36-12): which executor ran the
+            // instructions is not machine state, and `load_state` leaves it
+            // as the caller set it.
+            exec_tier: _,
         } = self;
 
         out.u8(*a)?;

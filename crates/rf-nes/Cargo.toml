@@ -37,3 +37,9 @@ harness = false
 [[bench]]
 name = "coverage"
 harness = false
+
+# Ticket W36-12: the Amdahl bench for the rebuild JIT ceiling (real frame vs
+# the same instruction stream on a flat bus).
+[[bench]]
+name = "amdahl"
+harness = false

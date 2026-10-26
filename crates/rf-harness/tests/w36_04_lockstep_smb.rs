@@ -20,6 +20,7 @@
 //!
 //! ```text
 //! cargo test --release -p rf-harness --test w36_04_lockstep_smb -- --ignored --nocapture
+//! RF_W36_TIER=ir cargo test --release -p rf-harness --test w36_04_lockstep_smb -- --ignored --nocapture
 //! ```
 
 use std::io::Read as _;
@@ -187,8 +188,17 @@ fn lockstep_level(
     let mut seen = Observed::default();
     let dir = std::env::temp_dir().join(format!("rf-w36-04-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let tier = rebuilt_tier();
     let mut hook = |frame: u32, side: Side, core: &mut NesCore| {
         force_level(frame, core, level);
+        if side == Side::Rebuilt {
+            core.set_exec_tier(tier);
+            assert_eq!(
+                core.exec_tier(),
+                tier,
+                "the rebuilt core runs the chosen tier"
+            );
+        }
         if side == Side::Rebuilt {
             if frame == FINGERPRINT {
                 seen.print = fingerprint(core);
@@ -220,6 +230,17 @@ fn lockstep_level(
         stats: r.stats,
         seen,
         bundle: r.bundle.map(|b| b.dir),
+    }
+}
+
+/// `RF_W36_TIER=ir` runs the rebuilt core on the IR tier (ticket W36-12); the
+/// plain core always stays on the interpreter, the reference. Same test, same
+/// scripts, same zero-divergence bar.
+fn rebuilt_tier() -> rf_nes::ExecTier {
+    if std::env::var("RF_W36_TIER").is_ok_and(|v| v == "ir") {
+        rf_nes::ExecTier::Ir
+    } else {
+        rf_nes::ExecTier::Interpreter
     }
 }
 

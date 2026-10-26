@@ -48,6 +48,16 @@ fn resolve(env_var: &str, default_rel: &str) -> Option<PathBuf> {
 
 #[test]
 fn nestest_golden_trace_matches_byte_exact() {
+    nestest_golden_trace(crate::cpu::ExecTier::Interpreter);
+}
+
+/// Ticket W36-12: the same 8991 lines on the IR tier.
+#[test]
+fn nestest_golden_trace_matches_byte_exact_on_the_ir_tier() {
+    nestest_golden_trace(crate::cpu::ExecTier::Ir);
+}
+
+fn nestest_golden_trace(tier: crate::cpu::ExecTier) {
     let Some(rom_path) = resolve("RF_NESTEST_ROM", "../../roms/nes/other/nestest.nes") else {
         eprintln!(
             "SKIP nestest_golden_trace_matches_byte_exact: nestest.nes not found. Set \
@@ -83,6 +93,7 @@ fn nestest_golden_trace_matches_byte_exact() {
     let rom = NesRom::from_ines_bytes(&rom_bytes).expect("valid nestest.nes image");
     let mut bus = NesBus::new(rom);
     let mut cpu = Cpu::power_on(&mut bus);
+    cpu.set_exec_tier(tier);
     // nestest's automated (non-interactive) test-mode entry point: bypasses
     // the ROM's own reset-vector code path and starts execution at $C000
     // directly. Nestest-specific test-harness behavior, not a general
