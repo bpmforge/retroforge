@@ -279,6 +279,7 @@ fn export_carries_source_and_confidence_and_human_names_win() {
         id: "x".into(),
         functions: vec![
             RecipeFunction {
+                mode: None,
                 name: "sprite_dma_by_hand".into(),
                 shape_hash: 0x2001,
                 exact_hash: Some(0x1001),
@@ -288,6 +289,7 @@ fn export_carries_source_and_confidence_and_human_names_win() {
                 confidence: None,
             },
             RecipeFunction {
+                mode: None,
                 name: "mapper_bank_switch".into(),
                 shape_hash: 0xdead,
                 exact_hash: None,

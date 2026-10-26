@@ -91,6 +91,7 @@ fn func_at(a: &Atlas, rom: u32) -> &rf_rebuild::Function {
 
 fn row(name: &str, f: &rf_rebuild::Function, exact: bool, hint: Option<u32>) -> RecipeFunction {
     RecipeFunction {
+        mode: None,
         confidence: None,
         name: name.to_string(),
         shape_hash: f.shape_hash,
@@ -319,4 +320,37 @@ fn identical_copies_are_ambiguous_not_guessed() {
             copies: 2
         })
     );
+}
+
+#[test]
+fn an_entry_mode_picks_between_functions_of_one_shape() {
+    // The same bytes entered in two decode modes are two atlas functions with
+    // one shape hash (the 65816 case, W36-10).
+    let mut img = vec![0u8; 0x1000];
+    put_fn(&mut img, 0x100, 0x0A);
+    let mut a = atlas_of(&img, &[0x100]);
+    let mut twin = func_at(&a, 0x100).clone();
+    twin.entry_mode = 3;
+    a.functions.push(twin.clone());
+    let base = func_at(&a, 0x100).clone();
+    assert_eq!(base.shape_hash, twin.shape_hash);
+
+    let with_mode = |mode: Option<u8>| {
+        let mut r = row("f", &base, false, None);
+        r.mode = mode;
+        match_recipe(&a, &recipe(vec![r]))
+    };
+    // No mode: any candidate; the lowest entry (then lowest mode order) wins.
+    assert_eq!(with_mode(None).matched.len(), 1);
+    assert_eq!(with_mode(None).matched[0].candidates, 2);
+    let m0 = with_mode(Some(base.entry_mode));
+    let m3 = with_mode(Some(3));
+    assert_eq!(
+        a.functions[m0.matched[0].function as usize].entry_mode,
+        base.entry_mode
+    );
+    assert_eq!(a.functions[m3.matched[0].function as usize].entry_mode, 3);
+    assert_ne!(m0.matched[0].function, m3.matched[0].function);
+    // A mode no function was entered in: unmatched, whatever the shape says.
+    assert_eq!(with_mode(Some(4)).unmatched, ["f"]);
 }

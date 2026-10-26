@@ -461,6 +461,7 @@ mod tests {
             id: "t".into(),
             engine: "t".into(),
             functions: vec![rf_rebuild::RecipeFunction {
+        mode: None,
                 confidence: None,
                 name: "sled".into(),
                 shape_hash: f.shape_hash,

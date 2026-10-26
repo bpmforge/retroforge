@@ -19,6 +19,7 @@
 //! shape_hash = "0x0123456789abcdef"    # required
 //! exact_hash = "0xfedcba9876543210"    # optional: raises confidence
 //! address_hint = 0x8E19                # optional: CPU entry on the observed dump
+//! mode = 3                             # optional: 65816 entry mode (W36-10), 0..=4
 //! hooks = ["entry", "exit"]            # which sides a hook may attach to
 //! confidence = 90                      # optional, percent: machine-made names
 //! source = "observed: NMI vector target of a 1-1 recording"   # required
@@ -88,6 +89,11 @@ pub enum RecipeError {
         why: &'static str,
     },
     DuplicatePatch(String),
+    /// A `mode` above 4 (the 65816 has five decode modes).
+    BadMode {
+        function: String,
+        value: u8,
+    },
     /// A `confidence` above 100 (it is a percentage).
     BadConfidence {
         function: String,
@@ -123,6 +129,10 @@ impl std::fmt::Display for RecipeError {
             Self::DuplicateFunction(n) => write!(f, "function `{n}` appears twice"),
             Self::BadPatch { patch, why } => write!(f, "[[patch]] `{patch}`: {why}"),
             Self::DuplicatePatch(n) => write!(f, "patch `{n}` appears twice"),
+            Self::BadMode { function, value } => write!(
+                f,
+                "function `{function}`: mode {value} is not a decode mode (0..=4)"
+            ),
             Self::BadConfidence { function, value } => write!(
                 f,
                 "function `{function}`: confidence {value} is not a percentage (0-100)"
@@ -161,6 +171,7 @@ struct FunctionRow {
     shape_hash: String,
     exact_hash: Option<String>,
     address_hint: Option<u32>,
+    mode: Option<u8>,
     #[serde(default)]
     hooks: Vec<String>,
     source: Option<String>,
@@ -252,6 +263,12 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
                 }
             }
         }
+        if let Some(m) = row.mode.filter(|&m| m > 4) {
+            return Err(RecipeError::BadMode {
+                function: row.name,
+                value: m,
+            });
+        }
         if let Some(c) = row.confidence.filter(|&c| c > 100) {
             return Err(RecipeError::BadConfidence {
                 function: row.name,
@@ -259,6 +276,7 @@ pub fn load_recipe_str(text: &str) -> Result<Recipe, RecipeError> {
             });
         }
         functions.push(RecipeFunction {
+            mode: row.mode,
             confidence: row.confidence,
             shape_hash: parse_hash(&row.name, "shape_hash", &row.shape_hash)?,
             exact_hash: row
@@ -349,6 +367,9 @@ fn write_function(out: &mut String, f: &RecipeFunction) {
     }
     if let Some(a) = f.address_hint {
         let _ = writeln!(out, "address_hint = {a:#06x}");
+    }
+    if let Some(m) = f.mode {
+        let _ = writeln!(out, "mode = {m}");
     }
     let mut hooks = Vec::new();
     if f.hooks.entry {
@@ -522,6 +543,28 @@ mod tests {
             ("wide", "tick", 41, 0xF0)
         );
         assert_eq!(r.mods(), ["wide"]);
+    }
+
+    #[test]
+    fn an_entry_mode_reads_writes_and_is_range_checked() {
+        let with_mode = GOOD.replace(
+            "address_hint = 0x8E19\n",
+            "address_hint = 0x8E19\n        mode = 3\n",
+        );
+        let r = load_recipe_str(&with_mode).expect("parses");
+        assert_eq!(r.functions[0].mode, Some(3));
+        assert_eq!(r.functions[1].mode, None);
+        let text = recipe_to_toml(&r);
+        assert_eq!(
+            text.matches("mode = 3").count(),
+            1,
+            "only the row that has one"
+        );
+        assert_eq!(load_recipe_str(&text), Ok(r));
+        assert!(matches!(
+            load_recipe_str(&with_mode.replace("mode = 3", "mode = 5")),
+            Err(RecipeError::BadMode { value: 5, .. })
+        ));
     }
 
     #[test]
