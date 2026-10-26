@@ -38,6 +38,10 @@ rf-cart = { path = "../rf-cart" }
 rf-cache = { path = "../rf-cache" }
 sha2 = "0.11"
 toml = "1"
+# zip: W37-00 reads the `.bk2` / `.lsmv` movie archives (src/movie). Same pin as
+# crates/retroforge, promoted from dev-dependencies (tests/alter_ego_replay.rs and
+# the ROM loaders in tests still use it); archives are untrusted, see movie::open_member.
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
@@ -72,15 +76,6 @@ rf-renderer = { path = "../rf-renderer" }
 # through it rather than inventing a second input-log serialization. Test-only
 # (no rf-harness binary or library API touches a replay log).
 rf-input = { path = "../rf-input" }
-# zip: unpack the fetched `alter_ego.zip` for tests/alter_ego_replay.rs
-# (ticket W2-11) -- see docs/TECH_STACK.md §2's Archive row (amended by this
-# ticket) for why a second, test-only home for this dependency doesn't
-# reopen the "keep it out of the NES core" reasoning that keeps it out of
-# rf-cart, and crates/retroforge/src/rom_open.rs's module doc for the
-# untrusted-zip posture this reuses. Same version/feature pin as
-# crates/retroforge's Cargo.toml -- deliberately not a second TECH_STACK
-# decision.
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "fetch-test-roms"
