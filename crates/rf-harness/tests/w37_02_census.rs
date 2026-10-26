@@ -559,7 +559,8 @@ fn shuffled<T: Clone>(items: &[T], seed: u64) -> Vec<T> {
 
 struct Job {
     path: PathBuf,
-    /// Selected because it carries a coprocessor, not by the sample.
+    /// Selected because it carries a coprocessor, or a mapper the sample
+    /// missed, not by the sample.
     forced: bool,
 }
 
@@ -573,6 +574,39 @@ fn select(seed: u64, nes_n: usize, snes_n: usize) -> Vec<Job> {
             forced: false,
         })
         .collect();
+    // Every mapper the sample missed still gets up to three boards (seeded),
+    // so each `prg_rom_offset` implementation meets a real cartridge.
+    let nes_mapper = |p: &Path| -> Option<u16> {
+        match rf_cart::Cartridge::load(&rom_bytes(p)?) {
+            Ok(rf_cart::Cartridge::Nes { header, .. }) => Some(header.mapper),
+            _ => None,
+        }
+    };
+    let covered: std::collections::BTreeSet<u16> =
+        jobs.iter().filter_map(|j| nes_mapper(&j.path)).collect();
+    let mut per_mapper: BTreeMap<u16, usize> = BTreeMap::new();
+    let mut extras = Vec::new();
+    for p in shuffled(&nes, seed ^ 0xA5A5)
+        .into_iter()
+        .filter(|p| !jobs.iter().any(|j| &j.path == p))
+    {
+        let Some(m) = nes_mapper(&p).filter(|m| !covered.contains(m)) else {
+            continue;
+        };
+        let n = per_mapper.entry(m).or_default();
+        if *n < 3 {
+            *n += 1;
+            extras.push(Job {
+                path: p,
+                forced: true,
+            });
+        }
+    }
+    if std::env::var("RF_W37_EXTRA_ONLY").is_ok() {
+        println!("extra mapper boards only: {}", extras.len());
+        return extras;
+    }
+    jobs.extend(extras);
     let snes = archives_in(&root().join("snes"));
     let (mut chips, mut plain) = (Vec::new(), Vec::new());
     for p in snes {
@@ -584,7 +618,7 @@ fn select(seed: u64, nes_n: usize, snes_n: usize) -> Vec<Job> {
     }
     println!(
         "library: {} nes archives, {} snes ({} with a coprocessor)",
-        jobs.len().max(nes_n),
+        nes.len(),
         plain.len() + chips.len(),
         chips.len()
     );

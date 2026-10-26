@@ -120,7 +120,7 @@ impl SnesDriver {
             return Err("not a SNES cartridge".to_string());
         };
         let rom_len = raw.len() - if header.had_copier_header { 512 } else { 0 };
-        let isa = Wdc65816::new(header.map_mode, rom_len);
+        let isa = Wdc65816::for_board(header.map_mode, rom_len, header.coprocessor);
         let mut core = SnesCore::load(raw).map_err(|e| e.to_string())?;
         core.reset(ResetKind::Hard);
         let mut reader = DataReader::new(Platform::Snes);
