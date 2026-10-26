@@ -516,7 +516,7 @@ and the matcher are in `rf-rebuild` (`recipe`), the TOML reader/writer is
 
 ```toml
 [recipe]
-format = 1                    # this build reads 1
+format = 1                    # this build reads 1 (see "Format v1" below for older files)
 id = "super-mario-bros"
 engine = "smb1"               # a label for the engine family, not logic
 
@@ -525,14 +525,46 @@ name = "nmi"                  # hooks register by this name
 shape_hash = "0x3f3d315a776a77dd"   # required, quoted hex (u64 does not fit a TOML integer)
 exact_hash = "0xf25cac5c834aa9ee"   # optional; raises match confidence
 address_hint = 0x8082         # optional CPU entry on the observed dump; breaks ties
+entry = "nmi"                 # optional: nmi | irq | reset | brk | call | indirect
+insn_count = 41               # optional: a count (not bytes); bounds the unmatched-reason scan
+mode = 3                      # optional, 65816 only: decode mode the function is entered in (0..=4)
 hooks = ["entry", "exit"]     # sides a hook may attach to (default: both)
+grade = "observed"            # observed | candidate | confirmed
 source = "observed: the atlas function the NMI vector targets in a recording"
 
 [[ram]]
 addr = 0x075a
 width = 1
 name = "lives"
+grade = "confirmed"
 source = "profiles/nes/super-mario-bros/profile.toml [[memory_map]] lives"
+
+[[patch]]                     # W36-06: new byte for one place in a listed function
+name = "spawn-lead"
+mod = "live-enemies"
+function = "tick"             # a [[function]] row with an exact_hash
+offset = 41
+value = 0xf0
+grade = "confirmed"           # a candidate patch is never applied
+source = "observed: ..."
+
+[[object_table]]              # field f of slot i is at base + f + i * stride
+name = "enemies"
+base = 0x000f
+slots = 5
+stride = 1                    # a record per slot: the record size; a column per field: 1
+x_lo = 0x3f2                  # optional field offsets: x_lo x_hi y y_hi type state
+state = 0
+grade = "observed"
+source = "observed: ..."
+
+[[tile]]                      # tile ids first..=last behave as `class`
+class = "solid"               # solid | one_way | water | hazard
+first = 0x10
+last = 0x1f
+layer = 1                     # optional; so is tileset = "name"
+grade = "candidate"
+source = "ai:..."
 ```
 
 **Matching.** A row matches an atlas function by `shape_hash`: the FNV-1a hash
@@ -548,11 +580,55 @@ A row with no candidate is **unmatched**: its hooks are reported inactive and
 the game runs on the generic rebuild and the interpreter. A hook never
 guesses.
 
-Unknown keys, a bad hash, a hook point other than `entry`/`exit`, a duplicate
-function name and a row without `source` are load errors. Hashes depend on
-which blocks the recording reached (a function's extent is what was observed
-plus what static decode adds), so a recipe is made from, and matches best
-against, atlases built from a similar amount of play.
+**Entry kinds.** The atlas records *how* each function was entered
+(`rf_rebuild::entry`): reset, NMI, IRQ or `BRK` vector target, call target,
+indirect target. A row with `entry` only matches functions entered that way.
+That is what tells twin stubs apart (an `nmi` and an `irq` handler with
+identical bytes): two rows with one shape, a compatible `mode` and the same
+(or no) `entry` are *twins* and can only be trusted at their own
+`address_hint`; rows whose `entry` kinds differ are not twins, so a hack that
+moved the stubs still binds `nmi` to whatever its NMI vector reaches. If the
+vector reaches nothing of that shape the row is unmatched. The understand
+pass writes `entry` for a function reached by exactly one interrupt kind.
+
+**Grades.** Every row says how far to trust it:
+
+| grade | meaning |
+|---|---|
+| `observed` | measured by RetroForge tooling on a real run (rule-derived names, RAM seen changing) |
+| `candidate` | proposed by a finder or an AI (`ai:` sources) and not verified |
+| `confirmed` | verified: a lockstep test passed, or a person checked it (patch rows verified by lockstep, RAM profile.toml marks verified) |
+
+The candidate rule: **a candidate row never drives a patch and never drives a
+hook on a host that can write memory.** `resolve_patches` refuses a mod whose
+patch row, or whose target function row, is a candidate
+(`PatchRefusal::Candidate`); `EmuStepper::resolve_hooks` resolves a candidate
+row to nothing when the hook host holds `write_memory`
+(`MatchReport::function_of_writable`). Candidates still match, label and drive
+read-only hooks. Promote a row by editing its grade once it is verified.
+
+**Format v1 (ticket W38-00).** `format = 1` now means the schema above:
+`grade` on every row, `entry` and `insn_count` on function rows, and the
+`[[object_table]]` and `[[tile]]` fact tables. Files written before it use the
+same `format = 1` but have no `grade` keys; the loader accepts them and gives
+each such row `observed` (`candidate` for an `ai:` source), and
+`rf_profiles::recipe_to_toml` writes the grade out. `load_recipe_noted`
+returns how many rows were defaulted (0 = already v1). Unknown keys stay load
+errors. No bytes of the game appear anywhere (law 5, D-021).
+
+**Unmatched reasons.** For a row with `insn_count`, `rf_rebuild::classify_unmatched`
+scans a ROM image (every offset, the row's decode mode, shape hash only) and
+says why the row found nothing: `removed` (no code of that shape anywhere),
+`not_reached` (it exists in bytes the drive never executed) or `changed` (it
+ran, but not as the row's `entry`/`mode` demand). A linear sweep: a function
+laid out in pieces, or edited in place, reads as `removed`.
+
+Unknown keys, a bad hash, a hook point other than `entry`/`exit`, a grade or
+entry kind outside the lists above, a duplicate function name and a row without
+`source` are load errors. Hashes depend on which blocks the recording reached
+(a function's extent is what was observed plus what static decode adds), so a
+recipe is made from, and matches best against, atlases built from a similar
+amount of play.
 
 ## 3. Authoring pipeline
 

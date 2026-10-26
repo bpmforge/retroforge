@@ -294,6 +294,45 @@ struct Row {
     fallback: String,
     nmi: String,
     nmi_ok: bool,
+    /// Rows the pre-W38-00 matcher (no entry kinds) leaves unmatched.
+    unmatched_before: Vec<String>,
+    /// Why each unmatched row is unmatched (W38-00): removed / not_reached /
+    /// changed by a superset scan, or `unscanned` without an insn_count.
+    reasons: Vec<(String, &'static str)>,
+}
+
+/// The unmatched `row`s of `report` classified by a superset scan of the
+/// hack's own image (`raw`, copier header and all) against what `log` ran.
+fn unmatched_reasons(
+    raw: &[u8],
+    log: &rf_core_api::CoverageLog,
+    recipe: &rf_rebuild::Recipe,
+    unmatched: &[String],
+) -> Vec<(String, &'static str)> {
+    let rf_cart::Cartridge::Snes { header, .. } = rf_cart::Cartridge::load(raw).expect("snes")
+    else {
+        panic!("not a SNES image");
+    };
+    let rom = if header.had_copier_header {
+        &raw[512..]
+    } else {
+        raw
+    };
+    let isa = rf_snes::rebuild::Wdc65816::new(header.map_mode, rom.len());
+    let executed = |o: usize| log.prg_flags.get(o).copied().unwrap_or(0) != 0;
+    unmatched
+        .iter()
+        .map(|name| {
+            let row = recipe
+                .functions
+                .iter()
+                .find(|f| &f.name == name)
+                .expect("row");
+            let why = rf_rebuild::classify_unmatched(&isa, rom, &executed, row)
+                .map_or("unscanned", |r| r.as_str());
+            (name.clone(), why)
+        })
+        .collect()
 }
 
 impl Row {
@@ -312,6 +351,8 @@ impl Row {
             fallback: String::new(),
             nmi: String::new(),
             nmi_ok: true,
+            unmatched_before: vec![],
+            reasons: vec![],
         }
     }
 }
@@ -378,7 +419,46 @@ fn analyse(
         fallback: String::new(),
         nmi: String::new(),
         nmi_ok: true,
+        unmatched_before: match_recipe(&atlas, &without_entry_kinds(recipe)).unmatched,
+        reasons: unmatched_reasons(raw, &d.log, recipe, &report.unmatched),
     };
+    println!(
+        "[{label}] before W38-00 (address-hint twins) unmatched {:?}; now unmatched with reasons {:?}",
+        row.unmatched_before, row.reasons
+    );
+    // For a row that insists on an entry kind and found nothing: what the
+    // atlas does hold with that entry kind (addresses, modes and sizes only).
+    for name in &report.unmatched {
+        let Some(want) = recipe.functions.iter().find(|f| &f.name == name) else {
+            continue;
+        };
+        let Some(kind) = want.entry else { continue };
+        let held: Vec<String> = atlas
+            .functions
+            .iter()
+            .filter(|f| f.entry_kinds & kind.bit() != 0)
+            .map(|f| {
+                format!(
+                    "{:#08x} mode {} {} insns {} bytes shape {}",
+                    f.entry_cpu,
+                    f.entry_mode,
+                    f.insn_count,
+                    f.byte_len,
+                    if f.shape_hash == want.shape_hash {
+                        "same"
+                    } else {
+                        "differs"
+                    }
+                )
+            })
+            .collect();
+        println!(
+            "[{label}]   `{name}` wants entry {} (mode {:?}, {:?} insns); the atlas holds: {held:?}",
+            kind.as_str(),
+            want.mode,
+            want.insn_count
+        );
+    }
     println!(
         "[{label}] atlas {} functions; recipe rows: {exact} exact, {shape} by shape, {} unmatched {:?}",
         atlas.functions.len(),
@@ -474,6 +554,16 @@ fn analyse(
     row
 }
 
+/// `recipe` as the format read before entry kinds: the twin rule falls back to
+/// address hints alone.
+fn without_entry_kinds(recipe: &rf_rebuild::Recipe) -> rf_rebuild::Recipe {
+    let mut r = recipe.clone();
+    for f in &mut r.functions {
+        f.entry = None;
+    }
+    r
+}
+
 fn print_table(rows: &[Row]) {
     println!("\n| hack | patch | ROM | gameplay | atlas fns | exact | shape | none | lockstep | fallback | nmi hook |");
     for r in rows {
@@ -494,8 +584,8 @@ fn print_table(rows: &[Row]) {
     }
     for r in rows {
         println!(
-            "{}: matched {:?}; unmatched {:?}",
-            r.label, r.matched_names, r.unmatched
+            "{}: matched {:?}; unmatched {:?}; unmatched before entry kinds {:?}; reasons {:?}",
+            r.label, r.matched_names, r.unmatched, r.unmatched_before, r.reasons
         );
     }
 }
