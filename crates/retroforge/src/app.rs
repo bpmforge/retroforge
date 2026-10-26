@@ -15501,6 +15501,14 @@ impl RetroForgeApp {
         (self.running, self.show_overlay_menu)
     }
 
+    /// Ticket W37-03 test hook: step one frame, as the Step Frame button does.
+    #[doc(hidden)]
+    pub fn step_frame_for_test(&mut self) {
+        self.running = false;
+        self.awaiting_stepped_frame = true;
+        self.send_command(CoreCommand::StepFrame);
+    }
+
     /// Pause the core, as the Pause button does (ticket W13-02d).
     #[doc(hidden)]
     pub fn pause_for_test(&mut self) {
