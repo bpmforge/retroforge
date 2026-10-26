@@ -148,3 +148,90 @@ pub fn sample_lines(run: &NamingRun) -> Vec<String> {
         })
         .collect()
 }
+
+/// FNV-1a over what a frame's machine state exposes: work RAM, VRAM, palette
+/// RAM, OAM and the CPU registers.
+fn state_print<C: rf_core_api::EmulatorCore>(c: &C) -> u64 {
+    let v = c.state_view();
+    let regs = format!("{:?}", v.cpu_regs);
+    [v.wram, v.vram, v.cgram, v.oam, regs.as_bytes()]
+        .iter()
+        .flat_map(|s| s.iter())
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
+/// Run `inputs` through a plain core (`run_frame`, atlas installed) and through
+/// a second one under the understand-pass observer, and compare the state
+/// they end in. This is what makes "the observed run is the game" a measured
+/// fact on a real cartridge rather than a claim: the lockstep checker proves
+/// hooks change nothing, and this proves the observer's frame loop does not
+/// either.
+///
+/// # Errors
+/// The cartridge or atlas does not load; `Ok(false)` means the end states
+/// differ.
+pub fn observed_matches_plain_nes(
+    raw: &[u8],
+    atlas: &Atlas,
+    inputs: &[InputFrame],
+) -> Result<bool, String> {
+    let mut plain = NesCore::from_ines_bytes(raw).map_err(|e| format!("{e:?}"))?;
+    plain.reset(ResetKind::Hard);
+    plain
+        .set_rebuild(Some(atlas.clone()))
+        .map_err(|e| format!("{e:?}"))?;
+    let mut watched = NesCore::from_ines_bytes(raw).map_err(|e| format!("{e:?}"))?;
+    watched.reset(ResetKind::Hard);
+    for i in inputs {
+        plain.run_frame(i, &mut InertSink);
+    }
+    observe(
+        &mut watched,
+        Platform::Nes,
+        atlas,
+        inputs.iter().copied(),
+        |_, _, _| {},
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(state_print(&plain) == state_print(&watched))
+}
+
+/// [`observed_matches_plain_nes`] for a SNES image (the pad words are latched
+/// into the bus before each frame, as the app does).
+///
+/// # Errors
+/// As the NES one.
+pub fn observed_matches_plain_snes(
+    raw: &[u8],
+    atlas: &Atlas,
+    inputs: &[InputFrame],
+) -> Result<bool, String> {
+    let latch = |c: &mut SnesCore, input: &InputFrame| {
+        let ports = &mut c.system_mut().bus.joypads.ports;
+        for (slot, word) in ports.iter_mut().zip(input.ports) {
+            *slot = word;
+        }
+    };
+    let mut plain = SnesCore::load(raw).map_err(|e| e.to_string())?;
+    plain.reset(ResetKind::Hard);
+    plain
+        .set_rebuild(Some(atlas.clone()))
+        .map_err(|e| format!("{e:?}"))?;
+    let mut watched = SnesCore::load(raw).map_err(|e| e.to_string())?;
+    watched.reset(ResetKind::Hard);
+    for i in inputs {
+        latch(&mut plain, i);
+        plain.run_frame(i, &mut InertSink);
+    }
+    observe(
+        &mut watched,
+        Platform::Snes,
+        atlas,
+        inputs.iter().copied(),
+        |c, _, input| latch(c, input),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(state_print(&plain) == state_print(&watched))
+}

@@ -180,6 +180,14 @@ fn smw_yoshis_island_one_names_by_rules_and_inert_hooks_keep_lockstep_green() {
     for l in understand::sample_lines(&run_out) {
         println!("{l}");
     }
+    // The observer's frame loop is the game's: same end state as run_frame.
+    let all_inputs = inputs(&pad);
+    assert_eq!(
+        understand::observed_matches_plain_snes(&raw, &atlas, &all_inputs),
+        Ok(true),
+        "the observed run ends where a plain run ends"
+    );
+    println!("observed run == plain run over {} frames", all_inputs.len());
     let names: Vec<&str> = run_out.proposals.iter().map(|p| p.name.as_str()).collect();
     for want in ["reset", "nmi"] {
         assert!(names.contains(&want), "{want} not named: {names:?}");
