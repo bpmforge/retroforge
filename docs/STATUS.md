@@ -4834,3 +4834,14 @@ stories, 10 decisions).
   opt-in Claude naming (facts only), limits, and the clean-room rules
   (D-024..D-028). Docs-only; docs-gate OK; no code changed since the
   3584-passing gate.
+
+- **W36-12 — 6502 IR, IR interpreter, Rust dev emitter, Amdahl bench**
+  (2026-10-26). Measured ceiling: on a flat bus the CPU work is 5.7-6.5% of a
+  real frame (SMB 6.3%), so any tier that keeps the per-cycle device stream can
+  gain at most ~1.07x. The IR (explicit bus cycles, ALU ops, flags; 236
+  opcodes lowered, 20 interpreted) runs inside run_cycled and matches exactly:
+  nes6502 vectors 2,555,578 of 2,560,000 (the 4,422 LXA cases fail identically
+  on the interpreter), nestest 8,991/8,991, all 32 SMB levels in lockstep with
+  zero divergence. It is 12-15% slower than the interpreter. The Rust emitter
+  output for RF-Scroller compiles. Cranelift (W36-12b) awaits Brad's call
+  (park / build / scheduler instead). Workspace: **3596 passing**.
