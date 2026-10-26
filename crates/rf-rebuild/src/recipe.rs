@@ -16,7 +16,9 @@
 //! [`crate::Function::byte_hash`] are preferred and the match is
 //! [`Confidence::Exact`]. Several candidates left: the one whose entry
 //! address is nearest the row's address hint wins (no hint: the lowest
-//! entry). A row that carries an entry `mode` (65816 recipes) only considers
+//! entry). Two rows of one recipe that share a shape (and could share a mode)
+//! cannot be told apart by their bytes; each then matches only the function at
+//! its own address hint. A row that carries an entry `mode` (65816 recipes) only considers
 //! functions entered in that mode. No candidate: the row is **unmatched**, the game keeps running on
 //! the generic rebuild and the interpreter, and the row's hooks are inactive.
 
@@ -159,6 +161,9 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
             .enumerate()
             .filter(|(_, f)| f.shape_hash == row.shape_hash)
             .filter(|(_, f)| row.mode.is_none_or(|m| f.entry_mode == m))
+            // Rows nothing but an address tells apart (see `twins`) match
+            // only the function at their hint: never a look-alike elsewhere.
+            .filter(|(_, f)| !twins(recipe, row) || row.address_hint == Some(f.entry_cpu))
             .map(|(i, f)| (i as u32, f))
             .collect();
         let exact: Vec<(u32, &crate::atlas::Function)> = row
@@ -193,6 +198,18 @@ pub fn match_recipe(atlas: &Atlas, recipe: &Recipe) -> MatchReport {
         }
     }
     report
+}
+
+/// Whether another row of `recipe` has this row's shape hash and could be
+/// entered in the same mode. Their bytes agree (a pair of interrupt stubs, say),
+/// so a ROM where one of them changed would hand its name to the other; such
+/// rows are only trusted at the address they were observed at (ticket W36-10).
+fn twins(recipe: &Recipe, row: &RecipeFunction) -> bool {
+    recipe.functions.iter().any(|o| {
+        o.name != row.name
+            && o.shape_hash == row.shape_hash
+            && (o.mode.is_none() || row.mode.is_none() || o.mode == row.mode)
+    })
 }
 
 /// A patch row placed at a byte of the PRG image.

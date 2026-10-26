@@ -354,3 +354,32 @@ fn an_entry_mode_picks_between_functions_of_one_shape() {
     // A mode no function was entered in: unmatched, whatever the shape says.
     assert_eq!(with_mode(Some(4)).unmatched, ["f"]);
 }
+
+#[test]
+fn rows_with_one_shape_match_only_at_their_own_address() {
+    // Two rows nothing but an address tells apart (a pair of identical
+    // interrupt stubs): where one moved, it must not be handed to the other.
+    let mut obs = vec![0u8; 0x1000];
+    put_fn(&mut obs, 0x100, 0x0A);
+    let f = func_at(&atlas_of(&obs, &[0x100]), 0x100).clone();
+    let a = row("a", &f, true, Some(0x8100));
+    let b = row("b", &f, true, Some(0x8300));
+    let r = recipe(vec![a, b]);
+
+    // Same ROM: `a` is where it was observed; `b`'s twin is not at 0x8300.
+    let same = match_recipe(&atlas_of(&obs, &[0x100]), &r);
+    assert_eq!(same.matched.len(), 1);
+    assert_eq!(same.matched[0].name, "a");
+    assert_eq!(same.unmatched, ["b"]);
+
+    // The function moved: neither row is at its hint, so neither guesses.
+    let mut moved = vec![0u8; 0x1000];
+    put_fn(&mut moved, 0x500, 0x0A);
+    let m = match_recipe(&atlas_of(&moved, &[0x500]), &r);
+    assert!(m.matched.is_empty(), "{m:?}");
+
+    // A lone row still follows a move (the W36-05 behaviour).
+    let lone = recipe(vec![row("a", &f, false, Some(0x8100))]);
+    let m = match_recipe(&atlas_of(&moved, &[0x500]), &lone);
+    assert_eq!(m.matched.len(), 1);
+}
