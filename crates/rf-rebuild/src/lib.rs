@@ -42,6 +42,8 @@ pub use recipe::{
 };
 pub use superset::{superset_decode, Superset};
 pub use verify::{
-    Verification, VerifyRecord, PROVEN_FRAMES, PROVEN_RUNS, VERIFY_ASSET, VERIFY_SETTINGS,
+    decode_demoted, demoted_ids, encode_demoted, function_key, FunctionKey, Verification,
+    VerifyRecord, DEMOTED_ASSET, DEMOTED_SETTINGS, PROVEN_FRAMES, PROVEN_RUNS, VERIFY_ASSET,
+    VERIFY_SETTINGS,
 };
 pub use windows::WindowIndex;

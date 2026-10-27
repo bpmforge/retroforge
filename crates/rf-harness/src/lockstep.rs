@@ -489,14 +489,14 @@ pub(crate) fn run_machine<M: LockstepMachine>(
 }
 
 /// What the re-run of the diverging frame produced.
-struct Investigation {
+pub(crate) struct Investigation {
     /// The plain core serialised at the start of the diverging frame.
-    state: Result<Vec<u8>, String>,
-    fine: Option<FineDivergence>,
+    pub(crate) state: Result<Vec<u8>, String>,
+    pub(crate) fine: Option<FineDivergence>,
     /// The rebuilt core's last executed steps at the point of divergence.
-    trace: Vec<TraceLine>,
-    wram_plain: Vec<u8>,
-    wram_rebuilt: Vec<u8>,
+    pub(crate) trace: Vec<TraceLine>,
+    pub(crate) wram_plain: Vec<u8>,
+    pub(crate) wram_rebuilt: Vec<u8>,
 }
 
 fn investigate<M: LockstepMachine>(
@@ -558,7 +558,7 @@ fn investigate<M: LockstepMachine>(
 /// Step both cores one instruction at a time through one frame; the first
 /// instruction after which registers, cycle count or WRAM differ is the
 /// answer. Law 8: the loop is a bounded `for`.
-fn fine_pass<M: LockstepMachine>(
+pub(crate) fn fine_pass<M: LockstepMachine>(
     plain: &mut M,
     rebuilt: &mut M,
     input: &InputFrame,
@@ -658,6 +658,38 @@ fn write_bundle<M: LockstepMachine>(
     inv: &Investigation,
     opts: &Options<'_, M>,
 ) -> (Vec<String>, Vec<String>) {
+    let shape = BundleShape {
+        first_frame: 0,
+        input_tail: opts.input_tail,
+        trace_len: opts.trace_len,
+        fine: opts.fine,
+        live: false,
+    };
+    write_bundle_shaped::<M>(dir, raw, inputs, d, inv, &shape)
+}
+
+/// What a bundle's text says about where it came from (ticket W37-04: the
+/// shadow core writes the same bundle from a live session).
+pub(crate) struct BundleShape {
+    /// Frame number of `inputs[0]`; the harness counts from power-on (0),
+    /// a live session passes the first frame of its input tail.
+    pub(crate) first_frame: u32,
+    pub(crate) input_tail: usize,
+    pub(crate) trace_len: usize,
+    /// Whether the instruction-level pass was attempted.
+    pub(crate) fine: bool,
+    /// A live session, not a run from power-on: the README says so.
+    pub(crate) live: bool,
+}
+
+pub(crate) fn write_bundle_shaped<M: LockstepMachine>(
+    dir: &Path,
+    raw: &[u8],
+    inputs: &[InputFrame],
+    d: &Divergence,
+    inv: &Investigation,
+    opts: &BundleShape,
+) -> (Vec<String>, Vec<String>) {
     let files = Vec::new();
     let errors = Vec::new();
     if let Err(e) = std::fs::create_dir_all(dir) {
@@ -669,23 +701,18 @@ fn write_bundle<M: LockstepMachine>(
     if let Ok(b) = &inv.state {
         put("plain_state_before_frame.rfstate", b);
     }
-    let first = (d.frame as usize).saturating_sub(opts.input_tail);
+    // Index of the diverging frame within `inputs`.
+    let at = d.frame.saturating_sub(opts.first_frame) as usize;
+    let first = at.saturating_sub(opts.input_tail);
     let mut text = String::from("frame port0 port1 (hex)\n");
-    for (i, input) in inputs
-        .iter()
-        .enumerate()
-        .take(d.frame as usize + 1)
-        .skip(first)
-    {
-        let mark = if i == d.frame as usize {
-            "  <-- diverging"
-        } else {
-            ""
-        };
+    for (i, input) in inputs.iter().enumerate().take(at + 1).skip(first) {
+        let mark = if i == at { "  <-- diverging" } else { "" };
         let _ = writeln!(
             text,
-            "{i} {:04x} {:04x}{mark}",
-            input.ports[0], input.ports[1]
+            "{} {:04x} {:04x}{mark}",
+            u64::from(opts.first_frame) + i as u64,
+            input.ports[0],
+            input.ports[1]
         );
     }
     put("inputs.txt", text.as_bytes());
@@ -734,10 +761,16 @@ fn write_bundle<M: LockstepMachine>(
         put("wram_plain.bin", &inv.wram_plain);
         put("wram_rebuilt.bin", &inv.wram_rebuilt);
     }
+    let origin = if opts.live {
+        "0-based, the live session's frame counter; the .rfstate below is the machine at the \
+         start of that frame, so replay from it, not from power-on"
+    } else {
+        "0-based, counted from power-on, Hard reset"
+    };
     let readme = format!(
-        "RetroForge lockstep repro bundle (ticket W36-04, {})\n\
+        "RetroForge lockstep repro bundle (ticket {}, {})\n\
          ROM sha256 (normalised): {}\n\
-         Diverging frame: {} (0-based, counted from power-on, Hard reset)\n\n\
+         Diverging frame: {} ({origin})\n\n\
          plain_state_before_frame.rfstate  the plain core at the start of that frame (.rfstate)\n\
          inputs.txt                        last {} input frames and the diverging one\n\
          trace.txt                         rebuilt core's last {} executed steps with atlas function ids\n\
@@ -746,6 +779,7 @@ fn write_bundle<M: LockstepMachine>(
          Replay: load the state in the app against the same ROM, feed inputs.txt from the\n\
          diverging frame with an atlas installed, and compare against a plain core.\n\
          No ROM bytes are in this bundle.\n",
+        if opts.live { "W37-04" } else { "W36-04" },
         M::CONSOLE,
         M::rom_sha256(raw),
         d.frame,

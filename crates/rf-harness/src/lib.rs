@@ -45,6 +45,7 @@ pub mod movie;
 pub mod movie_replay;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
+pub mod shadow;
 mod tolerance;
 pub mod understand;
 mod vector_json;

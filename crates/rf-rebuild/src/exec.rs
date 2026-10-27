@@ -179,6 +179,11 @@ pub struct RebuildExec {
     /// Ticket W36-05: bitset over function ids of the hooked entries.
     hooked: Vec<u64>,
     hooked_count: u32,
+    /// Ticket W37-04: bitset over function ids the shadow-core check has
+    /// demoted. A node of a demoted function dispatches as
+    /// [`Dispatch::Fallback`], so the plain interpreter runs it.
+    demoted: Vec<u64>,
+    demoted_count: u32,
     /// Hooked calls in flight, outermost first.
     frames: Vec<Frame>,
     frames_dropped: u64,
@@ -290,6 +295,8 @@ impl RebuildExec {
             site_targets,
             hooked: Vec::new(),
             hooked_count: 0,
+            demoted: Vec::new(),
+            demoted_count: 0,
             frames: Vec::new(),
             frames_dropped: 0,
             events: Vec::new(),
@@ -458,6 +465,16 @@ impl RebuildExec {
             };
             self.trace_push(bank, pc, mode, marker);
         }
+        // Ticket W37-04: one bitset load per atlas hit, and nothing at all
+        // while no function is demoted. The trace above still names the
+        // function (it records what the atlas knew); only the answer changes.
+        let demoted = self.demoted_count > 0
+            && node.is_some_and(|(_, nd)| nd.function != u32::MAX && self.is_demoted(nd.function));
+        if demoted {
+            self.stats.fallback += 1;
+            self.stats.fallback_demoted += 1;
+            return Dispatch::Fallback;
+        }
         match node {
             Some((n, nd)) => {
                 match nd.prov {
@@ -556,6 +573,30 @@ impl RebuildExec {
     #[must_use]
     pub fn hooks_active(&self) -> bool {
         self.hooked_count > 0
+    }
+
+    /// Ticket W37-04: choose the functions the plain interpreter runs instead
+    /// (`ids` index [`Atlas::functions`]; out-of-range ids are ignored).
+    /// Replaces any earlier set. Returns how many ids took.
+    pub fn set_demoted(&mut self, ids: &[u32]) -> usize {
+        let n = self.atlas.functions.len();
+        self.demoted = vec![0; n.div_ceil(64)];
+        self.demoted_count = 0;
+        for &id in ids.iter().filter(|&&id| (id as usize) < n) {
+            let (w, b) = (id as usize / 64, id % 64);
+            if self.demoted[w] & (1 << b) == 0 {
+                self.demoted[w] |= 1 << b;
+                self.demoted_count += 1;
+            }
+        }
+        self.demoted_count as usize
+    }
+
+    #[inline]
+    fn is_demoted(&self, function: u32) -> bool {
+        self.demoted
+            .get(function as usize / 64)
+            .is_some_and(|w| w & (1 << (function % 64)) != 0)
     }
 
     #[inline]
@@ -1122,5 +1163,34 @@ mod tests {
         x.check_target(node, site, ram(0x7E));
         x.check_target(node, site, ram(0x7F));
         assert_eq!(x.stats().dispatch_misses, 3);
+    }
+    /// Ticket W37-04: a demoted function's instructions dispatch as plain
+    /// fallback (counted apart), every other function is untouched, and an
+    /// empty set restores them.
+    #[test]
+    fn a_demoted_function_dispatches_as_fallback_and_others_do_not() {
+        let mut x = RebuildExec::new(hook_atlas());
+        // Function 1's two instructions are at ROM 0x20 and 0x21.
+        assert!(matches!(
+            x.dispatch(0x8020, Some(0x20)),
+            Dispatch::Atlas { .. }
+        ));
+        assert_eq!(x.set_demoted(&[1, 1, 99]), 1, "dup and out-of-range ids");
+        assert_eq!(x.dispatch(0x8020, Some(0x20)), Dispatch::Fallback);
+        assert_eq!(x.dispatch(0x8021, Some(0x21)), Dispatch::Fallback);
+        assert!(matches!(
+            x.dispatch(0x8010, Some(0x10)),
+            Dispatch::Atlas { .. }
+        ));
+        let s = x.stats();
+        assert_eq!(s.fallback_demoted, 2);
+        assert_eq!(s.fallback, 2);
+        assert_eq!(s.fallback_no_node, 0, "demoted is not 'no node'");
+        assert_eq!(s.fallback_width, 0);
+        assert_eq!(x.set_demoted(&[]), 0);
+        assert!(matches!(
+            x.dispatch(0x8020, Some(0x20)),
+            Dispatch::Atlas { .. }
+        ));
     }
 }

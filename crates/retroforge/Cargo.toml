@@ -32,6 +32,16 @@ rf-cart = { path = "../rf-cart" }
 # only layer that may know both a core's state regions and rf-state's chunk
 # tags, since core crates may not depend on rf-state (validate-arch.sh).
 rf-state = { path = "../rf-state" }
+# rf-harness: promoted from a dev-dependency by ticket W37-04. The shadow-core
+# check runs the harness's own lockstep comparison, instruction-level re-run
+# and repro bundle (`rf_harness::shadow`) on the player's live cores instead
+# of rewriting them. Still the dev-dependency's old users too: W36-05's SMB
+# acceptance drives the lockstep checker, and the repro-bundle test loads its
+# `.rfstate` through this crate's own loader. Layering: rf-harness and
+# retroforge are the two crates `scripts/validate-arch.sh` rule 3 lets touch
+# rf-nes/rf-snes, and rf-harness depends only on layers below this one. It
+# also compiles the test-ROM downloader, which nothing in the app calls.
+rf-harness = { path = "../rf-harness" }
 # rf-audio: ring, dynamic rate control and the output-stage filters
 # (ticket W2-05). The `device` feature (cpal) is enabled by the binary, not
 # here, so `cargo test --workspace` needs no ALSA headers.
@@ -142,9 +152,6 @@ serde = { version = "1", features = ["derive"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
 
 [dev-dependencies]
-# rf-harness: W36-05's SMB acceptance drives the lockstep checker, and the
-# repro-bundle test loads its `.rfstate` through this crate's own loader.
-rf-harness = { path = "../rf-harness" }
 
 # egui_kittest: the headless UI-test harness for ticket W4-09's CI smoke
 # flow. Same repo and release train as egui itself (emilk/egui), published

@@ -514,6 +514,17 @@ impl SnesCore {
             .map_or(&[], rf_rebuild::RebuildExec::deltas)
     }
 
+    /// Ticket W37-04: run these atlas functions on the plain interpreter
+    /// (`ids` index the installed atlas's function list; ids belong to one
+    /// atlas, so call again after every [`Self::set_rebuild`]). Returns how
+    /// many took; `0` with no atlas installed.
+    pub fn set_rebuild_demoted(&mut self, ids: &[u32]) -> usize {
+        self.system
+            .rebuild
+            .as_deref_mut()
+            .map_or(0, |x| x.set_demoted(ids))
+    }
+
     /// Keep the last `capacity` executed steps on the rebuilt path (repro
     /// bundles); `0` turns it off. No effect while Rebuild is off.
     pub fn set_rebuild_trace(&mut self, capacity: usize) {
