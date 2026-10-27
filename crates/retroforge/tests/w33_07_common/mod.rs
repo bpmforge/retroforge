@@ -139,6 +139,7 @@ impl Rig {
         let mut finder = ScoutFinder::new(len, if snes { 2 } else { 1 });
         if !snes {
             finder.set_save_ram_from(0x800);
+            finder.set_no_gate(retroforge::scout_find::NES_STACK_PAGE);
         }
         Some(Self {
             st,
@@ -314,6 +315,8 @@ impl Rig {
         self.finder = ScoutFinder::new(len, if self.snes { 2 } else { 1 });
         if !self.snes {
             self.finder.set_save_ram_from(0x800);
+            self.finder
+                .set_no_gate(retroforge::scout_find::NES_STACK_PAGE);
         }
         self.lag = ScrollLag::default();
         self.last_scene = None;

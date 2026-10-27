@@ -28,6 +28,9 @@ use crate::stepper::{EmuStepper, MachineSnapshot};
 const SEARCH_SNES: usize = 0x2000;
 /// The NES's 2 KiB and the cartridge's 8 KiB RAM window.
 const SEARCH_NES: usize = 0x0800 + 0x2000;
+/// W37-03b: the 6502's stack page (nesdev "CPU memory map"), which no start gate is taken from
+/// (`ScoutFinder::set_no_gate`).
+pub const NES_STACK_PAGE: std::ops::Range<usize> = 0x0100..0x0200;
 /// How often the finder's verdict is looked at.
 const LOOK_EVERY: u64 = 30;
 /// Frames the pad must have been idle before the trials start.
@@ -148,6 +151,7 @@ impl ScoutFind {
         if !snes {
             // The NES search space is the 2 KB of work RAM, then the cartridge's 8 KB.
             finder.set_save_ram_from(0x800);
+            finder.set_no_gate(NES_STACK_PAGE);
         }
         Self {
             finder,

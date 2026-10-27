@@ -627,6 +627,8 @@ pub struct ScoutFinder {
     /// W35-11: the first offset of battery-backed memory (a save file, not the game's state): no
     /// gate is taken from it. `usize::MAX`: none.
     save_ram_from: usize,
+    /// W37-03b: offsets no gate is taken from (the CPU's stack page). Empty: none.
+    no_gate: std::ops::Range<usize>,
     cut_key: Option<u64>,
     cut_ring: std::collections::VecDeque<Vec<u8>>,
     settle_start: Option<u64>,
@@ -730,6 +732,7 @@ impl ScoutFinder {
             preludes: HashMap::new(),
             press_snap: HashMap::new(),
             save_ram_from: usize::MAX,
+            no_gate: 0..0,
             cut_key: None,
             cut_ring: std::collections::VecDeque::new(),
             settle_start: None,
@@ -758,6 +761,15 @@ impl ScoutFinder {
     /// player's own (a gate read there would not open for another save).
     pub fn set_save_ram_from(&mut self, offset: usize) {
         self.save_ram_from = offset;
+    }
+
+    /// W37-03b: no gate is taken from the offsets in `range`. For the NES this is the 6502's
+    /// stack page, `$0100-$01FF` (nesdev "CPU memory map"): a byte there is a return address or a
+    /// saved register, which reads one value on every level frame of one player's session (the
+    /// same calls in the same order) and another for the next player. (Not the SNES: the 65816's
+    /// stack is wherever the game puts it, and Super Mario World keeps its game mode at `$0100`.)
+    pub fn set_no_gate(&mut self, range: std::ops::Range<usize>) {
+        self.no_gate = range;
     }
 
     /// Frames fed so far.
@@ -1912,7 +1924,7 @@ impl ScoutFinder {
             .map(|(_, h)| h)
             .collect();
         let mut out: Vec<(GateCandidate, (bool, u32))> = Vec::new();
-        for b in 0..self.len.min(self.save_ram_from) {
+        for b in (0..self.len.min(self.save_ram_from)).filter(|b| !self.no_gate.contains(b)) {
             let row = b * 256..b * 256 + 256;
             let tallies = self.played_tallies(b, None);
             let Some(play) = union_set(&tallies) else {
@@ -2251,7 +2263,7 @@ impl ScoutFinder {
             .collect();
         let level_zone = self.scene_zone.get(level_key).copied().unwrap_or(0);
         let mut out = Vec::new();
-        for b in 0..self.len {
+        for b in (0..self.len).filter(|b| !self.no_gate.contains(b)) {
             let bins = &level.bins[b * 256..b * 256 + 256];
             let Some((mode, &count)) = bins.iter().enumerate().max_by_key(|(v, c)| (**c, *v))
             else {
@@ -3588,6 +3600,16 @@ mod tests {
         assert!(!f.open_in_every_played_scene(&narrow));
         let widened = f.widened(narrow).expect("a set covers both");
         assert!(widened.holds(3) && widened.holds(8));
+    }
+
+    #[test]
+    fn no_gate_is_taken_from_the_offsets_set_aside() {
+        // W37-03b: the mode byte is a gate until its offset is set aside (as the NES stack page is).
+        let mut f = run_lumped(300);
+        assert!(f.clean_gates(8).iter().any(|g| g.offset == 0x40));
+        f.set_no_gate(0x40..0x41);
+        assert!(f.clean_gates(8).iter().all(|g| g.offset != 0x40));
+        assert!(f.gates_ranked(8).iter().all(|g| g.offset != 0x40));
     }
 
     #[test]
