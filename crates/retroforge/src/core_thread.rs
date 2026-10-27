@@ -672,6 +672,18 @@ pub enum CoreEvent {
     /// asked for with no explanation. Sent only when the decision
     /// CHANGES, not every frame.
     WidescreenDecisions([Option<&'static str>; 4]),
+    /// Ticket W41-05: something RetroAchievements reported (sign-in, game
+    /// loaded, unlock, ...). Never sent unless the player turned it on.
+    Achievement(rf_achievements::AchievementEvent),
+    /// Ticket W41-05: hardcore refused something; the text names it
+    /// (`crate::ra::hardcore_refuses`).
+    RaRefused(String),
+    /// Ticket W41-05: whether hardcore is really on after a `RaEnable`
+    /// (it stays off when cheats or mods are in force).
+    RaHardcore(bool),
+    /// Ticket W41-05: the core paused because the player asked and
+    /// `rc_client_can_pause` allowed it.
+    RaPaused,
 }
 
 /// Which bytes the full-level view needs read each frame (ticket W11-02).
@@ -1152,6 +1164,45 @@ pub enum CoreCommand {
     /// the machine (and the run-ahead copy); RAM writes are applied at the start of every frame
     /// through the memory editor's poke door and ledgered. The whole set travels each time.
     SetCheats(Box<crate::cheats::CheatSet>),
+    /// Ticket W41-05: start a RetroAchievements session on this thread
+    /// (nothing exists, and nothing touches the network, before this).
+    /// `hardcore` asks for hardcore; the answer is `CoreEvent::RaHardcore`.
+    RaEnable {
+        hardcore: bool,
+    },
+    /// Ticket W41-05: end the session (unload with flush, drop the client).
+    RaDisable,
+    /// Ticket W41-05: sign in with a stored token.
+    RaLoginToken {
+        user: String,
+        token: String,
+    },
+    /// Ticket W41-05: sign in with the password the player just typed. It is
+    /// handed to rcheevos and dropped; see `crate::ra::Password`.
+    RaLoginPassword {
+        user: String,
+        password: crate::ra::Password,
+    },
+    /// Ticket W41-05: sign out.
+    RaLogout,
+    /// Ticket W41-05: the HTTP worker's answer (any status).
+    RaResponse {
+        id: u64,
+        status: i32,
+        body: Vec<u8>,
+    },
+    /// Ticket W41-05: the HTTP worker got no answer.
+    RaFailed {
+        id: u64,
+        retryable: bool,
+        message: String,
+    },
+    /// Ticket W41-05: send RA requests here instead of starting the `ureq`
+    /// worker (tests answer them from canned JSON).
+    RaSetTransport(Sender<crate::ra::OutboundRequest>),
+    /// Ticket W41-05: the player asked to pause. In hardcore rcheevos may say
+    /// not yet (`rc_client_can_pause`); otherwise this is `Pause`.
+    RaTryPause,
     /// Test only (ticket W37-04): write `value` to `addr` of the machine at
     /// the start of the frame whose frame counter is `frame`, to force a
     /// divergence the shadow core must find. Not part of any production path.
@@ -1321,11 +1372,13 @@ pub fn spawn_with_waker(
     // why this exists.
     let pending_frames = Arc::new(AtomicUsize::new(0));
     let thread_pending_frames = Arc::clone(&pending_frames);
+    let ra_cmd_tx = cmd_tx.clone();
     let handle = thread::spawn(move || {
         core_thread_main(
             rom,
             rom_sha256,
             cmd_rx,
+            ra_cmd_tx,
             evt_tx,
             thread_input,
             bundle_writer,
@@ -1632,6 +1685,7 @@ fn core_thread_main(
     rom: Vec<u8>,
     rom_sha256: String,
     cmd_rx: Receiver<CoreCommand>,
+    ra_cmd_tx: Sender<CoreCommand>,
     evt_tx: Sender<CoreEvent>,
     input: Arc<SharedInputFrame>,
     mut bundle_writer: rf_core_api::TripleBufferWriter<rf_core_api::FrameBundle>,
@@ -1720,6 +1774,10 @@ fn core_thread_main(
     // Ticket W41-03: the player's cheats and the RAM writes they have made.
     let mut cheats = crate::cheats::CheatSet::default();
     let mut cheat_ledger = crate::cheats::CheatLedger::default();
+    // Ticket W41-05: the RetroAchievements session, `None` until the player
+    // turns it on (no client, no worker, no network before that).
+    let mut ra: Option<crate::ra::RaSession> = None;
+    let mut ra_transport: Option<Sender<crate::ra::OutboundRequest>> = None;
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -1800,6 +1858,29 @@ fn core_thread_main(
     let mut last_drop_log = Instant::now();
     // Super FX polygon jobs waiting for a frame that will be delivered.
     let mut carried_gsu_jobs: Vec<Arc<rf_core_api::gsu_poly::PolyJob>> = Vec::new();
+    // Ticket W41-05: send a RetroAchievements pass's events to the UI, and when
+    // it asks for a reset (hardcore switched on mid-game) reset the machine the
+    // way the RESET button would, then tell rcheevos.
+    macro_rules! ra_deliver {
+        ($drained:expr) => {{
+            let drained: crate::ra::Drained = $drained;
+            let reset = drained.reset;
+            if !crate::ra::deliver(drained, &frame_tx) {
+                return LoopControl::Stop; // UI thread hung up.
+            }
+            if reset {
+                stepper.reset();
+                rebuild.shadow_invalidate();
+                if let Some(d) = margin_drawer.as_mut() {
+                    d.reset();
+                }
+                clocks.resync();
+                if let Some(session) = ra.as_mut() {
+                    session.after_reset(&|a| stepper.peek_bus(a));
+                }
+            }
+        }};
+    }
     run_guarded_loop(&evt_tx, move || {
         // Ticket W2-14: a stepped frame must be SENT, not just rendered.
         // Before this flag existed the only `CoreEvent::Frame` send site
@@ -1813,6 +1894,21 @@ fn core_thread_main(
         // frame or a single-step frame; a scanline step does not run a whole frame).
         let mut margin_pre_taken = false;
         for cmd in cmd_rx.try_iter() {
+            // Ticket W41-05: the hardcore gate. One policy
+            // (`crate::ra::hardcore_refuses`), checked here for every command
+            // so no entry point can forget it.
+            if ra.as_ref().is_some_and(crate::ra::RaSession::hardcore) {
+                if let Some(msg) = crate::ra::action_of(&cmd).and_then(crate::ra::hardcore_refuses)
+                {
+                    if frame_tx
+                        .send(CoreEvent::RaRefused(msg.to_string()))
+                        .is_err()
+                    {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                    continue;
+                }
+            }
             match cmd {
                 CoreCommand::Pause => stepper.pause(),
                 CoreCommand::Resume => stepper.resume(),
@@ -2217,6 +2313,119 @@ fn core_thread_main(
                         d.reset();
                     }
                 }
+                CoreCommand::RaSetTransport(out) => {
+                    if let Some(session) = ra.as_mut() {
+                        session.set_outbound(out.clone());
+                    }
+                    ra_transport = Some(out);
+                }
+                CoreCommand::RaEnable { hardcore } => {
+                    if ra.is_none() {
+                        let Some(cart) = crate::ra::cart_of(&rom) else {
+                            let msg = "RetroAchievements cannot identify this game".to_string();
+                            if frame_tx.send(CoreEvent::RaRefused(msg)).is_err() {
+                                return LoopControl::Stop; // UI thread hung up.
+                            }
+                            continue;
+                        };
+                        let mut session = crate::ra::RaSession::new(cart, ra_cmd_tx.clone());
+                        if let Some(out) = ra_transport.clone() {
+                            session.set_outbound(out);
+                        }
+                        ra = Some(session);
+                    }
+                    // Hardcore needs the game to be the cartridge: cheats, recipe mods and a
+                    // memory-writing hook change what it computes, so they keep it out.
+                    let blocker = if !cheats.ids.is_empty() {
+                        Some("Turn off cheats to enter hardcore")
+                    } else if mod_session.as_ref().is_some_and(|m| !m.mods.is_empty()) {
+                        Some("Turn off recipe mods to enter hardcore")
+                    } else if crate::margin_draw::blocked_by_hooks(&stepper) {
+                        Some("Turn off the memory-writing hook script to enter hardcore")
+                    } else {
+                        None
+                    };
+                    let hardcore_on = hardcore && blocker.is_none();
+                    let mut notices: Vec<String> = Vec::new();
+                    if hardcore {
+                        if let Some(msg) = blocker {
+                            notices.push(msg.to_string());
+                        }
+                    }
+                    if hardcore_on && (rewind.is_some() || run_ahead > 0) {
+                        // Pure settings, not content: suspended rather than refused.
+                        rewind = None;
+                        run_ahead = 0;
+                        notices.push("Rewind and run-ahead are off while hardcore is on".into());
+                    }
+                    for n in notices {
+                        if frame_tx.send(CoreEvent::RaRefused(n)).is_err() {
+                            return LoopControl::Stop; // UI thread hung up.
+                        }
+                    }
+                    if frame_tx.send(CoreEvent::RaHardcore(hardcore_on)).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.set_hardcore(hardcore_on);
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaDisable => {
+                    if let Some(mut session) = ra.take() {
+                        session.close();
+                    }
+                    if frame_tx.send(CoreEvent::RaHardcore(false)).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                }
+                CoreCommand::RaLoginToken { user, token } => {
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.login_token(&user, &token);
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaLoginPassword { user, password } => {
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.login_password(&user, password);
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaLogout => {
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.logout();
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaResponse { id, status, body } => {
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.response(id, status, &body);
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaFailed {
+                    id,
+                    retryable,
+                    message,
+                } => {
+                    if let Some(session) = ra.as_mut() {
+                        let drained = session.failed(id, retryable, &message);
+                        ra_deliver!(drained);
+                    }
+                }
+                CoreCommand::RaTryPause => {
+                    let verdict = ra.as_mut().map_or(Ok(()), crate::ra::RaSession::can_pause);
+                    let event = match verdict {
+                        Ok(()) => {
+                            stepper.pause();
+                            CoreEvent::RaPaused
+                        }
+                        Err(msg) => CoreEvent::RaRefused(msg),
+                    };
+                    if frame_tx.send(event).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
+                }
                 CoreCommand::SetCoverage(on) => {
                     if on && cheats.rom_active() {
                         rebuild.refuse(CHEATS_PAUSE_REBUILD);
@@ -2306,6 +2515,10 @@ fn core_thread_main(
                     pacer.set_enabled(user_pacing);
                 }
                 CoreCommand::Shutdown => {
+                    // Ticket W41-05: unload with the flush rcheevos needs.
+                    if let Some(mut session) = ra.take() {
+                        session.close();
+                    }
                     // Ticket W34-07: what the height learner knows goes to the
                     // cache with the scenes (the canvas model writes it as it
                     // drops).
@@ -2496,6 +2709,16 @@ fn core_thread_main(
         };
         if shadow_frame {
             rebuild.shadow_after(&mut stepper, &rom, frame_input, ran);
+        }
+        // Ticket W41-05: RetroAchievements reads the real machine through `peek` after the frame
+        // (never the run-ahead copy, never writing), or just services timers while paused.
+        if let Some(session) = ra.as_mut() {
+            let drained = if ran || stepped {
+                session.frame(&|a| stepper.peek_bus(a))
+            } else {
+                session.idle(&|a| stepper.peek_bus(a))
+            };
+            ra_deliver!(drained);
         }
         // Ticket W20-13: snapshot a RUNNING frame into the rewind ring at
         // its interval. `save_state` only reads the machine (`&self`), so
@@ -3578,6 +3801,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a crash report, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         }
 
         // The spawned thread's own top-level closure must return
@@ -3873,6 +4100,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -3919,6 +4150,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -3994,6 +4229,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4043,6 +4282,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4086,6 +4329,10 @@ mod tests {
             CoreEvent::WidescreenDecisions(_) => {
                 panic!("expected a frame, got widescreen decisions")
             }
+            CoreEvent::Achievement(_)
+            | CoreEvent::RaRefused(_)
+            | CoreEvent::RaHardcore(_)
+            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
         };
 
         let bundle = core.frame_bundle.latest();

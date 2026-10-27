@@ -240,6 +240,7 @@ extern "C" {
 
     pub fn rc_client_do_frame(client: *mut RcClient);
     pub fn rc_client_idle(client: *mut RcClient);
+    pub fn rc_client_can_pause(client: *mut RcClient, frames_remaining: *mut u32) -> c_int;
     pub fn rc_client_reset(client: *mut RcClient);
 
     pub fn rc_version_string() -> *const c_char;

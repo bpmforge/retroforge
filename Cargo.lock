@@ -3919,6 +3919,7 @@ dependencies = [
  "image",
  "log",
  "lz4_flex",
+ "rf-achievements",
  "rf-ai",
  "rf-audio",
  "rf-cache",

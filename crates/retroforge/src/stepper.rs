@@ -690,6 +690,12 @@ impl EmuStepper {
         self.machine.bus_write(addr, value);
     }
 
+    /// Ticket W41-05: the console's RESET line (hardcore turned on mid-game
+    /// restarts the game). The frame counter keeps counting.
+    pub fn reset(&mut self) {
+        self.machine.as_core().reset(rf_core_api::ResetKind::Soft);
+    }
+
     /// Ticket W41-03: install ROM-read overrides (Game Genie style) on the
     /// machine, `rf_core_api::EmulatorCore::set_rom_overrides`. `false` when
     /// the core refuses (more than the core's limit) or does not support it.

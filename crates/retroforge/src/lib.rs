@@ -78,6 +78,7 @@ pub mod play_view;
 pub mod profile_builder;
 pub mod profile_editor;
 pub mod quick_menu;
+pub mod ra;
 pub mod rebuild;
 pub mod rebuild_card;
 pub mod recording;

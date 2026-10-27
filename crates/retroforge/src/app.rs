@@ -1323,6 +1323,29 @@ pub struct RetroForgeApp {
     /// the pacing command only on the transition, not every frame the key
     /// is down.
     fast_forward_held: bool,
+    /// Ticket W41-05: RetroAchievements events and refusals the core sent,
+    /// drained by `handle_ra_events` (set aside because `pump_core_events`
+    /// holds the core borrowed).
+    ra_inbox: Vec<CoreEvent>,
+    /// The signed-in user name, for Settings (the token itself is in
+    /// `ra_login`, and on disk only through `crate::ra::TokenStore`).
+    ra_user: Option<String>,
+    /// The stored sign-in, read at startup and replaced after a sign-in.
+    ra_login: Option<crate::ra::StoredLogin>,
+    /// What Settings says about RetroAchievements right now.
+    ra_status: String,
+    /// A game is live in the open core's RA session (the badge).
+    ra_game_loaded: bool,
+    /// Whether the core really is in hardcore (it can decline).
+    ra_hardcore_on: bool,
+    /// The sign-in form. The password is cleared the moment it is sent.
+    ra_form_user: String,
+    ra_form_password: String,
+    /// Unlocks seen this session (W41-06 will show them).
+    ra_unlocks: u32,
+    /// Tests only: where a new core sends RetroAchievements requests instead of
+    /// starting the `ureq` worker (no test may reach the real server).
+    ra_transport_override: Option<std::sync::mpsc::Sender<crate::ra::OutboundRequest>>,
     /// OR'd into `peeking_original` by `video_panel` — the hotkey's
     /// contribution to hold-to-peek, alongside the existing badge-hold
     /// gesture. A separate field because `video_panel` computes the badge
@@ -1849,6 +1872,9 @@ impl RetroForgeApp {
             Some(root) => crate::settings::load(root),
             None => (crate::settings::AppSettings::default(), None),
         };
+        // Ticket W41-05: the stored RetroAchievements sign-in, if any (read, never used,
+        // until the player turns RetroAchievements on and a game opens).
+        let ra_login = config_root.as_deref().and_then(crate::ra::TokenStore::load);
         let bindings_status = match settings_problem {
             Some(problem) => format!("{bindings_status}  {problem}"),
             None => bindings_status,
@@ -2139,6 +2165,16 @@ impl RetroForgeApp {
             binding_conflict: None,
             active_slot: None,
             fast_forward_held: false,
+            ra_inbox: Vec::new(),
+            ra_user: ra_login.as_ref().map(|l| l.username.clone()),
+            ra_login,
+            ra_status: String::new(),
+            ra_game_loaded: false,
+            ra_hardcore_on: false,
+            ra_form_user: String::new(),
+            ra_form_password: String::new(),
+            ra_unlocks: 0,
+            ra_transport_override: None,
             peek_key_held: false,
             sprite_overlay: false,
             show_layers: false,
@@ -2444,7 +2480,10 @@ impl RetroForgeApp {
                 .is_none()
             && ctx.input(|i| i.key_pressed(egui::Key::Space))
         {
-            if self.running {
+            if self.running && self.ra_hardcore_on {
+                // Ticket W41-05: rcheevos may say "not yet"; `RaPaused` flips `running`.
+                self.send_command(CoreCommand::RaTryPause);
+            } else if self.running {
                 self.send_command(CoreCommand::Pause);
                 self.running = false;
             } else {
@@ -2853,6 +2892,10 @@ impl RetroForgeApp {
         let Some((addr, value)) = self.debug_panels.data.memory.poke.take() else {
             return;
         };
+        if self.hardcore_gate(crate::ra::HardcoreAction::MemoryWrite) {
+            self.debug_panels.data.memory.status = Some(self.status.clone());
+            return;
+        }
         if !paused {
             self.debug_panels.data.memory.status =
                 Some("not written: the core is running".to_string());
@@ -4042,6 +4085,9 @@ impl RetroForgeApp {
     }
 
     fn load_from_slot(&mut self, slot: crate::state_slots::SlotId) {
+        if self.hardcore_gate(crate::ra::HardcoreAction::LoadState) {
+            return;
+        }
         let Some(dir) = self.states_dir() else {
             return;
         };
@@ -4580,6 +4626,8 @@ impl RetroForgeApp {
             Ok(handle) => {
                 self.core = Some(handle);
                 self.current_rom_path = Some(path.to_path_buf());
+                // Ticket W41-05: a fresh core starts RetroAchievements (if on) by itself.
+                self.sync_ra_on_new_core();
                 // Ticket W20-13: a fresh core has no ring; arm it if on.
                 self.sync_rewind();
                 // Ticket W27-02: the profile match above ran before this
@@ -4739,6 +4787,230 @@ impl RetroForgeApp {
         }
     }
 
+    /// Ticket W41-05: the hardcore gate for an action the UI is about to take.
+    /// `true` (and the status line says what was refused) when hardcore is on and
+    /// forbids it. The core thread checks the same policy again for every command.
+    fn hardcore_gate(&mut self, action: crate::ra::HardcoreAction) -> bool {
+        if !self.ra_hardcore_on {
+            return false;
+        }
+        match crate::ra::hardcore_refuses(action) {
+            Some(msg) => {
+                self.status = msg.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Ticket W41-05: what keeps hardcore out right now, if anything.
+    fn hardcore_blocker(&self) -> Option<&'static str> {
+        if self.current_game_settings.cheats.iter().any(|c| c.enabled) {
+            Some("Turn off cheats to enter hardcore")
+        } else if !self.soft_patch.mods.is_empty() {
+            Some("Turn off recipe mods to enter hardcore")
+        } else {
+            None
+        }
+    }
+
+    /// Ticket W41-05: a core was just spawned: start its RetroAchievements
+    /// session if the player turned them on, and sign in with the stored token.
+    /// With them off nothing is sent and nothing runs (NON_GOALS 6).
+    fn sync_ra_on_new_core(&mut self) {
+        self.ra_game_loaded = false;
+        self.ra_hardcore_on = false;
+        if !self.settings.achievements.enabled {
+            return;
+        }
+        if let Some(tx) = self.ra_transport_override.clone() {
+            self.send_command(CoreCommand::RaSetTransport(tx));
+        }
+        self.send_ra_enable();
+        if let Some(login) = self.ra_login.clone() {
+            self.send_command(CoreCommand::RaLoginToken {
+                user: login.username,
+                token: login.token,
+            });
+        }
+    }
+
+    fn send_ra_enable(&mut self) {
+        let want = self.settings.achievements.hardcore;
+        // The core would refuse too; saying so here keeps the answer in one place for the user.
+        let hardcore = match (want, self.hardcore_blocker()) {
+            (true, Some(msg)) => {
+                self.status = msg.to_string();
+                false
+            }
+            (want, _) => want,
+        };
+        self.send_command(CoreCommand::RaEnable { hardcore });
+    }
+
+    /// Ticket W41-05: Settings changed the RetroAchievements switches.
+    fn apply_ra_settings(&mut self, was_enabled: bool) {
+        if self.core.is_none() {
+            return;
+        }
+        match (was_enabled, self.settings.achievements.enabled) {
+            (false, true) => self.sync_ra_on_new_core(),
+            (true, false) => {
+                self.send_command(CoreCommand::RaDisable);
+                self.ra_game_loaded = false;
+                self.ra_hardcore_on = false;
+                self.sync_rewind();
+                self.cheats_sent = false;
+            }
+            (true, true) => self.send_ra_enable(),
+            (false, false) => {}
+        }
+    }
+
+    /// Ticket W41-05: the player pressed "Sign in". The password goes to the
+    /// core thread and the text box is cleared in the same breath.
+    fn ra_sign_in(&mut self) {
+        let user = self.ra_form_user.trim().to_string();
+        let password = std::mem::take(&mut self.ra_form_password);
+        if user.is_empty() || password.is_empty() {
+            self.ra_status = "Enter your RetroAchievements user name and password".into();
+            return;
+        }
+        self.ra_status = "Signing in...".into();
+        self.send_command(CoreCommand::RaLoginPassword {
+            user,
+            password: crate::ra::Password::new(password),
+        });
+    }
+
+    /// Ticket W41-05: sign out and forget the token.
+    fn ra_sign_out(&mut self) {
+        self.send_command(CoreCommand::RaLogout);
+        if let Some(root) = &self.config_root {
+            crate::ra::TokenStore::delete(root);
+        }
+        self.ra_login = None;
+        self.ra_user = None;
+        self.ra_game_loaded = false;
+        self.ra_status = "Signed out".into();
+    }
+
+    /// Ticket W41-05: act on what the core said about RetroAchievements.
+    fn handle_ra_events(&mut self, ctx: &egui::Context) {
+        use rf_achievements::AchievementEvent as Ev;
+        for ev in std::mem::take(&mut self.ra_inbox) {
+            match ev {
+                CoreEvent::RaRefused(msg) => {
+                    self.status.clone_from(&msg);
+                    self.toasts.push(crate::toast::ToastKind::Info, msg, ctx);
+                }
+                CoreEvent::RaHardcore(on) => {
+                    if on != self.ra_hardcore_on {
+                        self.ra_hardcore_on = on;
+                        // Hardcore suspends rewind and run-ahead; leaving it brings them back.
+                        self.sync_rewind();
+                        self.run_ahead_sent = None;
+                        self.cheats_sent = false;
+                    }
+                }
+                CoreEvent::RaPaused => self.running = false,
+                CoreEvent::Achievement(ev) => match ev {
+                    Ev::LoginSucceeded {
+                        username, token, ..
+                    } => {
+                        let login = crate::ra::StoredLogin {
+                            username: username.clone(),
+                            token: token.expose().to_string(),
+                        };
+                        // Only {username, token} persist; the password never reached here.
+                        if let Some(root) = &self.config_root {
+                            if let Err(e) = crate::ra::TokenStore::save(root, &login) {
+                                self.ra_status =
+                                    format!("Signed in, but the token was not saved: {e}");
+                            }
+                        }
+                        self.ra_user = Some(username.clone());
+                        self.ra_login = Some(login);
+                        self.ra_form_user.clear();
+                        if self.ra_status.is_empty() || self.ra_status.starts_with("Sign") {
+                            self.ra_status = format!("Signed in as {username}");
+                        }
+                    }
+                    Ev::LoginFailed { message, .. } => {
+                        // A stored token the server no longer accepts is forgotten.
+                        if self.ra_login.is_some() {
+                            if let Some(root) = &self.config_root {
+                                crate::ra::TokenStore::delete(root);
+                            }
+                            self.ra_login = None;
+                            self.ra_user = None;
+                        }
+                        self.ra_status = format!("Sign-in failed: {message}");
+                    }
+                    Ev::GameLoaded { title, .. } => {
+                        self.ra_game_loaded = true;
+                        self.ra_status = format!("Playing {title} with RetroAchievements");
+                    }
+                    Ev::GameLoadFailed { message, .. } => {
+                        self.ra_game_loaded = false;
+                        self.ra_status = format!("RetroAchievements: {message}");
+                    }
+                    Ev::Unlocked { .. } => self.ra_unlocks += 1,
+                    // Toasts and the list are W41-06.
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
+    /// Ticket W41-05 test hook: send a new core's RetroAchievements requests here.
+    #[doc(hidden)]
+    pub fn use_ra_transport_for_test(
+        &mut self,
+        tx: std::sync::mpsc::Sender<crate::ra::OutboundRequest>,
+    ) {
+        self.ra_transport_override = Some(tx);
+    }
+
+    /// Ticket W41-05 test hook: answer request `id` as the server would.
+    #[doc(hidden)]
+    pub fn ra_respond_for_test(&self, id: u64, body: Vec<u8>) {
+        self.send_command(CoreCommand::RaResponse {
+            id,
+            status: 200,
+            body,
+        });
+    }
+
+    /// Ticket W41-05 test hook: what Settings' two checkboxes do.
+    #[doc(hidden)]
+    pub fn set_ra_for_test(&mut self, enabled: bool, hardcore: bool) {
+        let was = self.settings.achievements.enabled;
+        self.settings.achievements.enabled = enabled;
+        self.settings.achievements.hardcore = hardcore;
+        self.apply_ra_settings(was);
+    }
+
+    /// Ticket W41-05 test hook: the status line.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn status_for_test(&self) -> String {
+        self.status.clone()
+    }
+
+    /// Ticket W41-05 test hook: the RetroAchievements state Settings and the badge show.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn ra_state_for_test(&self) -> (bool, bool, u32, Option<String>) {
+        (
+            self.ra_game_loaded,
+            self.ra_hardcore_on,
+            self.ra_unlocks,
+            self.ra_user.clone(),
+        )
+    }
+
     fn send_command(&self, cmd: CoreCommand) {
         if !matches!(cmd, CoreCommand::SetLayerExtraction(_)) {
             self.core_commands_sent
@@ -4820,6 +5092,11 @@ impl RetroForgeApp {
                 CoreEvent::WidescreenDecisions(reasons) => {
                     self.widescreen_decisions = reasons;
                 }
+                // Ticket W41-05: handled below, once `core` is no longer borrowed.
+                ev @ (CoreEvent::Achievement(_)
+                | CoreEvent::RaRefused(_)
+                | CoreEvent::RaHardcore(_)
+                | CoreEvent::RaPaused) => self.ra_inbox.push(ev),
                 CoreEvent::Crashed(report) => {
                     self.crash = Some(report);
                     self.running = false;
@@ -4869,6 +5146,8 @@ impl RetroForgeApp {
             // opens a ROM again — no separate "is there a live core"
             // check needed anywhere else.
             self.core = None;
+            self.ra_game_loaded = false;
+            self.ra_hardcore_on = false;
             self.status = "Core crashed (FM-01) — open a ROM to start a fresh session".to_string();
             return;
         }
@@ -5619,6 +5898,14 @@ impl RetroForgeApp {
             n if n > 0 && self.core.is_some() => format!("{badge} \u{b7} Cheats: {n}"),
             _ => badge,
         };
+        // Ticket W41-05: the RetroAchievements mode, once a game is live in it.
+        let badge = match crate::ra::badge_suffix(
+            self.ra_game_loaded && self.core.is_some(),
+            self.ra_hardcore_on,
+        ) {
+            Some(suffix) => format!("{badge}{suffix}"),
+            None => badge,
+        };
         // Ticket W36-06b: why run-ahead and the margin objects are not running.
         if self.copies_refused_by_hooks && self.core.is_some() {
             format!("{badge} · run-ahead and margin objects off (a hook writes memory)")
@@ -5634,6 +5921,10 @@ impl RetroForgeApp {
 
     /// Ticket W41-03: the game's enabled cheats, parsed for the open console.
     fn cheat_set(&self) -> crate::cheats::CheatSet {
+        // Ticket W41-05: hardcore runs without cheats (the core refuses them too).
+        if self.ra_hardcore_on {
+            return crate::cheats::CheatSet::default();
+        }
         match crate::cheats::console_of(self.console_label) {
             Some(console) => {
                 crate::cheats::CheatSet::build(console, &self.current_game_settings.cheats)
@@ -5657,6 +5948,9 @@ impl RetroForgeApp {
             return;
         }
         self.cheats_sent = true;
+        if self.ra_hardcore_on && self.current_game_settings.cheats.iter().any(|c| c.enabled) {
+            self.hardcore_gate(crate::ra::HardcoreAction::Cheats);
+        }
         let set = self.cheat_set();
         // Nothing to say to a core that has none and was never told any.
         if set.is_empty() && !self.cheats_on_core {
@@ -8725,6 +9019,77 @@ impl RetroForgeApp {
                                         "Stored in your settings file. Empty = the \
                                          ANTHROPIC_API_KEY environment variable.",
                                     );
+                                }
+
+                                ui.separator();
+                                // Ticket W41-05: the only setting that can make the app talk
+                                // to retroachievements.org. Off by default (NON_GOALS 6).
+                                let ra_was_enabled = self.settings.achievements.enabled;
+                                if ui
+                                    .checkbox(
+                                        &mut self.settings.achievements.enabled,
+                                        "RetroAchievements (needs an account)",
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                    self.apply_ra_settings(ra_was_enabled);
+                                }
+                                ui.small(
+                                    "Off by default; nothing is sent until you turn it on and \
+                                     sign in. Only your user name and the token RetroAchievements \
+                                     gives back are kept (a private file in your config folder); \
+                                     your password is never stored.",
+                                );
+                                if self.settings.achievements.enabled {
+                                    if ui
+                                        .checkbox(
+                                            &mut self.settings.achievements.hardcore,
+                                            "Hardcore mode",
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                        self.apply_ra_settings(true);
+                                    }
+                                    ui.small(
+                                        "Hardcore turns off cheats, rewind, loading states, \
+                                         run-ahead, frame advance, slow motion, recipe mods and \
+                                         memory editing, and restarts the game when you turn it \
+                                         on. RetroAchievements counts hardcore unlocks only from \
+                                         emulators it has approved, so for now unlocks here are \
+                                         softcore.",
+                                    );
+                                    if let Some(user) = self.ra_user.clone() {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("Signed in as {user}"));
+                                            if ui.button("Sign out").clicked() {
+                                                self.ra_sign_out();
+                                            }
+                                        });
+                                    } else if self.core.is_none() {
+                                        ui.small("Open a game to sign in.");
+                                    } else {
+                                        ui.horizontal(|ui| {
+                                            ui.label("User");
+                                            ui.text_edit_singleline(&mut self.ra_form_user);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Password");
+                                            ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut self.ra_form_password,
+                                                )
+                                                .password(true),
+                                            );
+                                        });
+                                        if ui.button("Sign in").clicked() {
+                                            self.ra_sign_in();
+                                        }
+                                    }
+                                    if !self.ra_status.is_empty() {
+                                        ui.small(self.ra_status.clone());
+                                    }
                                 }
                             }
                         }
@@ -17490,16 +17855,22 @@ impl RetroForgeApp {
             );
             self.run_hovered = run.hovered();
             if run.clicked() {
-                self.running = !self.running;
-                self.send_command(if self.running {
-                    CoreCommand::Resume
+                if self.running && self.ra_hardcore_on {
+                    // Ticket W41-05: see the Space key above.
+                    self.send_command(CoreCommand::RaTryPause);
                 } else {
-                    CoreCommand::Pause
-                });
+                    self.running = !self.running;
+                    self.send_command(if self.running {
+                        CoreCommand::Resume
+                    } else {
+                        CoreCommand::Pause
+                    });
+                }
             }
             if ui
                 .add_enabled(has_core, egui::Button::new("Step Frame"))
                 .clicked()
+                && !self.hardcore_gate(crate::ra::HardcoreAction::FrameAdvance)
             {
                 self.running = false;
                 self.awaiting_stepped_frame = true;
@@ -17508,6 +17879,7 @@ impl RetroForgeApp {
             if ui
                 .add_enabled(has_core, egui::Button::new("Step Scanline"))
                 .clicked()
+                && !self.hardcore_gate(crate::ra::HardcoreAction::FrameAdvance)
             {
                 self.running = false;
                 self.awaiting_stepped_frame = true;
@@ -17941,6 +18313,7 @@ impl RetroForgeApp {
         // Not while a replay is being recorded: a take is made on the real
         // timeline's own picture, with nothing borrowed from the future.
         let want = if self.recorder.is_none()
+            && !self.ra_hardcore_on
             && crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
                 .iter()
                 .any(|r| r.id == "run_ahead" && r.effective())
@@ -18375,7 +18748,10 @@ impl RetroForgeApp {
     /// Settings, and an NES game (`EmuStepper::save_state` writes NES
     /// containers only; SNES states are not wired into this path yet).
     fn rewind_available(&self) -> bool {
-        self.settings.play.rewind && self.core.is_some() && self.console_label == "NES"
+        self.settings.play.rewind
+            && self.core.is_some()
+            && self.console_label == "NES"
+            && !self.ra_hardcore_on
     }
 
     /// Ticket W20-13: hand the rewind setting to the core thread (at
@@ -19231,6 +19607,7 @@ impl eframe::App for RetroForgeApp {
         self.update_peek(&ctx);
         self.frame_interp_arrived = false;
         self.pump_core_events(&ctx);
+        self.handle_ra_events(&ctx);
         self.present_intermediate(&ctx);
         self.rebuild_peek_texture_if_stale();
         self.maybe_request_canvas_snapshot();

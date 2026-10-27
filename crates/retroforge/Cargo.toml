@@ -21,6 +21,9 @@ rf-core-api = { path = "../rf-core-api" }
 # rf-cheats: cheat-code parsers (ticket W41-03). Pure text -> rf-core-api types; the
 # app owns storing, applying and ledgering them.
 rf-cheats = { path = "../rf-cheats" }
+# rf-achievements: RetroAchievements client, vendored rcheevos behind a network-free wrapper
+# (tickets W41-04/05, D-031). The app performs its HTTP (`crate::ra`).
+rf-achievements = { path = "../rf-achievements" }
 # rf-nes: to actually run a core (pre-flight note, ticket W1-06 plan.json
 # entry) — exempt from "cores only via rf-core-api" as the app shell
 # itself (scripts/validate-arch.sh rule 3).

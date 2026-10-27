@@ -84,6 +84,23 @@ Mode's badge and shows "Cheats: N".
 * **Evaluator**: open question, see §6. Runs on the core thread after each
   frame through `peek`, never mutates the machine, so determinism holds.
 
+### As built (W41-05)
+
+* The session lives on the core thread (`crate::ra::RaSession`); one HTTP worker thread (`ureq`,
+  20 s timeout, the OS trust store) performs its requests. Nothing exists, and nothing is sent,
+  until Settings turns RetroAchievements on. Signing in needs an open game (the client is
+  per-core).
+* Hardcore policy, `crate::ra::hardcore_refuses`, checked in the core command loop for every
+  command and again in the UI: refused are cheats, rewind, loading a state, run-ahead, frame and
+  scanline advance, slow motion (no entry point exists), recipe mods, memory-writing hook
+  scripts and memory editing. Allowed: saving a state, fast-forward, and pausing (through
+  `rc_client_can_pause`). Entering hardcore is refused while cheats, recipe mods or such a hook
+  are on; rewind and run-ahead are switched off for its duration instead.
+* The token is stored as `ra_token.toml` (`{username, token}`) in the config directory, mode
+  `0600`; the password is never kept.
+* SNES cartridge RAM is served for LoROM, HiROM, S-DD1 and SA-1 (BW-RAM and I-RAM) carts through
+  `rf_achievements::CartMap`; Super FX, CX4 and OBC1 carts stay unmapped.
+
 ## 5. Tickets
 
 W41-00 this doc, D-030, NON_GOALS 14 amendment, plan rows.

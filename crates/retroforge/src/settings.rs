@@ -488,6 +488,20 @@ impl std::fmt::Debug for AiNamingSettings {
     }
 }
 
+/// Ticket W41-05: RetroAchievements. **Off by default**, and while off the app
+/// makes no request to retroachievements.org at all (NON_GOALS 6). The token
+/// is not here: it lives in its own `0600` file (`crate::ra::TokenStore`), so
+/// sharing this file never shares a sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AchievementSettings {
+    /// "RetroAchievements (needs an account)".
+    pub enabled: bool,
+    /// Ask for hardcore. It stays off while cheats, recipe mods or a
+    /// memory-writing hook are in force (`crate::ra::hardcore_refuses`).
+    pub hardcore: bool,
+}
+
 /// Ticket W22-06: one-time tips already shown, so they are never shown
 /// twice. Keyed by normalized ROM SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -527,6 +541,8 @@ pub struct AppSettings {
     pub tips: TipSettings,
     /// Ticket W36-09 (D-026): the opt-in AI naming pass.
     pub ai_naming: AiNamingSettings,
+    /// Ticket W41-05.
+    pub achievements: AchievementSettings,
     /// Tables and keys this build does not know, kept verbatim so a newer
     /// build's settings survive an older build touching the file (module
     /// doc).
@@ -550,6 +566,7 @@ struct KnownSettings {
     video_by_game: BTreeMap<String, VideoSettings>,
     tips: TipSettings,
     ai_naming: AiNamingSettings,
+    achievements: AchievementSettings,
 }
 
 impl AppSettings {
@@ -573,6 +590,7 @@ impl AppSettings {
             video_by_game: self.video_by_game.clone(),
             tips: self.tips.clone(),
             ai_naming: self.ai_naming.clone(),
+            achievements: self.achievements,
         };
         let mut table = toml::Table::try_from(known).map_err(|e| e.to_string())?;
         for (key, value) in &self.unknown {
@@ -607,6 +625,7 @@ impl AppSettings {
                     | "video_by_game"
                     | "tips"
                     | "ai_naming"
+                    | "achievements"
             ) {
                 unknown.insert(key.clone(), value.clone());
             }
@@ -650,6 +669,7 @@ impl AppSettings {
             video_by_game: section("video_by_game").try_into().unwrap_or_default(),
             tips: section("tips").try_into().unwrap_or_default(),
             ai_naming: section("ai_naming").try_into().unwrap_or_default(),
+            achievements: section("achievements").try_into().unwrap_or_default(),
             unknown,
         })
     }
@@ -783,6 +803,37 @@ mod tests {
         let (old, problem) = load(&root);
         assert!(problem.is_none());
         assert_eq!(old.video.graphics_backend, GraphicsBackend::Auto);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ticket W41-05: off by default, survives a save/load, and an older file
+    /// without the table loads as off.
+    #[test]
+    fn achievements_default_off_and_round_trip() {
+        let root = temp_root("achievements");
+        assert_eq!(
+            AppSettings::default().achievements,
+            AchievementSettings::default()
+        );
+        assert!(!AppSettings::default().achievements.enabled);
+        let settings = AppSettings {
+            achievements: AchievementSettings {
+                enabled: true,
+                hardcore: true,
+            },
+            ..AppSettings::default()
+        };
+        save(&root, &settings).expect("save");
+        let text = std::fs::read_to_string(settings_path(&root)).expect("read");
+        assert!(
+            !text.contains("token") && !text.contains("password"),
+            "{text}"
+        );
+        let (reloaded, problem) = load(&root);
+        assert!(problem.is_none());
+        assert_eq!(reloaded.achievements, settings.achievements);
+        std::fs::write(settings_path(&root), "[video]\nvsync = false\n").expect("write");
+        assert!(!load(&root).0.achievements.enabled);
         let _ = std::fs::remove_dir_all(&root);
     }
 

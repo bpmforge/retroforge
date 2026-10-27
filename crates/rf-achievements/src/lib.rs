@@ -57,7 +57,7 @@
 mod ffi;
 mod memmap;
 
-pub use memmap::{translate, Console};
+pub use memmap::{translate, translate_with, CartMap, Console};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -86,6 +86,10 @@ pub struct PendingRequest {
 pub struct Secret(String);
 
 impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Secret(value.into())
+    }
+
     /// The raw value (to store in the keychain).
     pub fn expose(&self) -> &str {
         &self.0
@@ -185,6 +189,7 @@ struct Shared {
     next_id: Cell<RequestId>,
     memory: Cell<Option<*const MemFn>>,
     console: Cell<Console>,
+    cart: Cell<CartMap>,
     epoch: Instant,
 }
 
@@ -261,7 +266,7 @@ unsafe extern "C" fn read_memory_cb(
             let Some(ra) = address.checked_add(i) else {
                 return 0;
             };
-            let Some(cpu) = translate(console, ra) else {
+            let Some(cpu) = translate_with(console, ra, shared.cart.get()) else {
                 return 0;
             };
             // SAFETY: `mem` is valid while a MemoryScope is alive, and the
@@ -440,6 +445,7 @@ impl Achievements {
             next_id: Cell::new(1),
             memory: Cell::new(None),
             console: Cell::new(Console::Nes),
+            cart: Cell::new(CartMap::None),
             epoch: Instant::now(),
         });
         // SAFETY: both callbacks have the exact C signatures declared in
@@ -552,6 +558,14 @@ impl Achievements {
     /// [`GameLoadFailed`](AchievementEvent::GameLoadFailed); the load waits
     /// for sign-in if one is in progress.
     pub fn load_game(&mut self, console: Console, ra_hash: &str) {
+        self.load_game_with(console, CartMap::None, ra_hash);
+    }
+
+    /// [`load_game`](Self::load_game) plus where the cartridge's RAM sits on
+    /// the CPU bus, so RA's cartridge-RAM addresses can be served (see
+    /// [`CartMap`]).
+    pub fn load_game_with(&mut self, console: Console, cart: CartMap, ra_hash: &str) {
+        self.shared.cart.set(cart);
         self.flush_pending_events();
         self.shared.console.set(console);
         let Ok(h) = CString::new(ra_hash) else {
@@ -603,6 +617,21 @@ impl Achievements {
         let _scope = MemoryScope::new(&self.shared, peek);
         // SAFETY: live client.
         unsafe { rc_client_idle(self.client) };
+    }
+
+    /// Whether the player may pause now. rcheevos rate-limits pausing in
+    /// hardcore (`rc_client_can_pause`, rc_client.h: call it only when the
+    /// user is trying to pause). `Err(frames)` is how many more frames must
+    /// run first. Always `Ok` in softcore.
+    pub fn can_pause(&mut self) -> Result<(), u32> {
+        let mut remaining: u32 = 0;
+        // SAFETY: live client; `remaining` outlives the call.
+        let ok = unsafe { rc_client_can_pause(self.client, &mut remaining) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(remaining)
+        }
     }
 
     /// Tell rcheevos the machine was reset.

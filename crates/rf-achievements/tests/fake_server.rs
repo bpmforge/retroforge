@@ -390,3 +390,33 @@ fn unload_and_reload_after_completion() {
         .drain_events()
         .contains(&AchievementEvent::GameCompleted));
 }
+
+#[test]
+fn can_pause_is_open_in_softcore_and_with_no_game() {
+    let mut ach = Achievements::new();
+    assert_eq!(ach.can_pause(), Ok(()), "no game, softcore");
+    let peek = |_a: u32| 0u8;
+    let (mut ach, _srv) = start(Console::Nes, game_json(7, "0xH0010=5"), false, &peek);
+    assert_eq!(ach.can_pause(), Ok(()), "softcore never limits pausing");
+}
+
+#[test]
+fn snes_cart_ram_address_is_served_through_the_cart_map() {
+    // RA $020010 = byte $10 of a LoROM cart's SRAM = CPU $70:0010.
+    let peek = |a: u32| if a == 0x70_0010 { 5 } else { 0 };
+    let mut ach = Achievements::new();
+    let mut srv = Server::new(game_json(3, "0xH020010=5"));
+    ach.login_with_token("Bob", "tok123");
+    srv.pump(&mut ach);
+    ach.load_game_with(
+        Console::Snes,
+        rf_achievements::CartMap::LoRom { ram: 0x2000 },
+        HASH,
+    );
+    srv.pump(&mut ach);
+    ach.do_frame(&peek);
+    srv.pump(&mut ach);
+    ach.do_frame(&peek);
+    let list = ach.achievements();
+    assert_eq!(list[0].state, 1, "active: the SRAM address is readable");
+}
