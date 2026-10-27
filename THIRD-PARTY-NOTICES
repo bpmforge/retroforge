@@ -102,3 +102,44 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 (Reproduced verbatim from zstd/LICENSE inside zstd-sys 2.0.16+zstd.1.5.7,
 the version resolved in Cargo.lock at the time of this ticket.)
+
+------------------------------------------------------------------------
+rcheevos v12.5.0 (W41-04, D-031) - crates/rf-achievements/vendor/rcheevos
+------------------------------------------------------------------------
+
+RetroAchievements' client library, vendored as C source and statically
+linked. MIT licence:
+
+  MIT License
+
+  Copyright (c) 2018 RetroAchievements.org
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit
+  persons to whom the Software is furnished to do so, subject to the
+  following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+  NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+  USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+rcheevos bundles src/rhash/md5.c and md5.h (RFC 1321 MD5), which carry
+their own permissive notice:
+
+  Copyright (C) 1999, 2000, 2002 Aladdin Enterprises.  All rights reserved.
+  This software is provided 'as-is', without any express or implied
+  warranty. Permission is granted to anyone to use this software for any
+  purpose, including commercial applications, and to alter it and
+  redistribute it freely, subject to: (1) the origin of the software must
+  not be misrepresented; (2) altered source versions must be plainly marked
+  as such; (3) this notice may not be removed or altered. L. Peter Deutsch.

@@ -1,0 +1,23 @@
+[package]
+name = "rf-achievements"
+description = "RetroAchievements client: vendored rcheevos (MIT, C) behind a safe, network-free Rust wrapper (D-031)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# The vendored C tree and the layout shim are build inputs; keep them in
+# the published file list.
+include = ["src/**", "shim/**", "vendor/**", "build.rs", "Cargo.toml"]
+
+[lints]
+workspace = true
+
+# No workspace dependencies at all: the wrapper reads memory through a
+# closure the app supplies per frame (the app passes one over
+# `EmulatorCore::peek`) and never sees a core type. scripts/validate-arch.sh
+# allows rf-core-api only, and none is needed.
+[dependencies]
+
+[build-dependencies]
+# Already in Cargo.lock (1.4.0) via other crates; ^1.4 keeps that version.
+cc = "1.4"
