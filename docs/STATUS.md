@@ -4926,3 +4926,13 @@ stories, 10 decisions).
   App-path census: 194 of 194 openable games show the same first screen with
   Rebuild on; 6 NES children crashed in the sweep only (W37-03c). Workspace:
   **3710 passing**.
+- **W37-03c — Census crashes** (2026-10-26). The crashes were the test
+  harness, not the app: egui_kittest's `Harness::run` panics after 4 steps if
+  the UI is still repainting, and the home screen's "Scanning your ROM
+  folders…" spinner keeps repainting while a scan is in flight on a loaded
+  machine (seen on Rally Bike with Rebuild off; the link to the original six
+  is inferred). The census child now settles with `run_steps(4)`, captures
+  every child's stderr with `RUST_BACKTRACE=1`, and a regression test pins the
+  `run()` panic. Full census: NES 95/95 and SNES 99/99 openable games
+  identical with Rebuild on, 0 crashed. Other home-screen tests that call
+  `harness.run()` could hit the same panic under load (not changed).
