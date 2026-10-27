@@ -77,6 +77,10 @@ requires a design doc, not a ticket.
     ledgered, recorded in save states (`docs/design/PLUGINS.md` §2).
 14. **No cheat database / achievement engine in v1.** The plugin API can
     host both later; we ship neither.
+    *Amended 2026-10-27 (D-030, Brad):* user-entered cheat codes (Game
+    Genie, Pro Action Replay, raw RAM) and RetroAchievements ship for NES
+    and SNES as mod-tier features, off by default. Still no bundled cheat
+    database. Design: `docs/design/CHEATS_ACHIEVEMENTS.md`.
 15. **No custom shader language.** WGSL passes with parameter UBOs; no
     slang/GLSL preset compatibility layer in v1 (import can come later).
 

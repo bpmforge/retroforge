@@ -30,6 +30,13 @@ if grep -E '^\s*rf-' crates/rf-rebuild/Cargo.toml | grep -vE '^\s*rf-core-api\s*
   fail=1
 fi
 
+# 2c. rf-cheats (W41-01) turns codes into rf-core-api values; it never
+#     learns a console core or an upper layer.
+if grep -E '^\s*rf-' crates/rf-cheats/Cargo.toml 2>/dev/null | grep -vE '^\s*rf-core-api\s*=' >/dev/null 2>&1; then
+  echo "ARCH VIOLATION: rf-cheats may depend on rf-core-api only" >&2
+  fail=1
+fi
+
 # 3. Only the app shell and the test harness may depend on console cores
 #    directly; everything else sees cores through rf-core-api (ARCH §3).
 for c in crates/*/; do
