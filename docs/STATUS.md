@@ -4967,3 +4967,28 @@ stories, 10 decisions).
   short. `Apu::load` now clears them. Regression test in
   `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
   Workspace: **3728 passing**, gate green.
+- **Small known bugs** (2026-10-27, Brad: "work through everything left").
+  **SNES colour math on hires lines**: hires and pseudo-hires lines sent no
+  sub-screen, so math never reached a 512-dot line; each half-dot now gets
+  its own entry (`Ppu::hires_sub_pixels`, fullsnes "Hires and Pseudo 3-Layer
+  Math"; the sub half-dot's one-dot flag lag is not modelled). The app's
+  frame buffer is 256 wide and keeps only the first 256 half-dots of a hires
+  line, so hires games are not shown whole in the app (open, not changed
+  here). **Compare/peek "original" keeps colour math**: the bundle keeps the
+  sub-screen while the original may be shown (`SetCompareCapture`) and
+  `original_rgba_with_math` blends it (the de-flicker rebuild path still
+  resolves without math). **Esc in Settings**: not reproducible on main
+  (fixed by W21-13); regression cases added for Quick Menu › Settings and a
+  focused search box. **RF-Scroller**: the profile's loading wait at $C000 is
+  empty ROM (CODE ends at $91D6), so it never runs; noted in the profile.
+  **Windows/Linux**: `cargo clippy --workspace --all-targets -D warnings`
+  clean in a Linux container (aarch64 Debian, rust 1.94) and for
+  `x86_64-pc-windows-gnu` (mingw) after gating rf-cache's Unix-symlink tests;
+  built, not run. **Yoshi's Island text box (open)**: not a stall, the story
+  pages advance ($0118 = 7, sub-state $11B8 cycles). The box's BG3 tilemap is
+  DMA'd from GSU RAM $70:5800 (frame 297, 00:B570) and holds tiles
+  $1A1-$1A9 / $1B1-$1B9 repeated three times across 24 columns, and those
+  tiles hold the $0130 fill that $7C00-$7FFF is cleared with, not glyphs;
+  the per-frame glyph uploads go to $7E80+ (tile $1D0+). So the GSU program
+  that builds the text-box tilemap is the suspect. No reference emulator
+  runs headless here (Mesen needs a window server). Workspace: **3728 passing**; `scout::tests::an_accepted_scout_remembers_its_rung_...` (NES, 30 s bound) failed under load twice and passes alone.

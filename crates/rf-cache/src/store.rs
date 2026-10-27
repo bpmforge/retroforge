@@ -257,6 +257,9 @@ fn load_or_rebuild_index(root: &Path, entries_dir: &Path, index_path: &Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The symlink tests are Unix-only: Windows symlinks need a privilege
+    // (or Developer Mode) that a plain test run does not have.
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn unique_dir(label: &str) -> PathBuf {
@@ -277,6 +280,7 @@ mod tests {
     /// Build a unique path under the system temp dir WITHOUT creating it
     /// -- used for the symlink-root test, where the path itself must not
     /// exist as a real directory before `Cache::open` sees it.
+    #[cfg(unix)]
     fn unique_missing_path(label: &str) -> PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
@@ -474,6 +478,7 @@ mod tests {
     /// entry's on-disk path, pointing outside the cache root -- this
     /// plants exactly that and proves `put` refuses to follow it.
     #[test]
+    #[cfg(unix)]
     fn refuses_symlink_planted_inside_cache_root_pointing_outside() {
         let root = unique_dir("containment-inside");
         let outside = unique_dir("containment-outside");
@@ -513,6 +518,7 @@ mod tests {
     /// compares a canonicalized child against an un-canonicalized root
     /// would fail this even though nothing is actually unsafe.
     #[test]
+    #[cfg(unix)]
     fn allows_symlinked_cache_root() {
         let real_root = unique_dir("containment-real-root");
         let link_root = unique_missing_path("containment-link-root");

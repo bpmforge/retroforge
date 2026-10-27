@@ -67,7 +67,7 @@ pub mod superfx_hd;
 
 pub use compare::{
     blink_shows_original, compose_split, original_rgba_from_indexed,
-    original_rgba_from_indexed_with, CompareMode,
+    original_rgba_from_indexed_with, original_rgba_with_math, CompareMode,
 };
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUDGET};
