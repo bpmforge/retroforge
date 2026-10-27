@@ -415,4 +415,83 @@ mod tests {
         let s: ShaderSettings = toml::from_str("[params.crt]\ngamma = 2.0\n").expect("decode");
         assert!(s.presets.is_empty());
     }
+
+    /// Synthetic 256x240 test card (no game data): colour bars, a grey
+    /// ramp, hard diagonals and a 1-px checker, so scalers, masks and
+    /// scanlines each have something to show.
+    fn test_card() -> Vec<u8> {
+        let (w, h) = (256usize, 240usize);
+        let bars = [
+            [235, 235, 235],
+            [235, 235, 16],
+            [16, 235, 235],
+            [16, 235, 16],
+            [235, 16, 235],
+            [235, 16, 16],
+            [16, 16, 235],
+            [16, 16, 16],
+        ];
+        let mut px = vec![255u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let c: [u8; 3] = if y < 100 {
+                    bars[x * 8 / w].map(|v| v as u8)
+                } else if y < 130 {
+                    let g = (x * 255 / (w - 1)) as u8;
+                    [g, g, g]
+                } else if y < 190 {
+                    let on = ((x as i32 - 128).abs() as usize + y) % 16 < 3 || (x + y) % 24 < 2;
+                    if on {
+                        [250, 250, 250]
+                    } else {
+                        [20, 24, 60]
+                    }
+                } else if (x + y) % 2 == 0 {
+                    [230, 200, 40]
+                } else {
+                    [30, 30, 30]
+                };
+                let i = (y * w + x) * 4;
+                px[i..i + 3].copy_from_slice(&c);
+            }
+        }
+        px
+    }
+
+    /// By-eye acceptance (W39-07): render every preset and the plain
+    /// frame over the test card at 3x and write PNGs to
+    /// `RF_PRESET_PNG_DIR` (skipped when unset or no GPU). Output is
+    /// never committed.
+    #[test]
+    fn render_every_preset_over_the_test_card() {
+        let Ok(dir) = std::env::var("RF_PRESET_PNG_DIR") else {
+            return;
+        };
+        let Ok(gpu) = rf_renderer::gpu::GpuContext::request_headless() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let chain = rf_renderer::ShaderChain::new(&gpu);
+        let s = ShaderSettings::default();
+        let card = test_card();
+        let write = |name: &str, rgba: &[u8], w: u32, h: u32| {
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("{name}.png")),
+                rf_renderer::png::encode_rgba(rgba, w, h),
+            )
+            .expect("write png");
+        };
+        write("00-plain", &card, 256, 240);
+        for p in first_party() {
+            let sel = resolve(Some(&saved_id(&p.id)), &s);
+            let stages = chain_stages(&sel, &s, 256, 240, 3).expect("stages");
+            let out = chain
+                .render(&gpu, &card, 256, 240, &stages)
+                .expect("render");
+            assert_eq!(out.len(), 768 * 720 * 4);
+            assert_ne!(out, card, "{} must change the picture", p.id);
+            write(&p.id, &out, 768, 720);
+        }
+    }
 }
