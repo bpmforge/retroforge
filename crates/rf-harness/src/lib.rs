@@ -30,8 +30,8 @@
 mod accuracy;
 pub mod atlas;
 mod blargg;
-pub mod collision_tables;
 pub mod blargg_evidence;
+pub mod collision_tables;
 pub mod data_regions;
 mod fetch;
 pub mod fuzz;
