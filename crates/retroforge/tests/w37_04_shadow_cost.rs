@@ -18,10 +18,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rf_core_api::{CoverageLog, InputFrame};
-use rf_input::SnesButton;
 use retroforge::shadow_check::{ShadowCheck, ShadowStatus};
 use retroforge::stepper::EmuStepper;
+use rf_core_api::{CoverageLog, InputFrame};
+use rf_input::SnesButton;
 
 const NES_FILE: &str = "Super Mario Bros. + Duck Hunt (USA).zip";
 const SNES_FILE: &str = "Super Mario World (USA).zip";
@@ -61,7 +61,8 @@ fn pad(snes: bool, frame: u32) -> u16 {
 fn session(raw: &[u8], snes: bool, shadow: bool, root: &Path) -> (f64, Option<ShadowStatus>) {
     let mut st = EmuStepper::open(raw).expect("opens");
     let atlas = retroforge::rebuild::build_for(raw, &CoverageLog::new(0)).expect("atlas");
-    st.set_rebuild_atlas(Some(Box::new(atlas))).expect("installs");
+    st.set_rebuild_atlas(Some(Box::new(atlas)))
+        .expect("installs");
     st.resume();
     let mut sink = rf_renderer::FrameBuffer::new();
     let mut check = shadow.then(|| ShadowCheck::start(root.to_path_buf(), "cost-run", Vec::new()));
@@ -98,8 +99,15 @@ fn measure(label: &str, raw: &[u8], snes: bool) {
         else {
             panic!("{label}: the shadow was not checking: {status:?}");
         };
-        assert_eq!(divergences, 0, "{label}: the live shadow found a difference");
-        assert_eq!(frames, u64::from(WARM + FRAMES), "{label}: every frame compared");
+        assert_eq!(
+            divergences, 0,
+            "{label}: the live shadow found a difference"
+        );
+        assert_eq!(
+            frames,
+            u64::from(WARM + FRAMES),
+            "{label}: every frame compared"
+        );
         println!(
             "{label} round {round}: off {:.2} ms/frame, on {:.2} ms/frame",
             t_off * 1000.0 / f64::from(FRAMES),

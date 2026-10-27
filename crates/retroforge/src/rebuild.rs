@@ -158,7 +158,7 @@ pub struct RebuildInfo {
     /// Functions demoted to the plain interpreter (this and earlier sessions).
     pub demoted: u32,
     /// The latest difference the shadow found this session.
-    pub last_difference: Option<ShadowTrouble>,
+    pub last_difference: Option<Box<ShadowTrouble>>,
 }
 
 /// Where the Rebuild button stands, as the panel shows it.
@@ -925,7 +925,11 @@ fn info(stepper: &EmuStepper, s: &Session, rebuilding: bool) -> RebuildInfo {
     RebuildInfo {
         shadow,
         demoted: u32::try_from(s.demoted_keys().len()).unwrap_or(u32::MAX),
-        last_difference: s.shadow.as_ref().and_then(|sh| sh.last_trouble().cloned()),
+        last_difference: s
+            .shadow
+            .as_ref()
+            .and_then(|sh| sh.last_trouble().cloned())
+            .map(Box::new),
         facts: s.facts,
         verification: s.verification,
         stats: stepper.rebuild_stats().unwrap_or_default(),

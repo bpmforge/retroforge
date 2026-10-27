@@ -619,7 +619,7 @@ number, not part of W37-04.
 **Not built / inferred.** No user toggle for the shadow (the ticket asks for
 on-by-default while unproven only). Behaviour with a real Super FX/SA-1 cart
 was not run live (coprocessor state is compared through its serialised state).
-The 5-bundle-per-session style cap, the 600-frame run minimum and the 10-second
+The 8-bundle-per-session cap, the 600-frame run minimum and the 10-second
 checkpoint are choices, not measurements.
 
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)

@@ -364,11 +364,11 @@ mod tests {
     /// are in plain words, and the suspended one says it is not checked.
     #[test]
     fn the_card_says_what_the_shadow_check_is_doing_and_found() {
-        let with = |shadow, demoted, last| {
+        let with = |shadow, demoted, last: Option<crate::rebuild::ShadowTrouble>| {
             let mut i = info(Verification::Checked { frames: 600 }, busy());
             i.shadow = shadow;
             i.demoted = demoted;
-            i.last_difference = last;
+            i.last_difference = last.map(Box::new);
             card(true, &RebuildStatus::On(i)).expect("card").text()
         };
         let t = with(
