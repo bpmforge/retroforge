@@ -508,6 +508,120 @@ runs lockstep and a read-only `nmi` counter: all five hacks reach `$7E0100 ==
 $14`, zero divergence on all five, hook counts equal independent NMI counts
 where the row matched, and the rows lost to a hack are reported unmatched.
 
+### W37-04: shadow-core lockstep during play (built 2026-10-27)
+
+**What it is.** While Rebuild is on and a game is **not proven**, a second,
+plain core (no atlas) is stepped beside the one the player uses: same core
+thread, right after the primary each frame, same input, compared at frame end.
+Rebuild is off by default and Original/Accuracy mode never reaches any of this
+(law 6). `crates/retroforge/src/shadow_check.rs` (`ShadowCheck`), driven from
+`RebuildCtl::shadow_before/shadow_after`, which `core_thread.rs` calls around
+the running frame and around a stepped frame.
+
+**Reuse, not a second comparison.** `rf_harness::shadow` exposes the lockstep
+checker's own `compare_frame`, `fine_pass` and repro-bundle writer over
+borrowed cores (`CoreRef`/`CoreMut`, NES or SNES); `lockstep.rs` only gained a
+`BundleShape` so the same writer can say "live session". rf-harness moved from
+`[dev-dependencies]` to `[dependencies]` of retroforge (validate-arch rule 3
+allows retroforge and rf-harness to touch the cores; rf-harness depends only on
+lower layers). It also compiles the harness's test-ROM downloader into the app;
+nothing calls it. rf-rebuild stays console-agnostic. **Not compared live:** the
+picture and sound hashes (the production sink has no per-pixel tap); the
+register, memory and device-state comparison is the harness's, and the picture
+and sound are functions of it.
+
+**On a difference (in the frame it appears in).**
+1. The frame is re-run from its start on private copies: a plain core and a
+   rebuilt core (atlas, trace ring) both restored from the shadow's
+   frame-start snapshot, an instruction at a time (`fine_pass`). The player's
+   core is never restored (a state omits the audio decimator's phase).
+2. The function is the newest non-interrupt step in the rebuilt copy's trace
+   ring, if it is an atlas step with a function. Anything else (a difference
+   only in memories the instruction pass does not read, RAM code, no function)
+   demotes nothing and the card says "no single function could be named".
+3. **Demotion.** `RebuildExec` has a demoted bitset beside `hooked`;
+   `dispatch_at` returns `Fallback` for a node whose `Node::function` is
+   demoted, counted in `RebuildStats::fallback_demoted` (not "no node"). The
+   trace still names the function. Behaviour-neutral: it only moves
+   instructions to the interpreter the executor already equals.
+4. **Persistence.** Function ids are renumbered by every atlas, so the list is
+   stored by **entry key** `(entry_rom, entry_mode)` (cache asset
+   `rebuild-demoted`, same key family as `rebuild-verification`) and
+   re-resolved to ids at every atlas install.
+5. **Record.** The difference goes into the `VerifyRecord` at once, so the game
+   can no longer be proven (see "run" below).
+6. **Bundle.** The shadow is snapshotted after each compared frame (that is the
+   next frame's start state); the bundle holds the harness's files, with the
+   live session's frame numbers and a README that says to replay from the
+   `.rfstate`. Written under `<temp>/retroforge-repro-bundles/<sha16>/frame-N`
+   (beside the atlas cache, not inside it). At most 8 bundles per session.
+7. The shadow is resynced from the player's core, so one fault is one report.
+
+**A "run".** One session with the check on that compared at least 600 frames,
+or saw a difference. The session folds into the record every 600 compared
+frames, at each difference and when it ends (`Drop`), and every fold
+*replaces* the session's earlier contribution (stored minus what it added
+before, plus its totals), so `runs` moves once and a crash loses at most 10
+seconds. Periodic folds wait while a background cache job runs.
+
+**Switching off.** If `Verification::of` says Proven when the first atlas is
+installed, no shadow core is built and the card says so; if a checkpoint makes
+the game Proven, the shadow is dropped on the spot. A divergence is permanent
+(only a new atlas format clears it), so a diverged game keeps its shadow.
+
+**Suspension and resync.** A hook script that can write memory
+(`margin_draw::blocked_by_hooks`) suspends the check; the card says "not
+checked: mod active". Hook writes are not mirrored. Code-patch mods need no
+suspension: the shadow opens the same (patched) image. The shadow is rebuilt
+from a snapshot of the player's core before the next compared frame after a
+state load, rewind, memory-editor write, hook release, or any frame the shadow
+did not step with it (a debugger scanline step, a frame whose cycle budget
+fired); `copy_sim_config_from` also carries the clock governors' multipliers
+and the NES extra vblank lines each frame. Run-ahead and the margin redraw run
+on copies after the real frame, so only committed frames are compared.
+
+**Cache handle lock.** `Cache` rewrites its whole index on every `put`, so two
+handles lose each other's entries (the shadow's checkpoints, the first and
+grow jobs and parallel tests all open handles in one process). `rebuild.rs`
+takes a process-wide lock around every handle use; jobs hold it only around cache reads and writes, never across a build, so the core thread waits at most for one cache read or write.
+
+**Forced divergence** is `#[cfg(test)]` only: `CoreCommand::PoisonForTest`
+writes a byte on the player's side at a frame (and again on the private copy
+during the re-run). Nothing on the production path.
+
+**Tests.** `shadow_check::tests` (5): forced divergence reported in its own
+frame with the function demoted, the bundle on disk, `fallback_demoted` moving,
+the record Diverged, persistence across a restart; a proven record starts no
+shadow; a record one run and a few hundred frames short switches the shadow off
+at a checkpoint; a write hook suspends and the poisoned byte is not a fault;
+SNES clean run then forced difference. `rf-rebuild` exec/verify unit tests for
+the bitset and the list encoding; `rf_harness::shadow` test; the card test.
+
+**Cost (release, Apple M2 Max, load average about 4 from other sessions, best
+of 4 interleaved runs of 600 frames after a 60-frame warm-up, Rebuild on with
+the vectors-only atlas, primary drawing into the shell's `FrameBuffer`):**
+
+| cartridge | shadow off | shadow on | extra | ratio |
+|---|---|---|---|---|
+| NES, Super Mario Bros. multicart | 1.86 ms/frame | 3.56 ms/frame | 1.70 ms | 1.92x |
+| SNES, Super Mario World | 6.85 ms/frame | 13.31 ms/frame | 6.47 ms | 1.94x |
+
+Real time is 16.64 ms/frame. The run is
+`crates/retroforge/tests/w37_04_shadow_cost.rs` (`--ignored`); it also asserts
+the shadow compared all 660 frames of each game with **zero differences**, a
+clean-play result on real code. The shadow roughly doubles the emulation cost;
+the SNES on-case leaves about 3 ms of a 60 fps frame on this machine before the
+shell's own work. If that proves too tight on slower machines the follow-up is
+a shadow on its own thread (the comparison needs both machines at the frame
+boundary, so it is a pipeline, not a free lunch); that is a ticket with this
+number, not part of W37-04.
+
+**Not built / inferred.** No user toggle for the shadow (the ticket asks for
+on-by-default while unproven only). Behaviour with a real Super FX/SA-1 cart
+was not run live (coprocessor state is compared through its serialised state).
+The 8-bundle-per-session cap, the 600-frame run minimum and the 10-second
+checkpoint are choices, not measurements.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

@@ -11,7 +11,7 @@
 
 use rf_rebuild::Verification;
 
-use crate::rebuild::{AtlasSource, RebuildInfo, RebuildStatus};
+use crate::rebuild::{AtlasSource, RebuildInfo, RebuildStatus, ShadowStatus, SuspendReason};
 
 /// What the card shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,7 @@ fn on_card(info: &RebuildInfo) -> RebuildCard {
         "Verification: {}",
         verification_words(info.verification)
     ));
+    lines.extend(shadow_lines(info));
     if info.rebuilding {
         lines.push("Growing the map from this session\u{2026}".to_string());
     }
@@ -97,6 +98,61 @@ fn on_card(info: &RebuildInfo) -> RebuildCard {
         proven: matches!(info.verification, Verification::Proven { .. }),
         diverged: matches!(info.verification, Verification::Diverged { .. }),
     }
+}
+
+/// What the shadow check (a plain copy of the game stepped beside the real one,
+/// compared every frame) is doing, and what it found.
+fn shadow_lines(info: &RebuildInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(match &info.shadow {
+        ShadowStatus::NotStarted => "Shadow check: not started.".to_string(),
+        ShadowStatus::Proven => {
+            "Shadow check: off. This game is proven, so no second copy runs.".to_string()
+        }
+        ShadowStatus::Checking {
+            frames,
+            divergences: 0,
+        } => format!(
+            "Shadow check: on. A plain copy runs beside the game and is compared every frame \
+             ({frames} frames this session, no difference)."
+        ),
+        ShadowStatus::Checking {
+            frames,
+            divergences,
+        } => format!(
+            "Shadow check: on. {divergences} of {frames} frames this session differed from the \
+             plain copy."
+        ),
+        ShadowStatus::Suspended { reason, .. } => match reason {
+            SuspendReason::WriteHook => "Shadow check: not checked: mod active. A mod that \
+                writes to the game's memory is loaded, so the plain copy would not match by \
+                design. It resumes when the mod is removed."
+                .to_string(),
+        },
+    });
+    if info.demoted > 0 {
+        out.push(format!(
+            "{} function{} moved to the plain emulator after a difference was found.",
+            info.demoted,
+            if info.demoted == 1 { "" } else { "s" }
+        ));
+    }
+    if let Some(d) = &info.last_difference {
+        let what = match d.function_entry {
+            Some(rom) => {
+                format!("the function at ROM offset {rom:#x} was moved to the plain emulator")
+            }
+            None => "no single function could be named, so nothing was moved".to_string(),
+        };
+        let saved = d.bundle.as_ref().map_or_else(String::new, |p| {
+            format!(" Saved for a bug report: {}.", p.display())
+        });
+        out.push(format!(
+            "Last difference: frame {} ({}); {what}.{saved}",
+            d.frame, d.field
+        ));
+    }
+    out
 }
 
 fn kib(bytes: u64) -> String {
@@ -302,5 +358,58 @@ mod tests {
         .expect("card");
         assert!(!bad.proven && bad.diverged);
         assert!(bad.text().contains("1 of them differed"));
+    }
+
+    /// Ticket W37-04: the shadow check's three honest states and what it found
+    /// are in plain words, and the suspended one says it is not checked.
+    #[test]
+    fn the_card_says_what_the_shadow_check_is_doing_and_found() {
+        let with = |shadow, demoted, last: Option<crate::rebuild::ShadowTrouble>| {
+            let mut i = info(Verification::Checked { frames: 600 }, busy());
+            i.shadow = shadow;
+            i.demoted = demoted;
+            i.last_difference = last.map(Box::new);
+            card(true, &RebuildStatus::On(i)).expect("card").text()
+        };
+        let t = with(
+            ShadowStatus::Checking {
+                frames: 90,
+                divergences: 0,
+            },
+            0,
+            None,
+        );
+        assert!(t.contains("Shadow check: on."), "{t}");
+        assert!(t.contains("90 frames this session, no difference"), "{t}");
+        let t = with(ShadowStatus::Proven, 0, None);
+        assert!(t.contains("Shadow check: off. This game is proven"), "{t}");
+        let t = with(
+            ShadowStatus::Suspended {
+                reason: SuspendReason::WriteHook,
+                frames: 5,
+                divergences: 0,
+            },
+            0,
+            None,
+        );
+        assert!(t.contains("not checked: mod active"), "{t}");
+        let t = with(
+            ShadowStatus::Checking {
+                frames: 9,
+                divergences: 1,
+            },
+            1,
+            Some(crate::rebuild::ShadowTrouble {
+                frame: 7,
+                field: "wram".to_string(),
+                function_entry: Some(0x1234),
+                bundle: Some(std::path::PathBuf::from("/tmp/bundle")),
+            }),
+        );
+        assert!(t.contains("1 of 9 frames"), "{t}");
+        assert!(t.contains("1 function moved to the plain emulator"), "{t}");
+        assert!(t.contains("Last difference: frame 7 (wram)"), "{t}");
+        assert!(t.contains("ROM offset 0x1234"), "{t}");
+        assert!(t.contains("/tmp/bundle"), "{t}");
     }
 }

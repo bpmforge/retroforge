@@ -1145,6 +1145,15 @@ pub enum CoreCommand {
     /// Ticket W36-03: turn the block executor on for this ROM (find or build
     /// the atlas in the background, install it here) or off. Off by default.
     SetRebuild(bool),
+    /// Test only (ticket W37-04): write `value` to `addr` of the machine at
+    /// the start of the frame whose frame counter is `frame`, to force a
+    /// divergence the shadow core must find. Not part of any production path.
+    #[cfg(test)]
+    PoisonForTest {
+        frame: u64,
+        addr: u32,
+        value: u8,
+    },
     /// Ticket W36-09: observe the running game on a private copy of the
     /// machine (needs Rebuild on, for the atlas), name its functions by rules
     /// and, if the job carries an AI configuration (the player opted in),
@@ -1816,8 +1825,11 @@ fn core_thread_main(
                             margin_pre_taken = true;
                         }
                     }
-                    stepper.latch_and_advance_frame(
-                        input.load(),
+                    // Ticket W37-04: a stepped frame is checked like a running one.
+                    let step_input = input.load();
+                    rebuild.shadow_before(&mut stepper, &rom, step_input);
+                    let advanced = stepper.latch_and_advance_frame(
+                        step_input,
                         &mut FanoutSink {
                             frame: &mut sink,
                             layers: layers_enabled.then_some(&mut layers),
@@ -1826,6 +1838,7 @@ fn core_thread_main(
                             overlay: overlay_capture.as_mut(),
                         },
                     );
+                    rebuild.shadow_after(&mut stepper, &rom, step_input, advanced > 0);
                     stepper.pause();
                     stepped = true;
                 }
@@ -2034,6 +2047,8 @@ fn core_thread_main(
                 }
                 CoreCommand::PokeBus { addr, value } => {
                     stepper.poke_bus(addr, value);
+                    // The memory editor wrote to the machine (ticket W37-04).
+                    rebuild.shadow_invalidate();
                 }
                 CoreCommand::SetWatches(watches) => {
                     // The refusal count is dropped here deliberately: the
@@ -2103,6 +2118,7 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplyState(container) => {
                     let _ = stepper.load_state(&container);
+                    rebuild.shadow_invalidate();
                     if let Some(d) = margin_drawer.as_mut() {
                         d.reset();
                     }
@@ -2110,6 +2126,7 @@ fn core_thread_main(
                 }
                 CoreCommand::ApplySnapshot(snapshot) => {
                     let _ = stepper.restore(&snapshot);
+                    rebuild.shadow_invalidate();
                     if let Some(d) = margin_drawer.as_mut() {
                         d.reset();
                     }
@@ -2124,6 +2141,7 @@ fn core_thread_main(
                         .and_then(|ring| ring.step_back().ok().flatten())
                         .and_then(|(_, bytes)| rf_state::Container::decode_default(&bytes).ok())
                         .is_some_and(|(container, _)| stepper.load_state(&container).is_ok());
+                    rebuild.shadow_invalidate();
                     if let Some(d) = margin_drawer.as_mut() {
                         d.reset();
                     }
@@ -2165,6 +2183,10 @@ fn core_thread_main(
                     rebuild.after_coverage_toggle(&mut stepper, on);
                 }
                 CoreCommand::SetHooks(setup) => hook_state.set(&mut stepper, setup),
+                #[cfg(test)]
+                CoreCommand::PoisonForTest { frame, addr, value } => {
+                    rebuild.poison = Some((frame, addr, value));
+                }
                 CoreCommand::SetRebuild(on) => {
                     if on {
                         if coverage_on {
@@ -2358,6 +2380,13 @@ fn core_thread_main(
                 margin_pre_taken = true;
             }
         }
+        // Ticket W37-04: the shadow core steps right after the machine, with
+        // the same input, before anything (the speed governors below) changes
+        // the machine's settings for the next frame.
+        let shadow_frame = !stepper.is_paused();
+        if shadow_frame {
+            rebuild.shadow_before(&mut stepper, &rom, frame_input);
+        }
         let ran = match trace.as_mut() {
             None => stepper.tick_running_with_input(
                 frame_input,
@@ -2398,6 +2427,9 @@ fn core_thread_main(
                 }
             }
         };
+        if shadow_frame {
+            rebuild.shadow_after(&mut stepper, &rom, frame_input, ran);
+        }
         // Ticket W20-13: snapshot a RUNNING frame into the rewind ring at
         // its interval. `save_state` only reads the machine (`&self`), so
         // this cannot perturb it; a stepped (rewound/single-stepped) frame

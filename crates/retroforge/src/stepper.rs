@@ -1547,6 +1547,93 @@ impl EmuStepper {
         Ok(())
     }
 
+    /// Ticket W37-04: copy only the settings that change what the SIMULATION
+    /// does (the CPU, SA-1 and Super FX clocks the speed governors choose,
+    /// and the NES's extra vblank lines) from `real`, so a plain core stepped
+    /// beside it stays comparable. Nothing about the picture.
+    pub fn copy_sim_config_from(&mut self, real: &EmuStepper) {
+        if let (Machine::Snes(mine), Machine::Snes(theirs)) = (&mut self.machine, &real.machine) {
+            mine.set_gsu_overclock(theirs.gsu_overclock());
+            mine.set_cpu_overclock(theirs.cpu_overclock());
+            mine.set_sa1_overclock(theirs.sa1_overclock());
+        }
+        if let (Machine::Nes(mine), Machine::Nes(theirs)) = (&mut self.machine, &real.machine) {
+            mine.set_extra_vblank_lines(theirs.extra_vblank_lines());
+        }
+    }
+
+    /// Ticket W37-04: the machine as the harness's lockstep comparison reads
+    /// it.
+    #[must_use]
+    pub fn core_ref(&self) -> rf_harness::shadow::CoreRef<'_> {
+        match &self.machine {
+            Machine::Nes(c) => rf_harness::shadow::CoreRef::Nes(c),
+            Machine::Snes(c) => rf_harness::shadow::CoreRef::Snes(c),
+        }
+    }
+
+    /// Ticket W37-04: the machine as the harness's instruction-level re-run
+    /// steps it. Only ever for a private copy of the machine (the re-run
+    /// replaces nothing but advances it).
+    pub fn core_mut(&mut self) -> rf_harness::shadow::CoreMut<'_> {
+        match &mut self.machine {
+            Machine::Nes(c) => rf_harness::shadow::CoreMut::Nes(c),
+            Machine::Snes(c) => rf_harness::shadow::CoreMut::Snes(c),
+        }
+    }
+
+    /// Ticket W37-04: run these functions of the installed atlas (named by
+    /// entry, so the list outlives a rebuilt atlas) on the plain interpreter.
+    /// Ids belong to one atlas, so call this after every install. Returns how
+    /// many functions took.
+    pub fn set_rebuild_demoted(&mut self, keys: &[rf_rebuild::FunctionKey]) -> usize {
+        match &mut self.machine {
+            Machine::Nes(c) => {
+                let ids = c
+                    .rebuild_atlas()
+                    .map_or_else(Vec::new, |a| rf_rebuild::demoted_ids(a, keys));
+                c.set_rebuild_demoted(&ids)
+            }
+            Machine::Snes(c) => {
+                let ids = c
+                    .rebuild_atlas()
+                    .map_or_else(Vec::new, |a| rf_rebuild::demoted_ids(a, keys));
+                c.set_rebuild_demoted(&ids)
+            }
+        }
+    }
+
+    /// Ticket W37-04: the entry key of function `id` in the installed atlas.
+    #[must_use]
+    pub fn rebuild_function_key(&self, id: u32) -> Option<rf_rebuild::FunctionKey> {
+        match &self.machine {
+            Machine::Nes(c) => c
+                .rebuild_atlas()
+                .and_then(|a| rf_rebuild::function_key(a, id)),
+            Machine::Snes(c) => c
+                .rebuild_atlas()
+                .and_then(|a| rf_rebuild::function_key(a, id)),
+        }
+    }
+
+    /// Ticket W37-04: keep the last `capacity` executed steps of the rebuilt
+    /// path (0 = off). Used on private copies only.
+    pub fn set_rebuild_trace(&mut self, capacity: usize) {
+        match &mut self.machine {
+            Machine::Nes(c) => c.set_rebuild_trace(capacity),
+            Machine::Snes(c) => c.set_rebuild_trace(capacity),
+        }
+    }
+
+    /// Ticket W37-04: the last executed steps of the rebuilt path.
+    #[must_use]
+    pub fn rebuild_trace(&self) -> Vec<rf_rebuild::TraceEntry> {
+        match &self.machine {
+            Machine::Nes(c) => c.rebuild_trace(),
+            Machine::Snes(c) => c.rebuild_trace(),
+        }
+    }
+
     /// Ticket W30-07: copy the settings that change what a frame looks like
     /// or how the simulation runs (sprite overlay, Super FX clock,
     /// widescreen, HD Mode 7) from `real` onto this shadow machine, so its

@@ -23,6 +23,9 @@ pub struct RebuildStats {
     /// Of those: code fetched from memory a coprocessor owns, or any other
     /// non-ROM, non-RAM space.
     pub fallback_other: u64,
+    /// Of those: the node's function was demoted by the shadow-core check
+    /// (ticket W37-04), so the plain interpreter ran it.
+    pub fallback_demoted: u64,
     /// Hardware interrupt entries (NMI/IRQ sequences, not instructions).
     pub interrupt_entries: u64,
     /// Indirect transfers (`JMP (a)`, `RTS`, `RTI`, `BRK`) compared against

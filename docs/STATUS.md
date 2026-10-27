@@ -4936,3 +4936,17 @@ stories, 10 decisions).
   `run()` panic. Full census: NES 95/95 and SNES 99/99 openable games
   identical with Rebuild on, 0 crashed. Other home-screen tests that call
   `harness.run()` could hit the same panic under load (not changed).
+- **W37-04 — Shadow-core lockstep during play** (2026-10-27). While Rebuild
+  is on and the game is not proven, a plain core runs beside the player's on
+  the core thread with the same input and is compared every frame (registers,
+  memories, device state; not picture or sound). A difference re-runs the
+  frame with the harness's fine pass, demotes the executing function to the
+  plain emulator in that frame (persisted per ROM as `rebuild-demoted`, keyed
+  by entry), saves a repro bundle and records the divergence, so Proven is
+  lost. A proven game starts no shadow; a write hook or mod suspends the check
+  ("not checked: mod active"). Cost (release, M2 Max, loaded): SMB 1.86 →
+  3.56 ms/frame, SMW 6.85 → 13.31 ms/frame (1.9x, still under 16.6 ms).
+  The cache lock is held only around I/O, never across an atlas build.
+  rf-harness is now a runtime dependency of the app. Workspace: **3720
+  passing**; `w35_16_margin_toggle` timed out once under load in the gate
+  (10 s frame wait, does not use Rebuild) and passes alone 3/3.

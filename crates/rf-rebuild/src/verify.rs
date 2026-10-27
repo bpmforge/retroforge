@@ -29,6 +29,8 @@
 //! W37-04 ends its shadow-core checking for a game once this state is
 //! Proven.
 
+use crate::atlas::Atlas;
+
 /// Cache asset name of the record.
 pub const VERIFY_ASSET: &str = "rebuild-verification";
 /// Cache settings string: the record's format and the atlas format it vouches
@@ -41,6 +43,13 @@ pub const VERIFY_SETTINGS: &str = "rebuild-verify-v1/code-atlas-v5";
 pub const PROVEN_FRAMES: u64 = 36_000;
 /// Separate runs needed before a game can be called proven.
 pub const PROVEN_RUNS: u32 = 2;
+
+/// Cache asset name of the demoted-function list (ticket W37-04).
+pub const DEMOTED_ASSET: &str = "rebuild-demoted";
+/// Cache settings string of the demoted-function list: same atlas-format
+/// suffix as [`VERIFY_SETTINGS`], so a new executor starts with nothing
+/// demoted.
+pub const DEMOTED_SETTINGS: &str = "rebuild-demoted-v1/code-atlas-v5";
 
 const MAGIC: [u8; 4] = *b"RFVR";
 const VERSION: u8 = 1;
@@ -93,6 +102,74 @@ impl VerifyRecord {
     }
 }
 
+/// A demoted function, named the way it survives a new atlas: function ids
+/// are positions in one atlas and are renumbered by every rebuild, so the
+/// list stores the function's entry (`entry_rom`, `entry_mode`), which
+/// [`Atlas::functions`] keys on.
+pub type FunctionKey = (u32, u8);
+
+const DEMOTED_MAGIC: [u8; 4] = *b"RFDM";
+const DEMOTED_VERSION: u8 = 1;
+/// Most entries a list may hold when read back (a damaged count can not ask
+/// for gigabytes).
+const DEMOTED_MAX: usize = 1 << 16;
+
+/// The key of function `id` in `atlas`, if it has one.
+#[must_use]
+pub fn function_key(atlas: &Atlas, id: u32) -> Option<FunctionKey> {
+    atlas
+        .functions
+        .get(id as usize)
+        .map(|f| (f.entry_rom, f.entry_mode))
+}
+
+/// The ids in `atlas` of the functions named by `keys` (keys the atlas does
+/// not hold are dropped), ascending.
+#[must_use]
+pub fn demoted_ids(atlas: &Atlas, keys: &[FunctionKey]) -> Vec<u32> {
+    let wanted: std::collections::HashSet<FunctionKey> = keys.iter().copied().collect();
+    atlas
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| wanted.contains(&(f.entry_rom, f.entry_mode)))
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+/// The demoted list's bytes: magic, version, a count, then 5 bytes a key.
+#[must_use]
+pub fn encode_demoted(keys: &[FunctionKey]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + keys.len() * 5);
+    out.extend_from_slice(&DEMOTED_MAGIC);
+    out.push(DEMOTED_VERSION);
+    out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    for &(rom, mode) in keys {
+        out.extend_from_slice(&rom.to_le_bytes());
+        out.push(mode);
+    }
+    out
+}
+
+/// `None` for anything but exactly the bytes [`encode_demoted`] writes.
+#[must_use]
+pub fn decode_demoted(bytes: &[u8]) -> Option<Vec<FunctionKey>> {
+    if bytes.len() < 9 || bytes[..4] != DEMOTED_MAGIC || bytes[4] != DEMOTED_VERSION {
+        return None;
+    }
+    let n = u32::from_le_bytes(bytes[5..9].try_into().ok()?) as usize;
+    if n > DEMOTED_MAX || bytes.len() != 9 + n * 5 {
+        return None;
+    }
+    // A bounded `chunks_exact` walk: every chunk is consumed once.
+    Some(
+        bytes[9..]
+            .chunks_exact(5)
+            .map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), c[4]))
+            .collect(),
+    )
+}
+
 /// What the panel says about a game's rebuilt path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Verification {
@@ -130,6 +207,20 @@ impl Verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_demoted_list_round_trips_and_damage_reads_as_absent() {
+        let keys = vec![(0x10, 0), (0x8000, 3), (7, 1)];
+        let bytes = encode_demoted(&keys);
+        assert_eq!(decode_demoted(&bytes), Some(keys));
+        assert_eq!(decode_demoted(&encode_demoted(&[])), Some(Vec::new()));
+        for cut in 0..bytes.len() {
+            assert_eq!(decode_demoted(&bytes[..cut]), None, "cut at {cut}");
+        }
+        let mut huge = encode_demoted(&[]);
+        huge[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode_demoted(&huge), None);
+    }
 
     #[test]
     fn a_record_round_trips_and_damage_reads_as_absent() {
