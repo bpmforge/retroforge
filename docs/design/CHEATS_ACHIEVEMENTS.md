@@ -58,8 +58,10 @@ Rebuild status says why (W41-03).
 
 Cheats are mods: off by default per game, persisted per game (by ROM
 SHA-256) in the game settings store, and listed in the `PROF` save-state
-chunk so a state taken with cheats is refused by a session without them
-(mod_chunk.rs rules apply unchanged). Any active cheat clears Accuracy
+chunk so loading a state taken with cheats into a session without them
+shows the existing mod-mismatch warning before it loads, the same as
+recipe mods (W41-03 kept that behaviour rather than inventing a harder
+refusal for cheats alone). Any active cheat clears Accuracy
 Mode's badge and shows "Cheats: N".
 
 ## 4. RetroAchievements
