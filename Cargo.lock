@@ -3998,6 +3998,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rf-cheats"
+version = "0.9.1"
+dependencies = [
+ "rf-core-api",
+]
+
+[[package]]
 name = "rf-core-api"
 version = "0.9.1"
 

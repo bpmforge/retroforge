@@ -14,6 +14,7 @@
 //! Do not add public API here without a ticket in plan.json.
 
 mod cart;
+mod cheat;
 pub mod color;
 mod core;
 pub mod coverage;
@@ -32,6 +33,7 @@ mod video;
 mod watch;
 
 pub use cart::CartImage;
+pub use cheat::{RamWrite, RomOverride};
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
 pub use coverage::{
     CodeAddr, CoverageLog, IndirectEdge, IndirectKind, InterruptEntry, InterruptKind,

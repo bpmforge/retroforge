@@ -1,0 +1,13 @@
+[package]
+name = "rf-cheats"
+description = "Cheat code parsing: Game Genie, Pro Action Replay and raw codes (NES, SNES) into rf-core-api overrides and writes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rf-core-api = { path = "../rf-core-api" }
