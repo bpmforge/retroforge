@@ -61,9 +61,9 @@ const ATLAS_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 /// open at once lose each other's entries (the module doc's warning). The
 /// first job, grow jobs, the shadow check's checkpoints and the tests all open
 /// handles from different threads of this one process; this lock makes them
-/// take turns. A job holds it for its whole run, so a checkpoint made while a
-/// build is running waits for it (checkpoints are skipped while a job runs;
-/// only a difference found by the shadow check, or a session ending, waits).
+/// take turns. Jobs hold it only around cache reads and writes, never across
+/// `build_for`, so the core thread's shadow-check writes wait at most for one
+/// cache read or write, not for a build.
 static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -426,7 +426,7 @@ fn first_atlas_in(
     sha: &str,
     user: Option<&CoverageLog>,
 ) -> RebuildBuild {
-    let _lock = cache_lock();
+    let lock = cache_lock();
     let t = Instant::now();
     let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
     let cached_atlas = cache.as_mut().and_then(|c| load_atlas(c, sha));
@@ -457,9 +457,15 @@ fn first_atlas_in(
     if let (Some(atlas), None) = (cached_atlas.clone(), user) {
         return ready(atlas, AtlasSource::Cached, log);
     }
+    // The build itself runs without the lock: the core thread's shadow check
+    // writes through the same lock and must not wait out a build.
+    drop(cache);
+    drop(lock);
     if let Some(log) = log.filter(recorded) {
         return match build_for(image, &log) {
             Ok(atlas) => {
+                let _lock = cache_lock();
+                let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
                 store(cache.as_mut(), sha, &atlas, Some(&log), 0);
                 ready(atlas, AtlasSource::Coverage, Some(log))
             }
@@ -494,10 +500,10 @@ fn grow_atlas_in(
     log: &CoverageLog,
     keep_observed: u64,
 ) -> RebuildBuild {
-    let _lock = cache_lock();
     let t = Instant::now();
     match build_for(image, log) {
         Ok(atlas) => {
+            let _lock = cache_lock();
             let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
             store(cache.as_mut(), sha, &atlas, Some(log), keep_observed);
             let record = load_record(cache.as_mut(), sha);

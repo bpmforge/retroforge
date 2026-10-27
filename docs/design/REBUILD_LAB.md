@@ -583,7 +583,7 @@ on copies after the real frame, so only committed frames are compared.
 **Cache handle lock.** `Cache` rewrites its whole index on every `put`, so two
 handles lose each other's entries (the shadow's checkpoints, the first and
 grow jobs and parallel tests all open handles in one process). `rebuild.rs`
-takes a process-wide lock around every handle use; a job holds it for its run.
+takes a process-wide lock around every handle use; jobs hold it only around cache reads and writes, never across a build, so the core thread waits at most for one cache read or write.
 
 **Forced divergence** is `#[cfg(test)]` only: `CoreCommand::PoisonForTest`
 writes a byte on the player's side at a frame (and again on the private copy
