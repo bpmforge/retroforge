@@ -343,13 +343,15 @@ impl NesCore {
         x.recycle_events(events);
     }
 
-    /// Forget the in-flight hooked calls (ticket W36-05). A machine reset
-    /// does it itself; a caller that restores a savestate through
-    /// [`NesCore::parts_mut`] must call this, because the call stack the
-    /// executor remembered belongs to the machine that was replaced.
+    /// Tell the executor a savestate was just loaded (tickets W36-05,
+    /// W37-07). A caller that restores a savestate through
+    /// [`NesCore::parts_mut`] must call this: the call stack the executor
+    /// remembered belongs to the machine that was replaced, and the next
+    /// block resumes on the plain interpreter. A machine reset forgets the
+    /// frames itself and does not arm the resume rule.
     pub fn reset_hook_frames(&mut self) {
         if let Some(x) = self.rebuild.as_deref_mut() {
-            x.reset_frames();
+            x.state_loaded();
         }
     }
 
@@ -404,6 +406,13 @@ impl NesCore {
         self.rebuild
             .as_deref_mut()
             .map_or(0, |x| x.set_demoted(ids))
+    }
+
+    /// Hooked calls currently in flight (0 while Rebuild is off; ticket
+    /// W37-07, the counterpart of the SNES core's accessor).
+    #[must_use]
+    pub fn rebuild_shadow_depth(&self) -> usize {
+        self.rebuild.as_deref().map_or(0, RebuildExec::shadow_depth)
     }
 
     /// Keep the last `capacity` executed steps on the rebuilt path (ticket
@@ -653,7 +662,9 @@ impl EmulatorCore for NesCore {
         self.cpu = Cpu::power_on(&mut self.bus);
         self.cpu.set_exec_tier(tier);
         self.coverage_note_reset();
-        self.reset_hook_frames();
+        if let Some(x) = self.rebuild.as_deref_mut() {
+            x.reset_frames();
+        }
     }
 
     fn run_frame(&mut self, input: &InputFrame, sink: &mut dyn CoreSink) {

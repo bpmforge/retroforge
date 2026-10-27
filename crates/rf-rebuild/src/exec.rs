@@ -168,6 +168,21 @@ pub enum Dispatch {
     Atlas { node: u32, indirect: bool },
 }
 
+/// Ticket W37-07: the first block after a state load runs on the plain
+/// interpreter, then dispatch re-enters the atlas (`REBUILD_LAB.md`,
+/// "W37-07").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resume {
+    /// Normal dispatch.
+    Off,
+    /// A state was just loaded: the next instruction is the first of the
+    /// resumed block.
+    Armed,
+    /// Inside the atlas block (index) the load landed in; still on the
+    /// interpreter until a block leader or a node of another block.
+    InBlock(u32),
+}
+
 pub struct RebuildExec {
     atlas: Atlas,
     /// PRG offset to the first node at that offset, `NO_NODE` when unknown;
@@ -187,6 +202,8 @@ pub struct RebuildExec {
     /// Hooked calls in flight, outermost first.
     frames: Vec<Frame>,
     frames_dropped: u64,
+    /// Ticket W37-07: where the post-load resume rule stands.
+    resume: Resume,
     events: Vec<FunctionEvent>,
     stats: RebuildStats,
     deltas: Vec<Delta>,
@@ -299,6 +316,7 @@ impl RebuildExec {
             demoted_count: 0,
             frames: Vec::new(),
             frames_dropped: 0,
+            resume: Resume::Off,
             events: Vec::new(),
             stats,
             deltas: Vec::with_capacity(MAX_DELTAS),
@@ -465,6 +483,18 @@ impl RebuildExec {
             };
             self.trace_push(bank, pc, mode, marker);
         }
+        // Ticket W37-07: one compare per instruction while no load is pending.
+        if self.resume != Resume::Off {
+            let rom = match fetch {
+                Fetch::Rom(r) => Some(r),
+                Fetch::Ram | Fetch::Other => None,
+            };
+            if self.resume_step(node.map(|(_, nd)| (nd.block, nd.mode)), rom) {
+                self.stats.fallback += 1;
+                self.stats.fallback_after_load += 1;
+                return Dispatch::Fallback;
+            }
+        }
         // Ticket W37-04: one bitset load per atlas hit, and nothing at all
         // while no function is demoted. The trace above still names the
         // function (it records what the atlas knew); only the answer changes.
@@ -513,6 +543,8 @@ impl RebuildExec {
     #[inline]
     pub fn note_interrupt_at(&mut self, bank: u8, pc: u16, mode: u8) {
         self.stats.interrupt_entries += 1;
+        // The vector's handler starts a new block.
+        self.resume = Resume::Off;
         if !self.trace.is_empty() {
             self.trace_push(bank, pc, mode, TRACE_INTERRUPT);
         }
@@ -610,6 +642,57 @@ impl RebuildExec {
     pub fn reset_frames(&mut self) {
         self.frames.clear();
         self.events.clear();
+        self.resume = Resume::Off;
+    }
+
+    /// A savestate was just loaded into the machine (ticket W37-07). The
+    /// executor's bookkeeping describes the machine that was replaced, so:
+    /// in-flight hooked frames and undelivered events are dropped (an Exit
+    /// for a call entered before the load is never reported), the trace ring
+    /// is cleared (it would splice two timelines), and the next block runs on
+    /// the interpreter ([`RebuildStats::fallback_after_load`]) before
+    /// dispatch re-enters the atlas. Counters, deltas, the hooked and demoted
+    /// sets are session settings and stay.
+    pub fn state_loaded(&mut self) {
+        self.reset_frames();
+        self.resume = Resume::Armed;
+        self.trace_next = 0;
+        self.trace_total = 0;
+    }
+
+    /// Does this instruction still belong to the resumed block? `node` is
+    /// the atlas node's `(block, mode)`, `rom` its offset when fetched from
+    /// ROM. Disarms on the first instruction that is not.
+    ///
+    /// Terminates: every call either leaves [`Resume::InBlock`] or stays in
+    /// it only for a node that is not its block's first instruction, and a
+    /// block is a finite run of such nodes (a jump into one is a leader by
+    /// construction).
+    fn resume_step(&mut self, node: Option<(u32, u8)>, rom: Option<u32>) -> bool {
+        match (self.resume, node) {
+            (Resume::Off, _) => false,
+            (Resume::Armed, found) => {
+                // The first instruction after a load always takes the
+                // interpreter, in the atlas or not.
+                self.resume = found.map_or(Resume::Off, |(b, _)| Resume::InBlock(b));
+                true
+            }
+            (Resume::InBlock(b), Some((nb, mode))) if nb == b => {
+                let leader = self
+                    .atlas
+                    .blocks
+                    .get(b as usize)
+                    .is_some_and(|blk| Some(blk.start_rom) == rom && blk.start_mode == mode);
+                if leader {
+                    self.resume = Resume::Off;
+                }
+                !leader
+            }
+            (Resume::InBlock(_), _) => {
+                self.resume = Resume::Off;
+                false
+            }
+        }
     }
 
     /// A call, `BRK` or interrupt entry just ran and control is now at PRG
@@ -1192,5 +1275,94 @@ mod tests {
             x.dispatch(0x8020, Some(0x20)),
             Dispatch::Atlas { .. }
         ));
+    }
+
+    /// Ticket W37-07: after a state load the first block runs on the plain
+    /// interpreter (counted as its own reason), then dispatch re-enters the
+    /// atlas at the next block leader.
+    #[test]
+    fn a_state_load_resumes_one_block_on_the_interpreter_then_reenters() {
+        let mut x = RebuildExec::new(hook_atlas());
+        x.state_loaded();
+        // Landed on the leader of function 1's block: both of its
+        // instructions are interpreter steps.
+        assert_eq!(x.dispatch(0x8020, Some(0x20)), Dispatch::Fallback);
+        assert_eq!(x.dispatch(0x8021, Some(0x21)), Dispatch::Fallback);
+        assert!(matches!(
+            x.dispatch(0x8010, Some(0x10)),
+            Dispatch::Atlas { .. }
+        ));
+        let s = x.stats();
+        assert_eq!((s.fallback, s.fallback_after_load), (2, 2));
+        assert_eq!((s.fallback_no_node, s.fallback_demoted), (0, 0));
+        assert_eq!(s.observed, 1);
+        // A block that loops onto its own leader ends the resumed block there.
+        x.state_loaded();
+        assert_eq!(x.dispatch(0x8010, Some(0x10)), Dispatch::Fallback);
+        assert!(matches!(
+            x.dispatch(0x8010, Some(0x10)),
+            Dispatch::Atlas { .. }
+        ));
+        // Landing mid-block: the rest of it, then the next leader.
+        x.state_loaded();
+        assert_eq!(x.dispatch(0x8021, Some(0x21)), Dispatch::Fallback);
+        assert!(matches!(
+            x.dispatch(0x8030, Some(0x30)),
+            Dispatch::Atlas { .. }
+        ));
+        assert_eq!(x.stats().fallback_after_load, 2 + 1 + 1);
+    }
+
+    #[test]
+    fn the_resume_rule_ends_at_code_the_atlas_does_not_know_and_at_interrupts() {
+        let mut x = RebuildExec::new(hook_atlas());
+        x.state_loaded();
+        // RAM code is the first block: one reason only, then normal counting.
+        assert_eq!(x.dispatch_at(0, 0x0300, Fetch::Ram, 0), Dispatch::Fallback);
+        assert_eq!(x.dispatch_at(0, 0x0301, Fetch::Ram, 0), Dispatch::Fallback);
+        let s = x.stats();
+        assert_eq!((s.fallback_after_load, s.fallback_ram), (1, 1));
+        x.state_loaded();
+        x.note_interrupt(0x8000);
+        assert!(matches!(
+            x.dispatch(0x8010, Some(0x10)),
+            Dispatch::Atlas { .. }
+        ));
+        assert_eq!(x.stats().fallback_after_load, 1, "the interrupt ended it");
+        // A reset (frames forgotten, no load) does not arm the rule.
+        x.reset_frames();
+        assert!(matches!(
+            x.dispatch(0x8010, Some(0x10)),
+            Dispatch::Atlas { .. }
+        ));
+    }
+
+    /// Ticket W37-07: what a load drops and what it keeps.
+    #[test]
+    fn a_state_load_drops_frames_and_events_and_keeps_the_session() {
+        let mut x = RebuildExec::new(hook_atlas());
+        x.set_hooked(&[0, 1]);
+        x.set_demoted(&[2]);
+        x.enable_trace(8);
+        x.dispatch(0x8010, Some(0x10));
+        x.landed(Some(0x10), 0x9000);
+        x.landed(Some(0x20), 0x9100);
+        assert_eq!(x.shadow_depth(), 2);
+        x.state_loaded();
+        assert_eq!(x.shadow_depth(), 0);
+        assert!(drain(&mut x).is_empty(), "the Enters were never delivered");
+        assert!(x.trace().is_empty() && x.trace_total() == 0);
+        // The return of a call made before the load reports nothing.
+        x.returned(0x9100);
+        x.returned(0x9000);
+        assert!(drain(&mut x).is_empty(), "no orphan Exit");
+        // Session settings and counters survive.
+        assert!(x.hooks_active());
+        assert_eq!(x.stats().observed, 1);
+        assert_eq!(x.dispatch(0x8030, Some(0x30)), Dispatch::Fallback);
+        assert_eq!(x.dispatch(0x8031, Some(0x31)), Dispatch::Fallback);
+        x.dispatch(0x8040, Some(0x40)); // leader of another block: re-entered
+        x.landed(Some(0x10), 0x9000);
+        assert_eq!(drain(&mut x), [enter(0)], "calls after the load pair up");
     }
 }

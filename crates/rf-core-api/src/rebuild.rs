@@ -26,6 +26,10 @@ pub struct RebuildStats {
     /// Of those: the node's function was demoted by the shadow-core check
     /// (ticket W37-04), so the plain interpreter ran it.
     pub fallback_demoted: u64,
+    /// Of those: the first block run after a savestate load (ticket W37-07).
+    /// A load always resumes on the plain interpreter for one block, then
+    /// dispatch re-enters the atlas at the next block leader.
+    pub fallback_after_load: u64,
     /// Hardware interrupt entries (NMI/IRQ sequences, not instructions).
     pub interrupt_entries: u64,
     /// Indirect transfers (`JMP (a)`, `RTS`, `RTI`, `BRK`) compared against
