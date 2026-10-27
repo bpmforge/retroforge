@@ -4851,9 +4851,11 @@ impl RetroForgeApp {
         } else {
             Vec::new()
         };
-        if want_compare_buffers != self.compare_capture_active {
-            self.compare_capture_active = want_compare_buffers;
-            self.send_command(CoreCommand::SetCompareCapture(want_compare_buffers));
+        // Only an SNES core has a sub-screen to keep.
+        let want_compare_capture = want_compare_buffers && self.console_label == "SNES";
+        if want_compare_capture != self.compare_capture_active {
+            self.compare_capture_active = want_compare_capture;
+            self.send_command(CoreCommand::SetCompareCapture(want_compare_capture));
         }
         if crashed {
             // FM-01's recovery row is "Reload ROM / load last state" — the
