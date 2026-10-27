@@ -440,7 +440,8 @@ mod tests {
                     let g = (x * 255 / (w - 1)) as u8;
                     [g, g, g]
                 } else if y < 190 {
-                    let on = ((x as i32 - 128).abs() as usize + y) % 16 < 3 || (x + y) % 24 < 2;
+                    let on =
+                        ((x as i32 - 128).unsigned_abs() as usize + y) % 16 < 3 || (x + y) % 24 < 2;
                     if on {
                         [250, 250, 250]
                     } else {
