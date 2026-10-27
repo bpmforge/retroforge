@@ -9,6 +9,7 @@
 
 pub mod atlas;
 mod build;
+pub mod collision;
 pub mod covio;
 pub mod dataregion;
 pub mod exec;
@@ -16,6 +17,7 @@ pub mod hw;
 pub mod ir;
 pub mod isa;
 pub mod naming;
+pub mod objtable;
 pub mod profile;
 pub mod recipe;
 pub mod superset;

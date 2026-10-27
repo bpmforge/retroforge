@@ -30,6 +30,7 @@
 mod accuracy;
 pub mod atlas;
 mod blargg;
+pub mod collision_tables;
 pub mod blargg_evidence;
 pub mod data_regions;
 mod fetch;
@@ -45,6 +46,7 @@ pub mod movie;
 pub mod movie_replay;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
+pub mod object_tables;
 pub mod shadow;
 mod tolerance;
 pub mod understand;
