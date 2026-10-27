@@ -54,10 +54,15 @@ use crate::recipe::{Grade, TileClass, TileSemantics};
 
 /// Frames with fewer reads than this at a site do not make it a candidate.
 const MIN_ACTIVE_PCT: usize = 50;
+/// A site must walk at least this many RAM addresses to be a level buffer
+/// reader (a variable or a short table is not).
+pub const MIN_BUFFER_ADDRS: usize = 12;
 /// Blocked (or rising) frames a tile id needs before it earns a class.
 pub const MIN_EVIDENCE: u32 = 3;
 /// Share of an id's reads (percent) that must fall in the deciding motion.
 pub const MIN_PRECISION_PCT: u32 = 85;
+/// A one-way id blocks a fall almost every time it is read in one.
+pub const ONE_WAY_PRECISION_PCT: u32 = 95;
 /// Rising frames right after leaving the ground that are not counted as
 /// "rising through" (the feet probe is still over the floor).
 const RISE_SKIP: usize = 3;
@@ -551,7 +556,7 @@ pub fn infer(facts: &CollisionFacts) -> Vec<CollisionSite> {
         };
         let act = active.get(site).copied().unwrap_or(0);
         // A map walker reads many addresses and reads on most frames.
-        if sf.addrs.len() < 2 || act * 100 < sampled * MIN_ACTIVE_PCT {
+        if sf.addrs.len() < MIN_BUFFER_ADDRS || act * 100 < sampled * MIN_ACTIVE_PCT {
             continue;
         }
         let verdicts: Vec<Verdict> = by_id
@@ -607,7 +612,7 @@ pub fn decide(t: &Tally) -> Option<TileClass> {
     // Blocks a fall but is read while rising through it: one-way.
     if t.blocked_down >= MIN_EVIDENCE
         && t.rising >= MIN_EVIDENCE
-        && Tally::pct(t.blocked_down, t.blocked_down + t.falling) >= MIN_PRECISION_PCT
+        && Tally::pct(t.blocked_down, t.blocked_down + t.falling) >= ONE_WAY_PRECISION_PCT
     {
         return Some(TileClass::OneWay);
     }

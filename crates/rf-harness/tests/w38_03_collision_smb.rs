@@ -121,22 +121,34 @@ fn smb_collision_routine_and_solid_ids_are_found_without_hints() {
     };
     let raw = load_rom(&path);
     let atlas = build_nes_atlas(&raw, &record(&raw, None)).expect("atlas");
-    let mut d = NesDriver::new(&raw, &atlas).expect("loads");
     let watch = Watch {
         y: vec![0x00CE],
         x: vec![0x0086, 0x006D],
     };
     let ins = inputs(script_one);
     let t = std::time::Instant::now();
-    let facts = run_nes(
-        &mut d,
-        &ins,
-        LEAD_IN as usize,
-        &watch,
-        |f| script_one(f as u32) & RIGHT != 0,
-        |_, _| {},
-    )
-    .expect("runs");
+    // 1-1 (ground, bricks, pipes) and 2-2 (underwater), forced the way the
+    // W38-01 experiment forces levels.
+    let mut facts = rf_rebuild::collision::CollisionFacts::default();
+    for level in [(0u8, 0u8), (1, 1)] {
+        let mut d = NesDriver::new(&raw, &atlas).expect("loads");
+        let f = run_nes(
+            &mut d,
+            &ins,
+            LEAD_IN as usize,
+            &watch,
+            |f| script_one(f as u32) & RIGHT != 0,
+            |f, d| force_level(f as u32, &mut d.core, Some(level)),
+        )
+        .expect("runs");
+        println!(
+            "level {:?}: {} frames, {} sites",
+            level,
+            f.frames.len(),
+            f.sites.len()
+        );
+        facts.merge(&f);
+    }
     println!(
         "{} frames observed in {:?}; {} load sites",
         facts.frames.len(),
@@ -167,7 +179,14 @@ fn smb_collision_routine_and_solid_ids_are_found_without_hints() {
         for v in &s.verdicts {
             println!("   id {:#04x} {:?} {:?}", v.id, v.class, v.tally);
         }
-        for row in to_rows(s, None, None, "the RAM level buffer ids", "1-1 play", Grade::Candidate) {
+        for row in to_rows(
+            s,
+            None,
+            None,
+            "the RAM level buffer ids",
+            "1-1 play",
+            Grade::Candidate,
+        ) {
             println!("   row {:?} {:#x}..={:#x}", row.class, row.first, row.last);
         }
     }
@@ -176,6 +195,34 @@ fn smb_collision_routine_and_solid_ids_are_found_without_hints() {
         sites.iter().any(|s| !s.ids(TileClass::Solid).is_empty()),
         "some ids classified Solid"
     );
+    // A per-screen solidity map of the buffer the routine walked: its RAM span
+    // read mid-1-1, 16 cells to a row, through the rows just found.
+    let site = &sites[0];
+    let (lo, hi, _) = buffer_span(site).expect("span");
+    let mut d = NesDriver::new(&raw, &atlas).expect("loads");
+    for (f, input) in ins.iter().enumerate().take(LEAD_IN as usize + 600) {
+        force_level(f as u32, &mut d.core, Some((0, 0)));
+        d.frame(input, false).expect("frame");
+    }
+    let rows = to_rows(
+        site,
+        None,
+        None,
+        "RAM level buffer ids",
+        "1-1",
+        Grade::Candidate,
+    );
+    let ids: Vec<Option<u32>> = (lo..=hi)
+        .map(|a| Some(u32::from(d.core.bus().peek(a as u16))))
+        .collect();
+    let grid = rf_rebuild::collision::found_grid(&ids, 16, &rows);
+    let solid = grid.cells.iter().filter(|c| **c == Some(true)).count();
+    println!(
+        "buffer {lo:#x}..={hi:#x}: {} rows of 16, {solid} solid cells of {}",
+        grid.h,
+        grid.cells.len()
+    );
+    assert!(solid > 0, "the found rows mark some buffer cells solid");
     // The painted side: none ships for this ROM (heights are painted for SNES
     // tilemaps only), so the agreement is not computable.
     let profile = std::fs::read_to_string(
