@@ -4959,3 +4959,11 @@ stories, 10 decisions).
   S-DSP voice byte the savestate misses with Rebuild off too: ticketed as
   W37-07b. Workspace: **3726 passing**; `memory_editor_writes_the_machine`
   failed once under load (pre-existing flake) and passes alone 3/3.
+- **W37-07b — SNES APU access tallies leak across a load** (2026-10-27).
+  The suspected missing S-DSP byte was not a savestate gap: the APU's
+  per-instruction tallies (`ram_accesses`, `io_accesses`, `intra_ticks`)
+  are not saved, and a fresh core's power-on leaves two I/O accesses
+  charged, so the first instruction after a load ran the DSP two cycles
+  short. `Apu::load` now clears them. Regression test in
+  `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
+  Workspace: **3728 passing**, gate green.
