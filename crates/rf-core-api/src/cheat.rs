@@ -5,6 +5,10 @@
 //! in `rf-cheats`; applying them lives in the cores (ROM overrides) and the
 //! app's mod-tier write door (RAM writes).
 
+/// Most ROM overrides a core accepts at once (ticket W41-02). A sanity bound,
+/// not hardware: the NES Game Genie took 3 codes, the SNES one 5.
+pub const MAX_ROM_OVERRIDES: usize = 16;
+
 /// A ROM-read override: a CPU read of cartridge ROM at `addr` returns
 /// `value`, but only when the cartridge's own byte equals `compare` if that is
 /// `Some`.
@@ -41,4 +45,33 @@ pub struct RamWrite {
     pub value: u8,
     /// When `Some`, write only if the current byte equals this.
     pub compare: Option<u8>,
+}
+
+/// The byte a CPU read of cartridge ROM at `addr` returns when the cartridge
+/// itself supplied `cartridge_byte` (ticket W41-02). The first override whose
+/// `addr` matches and whose `compare` is `None` or equals `cartridge_byte`
+/// wins; otherwise the cartridge byte passes through.
+///
+/// Shared by the cores so both consoles resolve a list identically. Callers
+/// keep a fast path (`if overrides.is_empty()`) around it.
+#[inline]
+#[must_use]
+pub fn resolve_rom_override(overrides: &[RomOverride], addr: u32, cartridge_byte: u8) -> u8 {
+    overrides
+        .iter()
+        .find(|o| o.addr == addr && o.compare.is_none_or(|c| c == cartridge_byte))
+        .map_or(cartridge_byte, |o| o.value)
+}
+
+/// Replace `slot` with `new` unless `new` is longer than
+/// [`MAX_ROM_OVERRIDES`], in which case nothing changes and this returns
+/// `false`. An empty `new` clears the slot. The cores' shared body of
+/// `EmulatorCore::set_rom_overrides`.
+pub fn install_rom_overrides(slot: &mut Vec<RomOverride>, new: &[RomOverride]) -> bool {
+    if new.len() > MAX_ROM_OVERRIDES {
+        return false;
+    }
+    slot.clear();
+    slot.extend_from_slice(new);
+    true
 }

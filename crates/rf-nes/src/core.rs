@@ -813,6 +813,10 @@ impl EmulatorCore for NesCore {
         }
     }
 
+    fn set_rom_overrides(&mut self, overrides: &[rf_core_api::RomOverride]) -> bool {
+        self.bus.set_rom_overrides(overrides)
+    }
+
     fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
         self.rebuild.as_deref().map(RebuildExec::stats)
     }

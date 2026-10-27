@@ -33,7 +33,9 @@ mod video;
 mod watch;
 
 pub use cart::CartImage;
-pub use cheat::{RamWrite, RomOverride};
+pub use cheat::{
+    install_rom_overrides, resolve_rom_override, RamWrite, RomOverride, MAX_ROM_OVERRIDES,
+};
 pub use core::{CoreConfig, CoreSink, EmulatorCore, ResetKind, Step, StepResult};
 pub use coverage::{
     CodeAddr, CoverageLog, IndirectEdge, IndirectKind, InterruptEntry, InterruptKind,

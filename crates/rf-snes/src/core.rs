@@ -988,6 +988,10 @@ impl EmulatorCore for SnesCore {
         }
     }
 
+    fn set_rom_overrides(&mut self, overrides: &[rf_core_api::RomOverride]) -> bool {
+        rf_core_api::install_rom_overrides(&mut self.system.bus.rom_overrides, overrides)
+    }
+
     fn rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
         self.system
             .rebuild
@@ -1073,7 +1077,12 @@ impl EmulatorCore for SnesCore {
             self.system.bus.sram.len(),
         );
         match target {
-            crate::mapping::Target::Rom(i) => self.system.bus.rom.get(i).copied().unwrap_or(0),
+            // W41-02: the debugger shows what the CPU sees, overrides included.
+            crate::mapping::Target::Rom(i) => rf_core_api::resolve_rom_override(
+                &self.system.bus.rom_overrides,
+                addr & 0x00FF_FFFF,
+                self.system.bus.rom.get(i).copied().unwrap_or(0),
+            ),
             crate::mapping::Target::Wram(i) => self.system.bus.wram.get(i).copied().unwrap_or(0),
             crate::mapping::Target::Sram(i) => self.system.bus.sram.get(i).copied().unwrap_or(0),
             // This viewer resolves through the plain `map` above, never

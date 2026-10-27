@@ -27,6 +27,7 @@ mod mapping;
 mod overclock;
 mod ppu;
 mod regs;
+mod rom_overrides;
 mod sdd1_dma;
 mod system;
 mod timing;

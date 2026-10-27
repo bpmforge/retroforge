@@ -157,6 +157,9 @@ impl NesBus {
             // to smuggle a different game into a session.
             rom: _,
             mapper: _, // MAPR chunk
+            // Ticket W41-02: session state, re-installed by the app from its
+            // PROF record; never saved.
+            rom_overrides: _,
             last_oam_dma_stall,
             // Ticket W3-07b. Diagnostic, not state: it counts how the
             // scheduler ran this session, and nothing reads it back into

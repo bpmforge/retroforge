@@ -60,6 +60,11 @@ pub struct Dsp1DrTrace {
 /// The machine's memory, cartridge and registers.
 pub struct SnesBus {
     pub rom: Vec<u8>,
+    /// Ticket W41-02: Game Genie style ROM-read overrides keyed by the
+    /// 24-bit CPU address (at most [`rf_core_api::MAX_ROM_OVERRIDES`]).
+    /// Empty costs one length test per ROM read. Session state: not saved,
+    /// survives reset, gone with the bus on a cartridge load.
+    pub rom_overrides: Vec<rf_core_api::RomOverride>,
     pub sram: Vec<u8>,
     /// Cartridge RAM in the `$6000-$7FFF` window of the system banks
     /// (ticket W14-60). `None` on every cartridge but a LoROM board whose
@@ -355,6 +360,7 @@ impl SnesBus {
             access_log: Vec::new(),
             hdma_lanes: vec![0; 262],
             rom,
+            rom_overrides: Vec::new(),
             sram: vec![0; sram_len],
             window_ram: None,
             wram: vec![0; WRAM_LEN],
@@ -1362,6 +1368,27 @@ impl SnesBus {
     }
 }
 
+impl SnesBus {
+    /// ROM byte `rom[i]` as the CPU (and A-bus DMA) sees it at 24-bit
+    /// address `addr`, after any ROM override (ticket W41-02). Overrides key
+    /// on the address the CPU asked for, so mirrors of one ROM byte are
+    /// distinct addresses, as on the device. The SNES Game Genie sits on the
+    /// cartridge connector and answers reads there, so A-bus DMA (MDMA/HDMA
+    /// source reads go through [`CpuBus::read`]) is overridden too; SA-1 and
+    /// GSU read `rom` directly and are not. UNVERIFIED against fullsnes
+    /// "SNES Cart Cheat Devices" (<https://problemkaputt.de/fullsnes.htm>),
+    /// which was not consulted offline: the DMA choice follows from the
+    /// device's position on the cartridge bus.
+    #[inline]
+    fn rom_byte_seen_by_cpu(&self, addr: u32, i: usize) -> u8 {
+        let byte = self.rom[i];
+        if self.rom_overrides.is_empty() {
+            return byte;
+        }
+        rf_core_api::resolve_rom_override(&self.rom_overrides, addr, byte)
+    }
+}
+
 impl CpuBus for SnesBus {
     fn read(&mut self, addr: u32) -> u8 {
         let target = self.target(addr);
@@ -1382,7 +1409,7 @@ impl CpuBus for SnesBus {
             Target::Rom(_) if self.rom_bus_held_by_gsu() => {
                 crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
             }
-            Target::Rom(i) => self.rom[i],
+            Target::Rom(i) => self.rom_byte_seen_by_cpu(addr, i),
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
             Target::WindowRam(i) => self.window_ram_read(i),
@@ -1687,7 +1714,7 @@ impl CpuBus for SnesBus {
             Target::Rom(_) if self.rom_bus_held_by_gsu() => {
                 crate::gsu::Gsu::fixed_vector_byte(addr).unwrap_or(self.open_bus)
             }
-            Target::Rom(i) => self.rom[i],
+            Target::Rom(i) => self.rom_byte_seen_by_cpu(addr, i),
             Target::Wram(i) => self.wram[i],
             Target::Sram(i) => self.sram[i],
             Target::WindowRam(i) => self.window_ram_read(i),

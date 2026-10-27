@@ -1,6 +1,7 @@
 //! The core contract itself: [`EmulatorCore`] and [`CoreSink`]
 //! (ARCHITECTURE §5; CONTRACTS §1; FR-CORE-001, FR-CORE-005).
 use crate::cart::CartImage;
+use crate::cheat::RomOverride;
 use crate::error::{CoreError, StateError};
 use crate::event::{CoreEvent, EventMask};
 use crate::input::InputFrame;
@@ -368,6 +369,25 @@ pub trait EmulatorCore {
     /// mod-tier (NON_GOALS 13); the sink side ledgers it.
     fn set_function_hooks(&mut self, function_ids: &[u32]) {
         let _ = function_ids;
+    }
+
+    /// Ticket W41-02: install ROM-read overrides (Game Genie style, see
+    /// [`RomOverride`] and `docs/design/CHEATS_ACHIEVEMENTS.md` section 2).
+    /// Returns `true` when the core applied them. An empty slice clears all
+    /// overrides.
+    ///
+    /// CPU reads of cartridge ROM only: the core consults the list after the
+    /// cartridge has produced its byte. The first matching entry wins. A
+    /// core applies at most 16; given more it applies nothing and returns
+    /// `false`. The default is "this core does not support it" and returns
+    /// `false`.
+    ///
+    /// The caller is the app, at the mod tier (NON_GOALS 13), and it ledgers
+    /// the install. Overrides are session state, not part of a save state:
+    /// the app re-installs them from its PROF chunk record after a load.
+    fn set_rom_overrides(&mut self, overrides: &[RomOverride]) -> bool {
+        let _ = overrides;
+        false
     }
 
     /// The executor's counters, `None` when no atlas is installed.

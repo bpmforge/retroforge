@@ -45,10 +45,14 @@ thread at the start of every frame through the existing mod-tier write
 door, the same one hook scripts and the memory editor use, so every write
 is ledgered (NON_GOALS 13).
 
-**Rebuild tiers.** Pre-decoded and compiled code does not re-read ROM, so
-a ROM override would be silently ignored there. While any ROM override is
-active the core thread runs the interpreter tier, and the Rebuild status
-says why.
+**Rebuild tiers** (corrected by W41-02's finding). The atlas executor only
+observes: it peeks and then runs the plain interpreter step, so instructions
+still come through the bus and overrides are honoured (NES `ExecTier::Ir`
+fetches through the bus too). What overrides break is the atlas's *view*:
+it is looked up by ROM offset and describes the cartridge's bytes, not the
+patched ones. So while any ROM override is active the app does not record
+coverage, build or extend an atlas, or treat atlas stats as evidence, and the
+Rebuild status says why (W41-03).
 
 ## 3. Mod tier, state and identity
 

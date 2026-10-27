@@ -154,6 +154,12 @@ pub struct NesBus {
     /// access and every CHR-bank/mirroring push into `ppu` goes through
     /// this. See the module doc's "Mapper scope" section.
     mapper: Box<dyn Mapper>,
+    /// Ticket W41-02: Game Genie style ROM-read overrides (at most
+    /// [`rf_core_api::MAX_ROM_OVERRIDES`]). Empty means the `$8000-$FFFF`
+    /// read path pays one length test. Session state: not saved, survives
+    /// reset (a real Game Genie stays across the console's reset button),
+    /// gone with the bus when a cartridge is loaded.
+    rom_overrides: Vec<rf_core_api::RomOverride>,
     /// Stall length (513 or 514) of the most recently completed OAM DMA,
     /// *not counting* the `$4014` write's own bus cycle (see
     /// `run_oam_dma`'s doc for the exact accounting). `None` until the
@@ -412,6 +418,7 @@ impl NesBus {
             prg_ram: vec![0; prg_ram_len],
             rom,
             mapper,
+            rom_overrides: Vec::new(),
             last_oam_dma_stall: None,
             skipped_dots: 0,
             inert_recheck_in: 0,
@@ -771,11 +778,44 @@ impl NesBus {
             // module doc, "PRG RAM windows").
             0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
                 Some(offset) => self.prg_ram[offset % self.prg_ram.len()],
-                None => self.mapper.cpu_read(addr),
+                None => self.cart_rom_byte(addr),
             },
         };
         self.open_bus = value;
         value
+    }
+
+    /// The byte the CPU sees for a cartridge ROM read at `addr`
+    /// (`$8000-$FFFF`, not an MMC5 RAM-selected window): the mapper's byte,
+    /// then any ROM override (ticket W41-02). The Game Genie sits between
+    /// cartridge and console and answers on the CPU bus, optionally gated on
+    /// the cartridge's own byte (nesdev wiki "Game Genie",
+    /// <https://www.nesdev.org/wiki/Game_Genie>). It therefore also answers
+    /// DMC DMA fetches, which use the CPU bus (nesdev wiki "APU DMC",
+    /// <https://www.nesdev.org/wiki/APU_DMC>), and never PPU fetches, which
+    /// do not pass this path. `peek` uses it too, so the debugger shows what
+    /// the CPU sees; the mapper read is `&self`, so it has no side effects.
+    #[inline]
+    fn cart_rom_byte(&self, addr: u16) -> u8 {
+        let byte = self.mapper.cpu_read(addr);
+        if self.rom_overrides.is_empty() {
+            return byte;
+        }
+        rf_core_api::resolve_rom_override(&self.rom_overrides, u32::from(addr), byte)
+    }
+
+    /// Install ROM-read overrides (ticket W41-02); see
+    /// [`rf_core_api::EmulatorCore::set_rom_overrides`]. Returns `false`
+    /// and changes nothing when given more than
+    /// [`rf_core_api::MAX_ROM_OVERRIDES`].
+    pub fn set_rom_overrides(&mut self, overrides: &[rf_core_api::RomOverride]) -> bool {
+        rf_core_api::install_rom_overrides(&mut self.rom_overrides, overrides)
+    }
+
+    /// The ROM overrides in force.
+    #[must_use]
+    pub fn rom_overrides(&self) -> &[rf_core_api::RomOverride] {
+        &self.rom_overrides
     }
 
     /// Side-effect-free, cycle-free memory read (ticket W1-03): never
@@ -859,7 +899,7 @@ impl NesBus {
             0x6000..=0x7FFF => self.prg_ram[self.mapper.wram_offset(addr) % self.prg_ram.len()],
             0x8000..=0xFFFF => match self.mapper.prg_ram_window(addr) {
                 Some(offset) => self.prg_ram[offset % self.prg_ram.len()],
-                None => self.mapper.cpu_read(addr),
+                None => self.cart_rom_byte(addr),
             },
         }
     }
