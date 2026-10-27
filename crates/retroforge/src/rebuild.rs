@@ -163,6 +163,10 @@ pub struct RebuildInfo {
 
 /// Where the Rebuild button stands, as the panel shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+// W37-07: `RebuildStats` grew one counter, which tipped `On` over the lint's
+// size threshold; the value is built once per status change, so boxing it
+// would only touch every reader.
+#[allow(clippy::large_enum_variant)]
 pub enum RebuildStatus {
     #[default]
     Off,

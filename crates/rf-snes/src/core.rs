@@ -551,13 +551,15 @@ impl SnesCore {
             .map_or(0, rf_rebuild::RebuildExec::shadow_depth)
     }
 
-    /// Forget the in-flight hooked calls. A machine reset does it itself; a
-    /// caller that restores a savestate into [`Self::system_mut`] must call
-    /// this, because the call stack the executor remembered belongs to the
-    /// machine that was replaced.
+    /// Tell the executor a savestate was just loaded (tickets W36-08b,
+    /// W37-07). A caller that restores a savestate into
+    /// [`Self::system_mut`] must call this: the call stack the executor
+    /// remembered belongs to the machine that was replaced, and the next
+    /// block resumes on the plain interpreter. A machine reset forgets the
+    /// frames itself and does not arm the resume rule.
     pub fn reset_hook_frames(&mut self) {
         if let Some(x) = self.system.rebuild.as_deref_mut() {
-            x.reset_frames();
+            x.state_loaded();
         }
     }
 

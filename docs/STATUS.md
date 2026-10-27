@@ -4950,3 +4950,12 @@ stories, 10 decisions).
   rf-harness is now a runtime dependency of the app. Workspace: **3720
   passing**; `w35_16_margin_toggle` timed out once under load in the gate
   (10 s frame wait, does not use Rebuild) and passes alone 3/3.
+- **W37-07 — Savestates and rewind across tiers** (2026-10-27). Loading a
+  state (or rewinding) while Rebuild is on drops in-flight frames and events,
+  clears the trace and runs the first block on the interpreter before
+  re-entering the atlas (`RebuildStats::fallback_after_load`), so a state
+  saved on any tier loads on any tier. NES and SNES 16-combo matrices
+  (save tier × load tier × rewind) restore byte-identical, except one SNES
+  S-DSP voice byte the savestate misses with Rebuild off too: ticketed as
+  W37-07b. Workspace: **3726 passing**; `memory_editor_writes_the_machine`
+  failed once under load (pre-existing flake) and passes alone 3/3.

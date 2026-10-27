@@ -622,6 +622,76 @@ was not run live (coprocessor state is compared through its serialised state).
 The 8-bundle-per-session cap, the 600-frame run minimum and the 10-second
 checkpoint are choices, not measurements.
 
+### W37-07: savestates and rewind across tiers (built 2026-10-27)
+
+There is no compiled tier (D-029). The tiers are the plain interpreter
+(Rebuild off), the rebuilt path (the core's own `Cpu::step` driven through the
+atlas) and, inside it, the per-instruction fallbacks (no node, RAM code, a
+demoted function). CPU state lives in the same registers on all of them, so a
+savestate is tier-blind: it can be saved on any tier and loaded into any (law 4,
+"savestates stay interchangeable").
+
+**What is in a savestate.** Machine state only: the container (NES `.rfstate`
+regions; SNES `snes_save_state`), plus the hook host's write ledger in `PROF`
+(W36-06b, unchanged). **What is not:** anything the executor keeps.
+
+| Executor state | On a load |
+|---|---|
+| Shadow call stack (hooked calls in flight) | dropped |
+| Queued, undelivered function events | dropped (hooks are delivered at the instruction boundary, so none are pending at a frame boundary anyway) |
+| Trace ring | cleared (it would splice two timelines) |
+| Resume rule | armed (below) |
+| Counters (`RebuildStats`), dispatch deltas, `shadow_dropped` | kept: they are session totals, not machine state |
+| Hooked and demoted sets, the atlas | kept: session settings |
+
+`RebuildExec::state_loaded` does the above. The cores call it from
+`reset_hook_frames`, which every load path already calls (`EmuStepper::load_state`
+and `restore`, `fuzz::Savestate::restore`); the name stayed for compatibility.
+A machine reset still only forgets frames (`reset_frames`) and does not arm the
+resume rule.
+
+**Events across a load.** A call entered before the save has no frame after the
+load, so its Exit is never reported: no orphan Exit, and nothing doubled. Calls
+made after the load pair up as usual. The test computes the expected stream from
+a straight hooked run (its events after the save, minus the Exits that pop
+pre-save frames) and demands equality. A consumer that needs the pre-save call
+must read it from its own state (the hook host's ledger is in `PROF`).
+
+**Resume rule.** The first block after a load runs on the plain interpreter,
+counted as `RebuildStats::fallback_after_load` (also in `fallback`; an
+instruction is counted under exactly one reason and this one takes precedence).
+"First block" is the load's first instruction and the rest of its atlas block
+up to the next block leader; code the atlas does not know ends it after one
+instruction, and so does an NMI/IRQ entry. Dispatch then re-enters the atlas.
+Behaviour is identical either way (the executor only watches), so this is
+bookkeeping made explicit rather than a different code path; a future compiled
+tier gets its entry condition from it. Cost: one enum compare per instruction
+while Rebuild is on, a single predictable branch.
+
+**Rewind and run-ahead.** Both go through `EmuStepper::snapshot/restore`, so
+they take the same path. Run-ahead loads its snapshot into a private shadow
+machine, which gets the same reset (and the shell's real machine is only read).
+
+**Tests** (`crates/retroforge/tests/w37_07_savestates.rs`, `rf-rebuild` exec
+tests). Per console on a synthetic cartridge that runs real code with a
+frame-spanning hooked call: save on each of {Off, On, On+hook, On+demoted},
+load into each of the four (the target first runs four frames of its own, so a
+hooked target holds frames that the load must drop), replay to M, and assert the
+machine digest (registers plus every savestate region) after every frame equals
+a straight plain run. The save in the hooked row is taken mid-call. The diagonal
+also rewinds in place. Plus: the shipped `EmuStepper` path with state hashes,
+the event rule above, and `fallback_after_load` bounds and re-entry
+(`observed` grows after it). `#[ignore]`d `smb_saves_load_across_all_tiers`
+and `smw_saves_load_across_all_tiers` run the same matrix on the real games
+(all called functions hooked, every fifth function demoted). SMB and SMW both
+pass in release (about four minutes). **Known gap, found here and not
+tier-related** (Off to Off shows it): on SMW, after a SNES load the APU region
+(SPC700 plus S-DSP) differs by one byte (offset 66237 of 66481, inside the DSP's
+voice records) after the first replayed frame, so the SMW run compares every
+other region and skips the APU one (`Rig::skip_apu`). Some DSP state the save
+does not carry; the synthetic SNES cartridge never plays a sample and so does
+not show it. Follow-up for rf-snes.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

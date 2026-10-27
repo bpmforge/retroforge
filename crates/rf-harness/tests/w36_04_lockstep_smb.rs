@@ -254,6 +254,7 @@ fn sum(a: RebuildStats, b: RebuildStats) -> RebuildStats {
         fallback_ram: a.fallback_ram + b.fallback_ram,
         fallback_other: a.fallback_other + b.fallback_other,
         fallback_demoted: a.fallback_demoted + b.fallback_demoted,
+        fallback_after_load: a.fallback_after_load + b.fallback_after_load,
         interrupt_entries: a.interrupt_entries + b.interrupt_entries,
         indirect_checked: a.indirect_checked + b.indirect_checked,
         dispatch_misses: a.dispatch_misses + b.dispatch_misses,
