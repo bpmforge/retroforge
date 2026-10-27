@@ -52,6 +52,11 @@ rebuilt without the rest of the story next to it:
 * **Verification**: *not checked*, or *checked: N frames in lockstep* (the
   number of frames a rebuilt and a plain copy of this game were compared on,
   with no difference), or a warning if they ever differed.
+* **Shadow check**: while a game is not proven yet, RetroForge also runs a
+  plain copy of it beside the one you play and compares the two on every
+  frame. It says how many frames this session matched, or that it is off
+  because the game is proven, or "not checked: mod active" while a mod that
+  writes to the game's memory is loaded (the copy would differ by design).
 * A **Proven** badge, only when the game has passed a long check: at least
   36,000 frames (ten minutes of play) compared over at least two separate
   runs, with no difference at all. One difference anywhere removes the claim.
@@ -76,6 +81,19 @@ state from just before, the last inputs and the last functions run).
 
 The checker's result is kept per game on your machine, and the Rebuild card
 reads it back: that is where "checked" and "proven" come from.
+
+**While you play.** Until a game is proven, a second, plain copy of it runs
+right behind the one you are playing, with the same buttons, and RetroForge
+compares the two at the end of every frame. This costs roughly as much again
+as running the game (measured on one Mac: Super Mario Bros. 1.9 ms a frame
+instead of 3.6, Super Mario World 6.9 ms instead of 13.3, where a 60 fps frame
+has 16.6 ms). If the two ever differ, in that same frame RetroForge finds the
+function that was running, moves it back to the plain emulator for good (it
+stays moved next time you open the game), saves a repro bundle and tells you
+on the card. The difference also counts against the game: it can no longer be
+proven. Once the game is proven, the second copy is not started. Run-ahead and
+the margin drawing never disturb it, and loading a state or rewinding simply
+restarts the copy from where you are.
 
 Measured so far: on a fixed sample of 100 NES and 100 SNES games from the
 project's test library, the picture shown after 600 frames was identical with
@@ -117,6 +135,8 @@ never changes code.
   emulator. A faster compiled tier (Cranelift) is being measured next.
 * Coprocessor games (Super FX, SA-1 and similar) rebuild only the main CPU.
 * Coverage depends on what was played. Unplayed paths run on the emulator.
+* The live shadow check does not hash the picture and sound; it compares the
+  machine's registers, memories and device state, which they come from.
 * The checker cannot catch a bug that both copies share, because the picture
   and sound hardware are the same emulated chips on both sides. The test ROM
   suites still guard those.
