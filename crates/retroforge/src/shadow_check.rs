@@ -656,10 +656,13 @@ mod tests {
         );
         let trouble = info.last_difference.expect("what was found");
         assert_eq!(trouble.frame, fc);
-        // The poke costs the poisoned side a bus cycle, so the cycle counter
-        // is the first field to differ; work RAM follows.
+        // The poke costs the poisoned side a bus cycle. When that cycle moves
+        // the frame's last instruction boundary, the INX counter (`cpu.x`,
+        // compared before `cycles`) differs too and is named first; which one
+        // depends on the cycle phase of the poisoned frame. Work RAM always
+        // differs (checked in diff.txt below).
         assert!(
-            ["cycles", "wram"].contains(&trouble.field.as_str()),
+            ["cpu.x", "cycles", "wram"].contains(&trouble.field.as_str()),
             "{trouble:?}"
         );
         assert_eq!(trouble.function_entry, Some(0), "the reset function");
