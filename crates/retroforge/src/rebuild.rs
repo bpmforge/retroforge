@@ -56,6 +56,22 @@ use crate::stepper::EmuStepper;
 
 const ATLAS_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
+/// One handle at a time on the atlas cache (ticket W37-04). `Cache` keeps its
+/// index in memory and rewrites the whole file on every `put`, so two handles
+/// open at once lose each other's entries (the module doc's warning). The
+/// first job, grow jobs, the shadow check's checkpoints and the tests all open
+/// handles from different threads of this one process; this lock makes them
+/// take turns. A job holds it for its whole run, so a checkpoint made while a
+/// build is running waits for it (checkpoints are skipped while a job runs;
+/// only a difference found by the shadow check, or a session ending, waits).
+static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
+    CACHE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Frames between checks for "did coverage grow, rebuild?" (5 s at 60 fps).
 /// The wait also stretches to four times the last build's wall time, so a
 /// slow build on a big ROM never runs back to back.
@@ -274,6 +290,7 @@ fn load_demoted(cache: Option<&mut Cache>, sha: &str) -> Vec<FunctionKey> {
 /// Replace the stored verification record (the shadow check's checkpoint).
 /// `false` when the cache could not be written.
 pub(crate) fn write_record(root: &Path, sha: &str, record: &VerifyRecord) -> bool {
+    let _lock = cache_lock();
     Cache::open(root, ATLAS_CACHE_CAP_BYTES)
         .and_then(|mut c| c.put(&verify_key(sha), &record.encode()))
         .is_ok()
@@ -282,12 +299,14 @@ pub(crate) fn write_record(root: &Path, sha: &str, record: &VerifyRecord) -> boo
 /// The stored record, read afresh (the shadow check's checkpoint reads it so
 /// another writer's runs are never lost).
 pub(crate) fn read_record(root: &Path, sha: &str) -> Option<VerifyRecord> {
+    let _lock = cache_lock();
     let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
     load_record(cache.as_mut(), sha)
 }
 
 /// Replace the stored demoted list.
 pub(crate) fn write_demoted(root: &Path, sha: &str, keys: &[FunctionKey]) -> bool {
+    let _lock = cache_lock();
     Cache::open(root, ATLAS_CACHE_CAP_BYTES)
         .and_then(|mut c| c.put(&demoted_key(sha), &encode_demoted(keys)))
         .is_ok()
@@ -296,6 +315,7 @@ pub(crate) fn write_demoted(root: &Path, sha: &str, keys: &[FunctionKey]) -> boo
 /// The stored demoted list (a test or tool asking the way the first job does).
 #[must_use]
 pub fn stored_demoted(rom_sha256: &str) -> Vec<FunctionKey> {
+    let _lock = cache_lock();
     let mut cache = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES).ok();
     load_demoted(cache.as_mut(), rom_sha256)
 }
@@ -311,6 +331,7 @@ pub fn store_record_for_test(rom_sha256: &str, record: &VerifyRecord) {
 /// asking the way the first Rebuild job does). Blocking file I/O.
 #[must_use]
 pub fn stored_verification(rom_sha256: &str) -> Verification {
+    let _lock = cache_lock();
     let mut cache = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES).ok();
     load_verification(cache.as_mut(), rom_sha256)
 }
@@ -337,12 +358,14 @@ pub fn cached_atlas(rom_sha256: &str) -> Option<Atlas> {
 /// a build (for tests that stand in for that step).
 #[doc(hidden)]
 pub fn store_atlas_for_test(rom_sha256: &str, atlas: &Atlas) {
+    let _lock = cache_lock();
     if let Ok(mut cache) = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES) {
         let _ = cache.put(&key(rom_sha256), &atlas.to_bytes());
     }
 }
 
 fn cached_atlas_in(root: &std::path::Path, rom_sha256: &str) -> Option<Atlas> {
+    let _lock = cache_lock();
     let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok()?;
     let bytes = cache.get(&key(rom_sha256)).ok().flatten()?;
     Atlas::from_bytes(&bytes).ok()
@@ -403,6 +426,7 @@ fn first_atlas_in(
     sha: &str,
     user: Option<&CoverageLog>,
 ) -> RebuildBuild {
+    let _lock = cache_lock();
     let t = Instant::now();
     let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
     let cached_atlas = cache.as_mut().and_then(|c| load_atlas(c, sha));
@@ -470,6 +494,7 @@ fn grow_atlas_in(
     log: &CoverageLog,
     keep_observed: u64,
 ) -> RebuildBuild {
+    let _lock = cache_lock();
     let t = Instant::now();
     match build_for(image, log) {
         Ok(atlas) => {

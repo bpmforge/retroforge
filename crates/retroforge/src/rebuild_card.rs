@@ -359,4 +359,57 @@ mod tests {
         assert!(!bad.proven && bad.diverged);
         assert!(bad.text().contains("1 of them differed"));
     }
+
+    /// Ticket W37-04: the shadow check's three honest states and what it found
+    /// are in plain words, and the suspended one says it is not checked.
+    #[test]
+    fn the_card_says_what_the_shadow_check_is_doing_and_found() {
+        let with = |shadow, demoted, last| {
+            let mut i = info(Verification::Checked { frames: 600 }, busy());
+            i.shadow = shadow;
+            i.demoted = demoted;
+            i.last_difference = last;
+            card(true, &RebuildStatus::On(i)).expect("card").text()
+        };
+        let t = with(
+            ShadowStatus::Checking {
+                frames: 90,
+                divergences: 0,
+            },
+            0,
+            None,
+        );
+        assert!(t.contains("Shadow check: on."), "{t}");
+        assert!(t.contains("90 frames this session, no difference"), "{t}");
+        let t = with(ShadowStatus::Proven, 0, None);
+        assert!(t.contains("Shadow check: off. This game is proven"), "{t}");
+        let t = with(
+            ShadowStatus::Suspended {
+                reason: SuspendReason::WriteHook,
+                frames: 5,
+                divergences: 0,
+            },
+            0,
+            None,
+        );
+        assert!(t.contains("not checked: mod active"), "{t}");
+        let t = with(
+            ShadowStatus::Checking {
+                frames: 9,
+                divergences: 1,
+            },
+            1,
+            Some(crate::rebuild::ShadowTrouble {
+                frame: 7,
+                field: "wram".to_string(),
+                function_entry: Some(0x1234),
+                bundle: Some(std::path::PathBuf::from("/tmp/bundle")),
+            }),
+        );
+        assert!(t.contains("1 of 9 frames"), "{t}");
+        assert!(t.contains("1 function moved to the plain emulator"), "{t}");
+        assert!(t.contains("Last difference: frame 7 (wram)"), "{t}");
+        assert!(t.contains("ROM offset 0x1234"), "{t}");
+        assert!(t.contains("/tmp/bundle"), "{t}");
+    }
 }

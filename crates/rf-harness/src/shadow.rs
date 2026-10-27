@@ -188,3 +188,115 @@ pub fn write_repro(dir: &Path, r: &Repro<'_>) -> ReproWritten {
         errors,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rf_core_api::{CoreSink, EmulatorCore, ResetKind, Step};
+
+    struct Quiet;
+    impl CoreSink for Quiet {
+        fn video_scanline(&mut self, _y: u16, _p: &[rf_core_api::PpuPixel]) {}
+        fn audio(&mut self, _s: &[i16]) {}
+        fn event(&mut self, _e: rf_core_api::CoreEvent) {}
+    }
+
+    /// 16 KiB NROM that counts forever (`INX ; JMP $C000`).
+    fn counting_nrom() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"NES\x1a");
+        data.extend_from_slice(&[1, 1]);
+        data.extend_from_slice(&[0u8; 10]);
+        let mut prg = vec![0xEAu8; 16 * 1024];
+        prg[0..4].copy_from_slice(&[0xE8, 0x4C, 0x00, 0xC0]);
+        prg[0x3FFC..0x3FFE].copy_from_slice(&0xC000u16.to_le_bytes());
+        data.extend(prg);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    fn core() -> NesCore {
+        let mut c = NesCore::from_ines_bytes(&counting_nrom()).expect("loads");
+        c.reset(ResetKind::Hard);
+        c
+    }
+
+    /// Two identical cores agree; a changed byte is named; the instruction
+    /// pass finds the first instruction after which the cores differ; a bundle
+    /// written for it holds the harness's files and says it is a live session.
+    #[test]
+    fn the_borrowed_comparison_finds_and_names_a_difference() {
+        let (mut a, mut b) = (core(), core());
+        let input = InputFrame::empty();
+        for _ in 0..3 {
+            a.run_frame(&input, &mut Quiet);
+            b.run_frame(&input, &mut Quiet);
+        }
+        assert!(compare_frame(CoreRef::Nes(&a), CoreRef::Nes(&b)).is_empty());
+        let before = (a.bus().master_cycle(), b.bus().master_cycle());
+        assert_eq!(before.0, before.1);
+        // The fine pass on a frame where one side has a poisoned byte.
+        use rf_nes::CpuBus as _;
+        b.bus_mut().write(0x0010, 0xAB);
+        let fine = fine_pass(CoreMut::Nes(&mut a), CoreMut::Nes(&mut b), &input)
+            .expect("the first instruction already differs");
+        assert_eq!(fine.instruction, 0);
+        assert!(fine
+            .fields
+            .iter()
+            .any(|f| f.field == "wram" || f.field == "cycles"));
+        // A frame boundary later the difference is in the frame comparison.
+        while !a.step(Step::Frame, &mut Quiet).frame_complete {}
+        while !b.step(Step::Frame, &mut Quiet).frame_complete {}
+        let diffs = compare_frame(CoreRef::Nes(&a), CoreRef::Nes(&b));
+        assert!(diffs.iter().any(|d| d.field == "wram"), "{diffs:?}");
+        // Mixed consoles never compare equal.
+        let s = rf_snes::core::SnesCore::load(&[0u8; 0x8000]).ok();
+        if let Some(s) = s {
+            assert_eq!(
+                compare_frame(CoreRef::Nes(&a), CoreRef::Snes(&s))[0].field,
+                "console"
+            );
+        }
+
+        let dir = std::env::temp_dir().join(format!("rf-shadow-repro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let raw = counting_nrom();
+        let written = write_repro(
+            &dir,
+            &Repro {
+                raw: &raw,
+                console: ReproConsole::Nes,
+                inputs: &[input, input],
+                first_frame: 40,
+                frame: 41,
+                fields: diffs,
+                fine: Some(fine),
+                state: state_bytes(CoreRef::Nes(&a), &raw),
+                trace: Vec::new(),
+                wram_plain: wram(CoreRef::Nes(&a)),
+                wram_rebuilt: wram(CoreRef::Nes(&b)),
+                trace_len: 256,
+            },
+        );
+        assert!(written.errors.is_empty(), "{:?}", written.errors);
+        for f in [
+            "README.txt",
+            "inputs.txt",
+            "diff.txt",
+            "trace.txt",
+            "wram_plain.bin",
+        ] {
+            assert!(dir.join(f).is_file(), "{f}");
+        }
+        let inputs = std::fs::read_to_string(dir.join("inputs.txt")).expect("text");
+        assert!(inputs.contains("41 0000 0000  <-- diverging"), "{inputs}");
+        assert!(inputs.contains("40 0000 0000\n"), "{inputs}");
+        let readme = std::fs::read_to_string(dir.join("README.txt")).expect("text");
+        assert!(
+            readme.contains("W37-04") && readme.contains("live session"),
+            "{readme}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

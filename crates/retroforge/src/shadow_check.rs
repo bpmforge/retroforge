@@ -50,6 +50,8 @@ use std::path::PathBuf;
 
 use rf_core_api::{CoreEvent, CoreSink, InputFrame, PpuPixel};
 use rf_harness::shadow as hs;
+#[cfg(test)]
+use rf_rebuild::VerifyRecord;
 use rf_rebuild::{FunctionKey, TraceKind, Verification};
 
 use crate::rebuild::{read_record, repro_root, write_demoted, write_record};
@@ -513,5 +515,409 @@ impl Drop for ShadowCheck {
         if self.frames > 0 && self.flushed != (self.frames, self.divergences) {
             let _ = self.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use rf_rebuild::{PROVEN_FRAMES, PROVEN_RUNS};
+
+    use super::*;
+    use crate::core_thread::{spawn, CoreCommand, CoreEvent, CoreHandle, FrameMsg};
+    use crate::rebuild::{
+        store_record_for_test, stored_demoted, stored_verification, RebuildInfo, RebuildStatus,
+    };
+
+    /// 16 KiB NROM that counts forever (`INX ; JMP $C000`), reset vector
+    /// `$C000`. `tag` makes the image, and so its cache entries, unique to a
+    /// test. (`synthetic_nrom()` in the core-thread tests runs no ROM code at
+    /// all, so it has no function to demote.)
+    fn counting_nrom(tag: u8) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&rf_cart::nes::INES_MAGIC);
+        data.push(1);
+        data.push(1);
+        data.extend_from_slice(&[0u8; 10]);
+        let mut prg = vec![0xEAu8; 16 * 1024];
+        prg[0..4].copy_from_slice(&[0xE8, 0x4C, 0x00, 0xC0]);
+        prg[0x100] = tag;
+        prg[0x3FFC..0x3FFE].copy_from_slice(&0xC000u16.to_le_bytes());
+        data.extend(prg);
+        data.extend(vec![0u8; 8 * 1024]);
+        data
+    }
+
+    fn sha_of(image: &[u8]) -> String {
+        crate::hash::sha256_hex(image)
+    }
+
+    /// The test is the UI: it steps a frame, acknowledges it (or the core
+    /// drops every frame after `MAX_PENDING_FRAMES`) and hands the message to
+    /// `done`. `true` when `done` accepted one within `max` steps.
+    fn step_until(core: &CoreHandle, max: usize, done: &mut dyn FnMut(&FrameMsg) -> bool) -> bool {
+        for _ in 0..max {
+            core.cmd_tx.send(CoreCommand::StepFrame).expect("accepted");
+            let CoreEvent::Frame(msg) = core
+                .evt_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("frame")
+            else {
+                continue;
+            };
+            core.pending_frames.fetch_sub(1, Ordering::AcqRel);
+            if done(&msg) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn on(msg: &FrameMsg) -> Option<RebuildInfo> {
+        match &msg.rebuild {
+            Some(RebuildStatus::On(i)) => Some(i.clone()),
+            _ => None,
+        }
+    }
+
+    /// Turn Rebuild on and step until the first atlas is installed and the
+    /// status says so. Returns that status and the frame counter.
+    fn rebuild_on(core: &CoreHandle) -> (RebuildInfo, u64) {
+        core.cmd_tx
+            .send(CoreCommand::SetRebuild(true))
+            .expect("accepted");
+        let mut seen = None;
+        assert!(
+            step_until(core, 600, &mut |m| {
+                seen = on(m).map(|i| (i, m.frame_count));
+                seen.is_some()
+            }),
+            "Rebuild never turned on"
+        );
+        seen.expect("set")
+    }
+
+    fn finish(core: CoreHandle) {
+        let _ = core.cmd_tx.send(CoreCommand::Shutdown);
+        let _ = core.join_handle.join();
+    }
+
+    /// Ticket W37-04, acceptance 1 and the persistence clause: a forced
+    /// divergence demotes the function within the frame it appears in, saves
+    /// a repro bundle, spoils the record, and the demotion survives a restart.
+    #[test]
+    fn a_forced_divergence_demotes_the_function_in_one_frame_and_saves_a_bundle() {
+        let image = counting_nrom(0x41);
+        let sha = sha_of(&image);
+        let core = spawn(image.clone()).expect("spawns");
+        let (first, _) = rebuild_on(&core);
+        assert!(
+            matches!(first.shadow, ShadowStatus::Checking { .. }),
+            "{first:?}"
+        );
+        assert_eq!(first.demoted, 0);
+
+        // A few clean frames, then one byte of the machine changes under the
+        // rebuilt side only (RAM $0010; the program never touches it).
+        let mut fc = 0;
+        assert!(
+            step_until(&core, 5, &mut |m| {
+                fc = m.frame_count;
+                false
+            }) || fc > 0
+        );
+        core.cmd_tx
+            .send(CoreCommand::PoisonForTest {
+                frame: fc,
+                addr: 0x10,
+                value: 0xAB,
+            })
+            .expect("accepted");
+        // The very next report after the poisoned frame carries the verdict.
+        let mut hit = None;
+        assert!(step_until(&core, 1, &mut |m| {
+            hit = on(m);
+            true
+        }));
+        let info = hit.expect("a divergence is reported in the frame it happens in");
+        assert!(
+            matches!(info.shadow, ShadowStatus::Checking { divergences: 1, .. }),
+            "{info:?}"
+        );
+        assert_eq!(info.demoted, 1, "{info:?}");
+        assert!(
+            matches!(
+                info.verification,
+                Verification::Diverged { divergences: 1, .. }
+            ),
+            "one difference removes any proven claim at once: {info:?}"
+        );
+        let trouble = info.last_difference.expect("what was found");
+        assert_eq!(trouble.frame, fc);
+        // The poke costs the poisoned side a bus cycle, so the cycle counter
+        // is the first field to differ; work RAM follows.
+        assert!(
+            ["cycles", "wram"].contains(&trouble.field.as_str()),
+            "{trouble:?}"
+        );
+        assert_eq!(trouble.function_entry, Some(0), "the reset function");
+        let dir = trouble.bundle.expect("a bundle was saved");
+        assert!(dir.starts_with(crate::rebuild::repro_root()), "{dir:?}");
+        for f in [
+            "plain_state_before_frame.rfstate",
+            "inputs.txt",
+            "trace.txt",
+            "diff.txt",
+            "wram_plain.bin",
+            "wram_rebuilt.bin",
+            "README.txt",
+        ] {
+            assert!(dir.join(f).is_file(), "{f} missing from {dir:?}");
+        }
+        let diff = std::fs::read_to_string(dir.join("diff.txt")).expect("text");
+        assert!(diff.contains("wram"), "{diff}");
+        let readme = std::fs::read_to_string(dir.join("README.txt")).expect("text");
+        assert!(readme.contains("live session"), "{readme}");
+
+        // Executing the demoted function now counts as plain fallback.
+        let mut demoted_hits = 0;
+        assert!(step_until(&core, 400, &mut |m| {
+            demoted_hits = on(m).map_or(0, |i| i.stats.fallback_demoted);
+            demoted_hits > 0
+        }));
+        assert!(demoted_hits > 0);
+        // One fault, one report: the shadow was resynced, not left to repeat it.
+        let mut again = None;
+        step_until(&core, 20, &mut |m| {
+            again = on(m).or(again.clone());
+            false
+        });
+        if let Some(i) = again {
+            assert!(
+                matches!(i.shadow, ShadowStatus::Checking { divergences: 1, .. }),
+                "{i:?}"
+            );
+        }
+        finish(core);
+
+        // Stored for the next session: the record and the demotion.
+        assert!(matches!(
+            stored_verification(&sha),
+            Verification::Diverged { divergences: 1, .. }
+        ));
+        assert_eq!(stored_demoted(&sha), vec![(0, 0)]);
+
+        // Restart: the function is demoted from the first frame on.
+        let core = spawn(image).expect("spawns");
+        let (restarted, _) = rebuild_on(&core);
+        assert_eq!(restarted.demoted, 1, "{restarted:?}");
+        let mut hits = 0;
+        assert!(step_until(&core, 400, &mut |m| {
+            hits = on(m).map_or(0, |i| i.stats.fallback_demoted);
+            hits > 0
+        }));
+        finish(core);
+    }
+
+    /// Acceptance 2: a game the record calls proven starts no shadow core.
+    #[test]
+    fn a_proven_game_starts_no_shadow() {
+        let image = counting_nrom(0x42);
+        let sha = sha_of(&image);
+        store_record_for_test(
+            &sha,
+            &VerifyRecord {
+                frames: PROVEN_FRAMES,
+                divergences: 0,
+                runs: PROVEN_RUNS,
+            },
+        );
+        let core = spawn(image).expect("spawns");
+        let (info, _) = rebuild_on(&core);
+        assert_eq!(info.shadow, ShadowStatus::Proven, "{info:?}");
+        assert!(matches!(info.verification, Verification::Proven { .. }));
+        // And it stays off, with a poisoned byte nobody compares.
+        core.cmd_tx
+            .send(CoreCommand::PoisonForTest {
+                frame: 0,
+                addr: 0x10,
+                value: 1,
+            })
+            .expect("accepted");
+        step_until(&core, 30, &mut |_| false);
+        finish(core);
+        assert!(matches!(
+            stored_verification(&sha),
+            Verification::Proven { .. }
+        ));
+    }
+
+    /// Acceptance 2, the other half: a game that crosses the threshold while
+    /// the shadow is running switches it off at that checkpoint.
+    #[test]
+    fn the_shadow_switches_off_when_the_game_becomes_proven() {
+        let image = counting_nrom(0x43);
+        let sha = sha_of(&image);
+        // One run short, and a few hundred frames short.
+        store_record_for_test(
+            &sha,
+            &VerifyRecord {
+                frames: PROVEN_FRAMES - FLUSH_FRAMES / 2,
+                divergences: 0,
+                runs: PROVEN_RUNS - 1,
+            },
+        );
+        let core = spawn(image).expect("spawns");
+        let (info, _) = rebuild_on(&core);
+        assert!(
+            matches!(info.shadow, ShadowStatus::Checking { .. }),
+            "{info:?}"
+        );
+        let mut last = None;
+        let off = step_until(&core, 2000, &mut |m| {
+            last = on(m).or(last.take());
+            last.as_ref()
+                .is_some_and(|i| i.shadow == ShadowStatus::Proven)
+        });
+        assert!(off, "never switched off: {last:?}");
+        let last = last.expect("seen");
+        assert!(matches!(last.verification, Verification::Proven { .. }));
+        finish(core);
+        assert!(matches!(
+            stored_verification(&sha),
+            Verification::Proven { .. }
+        ));
+    }
+
+    /// A mod that writes memory suspends the check, honestly worded, and the
+    /// same poisoned byte is not reported as a fault while it is loaded.
+    #[test]
+    fn a_write_hook_suspends_the_check() {
+        let image = counting_nrom(0x44);
+        let sha = sha_of(&image);
+        let core = spawn(image).expect("spawns");
+        let setup = crate::rebuild::HookSetup {
+            manifest: rf_plugin_sdk::Manifest {
+                id: "shadow-suspend".into(),
+                version: "0.1.0".into(),
+                api: "0.1".into(),
+                license: "MIT".into(),
+                provenance: "test".into(),
+                capabilities: rf_plugin_sdk::Capabilities {
+                    function_hooks: true,
+                    write_memory: true,
+                    ..rf_plugin_sdk::Capabilities::default()
+                },
+            },
+            lua_source: "-- no hooks".to_string(),
+            recipe: rf_rebuild::Recipe {
+                id: "t".into(),
+                engine: "t".into(),
+                functions: vec![],
+                ram: vec![],
+                patches: vec![],
+                ..Default::default()
+            },
+        };
+        core.cmd_tx
+            .send(CoreCommand::SetHooks(Some(Box::new(setup))))
+            .expect("accepted");
+        let (_, fc) = rebuild_on(&core);
+        core.cmd_tx
+            .send(CoreCommand::PoisonForTest {
+                frame: fc + 2,
+                addr: 0x10,
+                value: 0xAB,
+            })
+            .expect("accepted");
+        let mut last = None;
+        step_until(&core, 20, &mut |m| {
+            last = on(m).or(last.take());
+            false
+        });
+        let last = last.expect("a report");
+        assert!(
+            matches!(
+                last.shadow,
+                ShadowStatus::Suspended {
+                    reason: SuspendReason::WriteHook,
+                    divergences: 0,
+                    ..
+                }
+            ),
+            "{last:?}"
+        );
+        let card = crate::rebuild_card::card(true, &RebuildStatus::On(last)).expect("card");
+        assert!(
+            card.text().contains("not checked: mod active"),
+            "{}",
+            card.text()
+        );
+        finish(core);
+        assert_eq!(stored_verification(&sha), Verification::NotChecked);
+    }
+
+    /// 32 KiB LoROM that loops `NOP ; BRA -3` from its reset vector.
+    fn counting_lorom(tag: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0..3].copy_from_slice(&[0xEA, 0x80, 0xFD]);
+        rom[0x100] = tag;
+        rom[0x7FD5] = 0x20;
+        rom[0x7FD7] = 0x08;
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+        rom
+    }
+
+    /// The SNES core is compared the same way, and a clean run stays clean
+    /// across the shadow's per-frame snapshot (so the snapshot round trip
+    /// loses nothing the comparison reads).
+    #[test]
+    fn a_clean_snes_run_stays_clean_and_a_forced_difference_is_found() {
+        let image = counting_lorom(0x45);
+        let sha = sha_of(&image);
+        let core = spawn(image).expect("spawns");
+        let (info, _) = rebuild_on(&core);
+        assert!(
+            matches!(info.shadow, ShadowStatus::Checking { .. }),
+            "{info:?}"
+        );
+        let mut fc = 0;
+        let mut last = None;
+        step_until(&core, 60, &mut |m| {
+            fc = m.frame_count;
+            last = on(m).or(last.take());
+            false
+        });
+        let ShadowStatus::Checking {
+            frames,
+            divergences: 0,
+        } = last.expect("a report").shadow
+        else {
+            panic!("expected a clean check");
+        };
+        assert!(frames > 0, "the shadow compared frames");
+        core.cmd_tx
+            .send(CoreCommand::PoisonForTest {
+                frame: fc,
+                addr: 0x10,
+                value: 0xAB,
+            })
+            .expect("accepted");
+        let mut hit = None;
+        step_until(&core, 1, &mut |m| {
+            hit = on(m);
+            true
+        });
+        let info = hit.expect("reported in the frame");
+        assert!(
+            matches!(info.shadow, ShadowStatus::Checking { divergences: 1, .. }),
+            "{info:?}"
+        );
+        assert_eq!(info.demoted, 1, "{info:?}");
+        finish(core);
+        assert_eq!(stored_demoted(&sha).len(), 1);
     }
 }
