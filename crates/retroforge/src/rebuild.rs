@@ -604,6 +604,8 @@ impl Session {
 pub struct RebuildCtl {
     pub status: RebuildStatus,
     dirty: bool,
+    /// A [`Self::refuse`] message is showing.
+    refused: bool,
     job: Option<Receiver<RebuildBuild>>,
     session: Option<Session>,
     /// Test only: poison one byte of the machine at a frame, to force a
@@ -686,6 +688,25 @@ impl RebuildCtl {
             self.dirty = true;
         }
         self.status = RebuildStatus::Off;
+    }
+
+    /// Ticket W41-03: say why Rebuild will not run (ROM cheats change the code the atlas
+    /// describes). Shown as a failure; [`Self::clear_refusal`] takes it back.
+    pub fn refuse(&mut self, why: &str) {
+        let msg = RebuildStatus::Failed(why.to_string());
+        if self.status != msg {
+            self.status = msg;
+            self.dirty = true;
+        }
+        self.refused = true;
+    }
+
+    /// Withdraw a [`Self::refuse`] message once nothing forbids Rebuild any more.
+    pub fn clear_refusal(&mut self) {
+        if std::mem::take(&mut self.refused) && matches!(self.status, RebuildStatus::Failed(_)) {
+            self.status = RebuildStatus::Off;
+            self.dirty = true;
+        }
     }
 
     /// Before the player arms or disarms the recorder: keep what Rebuild has

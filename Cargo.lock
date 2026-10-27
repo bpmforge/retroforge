@@ -3923,6 +3923,7 @@ dependencies = [
  "rf-audio",
  "rf-cache",
  "rf-cart",
+ "rf-cheats",
  "rf-core-api",
  "rf-debugger",
  "rf-enhance",

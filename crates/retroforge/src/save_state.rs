@@ -365,11 +365,29 @@ impl EmuStepper {
         timestamp: u64,
         session: Option<&crate::mod_chunk::ModSession>,
     ) -> Result<Container, SaveStateError> {
+        self.save_state_with_session(timestamp, session, &[])
+    }
+
+    /// [`Self::save_state_with_mods`] with more ledger entries to record after the hook
+    /// host's own (ticket W41-03: the cheat writes the core thread made).
+    ///
+    /// # Errors
+    /// See [`Self::save_state_with_mods`].
+    pub fn save_state_with_session(
+        &self,
+        timestamp: u64,
+        session: Option<&crate::mod_chunk::ModSession>,
+        extra_ledger: &[rf_plugin_sdk::LedgerEntry],
+    ) -> Result<Container, SaveStateError> {
         let mut container = self.save_state(timestamp)?;
-        let ledger = self
+        let mut ledger = self
             .hook_host()
             .map(rf_plugin_sdk::HookHost::ledger_entries)
             .unwrap_or_default();
+        // A load puts the whole saved ledger back in the hook host, cheat writes included; the
+        // core thread's own cheat ledger is the live copy, so drop the restored ones.
+        ledger.retain(|e| !e.plugin.starts_with(crate::cheats::LEDGER_PREFIX));
+        ledger.extend_from_slice(extra_ledger);
         if let Some(chunk) = crate::mod_chunk::session_chunk(session, &ledger) {
             crate::mod_chunk::attach_chunk(&mut container, &chunk)?;
         }

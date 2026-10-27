@@ -690,6 +690,13 @@ impl EmuStepper {
         self.machine.bus_write(addr, value);
     }
 
+    /// Ticket W41-03: install ROM-read overrides (Game Genie style) on the
+    /// machine, `rf_core_api::EmulatorCore::set_rom_overrides`. `false` when
+    /// the core refuses (more than the core's limit) or does not support it.
+    pub fn set_rom_overrides(&mut self, overrides: &[rf_core_api::RomOverride]) -> bool {
+        self.machine.as_core().set_rom_overrides(overrides)
+    }
+
     /// Ticket W32-07: out-of-band write into the console's work RAM at a full
     /// bus address -- the write-side counterpart to [`Self::peek_bus`]. The
     /// level scout uses it on its PRIVATE machine only (never the live one).

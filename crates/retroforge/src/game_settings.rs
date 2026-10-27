@@ -213,6 +213,79 @@ impl OverclockMode {
     }
 }
 
+/// Ticket W41-03: one cheat code the player stored for a game. `code` is the
+/// player's own text (parsed with `rf_cheats::parse` for the game's console
+/// whenever it is applied), `label` is optional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheatEntry {
+    pub code: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+impl CheatEntry {
+    /// `1|<code>|<label>` with `%`, `|`, tab and control characters
+    /// percent-escaped, so one entry never holds the file's own separators.
+    fn to_field(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            u8::from(self.enabled),
+            escape_field(&self.code),
+            escape_field(&self.label)
+        )
+    }
+
+    fn from_field(field: &str) -> Option<Self> {
+        let mut parts = field.splitn(3, '|');
+        let enabled = parts.next()? == "1";
+        let code = unescape_field(parts.next()?);
+        let label = unescape_field(parts.next().unwrap_or(""));
+        (!code.trim().is_empty()).then_some(Self {
+            code,
+            label,
+            enabled,
+        })
+    }
+}
+
+fn escape_field(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == '|' || c.is_control() {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                let _ = write!(out, "%{b:02X}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn unescape_field(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    // Every pass advances `i` by at least one (law 8).
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|_| bytes[i] == b'%')
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        if let Some(b) = hex {
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// One game's settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSettings {
@@ -393,6 +466,10 @@ pub struct GameSettings {
     /// default: a mod changes what the game computes (NON_GOALS 13) and is
     /// never on silently.
     pub mods_enabled: Vec<String>,
+    /// Ticket W41-03: the cheat codes the player added for this game, each
+    /// with its own on/off. Empty by default and every entry is added OFF-able
+    /// by the player only: nothing is ever on silently (law 6).
+    pub cheats: Vec<CheatEntry>,
     /// Keys this build does not know, kept verbatim (module doc).
     unknown: BTreeMap<String, String>,
 }
@@ -508,6 +585,7 @@ impl Default for GameSettings {
             info_corner: InfoCorner::default(),
             patches_enabled: Vec::new(),
             mods_enabled: Vec::new(),
+            cheats: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -755,6 +833,16 @@ impl GameSettings {
         if !self.mods_enabled.is_empty() {
             fields.insert("mods".to_string(), self.mods_enabled.join("\t"));
         }
+        if !self.cheats.is_empty() {
+            fields.insert(
+                "cheats".to_string(),
+                self.cheats
+                    .iter()
+                    .map(CheatEntry::to_field)
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            );
+        }
         if self.favourite {
             fields.insert("favourite".to_string(), "true".to_string());
         }
@@ -959,6 +1047,12 @@ impl GameSettings {
                         .split('\t')
                         .filter(|p| !p.is_empty())
                         .map(str::to_owned)
+                        .collect();
+                }
+                "cheats" => {
+                    settings.cheats = value
+                        .split('\t')
+                        .filter_map(CheatEntry::from_field)
                         .collect();
                 }
                 "info_corner" => {
@@ -1375,6 +1469,33 @@ mod mode_and_feature_persistence_tests {
         };
         let back = GameSettings::from_text(&s.to_text()).unwrap();
         assert_eq!(back.patches_enabled, s.patches_enabled);
+        assert!(back.unknown_keys().is_empty());
+    }
+
+    /// Ticket W41-03: the cheat list persists per game, is absent from an
+    /// untouched game's file, and survives the separators in codes/labels.
+    #[test]
+    fn cheats_round_trip_and_default_to_none() {
+        let untouched = GameSettings::default();
+        assert!(untouched.cheats.is_empty());
+        assert!(!untouched.to_text().contains("cheats"));
+        let s = GameSettings {
+            cheats: vec![
+                CheatEntry {
+                    code: "SXIOPO".into(),
+                    label: "Infinite | lives, 100% \u{e9}".into(),
+                    enabled: true,
+                },
+                CheatEntry {
+                    code: "0075:09".into(),
+                    label: String::new(),
+                    enabled: false,
+                },
+            ],
+            ..GameSettings::default()
+        };
+        let back = GameSettings::from_text(&s.to_text()).unwrap();
+        assert_eq!(back.cheats, s.cheats);
         assert!(back.unknown_keys().is_empty());
     }
 

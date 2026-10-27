@@ -40,6 +40,7 @@ pub mod art;
 pub mod audio_out;
 pub mod authoring;
 pub mod bindings_store;
+pub mod cheats;
 pub mod clock_governor;
 pub mod controls_panel;
 pub mod core_thread;

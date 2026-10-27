@@ -18,6 +18,9 @@ workspace = true
 # test build gets whatever the dev entry asks for.
 image = { version = "0.25", default-features = false, features = ["png"] }
 rf-core-api = { path = "../rf-core-api" }
+# rf-cheats: cheat-code parsers (ticket W41-03). Pure text -> rf-core-api types; the
+# app owns storing, applying and ledgering them.
+rf-cheats = { path = "../rf-cheats" }
 # rf-nes: to actually run a core (pre-flight note, ticket W1-06 plan.json
 # entry) — exempt from "cores only via rf-core-api" as the app shell
 # itself (scripts/validate-arch.sh rule 3).

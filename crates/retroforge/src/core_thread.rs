@@ -813,6 +813,9 @@ fn naming_report(
     std::mem::take(dirty).then(|| status.clone())
 }
 
+/// The Rebuild status line while ROM cheats are on (ticket W41-03).
+const CHEATS_PAUSE_REBUILD: &str = "Rebuild lab paused: cheats change the game's code";
+
 /// The core thread's function-hook bookkeeping (ticket W36-05).
 #[derive(Default)]
 struct HookState {
@@ -1145,6 +1148,10 @@ pub enum CoreCommand {
     /// Ticket W36-03: turn the block executor on for this ROM (find or build
     /// the atlas in the background, install it here) or off. Off by default.
     SetRebuild(bool),
+    /// Ticket W41-03: replace the player's cheats (`crate::cheats`). ROM overrides are installed on
+    /// the machine (and the run-ahead copy); RAM writes are applied at the start of every frame
+    /// through the memory editor's poke door and ledgered. The whole set travels each time.
+    SetCheats(Box<crate::cheats::CheatSet>),
     /// Test only (ticket W37-04): write `value` to `addr` of the machine at
     /// the start of the frame whose frame counter is `frame`, to force a
     /// divergence the shadow core must find. Not part of any production path.
@@ -1710,6 +1717,9 @@ fn core_thread_main(
     let mut naming_dirty = false;
     // Ticket W36-05: function hooks (Lua state lives here, on this thread).
     let mut hook_state = HookState::default();
+    // Ticket W41-03: the player's cheats and the RAM writes they have made.
+    let mut cheats = crate::cheats::CheatSet::default();
+    let mut cheat_ledger = crate::cheats::CheatLedger::default();
     // Ticket W4-01: the indexed-pixel + event accumulator that becomes each
     // published `FrameBundle`, fed alongside `sink`/`layers` via the same
     // `FanoutSink`.
@@ -1824,6 +1834,10 @@ fn core_thread_main(
                             d.before_frame(&stepper, input.load());
                             margin_pre_taken = true;
                         }
+                    }
+                    // Ticket W41-03: a stepped frame gets the cheats' RAM writes too.
+                    if cheats.apply_ram(&mut stepper, Some(&mut cheat_ledger)) {
+                        rebuild.shadow_invalidate();
                     }
                     // Ticket W37-04: a stepped frame is checked like a running one.
                     let step_input = input.load();
@@ -2094,7 +2108,20 @@ fn core_thread_main(
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
-                    match stepper.save_state_with_mods(timestamp, mod_session.as_ref()) {
+                    // Cheats are mods (ticket W41-03): their ids join the recipe mods in `PROF`, so a
+                    // session without them is told the state came from other code.
+                    let mut saving = mod_session.clone();
+                    if !cheats.ids.is_empty() {
+                        saving
+                            .get_or_insert_with(Default::default)
+                            .mods
+                            .extend(cheats.ids.iter().cloned());
+                    }
+                    match stepper.save_state_with_session(
+                        timestamp,
+                        saving.as_ref(),
+                        cheat_ledger.entries(),
+                    ) {
                         Ok(container) => {
                             let Ok(bytes) = container.encode() else {
                                 continue;
@@ -2165,7 +2192,36 @@ fn core_thread_main(
                     stepper.set_audio_channel_capture(on);
                     audio_capture = on;
                 }
+                CoreCommand::SetCheats(set) => {
+                    let had_rom = cheats.rom_active();
+                    // A set the core refuses (more overrides than it takes) installs nothing: the
+                    // builder caps the list, so this only guards a core that supports none.
+                    let _ = stepper.set_rom_overrides(&set.rom);
+                    speculator.set_cheats((*set).clone());
+                    cheats = *set;
+                    if cheats.rom_active() {
+                        // The atlas describes the cartridge's bytes, not the patched ones
+                        // (CHEATS_ACHIEVEMENTS.md section 2).
+                        if coverage_on {
+                            stepper.set_coverage_recording(false);
+                            coverage_on = false;
+                            coverage_acc = None;
+                        }
+                        rebuild.stop(&mut stepper, false);
+                        rebuild.refuse(CHEATS_PAUSE_REBUILD);
+                    } else if had_rom {
+                        rebuild.clear_refusal();
+                    }
+                    rebuild.shadow_invalidate();
+                    if let Some(d) = margin_drawer.as_mut() {
+                        d.reset();
+                    }
+                }
                 CoreCommand::SetCoverage(on) => {
+                    if on && cheats.rom_active() {
+                        rebuild.refuse(CHEATS_PAUSE_REBUILD);
+                        continue;
+                    }
                     // Disarming keeps what was recorded, so "record, stop,
                     // then turn Rebuild on" has coverage to build from.
                     // Arming starts a fresh accumulator. While Rebuild is on
@@ -2188,6 +2244,10 @@ fn core_thread_main(
                     rebuild.poison = Some((frame, addr, value));
                 }
                 CoreCommand::SetRebuild(on) => {
+                    if on && cheats.rom_active() {
+                        rebuild.refuse(CHEATS_PAUSE_REBUILD);
+                        continue;
+                    }
                     if on {
                         if coverage_on {
                             coverage_merge(&mut stepper, &mut coverage_acc);
@@ -2347,7 +2407,8 @@ fn core_thread_main(
         // the real machine, and the state from just before each frame. Not under a hook host that
         // writes memory: the copies it runs on have no hooks.
         let hooks_block = crate::margin_draw::blocked_by_hooks(&stepper);
-        let margin_wanted = widescreen.is_some() && margin_drawer.is_some() && !hooks_block;
+        let margin_wanted =
+            widescreen.is_some() && margin_drawer.is_some() && !hooks_block && !cheats.rom_active();
         // Ticket W36-07: interpolated presentation reads the same two captures. Only for the picture its
         // layers describe: not a run-ahead picture, not a rebuilt one. Widescreen is fine (W37-06): the
         // console's own 256 dots are what the captures describe, and the shell widens the layers with
@@ -2384,6 +2445,12 @@ fn core_thread_main(
         // the same input, before anything (the speed governors below) changes
         // the machine's settings for the next frame.
         let shadow_frame = !stepper.is_paused();
+        // Ticket W41-03: the cheats' RAM writes land before the frame runs, so every copy taken
+        // from here (the shadow check, the margin redraw) starts from the written machine. The
+        // shadow check replays from its own state, so it is told the machine was written.
+        if shadow_frame && cheats.apply_ram(&mut stepper, Some(&mut cheat_ledger)) {
+            rebuild.shadow_invalidate();
+        }
         if shadow_frame {
             rebuild.shadow_before(&mut stepper, &rom, frame_input);
         }

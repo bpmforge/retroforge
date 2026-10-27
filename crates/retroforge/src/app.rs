@@ -1274,6 +1274,14 @@ pub struct RetroForgeApp {
     mod_recipe: Option<rf_rebuild::Recipe>,
     /// Whether the open core has been told the session's mods (`CoreCommand::SetModSession`).
     mod_session_sent: bool,
+    /// Ticket W41-03: whether the open core has been told the game's cheats
+    /// (`CoreCommand::SetCheats`); cleared on a new core and on any change.
+    cheats_sent: bool,
+    /// Whether the open core was last told a non-empty set (so emptying it must be sent too).
+    cheats_on_core: bool,
+    /// Text in the Cheats box, and why pasted codes were refused (shown inline).
+    cheat_input: String,
+    cheat_errors: Vec<String>,
     /// Ticket W36-06b: the last frame said run-ahead and the margin redraw are off because a hook
     /// script writes memory (badge text).
     copies_refused_by_hooks: bool,
@@ -2116,6 +2124,10 @@ impl RetroForgeApp {
             mod_messages: Vec::new(),
             mod_recipe: None,
             mod_session_sent: false,
+            cheats_sent: false,
+            cheats_on_core: false,
+            cheat_input: String::new(),
+            cheat_errors: Vec::new(),
             copies_refused_by_hooks: false,
             current_game_hashes: None,
             current_game_settings: crate::game_settings::GameSettings::default(),
@@ -4043,7 +4055,7 @@ impl RetroForgeApp {
                 // round) restores memory the code here did not make.
                 self.state_warnings.extend(crate::mod_chunk::mismatch_lines(
                     &container,
-                    &self.soft_patch.mods,
+                    &self.session_mod_ids(),
                 ));
                 self.status = if self.state_warnings.is_empty() {
                     format!("Loaded {}", slot.label())
@@ -4359,6 +4371,9 @@ impl RetroForgeApp {
         self.mod_messages.clear();
         self.mod_recipe = None;
         self.mod_session_sent = false;
+        self.cheats_sent = false;
+        self.cheats_on_core = false;
+        self.cheat_errors.clear();
         let bytes = if let Some(base_sha) = &base_sha {
             self.patch_discovery =
                 crate::soft_patch::discover(path, self.config_root.as_deref(), base_sha);
@@ -4456,6 +4471,9 @@ impl RetroForgeApp {
         self.rebuild_status = crate::rebuild::RebuildStatus::Off;
         self.frame_interp.reset();
         self.mod_session_sent = false;
+        self.cheats_sent = false;
+        self.cheats_on_core = false;
+        self.cheat_errors.clear();
         self.hd_mode7_sent = None;
         self.superfx_hd_sent = None;
         self.superfx_hd.clear();
@@ -5595,12 +5613,57 @@ impl RetroForgeApp {
             Some(patched) if self.core.is_some() => format!("{badge} · {patched}"),
             _ => badge,
         };
+        // Ticket W41-03: cheats change what the game computes, so the session is not the
+        // reference. N is how many are switched on.
+        let badge = match self.active_cheat_count() {
+            n if n > 0 && self.core.is_some() => format!("{badge} \u{b7} Cheats: {n}"),
+            _ => badge,
+        };
         // Ticket W36-06b: why run-ahead and the margin objects are not running.
         if self.copies_refused_by_hooks && self.core.is_some() {
             format!("{badge} · run-ahead and margin objects off (a hook writes memory)")
         } else {
             badge
         }
+    }
+
+    /// Ticket W41-03: how many of the game's cheats are switched on and valid for this console.
+    fn active_cheat_count(&self) -> usize {
+        self.cheat_set().ids.len()
+    }
+
+    /// Ticket W41-03: the game's enabled cheats, parsed for the open console.
+    fn cheat_set(&self) -> crate::cheats::CheatSet {
+        match crate::cheats::console_of(self.console_label) {
+            Some(console) => {
+                crate::cheats::CheatSet::build(console, &self.current_game_settings.cheats)
+            }
+            None => crate::cheats::CheatSet::default(),
+        }
+    }
+
+    /// Ticket W41-03: the mods this session runs, as a save state's `PROF` names them: the
+    /// recipe mods plus one `cheat:<code>` per cheat in force.
+    fn session_mod_ids(&self) -> Vec<String> {
+        let mut ids = self.soft_patch.mods.clone();
+        ids.extend(self.cheat_set().ids);
+        ids
+    }
+
+    /// Ticket W41-03: tell the core thread the game's cheats, once per core and after every
+    /// change (`cheats_sent` is cleared by both).
+    fn sync_cheats(&mut self) {
+        if self.core.is_none() || self.cheats_sent {
+            return;
+        }
+        self.cheats_sent = true;
+        let set = self.cheat_set();
+        // Nothing to say to a core that has none and was never told any.
+        if set.is_empty() && !self.cheats_on_core {
+            return;
+        }
+        self.cheats_on_core = !set.is_empty();
+        self.send_command(CoreCommand::SetCheats(Box::new(set)));
     }
 
     /// Ticket W20-09: everything about the running game that decides
@@ -9065,6 +9128,9 @@ impl RetroForgeApp {
                             if self.mods_section(ui) {
                                 changed = true;
                             }
+                            if self.cheats_section(ui) {
+                                changed = true;
+                            }
                             if changed {
                                 // No Apply button anywhere in this app's settings —
                                 // see `save_current_game_settings`'s own doc.
@@ -9107,6 +9173,101 @@ impl RetroForgeApp {
         }
         for m in &self.patch_messages {
             ui.label(m);
+        }
+        changed
+    }
+
+    /// Ticket W41-03: the Cheats panel -- paste codes, switch each on or off,
+    /// remove them. Per game, off by default (a cheat is a mod: NON_GOALS 13),
+    /// applied to the running game at once. Returns whether the list changed.
+    fn cheats_section(&mut self, ui: &mut egui::Ui) -> bool {
+        let Some(console) = crate::cheats::console_of(self.console_label) else {
+            return false;
+        };
+        if self.core.is_none() {
+            return false;
+        }
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        ui.separator();
+        ui.strong("Cheats");
+        ui.label(
+            "Game Genie, Pro Action Replay and raw codes. A cheat changes what the game \
+             computes: it is off until you switch it on, it is not the original cartridge, and \
+             save states record it.",
+        );
+        let mut changed = false;
+        let prompt = ui.label("Paste codes, one per line");
+        let edit = egui::TextEdit::multiline(&mut self.cheat_input)
+            .desired_rows(3)
+            .desired_width(f32::INFINITY)
+            .hint_text("e.g. SXIOPO or 0075:09")
+            .id(egui::Id::new("cheat_input"));
+        let edit_response = ui.add(edit);
+        edit_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Cheat codes")
+        });
+        let _ = prompt;
+        if ui
+            .add_enabled(
+                !self.cheat_input.trim().is_empty(),
+                egui::Button::new("Add codes"),
+            )
+            .clicked()
+        {
+            let pasted = crate::cheats::paste(
+                console,
+                &self.current_game_settings.cheats,
+                &self.cheat_input,
+            );
+            if !pasted.added.is_empty() {
+                changed = true;
+            }
+            self.current_game_settings.cheats.extend(pasted.added);
+            // Valid lines are in the list now; what stays in the box is what needs fixing.
+            self.cheat_input.clear();
+            self.cheat_errors = pasted.errors;
+        }
+        for e in &self.cheat_errors {
+            ui.colored_label(tokens.error, e);
+        }
+        let mut remove = None;
+        for (i, c) in self.current_game_settings.cheats.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let name = if c.label.is_empty() {
+                    &c.code
+                } else {
+                    &c.label
+                };
+                if ui.checkbox(&mut c.enabled, name.as_str()).changed() {
+                    changed = true;
+                }
+                ui.weak(crate::cheats::format_name(&c.code, console));
+                let button = ui.button("Remove");
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("Remove cheat {}", c.code),
+                    )
+                });
+                if button.clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            self.current_game_settings.cheats.remove(i);
+            changed = true;
+        }
+        if changed {
+            self.cheats_sent = false;
+        }
+        let set = self.cheat_set();
+        for s in &set.skipped {
+            ui.colored_label(tokens.warn, format!("Not applied: {s}"));
+        }
+        if set.rom_active() {
+            ui.label("Rebuild lab paused: cheats change the game's code.");
         }
         changed
     }
@@ -16622,6 +16783,20 @@ impl RetroForgeApp {
             .insert(asset_hash.to_string(), decision);
     }
 
+    /// Ticket W41-03: open the one Game Settings window on the running game, as the menus do.
+    #[doc(hidden)]
+    pub fn open_game_settings_for_test(&mut self) {
+        self.game_settings_target = None;
+        self.show_game_settings = true;
+    }
+
+    /// Ticket W41-03: what is in the Cheats box and the inline errors under it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn cheat_box_for_test(&self) -> (&str, &[String]) {
+        (&self.cheat_input, &self.cheat_errors)
+    }
+
     /// Close the Game Settings window and clear its target, without
     /// clicking the window's own close button (ticket W15-03).
     #[doc(hidden)]
@@ -19038,6 +19213,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_frame_interpolation();
         self.sync_rebuild();
         self.sync_mod_session();
+        self.sync_cheats();
         self.sync_patch_widescreen();
         // Ticket W14-02: adopt a background library scan the moment it
         // lands, before anything draws the grid.

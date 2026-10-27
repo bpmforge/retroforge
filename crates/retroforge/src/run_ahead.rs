@@ -67,6 +67,11 @@ pub struct Speculator {
     sink: FrameBuffer,
     bundle: FrameBundleBuilder,
     overlay: Option<Vec<OverlayPixel>>,
+    /// Ticket W41-03: the player's cheats. The copy runs the same ROM overrides and the same RAM
+    /// writes before each speculative frame as the real machine does, so the picture it shows is
+    /// the one the real timeline reaches. (Both are deterministic functions of the machine, so
+    /// nothing here needs the run-ahead refusal a memory-writing hook script gets.)
+    cheats: crate::cheats::CheatSet,
 }
 
 impl Default for Speculator {
@@ -86,7 +91,13 @@ impl Speculator {
                 rf_renderer::frame::NES_HEIGHT as u16,
             ),
             overlay: None,
+            cheats: crate::cheats::CheatSet::default(),
         }
+    }
+
+    /// Ticket W41-03: use these cheats on the copy from the next [`Self::run`] on.
+    pub fn set_cheats(&mut self, cheats: crate::cheats::CheatSet) {
+        self.cheats = cheats;
     }
 
     /// Run `frames` (clamped to 1..=[`MAX_RUN_AHEAD`]) speculative frames
@@ -118,6 +129,8 @@ impl Speculator {
         let snapshot = real.snapshot().ok()?;
         shadow.restore(&snapshot).ok()?;
         shadow.copy_picture_config_from(real);
+        // Overrides are session state, not part of the snapshot just restored.
+        shadow.set_rom_overrides(&self.cheats.rom);
         fit(
             &mut self.sink,
             &mut self.overlay,
@@ -134,6 +147,7 @@ impl Speculator {
         for _ in 0..frames.clamp(1, MAX_RUN_AHEAD) {
             // The OAM before this frame runs is the one that draws it.
             *oam = *shadow.oam();
+            self.cheats.apply_ram(shadow, None);
             let ran = shadow.latch_and_advance_frame(
                 input,
                 &mut FanoutSink {
