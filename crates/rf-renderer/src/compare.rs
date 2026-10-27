@@ -63,6 +63,26 @@ pub fn original_rgba_from_indexed_with(
     height: u32,
     palettes: &[Option<crate::palette::LinePalette>],
 ) -> Vec<u8> {
+    original_rgba_with_math(pixels, width, height, palettes, &[])
+}
+
+/// [`original_rgba_from_indexed_with`] with each row's colour-math
+/// sub-screen (`FrameBundle::sub`): a row with a palette and a sub-screen
+/// is blended exactly as `crate::frame::FrameBuffer` blends the displayed
+/// frame, so the "original" shows the game's translucency and fades
+/// instead of the picture without them. An empty slice, or a row with no
+/// entry, resolves without math.
+///
+/// # Panics
+/// As [`original_rgba_from_indexed`].
+#[must_use]
+pub fn original_rgba_with_math(
+    pixels: &[rf_core_api::PpuPixel],
+    width: u32,
+    height: u32,
+    palettes: &[Option<crate::palette::LinePalette>],
+    subs: &[Option<rf_core_api::SubLine>],
+) -> Vec<u8> {
     assert_eq!(
         pixels.len(),
         (width as usize) * (height as usize),
@@ -71,8 +91,15 @@ pub fn original_rgba_from_indexed_with(
     let mut out = Vec::with_capacity(pixels.len() * 4);
     for (row, line) in pixels.chunks(width.max(1) as usize).enumerate() {
         let palette = palettes.get(row).and_then(Option::as_ref);
-        for px in line {
-            let [r, g, b] = crate::palette::resolve_index(px.palette_index, palette);
+        let sub = subs.get(row).and_then(Option::as_ref);
+        for (x, px) in line.iter().enumerate() {
+            let [r, g, b] = match (
+                palette,
+                sub.and_then(|s| Some((s.pixels.get(x)?, s.fixed_color))),
+            ) {
+                (Some(p), Some((sp, fixed))) => p.rgb_with_math(px.palette_index, sp, fixed),
+                _ => crate::palette::resolve_index(px.palette_index, palette),
+            };
             out.extend_from_slice(&[r, g, b, 0xFF]);
         }
     }
@@ -196,6 +223,38 @@ mod tests {
         assert_eq!(rgba[3], 0xFF, "must be opaque");
         assert_eq!(&rgba[4..7], &crate::palette::palette_index_to_rgb(0x0F));
         assert_ne!(&rgba[0..3], &rgba[4..7], "two palette entries must differ");
+    }
+
+    /// The "original" keeps colour math: a backdrop row with an add of a
+    /// fixed red resolves red (as the displayed frame does), a row with no
+    /// sub-screen stays the palette's black. Before, both rows were black.
+    #[test]
+    fn the_original_blends_a_row_that_has_a_sub_screen() {
+        let backdrop = rf_core_api::PpuPixel {
+            palette_index: 0,
+            layer: rf_core_api::PixelLayer::Backdrop,
+            sprite_id: None,
+            priority: 0,
+        };
+        let pixels = vec![backdrop; 4];
+        let palette = Some(crate::palette::LinePalette::from_words(&[0], 15));
+        let sub = rf_core_api::SubPixel {
+            layer: rf_core_api::PixelLayer::Backdrop,
+            op: rf_core_api::ColorMathOp::Add,
+            fixed: true,
+            ..Default::default()
+        };
+        let subs = vec![
+            Some(rf_core_api::SubLine {
+                pixels: vec![sub; 2],
+                fixed_color: 0x001F,
+            }),
+            None,
+        ];
+        let rgba = original_rgba_with_math(&pixels, 2, 2, &[palette.clone(), palette], &subs);
+        assert_eq!(pixel(&rgba, 2, 0, 0), RED, "row 0: black + red 31");
+        assert_eq!(pixel(&rgba, 2, 1, 0), RED);
+        assert_eq!(pixel(&rgba, 2, 0, 1), [0, 0, 0, 255], "row 1: no math");
     }
 
     #[test]
