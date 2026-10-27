@@ -168,11 +168,14 @@ pub fn grade_of(f: &Found) -> Grade {
 // preparation
 
 /// Smallest z-score for a byte to count as an x position.
-pub const MIN_Z: f64 = 7.0;
+pub const MIN_Z: f64 = 12.0;
 /// Fewest matching frames for the same.
-const MIN_MATCHES: u32 = 30;
+const MIN_MATCHES: u32 = 60;
 /// Largest stride searched.
 const MAX_STRIDE: usize = 64;
+/// Pixels a sprite column may sit from where the x byte puts it (see
+/// [`Cols::bound`]).
+pub const X_SLACK: i8 = 2;
 /// Fewest slots in a table.
 const MIN_SLOTS: usize = 3;
 /// Rows of frames sampled when searching the other columns.
@@ -294,7 +297,7 @@ struct XCand {
 /// lowest peak nearly as strong as the highest (the top-left sprite).
 fn peak(hist: &[u32; 256]) -> Option<(usize, u32)> {
     let (mut d, &mut_best) = hist.iter().enumerate().max_by_key(|&(_, &c)| c)?;
-    for step in [8usize, 16] {
+    for step in [8usize, 16, 24] {
         let lower = (d + 256 - step) % 256;
         if hist[lower] * 10 >= mut_best * 8 {
             d = lower;
@@ -303,21 +306,24 @@ fn peak(hist: &[u32; 256]) -> Option<(usize, u32)> {
     Some((d, hist[d]))
 }
 
-/// Score one byte as an x position at `lag`. Only frames where the byte or the
-/// scroll changed carry evidence (a byte that sits still while nothing moves
-/// would match a parked sprite by chance and say nothing).
+/// Score one byte as an x position at `lag`.
 fn score_x(pre: &Pre<'_>, a: usize, lag: usize) -> Option<XCand> {
     let mut hist = [0u32; 256];
     let (mut info, mut exp, mut var) = (0u32, 0f64, 0f64);
     for f in (lag + 1)..pre.n() {
         let v = pre.ram(f - lag, a);
-        let moved = v != pre.ram(f - lag - 1, a)
-            || pre.t.frames[f].cam_x as u8 != pre.t.frames[f - 1].cam_x as u8;
+        // Evidence only when the on-screen position the byte implies moved: a
+        // byte that tracks the scroll implies a fixed position and would
+        // match any parked sprite (the status bar's) for free.
+        let cam = pre.t.frames[f].cam_x as u8;
+        let prev = pre
+            .ram(f - lag - 1, a)
+            .wrapping_sub(pre.t.frames[f - 1].cam_x as u8);
+        let moved = v.wrapping_sub(cam) != prev;
         if !moved {
             continue;
         }
         info += 1;
-        let cam = pre.t.frames[f].cam_x as u8;
         let p = pre.xs[f].len() as f64 / 256.0;
         exp += p;
         var += p * (1.0 - p);
@@ -492,11 +498,11 @@ fn find_y(
     }
     let (b, dy, p) = best?;
     let total = pairs.len() as u32;
-    (p >= 30 && f64::from(p) >= 0.3 * f64::from(total)).then_some((b, dy, p, total))
+    (p >= 30 && f64::from(p) >= 0.1 * f64::from(total)).then_some((b, dy, p, total))
 }
 
-/// The x high byte: steps by one when the low byte wraps.
-fn find_x_hi(pre: &Pre<'_>, c: &Chain, xs: &[usize], lag: usize, skip: &[usize]) -> Option<usize> {
+/// The high byte of a position: steps by one when the low byte wraps.
+fn find_hi(pre: &Pre<'_>, c: &Chain, xs: &[usize], lag: usize, skip: &[usize]) -> Option<usize> {
     // (frame, slot, +1 or -1 as u8)
     let mut events: Vec<(usize, usize, u8)> = Vec::new();
     let mut steady = 0u32;
@@ -556,6 +562,9 @@ struct Cols {
     x: usize,
     y: usize,
     hi: Option<usize>,
+    /// The y high byte and the value it has while the object is in the
+    /// vertical range of the screen.
+    yhi: Option<(usize, u8)>,
     lag: usize,
     dx: i32,
     dy: i32,
@@ -565,10 +574,15 @@ impl Cols {
     /// Where slot `i` is drawn in frame `f`: `(screen x, screen y)` with the
     /// wrap applied, and whether that is inside the visible picture.
     fn screen(&self, pre: &Pre<'_>, f: usize, i: usize) -> (u8, u8, bool) {
-        let fr = &pre.t.frames[f];
-        let lo = i64::from(pre.ram(f - self.lag, col(&self.c, self.x, i)));
+        self.screen_v(pre, f, i, self.lag, 0)
+    }
+
+    /// [`Self::screen`] with the RAM taken `rl` frames back and the scroll `cl`.
+    fn screen_v(&self, pre: &Pre<'_>, f: usize, i: usize, rl: usize, cl: usize) -> (u8, u8, bool) {
+        let fr = &pre.t.frames[f - cl];
+        let lo = i64::from(pre.ram(f - rl, col(&self.c, self.x, i)));
         let world = match self.hi {
-            Some(h) => lo + 256 * i64::from(pre.ram(f - self.lag, col(&self.c, h, i))),
+            Some(h) => lo + 256 * i64::from(pre.ram(f - rl, col(&self.c, h, i))),
             None => lo,
         };
         let wrap = i64::from(pre.t.wrap.max(1));
@@ -576,19 +590,35 @@ impl Cols {
         if sx >= wrap / 2 {
             sx -= wrap;
         }
-        let yv = i64::from(pre.ram(f - self.lag, col(&self.c, self.y, i)));
+        let yv = i64::from(pre.ram(f - rl, col(&self.c, self.y, i)));
         let sy = (yv - i64::from(fr.cam_y as u8) + i64::from(self.dy)).rem_euclid(256);
-        let on = (0..248).contains(&sx) && sy < 224;
+        let high_ok = self
+            .yhi
+            .is_none_or(|(h, home)| pre.ram(f - rl, col(&self.c, h, i)) == home);
+        let on = (0..248).contains(&sx) && sy < 224 && high_ok;
         (sx.rem_euclid(256) as u8, sy as u8, on)
     }
 
+    /// The lowest-numbered sprite drawn at the slot's position. An object is
+    /// several 8x8 or 16x16 sprites on an 8-pixel grid, and which of them the
+    /// game's own coordinate names depends on the object's size and pose (a
+    /// small and a big Mario differ in rows), so a sprite counts when it is in
+    /// the object's first or second column and in one of the rows from one
+    /// above to three below the coordinate. Rows are exact to the pixel; x
+    /// allows [`X_SLACK`] pixels because a game may nudge a sprite pair by a
+    /// pixel or two with the facing direction.
     fn bound(&self, pre: &Pre<'_>, f: usize, i: usize) -> Option<u16> {
         let (x, y, _) = self.screen(pre, f, i);
         pre.t.frames[f]
             .sprites
             .iter()
-            .find(|s| s.x == x && s.y == y)
+            .filter(|s| {
+                let (dx, dy) = (s.x.wrapping_sub(x) as i8, s.y.wrapping_sub(y));
+                (dx.abs() <= X_SLACK || (dx - 8).abs() <= X_SLACK)
+                    && matches!(dy, 0 | 8 | 16 | 24 | 248)
+            })
             .map(|s| s.index)
+            .min()
     }
 }
 
@@ -627,7 +657,7 @@ fn find_state(
         let recall = f64::from(hit) / f64::from(nb);
         let spec = f64::from(zero) / f64::from(nn);
         let j = recall + spec - 1.0;
-        if recall >= 0.95 && spec >= 0.5 && best.is_none_or(|(_, bj)| j > bj) {
+        if recall >= 0.95 && j >= 0.25 && best.is_none_or(|(_, bj)| j > bj) {
             best = Some((b, j));
         }
     }
@@ -694,6 +724,7 @@ pub fn infer(t: &Trace) -> Vec<Found> {
     let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
     let lag = usize::from(strength(1) > strength(0));
     let cands = &by_lag[lag];
+    if std::env::var("OBJDBG").is_ok() { eprintln!("lag strengths {} {}", strength(0), strength(1)); for l in 0..2 { for c in &by_lag[l] { eprintln!("cand lag{l} {:#x} z {:.0} dx {} m {}", c.addr, c.z, c.dx, c.matches);} } }
     let addrs: Vec<usize> = cands.iter().map(|c| c.addr).collect();
     let mut out = Vec::new();
     for ch in chains(&addrs) {
@@ -721,13 +752,19 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
     }
     let (dx, _) = votes.iter().enumerate().max_by_key(|&(_, &v)| v)?;
     let dx = dx as u8;
-    let (yb, dy, _, _) = find_y(pre, ch, &xs, lag, dx)?;
-    let hi = find_x_hi(pre, ch, &xs, lag, &[yb]);
+    let yy = find_y(pre, ch, &xs, lag, dx);
+    let (yb, dy, _, _) = yy?;
+    let hi = find_hi(pre, ch, &xs, lag, &[yb]);
+    let ys: Vec<usize> = (0..ch.slots).map(|i| col(ch, yb, i)).collect();
+    let mut skip_hi = vec![ch.base];
+    skip_hi.extend(hi);
+    let yhi = find_hi(pre, ch, &ys, lag, &skip_hi);
     let mut cols = Cols {
         c: ch.clone(),
         x: ch.base,
         y: yb,
         hi,
+        yhi: None,
         lag,
         dx: signed(dx),
         dy: signed(dy),
@@ -739,12 +776,26 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
             bound[f][i] = cols.bound(pre, f, i);
         }
     }
+    // The y high byte reads, among slots drawn, one value: the screen's own.
+    if let Some(yh) = yhi {
+        let mut count = [0u32; 256];
+        for f in (lag + 1)..n {
+            for i in 0..ch.slots {
+                if bound[f][i].is_some() {
+                    count[usize::from(pre.ram(f - lag, col(ch, yh, i)))] += 1;
+                }
+            }
+        }
+        if let Some((home, _)) = count.iter().enumerate().max_by_key(|&(_, &c)| c) {
+            cols.yhi = Some((yh, home as u8));
+        }
+    }
     let mut skip = vec![ch.base, yb];
     skip.extend(hi);
+    skip.extend(yhi);
     let state = find_state(pre, &cols, &bound, &skip);
     skip.extend(state);
     let kind = find_kind(pre, &cols, &bound, &skip);
-    let _ = &mut cols;
 
     // Count the match, per slot and per frame.
     let mut b = Binding {
@@ -794,7 +845,7 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
     }
     b.slots = per;
 
-    let fields = [Some(ch.base), Some(yb), hi, state, kind];
+    let fields = [Some(ch.base), Some(yb), hi, yhi, state, kind];
     let lowest = fields.iter().flatten().copied().min()?;
     let off = |a: Option<usize>| a.map(|a| (a - lowest) as u32);
     let base = t_addr(pre, lowest);
@@ -807,7 +858,7 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
             x_lo: off(Some(ch.base)),
             x_hi: off(hi),
             y: off(Some(yb)),
-            y_hi: None,
+            y_hi: off(yhi),
             kind: off(kind),
             state: off(state),
             source: String::new(),
