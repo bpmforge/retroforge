@@ -42,14 +42,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rf_cache::{Cache, CacheKey};
-use rf_core_api::{CoverageLog, RebuildStats};
+use rf_core_api::{CoverageLog, InputFrame, RebuildStats};
 use rf_nes::rebuild::Atlas;
 use rf_rebuild::{
-    decode_coverage, encode_coverage, Provenance, Verification, VerifyRecord, CACHE_ASSET,
-    CACHE_PRODUCER, CACHE_SETTINGS, COVERAGE_ASSET, COVERAGE_SETTINGS, VERIFY_ASSET,
-    VERIFY_SETTINGS,
+    decode_coverage, decode_demoted, encode_coverage, encode_demoted, FunctionKey, Provenance,
+    Verification, VerifyRecord, CACHE_ASSET, CACHE_PRODUCER, CACHE_SETTINGS, COVERAGE_ASSET,
+    COVERAGE_SETTINGS, DEMOTED_ASSET, DEMOTED_SETTINGS, VERIFY_ASSET, VERIFY_SETTINGS,
 };
 
+use crate::shadow_check::ShadowCheck;
+pub use crate::shadow_check::{ShadowStatus, ShadowTrouble, SuspendReason};
 use crate::stepper::EmuStepper;
 
 const ATLAS_CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
@@ -119,7 +121,7 @@ pub fn atlas_facts(atlas: &Atlas) -> AtlasFacts {
 }
 
 /// What the Rebuild panel shows while on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RebuildInfo {
     /// What the installed atlas holds (coverage, size).
     pub facts: AtlasFacts,
@@ -135,6 +137,12 @@ pub struct RebuildInfo {
     pub source: AtlasSource,
     /// Wall time of the build that produced the installed atlas.
     pub last_build: Duration,
+    /// Ticket W37-04: the shadow core's state.
+    pub shadow: ShadowStatus,
+    /// Functions demoted to the plain interpreter (this and earlier sessions).
+    pub demoted: u32,
+    /// The latest difference the shadow found this session.
+    pub last_difference: Option<ShadowTrouble>,
 }
 
 /// Where the Rebuild button stands, as the panel shows it.
@@ -166,6 +174,10 @@ pub struct BuildOutcome {
     pub facts: AtlasFacts,
     /// The ROM's verification record as the job found it.
     pub verification: Verification,
+    /// The record itself (the shadow check adds its session to it).
+    pub record: Option<VerifyRecord>,
+    /// Functions the shadow check demoted in earlier sessions (ticket W37-04).
+    pub demoted: Vec<FunctionKey>,
     pub source: AtlasSource,
     /// Wall time of the whole job (cache reads, build, cache writes).
     pub elapsed: Duration,
@@ -180,8 +192,23 @@ pub enum RebuildBuild {
 }
 
 #[cfg(not(test))]
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     std::env::temp_dir().join("retroforge-atlas-cache")
+}
+
+/// Where the shadow check saves repro bundles (ticket W37-04): beside the
+/// atlas cache, not inside it (the cache owns every file under its root).
+#[cfg(not(test))]
+pub(crate) fn repro_root() -> PathBuf {
+    std::env::temp_dir().join("retroforge-repro-bundles")
+}
+
+#[cfg(test)]
+pub(crate) fn repro_root() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "retroforge-repro-bundles-test-{}",
+        std::process::id()
+    ))
 }
 
 /// Unit tests get a cache of their own per test process: the shared
@@ -189,7 +216,7 @@ fn cache_root() -> PathBuf {
 /// gate, a second worktree), and a core-thread test that read another
 /// process's half-written index flaked in the 2026-10-25 gate runs.
 #[cfg(test)]
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     std::env::temp_dir().join(format!(
         "retroforge-atlas-cache-test-{}",
         std::process::id()
@@ -214,13 +241,70 @@ fn verify_key(rom_sha256: &str) -> CacheKey {
     }
 }
 
+fn demoted_key(rom_sha256: &str) -> CacheKey {
+    CacheKey {
+        rom_sha256: rom_sha256.to_string(),
+        asset_hash: DEMOTED_ASSET.to_string(),
+        producer: CACHE_PRODUCER.to_string(),
+        settings_hash: DEMOTED_SETTINGS.to_string(),
+    }
+}
+
+/// The stored record itself (`None` on a miss, a damaged entry or no cache).
+fn load_record(cache: Option<&mut Cache>, sha: &str) -> Option<VerifyRecord> {
+    cache
+        .and_then(|c| c.get(&verify_key(sha)).ok().flatten())
+        .and_then(|b| VerifyRecord::decode(&b))
+}
+
 /// What the lockstep tools recorded for this ROM; "not checked" on a miss, a
 /// damaged entry or no cache.
 fn load_verification(cache: Option<&mut Cache>, sha: &str) -> Verification {
-    let record = cache
-        .and_then(|c| c.get(&verify_key(sha)).ok().flatten())
-        .and_then(|b| VerifyRecord::decode(&b));
-    Verification::of(record.as_ref())
+    Verification::of(load_record(cache, sha).as_ref())
+}
+
+/// The functions the shadow check demoted for this ROM, by entry key.
+fn load_demoted(cache: Option<&mut Cache>, sha: &str) -> Vec<FunctionKey> {
+    cache
+        .and_then(|c| c.get(&demoted_key(sha)).ok().flatten())
+        .and_then(|b| decode_demoted(&b))
+        .unwrap_or_default()
+}
+
+/// Replace the stored verification record (the shadow check's checkpoint).
+/// `false` when the cache could not be written.
+pub(crate) fn write_record(root: &Path, sha: &str, record: &VerifyRecord) -> bool {
+    Cache::open(root, ATLAS_CACHE_CAP_BYTES)
+        .and_then(|mut c| c.put(&verify_key(sha), &record.encode()))
+        .is_ok()
+}
+
+/// The stored record, read afresh (the shadow check's checkpoint reads it so
+/// another writer's runs are never lost).
+pub(crate) fn read_record(root: &Path, sha: &str) -> Option<VerifyRecord> {
+    let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
+    load_record(cache.as_mut(), sha)
+}
+
+/// Replace the stored demoted list.
+pub(crate) fn write_demoted(root: &Path, sha: &str, keys: &[FunctionKey]) -> bool {
+    Cache::open(root, ATLAS_CACHE_CAP_BYTES)
+        .and_then(|mut c| c.put(&demoted_key(sha), &encode_demoted(keys)))
+        .is_ok()
+}
+
+/// The stored demoted list (a test or tool asking the way the first job does).
+#[must_use]
+pub fn stored_demoted(rom_sha256: &str) -> Vec<FunctionKey> {
+    let mut cache = Cache::open(cache_root(), ATLAS_CACHE_CAP_BYTES).ok();
+    load_demoted(cache.as_mut(), rom_sha256)
+}
+
+/// Store a verification record where the Rebuild first job reads it (for
+/// tests that seed a proven or diverged game).
+#[doc(hidden)]
+pub fn store_record_for_test(rom_sha256: &str, record: &VerifyRecord) {
+    write_record(&cache_root(), rom_sha256, record);
 }
 
 /// The verification state stored for the ROM with this hash (a test or tool
@@ -331,11 +415,15 @@ fn first_atlas_in(
             log = Some(u.clone());
         }
     }
-    let verification = load_verification(cache.as_mut(), sha);
+    let record = load_record(cache.as_mut(), sha);
+    let verification = Verification::of(record.as_ref());
+    let demoted = load_demoted(cache.as_mut(), sha);
     let ready = |atlas: Atlas, source, log: Option<CoverageLog>| {
         RebuildBuild::Ready(Box::new(BuildOutcome {
             facts: atlas_facts(&atlas),
             verification,
+            record,
+            demoted: demoted.clone(),
             atlas: Box::new(atlas),
             source,
             elapsed: t.elapsed(),
@@ -387,9 +475,12 @@ fn grow_atlas_in(
         Ok(atlas) => {
             let mut cache = Cache::open(root, ATLAS_CACHE_CAP_BYTES).ok();
             store(cache.as_mut(), sha, &atlas, Some(log), keep_observed);
+            let record = load_record(cache.as_mut(), sha);
             RebuildBuild::Ready(Box::new(BuildOutcome {
                 facts: atlas_facts(&atlas),
-                verification: load_verification(cache.as_mut(), sha),
+                verification: Verification::of(record.as_ref()),
+                record,
+                demoted: load_demoted(cache.as_mut(), sha),
                 atlas: Box::new(atlas),
                 source: AtlasSource::Coverage,
                 elapsed: t.elapsed(),
@@ -457,6 +548,19 @@ struct Session {
     last_build: Duration,
     last_growth: Growth,
     next_check: u64,
+    /// Ticket W37-04: the shadow core's check, while the game is unproven.
+    shadow: Option<ShadowCheck>,
+    /// The stored demoted list (the shadow's own once it exists).
+    demoted: Vec<FunctionKey>,
+}
+
+impl Session {
+    /// The demoted functions, from the shadow check when it runs.
+    fn demoted_keys(&self) -> &[FunctionKey] {
+        self.shadow
+            .as_ref()
+            .map_or(self.demoted.as_slice(), ShadowCheck::demoted)
+    }
 }
 
 /// Rebuild's state on the core thread: status, the running job and the
@@ -467,6 +571,10 @@ pub struct RebuildCtl {
     dirty: bool,
     job: Option<Receiver<RebuildBuild>>,
     session: Option<Session>,
+    /// Test only: poison one byte of the machine at a frame, to force a
+    /// divergence the shadow must find.
+    #[cfg(test)]
+    pub poison: Option<(u64, u32, u8)>,
 }
 
 fn merge_into(acc: &mut Option<CoverageLog>, taken: CoverageLog) {
@@ -521,6 +629,8 @@ impl RebuildCtl {
             last_build: Duration::ZERO,
             last_growth: Growth::default(),
             next_check: 0,
+            shadow: None,
+            demoted: Vec::new(),
         });
         self.status = RebuildStatus::Building;
         self.dirty = true;
@@ -531,6 +641,8 @@ impl RebuildCtl {
         self.job = None;
         let _ = stepper.set_rebuild_atlas(None);
         if let Some(s) = self.session.take() {
+            // Dropping the session ends the shadow check, which folds its
+            // last frames into the record (`ShadowCheck`'s `Drop`).
             if s.armed_here && !coverage_on {
                 stepper.set_coverage_recording(false);
             }
@@ -607,9 +719,13 @@ impl RebuildCtl {
         };
         let insns = observed_of(&out.atlas);
         let first = !s.first_installed;
-        // The record may have grown since (a lockstep run finished): always
-        // take the newest reading, installed or not.
-        s.verification = out.verification;
+        // The record may have grown since (a lockstep run finished): take the
+        // newest reading, installed or not. While the shadow check runs it
+        // is the writer, so a job that started before its last checkpoint
+        // must not roll the reading back.
+        if s.shadow.is_none() {
+            s.verification = out.verification;
+        }
         // A grown atlas that rests on less recorded code than the one running
         // (a thin session over a richer cache) is not an improvement.
         if !first && insns < s.installed_observed {
@@ -621,9 +737,20 @@ impl RebuildCtl {
                 if first {
                     s.first_installed = true;
                     s.base = out.base.map(|b| *b);
+                    s.demoted = out.demoted;
+                    // On while the game is unproven (ticket W37-04).
+                    if !matches!(s.verification, Verification::Proven { .. }) {
+                        s.shadow = Some(ShadowCheck::start(
+                            cache_root(),
+                            &s.sha,
+                            std::mem::take(&mut s.demoted),
+                        ));
+                    }
                 } else {
                     s.swaps += 1;
                 }
+                // Function ids are per atlas: name them again in this one.
+                stepper.set_rebuild_demoted(s.demoted_keys());
                 s.installed_observed = insns;
                 s.facts = out.facts;
                 s.source = out.source;
@@ -691,6 +818,66 @@ impl RebuildCtl {
         }
     }
 
+    /// Before the machine runs a frame with `input` (ticket W37-04): ready the
+    /// shadow core's comparison. A no-op unless a shadow check is running.
+    pub fn shadow_before(&mut self, stepper: &mut EmuStepper, rom: &[u8], input: InputFrame) {
+        #[cfg(test)]
+        let poison = self.poison;
+        if let Some(sh) = self.session.as_mut().and_then(|s| s.shadow.as_mut()) {
+            #[cfg(test)]
+            {
+                sh.poison = poison;
+            }
+            sh.before_frame(stepper, rom, input);
+        }
+    }
+
+    /// After the machine ran that frame (`ran`: it completed one): step the
+    /// shadow through it and compare. Checkpoints and the proven switch-off
+    /// happen here.
+    pub fn shadow_after(
+        &mut self,
+        stepper: &mut EmuStepper,
+        rom: &[u8],
+        input: InputFrame,
+        ran: bool,
+    ) {
+        let may_flush = self.job.is_none();
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        let Some(sh) = s.shadow.as_mut() else {
+            return;
+        };
+        let out = sh.after_frame(stepper, rom, input, ran, may_flush);
+        if let Some(v) = out.verification {
+            if s.verification != v {
+                s.verification = v;
+                self.dirty = true;
+            }
+            if matches!(v, Verification::Proven { .. }) {
+                // Proven: the check has done its job. Dropping it folds in
+                // the last frames (a no-op just after a checkpoint).
+                if let Some(done) = s.shadow.take() {
+                    s.demoted = done.demoted().to_vec();
+                }
+                self.dirty = true;
+            }
+        }
+        if out.changed {
+            self.dirty = true;
+        }
+    }
+
+    /// The machine was changed behind the frame loop (state load, rewind,
+    /// memory-editor write): the shadow is rebuilt from it before the next
+    /// compared frame.
+    pub fn shadow_invalidate(&mut self) {
+        if let Some(sh) = self.session.as_mut().and_then(|s| s.shadow.as_mut()) {
+            sh.invalidate();
+        }
+    }
+
     /// What the panel should hear this frame: a change once, and the counters
     /// on the refresh cadence (`tick`) while on.
     pub fn report(&mut self, stepper: &EmuStepper, tick: bool) -> Option<RebuildStatus> {
@@ -705,7 +892,15 @@ impl RebuildCtl {
 }
 
 fn info(stepper: &EmuStepper, s: &Session, rebuilding: bool) -> RebuildInfo {
+    let shadow = match (&s.shadow, s.verification) {
+        (Some(sh), _) => sh.status(),
+        (None, Verification::Proven { .. }) => ShadowStatus::Proven,
+        (None, _) => ShadowStatus::NotStarted,
+    };
     RebuildInfo {
+        shadow,
+        demoted: u32::try_from(s.demoted_keys().len()).unwrap_or(u32::MAX),
+        last_difference: s.shadow.as_ref().and_then(|sh| sh.last_trouble().cloned()),
         facts: s.facts,
         verification: s.verification,
         stats: stepper.rebuild_stats().unwrap_or_default(),

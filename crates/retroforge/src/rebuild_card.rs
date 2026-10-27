@@ -11,7 +11,7 @@
 
 use rf_rebuild::Verification;
 
-use crate::rebuild::{AtlasSource, RebuildInfo, RebuildStatus};
+use crate::rebuild::{AtlasSource, RebuildInfo, RebuildStatus, ShadowStatus, SuspendReason};
 
 /// What the card shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,7 @@ fn on_card(info: &RebuildInfo) -> RebuildCard {
         "Verification: {}",
         verification_words(info.verification)
     ));
+    lines.extend(shadow_lines(info));
     if info.rebuilding {
         lines.push("Growing the map from this session\u{2026}".to_string());
     }
@@ -97,6 +98,61 @@ fn on_card(info: &RebuildInfo) -> RebuildCard {
         proven: matches!(info.verification, Verification::Proven { .. }),
         diverged: matches!(info.verification, Verification::Diverged { .. }),
     }
+}
+
+/// What the shadow check (a plain copy of the game stepped beside the real one,
+/// compared every frame) is doing, and what it found.
+fn shadow_lines(info: &RebuildInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(match &info.shadow {
+        ShadowStatus::NotStarted => "Shadow check: not started.".to_string(),
+        ShadowStatus::Proven => {
+            "Shadow check: off. This game is proven, so no second copy runs.".to_string()
+        }
+        ShadowStatus::Checking {
+            frames,
+            divergences: 0,
+        } => format!(
+            "Shadow check: on. A plain copy runs beside the game and is compared every frame \
+             ({frames} frames this session, no difference)."
+        ),
+        ShadowStatus::Checking {
+            frames,
+            divergences,
+        } => format!(
+            "Shadow check: on. {divergences} of {frames} frames this session differed from the \
+             plain copy."
+        ),
+        ShadowStatus::Suspended { reason, .. } => match reason {
+            SuspendReason::WriteHook => "Shadow check: not checked: mod active. A mod that \
+                writes to the game's memory is loaded, so the plain copy would not match by \
+                design. It resumes when the mod is removed."
+                .to_string(),
+        },
+    });
+    if info.demoted > 0 {
+        out.push(format!(
+            "{} function{} moved to the plain emulator after a difference was found.",
+            info.demoted,
+            if info.demoted == 1 { "" } else { "s" }
+        ));
+    }
+    if let Some(d) = &info.last_difference {
+        let what = match d.function_entry {
+            Some(rom) => {
+                format!("the function at ROM offset {rom:#x} was moved to the plain emulator")
+            }
+            None => "no single function could be named, so nothing was moved".to_string(),
+        };
+        let saved = d.bundle.as_ref().map_or_else(String::new, |p| {
+            format!(" Saved for a bug report: {}.", p.display())
+        });
+        out.push(format!(
+            "Last difference: frame {} ({}); {what}.{saved}",
+            d.frame, d.field
+        ));
+    }
+    out
 }
 
 fn kib(bytes: u64) -> String {

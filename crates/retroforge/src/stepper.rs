@@ -1582,12 +1582,37 @@ impl EmuStepper {
         }
     }
 
-    /// Ticket W37-04: run these functions of the installed atlas on the
-    /// plain interpreter (ids belong to one atlas: call after every install).
-    pub fn set_rebuild_demoted(&mut self, ids: &[u32]) -> usize {
+    /// Ticket W37-04: run these functions of the installed atlas (named by
+    /// entry, so the list outlives a rebuilt atlas) on the plain interpreter.
+    /// Ids belong to one atlas, so call this after every install. Returns how
+    /// many functions took.
+    pub fn set_rebuild_demoted(&mut self, keys: &[rf_rebuild::FunctionKey]) -> usize {
         match &mut self.machine {
-            Machine::Nes(c) => c.set_rebuild_demoted(ids),
-            Machine::Snes(c) => c.set_rebuild_demoted(ids),
+            Machine::Nes(c) => {
+                let ids = c
+                    .rebuild_atlas()
+                    .map_or_else(Vec::new, |a| rf_rebuild::demoted_ids(a, keys));
+                c.set_rebuild_demoted(&ids)
+            }
+            Machine::Snes(c) => {
+                let ids = c
+                    .rebuild_atlas()
+                    .map_or_else(Vec::new, |a| rf_rebuild::demoted_ids(a, keys));
+                c.set_rebuild_demoted(&ids)
+            }
+        }
+    }
+
+    /// Ticket W37-04: the entry key of function `id` in the installed atlas.
+    #[must_use]
+    pub fn rebuild_function_key(&self, id: u32) -> Option<rf_rebuild::FunctionKey> {
+        match &self.machine {
+            Machine::Nes(c) => c
+                .rebuild_atlas()
+                .and_then(|a| rf_rebuild::function_key(a, id)),
+            Machine::Snes(c) => c
+                .rebuild_atlas()
+                .and_then(|a| rf_rebuild::function_key(a, id)),
         }
     }
 

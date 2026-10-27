@@ -92,6 +92,7 @@ pub mod scout_ladder;
 pub mod script_panel;
 pub mod settings;
 pub mod shader_select;
+pub mod shadow_check;
 pub mod slot_cards;
 pub mod snes_input;
 pub mod snes_save_state;
