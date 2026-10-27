@@ -714,6 +714,8 @@ pub struct RetroForgeApp {
     shader_chain: Option<rf_renderer::ShaderChain>,
     shader_budget: rf_renderer::fog::BudgetGate,
     shader_note: Option<String>,
+    /// Ticket W39-07: the name typed for "Save as preset".
+    preset_name_draft: String,
     /// Ticket W20-17: the fog pass over the live picture — the plane the
     /// matched profile's `[atmosphere]` names, the pass (built on first
     /// use), its own budget gate, whether it failed, when it started
@@ -1973,6 +1975,7 @@ impl RetroForgeApp {
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
+            preset_name_draft: String::new(),
             atmosphere_pin: None,
             fog_pass: None,
             fog_budget: rf_renderer::fog::BudgetGate::new(),
@@ -5376,10 +5379,14 @@ impl RetroForgeApp {
             // the player sees — never over the compare pair (a research
             // view of the accuracy-exact frame) and never into a capture.
             let shader = if compare_rgba.is_none() {
-                self.video
-                    .shader
-                    .as_deref()
-                    .and_then(crate::shader_select::kind_from_id)
+                match crate::shader_preset::resolve(
+                    self.video.shader.as_deref(),
+                    &self.settings.shaders,
+                ) {
+                    crate::shader_preset::Selection::Unknown
+                    | crate::shader_preset::Selection::None => None,
+                    sel => Some(sel),
+                }
             } else {
                 None
             };
@@ -5388,8 +5395,8 @@ impl RetroForgeApp {
                     self.shader_chain = Some(rf_renderer::ShaderChain::new(gpu));
                 }
             }
-            let shaded = match (shader, &self.shader_chain, &self.gpu) {
-                (Some(kind), Some(chain), Some(gpu)) if self.shader_budget.is_enabled() => {
+            let shaded = match (&shader, &self.shader_chain, &self.gpu) {
+                (Some(sel), Some(chain), Some(gpu)) if self.shader_budget.is_enabled() => {
                     // Relative to the frame actually being shaded (an HD
                     // pack's is already larger), so the shader draws at
                     // about the size it will be shown.
@@ -5401,11 +5408,18 @@ impl RetroForgeApp {
                         u32::try_from(dw).unwrap_or(0),
                         u32::try_from(dh).unwrap_or(0),
                     );
-                    let stage =
-                        crate::shader_select::stage(kind, &self.settings.shaders.values(kind))
-                            .with_out_size(w32 * n, h32 * n);
+                    // Ticket W39-07: a single shader or a preset's chain;
+                    // either way it runs over the displayed frame only.
+                    let stages = crate::shader_preset::chain_stages(
+                        sel,
+                        &self.settings.shaders,
+                        w32,
+                        h32,
+                        n,
+                    )
+                    .unwrap_or_default();
                     let started = std::time::Instant::now();
-                    let result = chain.render(gpu, displayed, w32, h32, &[stage]);
+                    let result = chain.render(gpu, displayed, w32, h32, &stages);
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
                     match result {
                         Ok(out) => {
@@ -8835,18 +8849,52 @@ impl RetroForgeApp {
         // that exist, each with the sliders its own
         // manifest declares — not a free-text box.
         ui.label("Shader");
-        let selected = self
-            .video
-            .shader
-            .as_deref()
-            .and_then(crate::shader_select::kind_from_id);
+        let selection =
+            crate::shader_preset::resolve(self.video.shader.as_deref(), &self.settings.shaders);
+        let selected = match &selection {
+            crate::shader_preset::Selection::Kind(k) => Some(*k),
+            _ => None,
+        };
+        let selected_text = match &selection {
+            crate::shader_preset::Selection::Kind(k) => {
+                crate::shader_select::player_name(*k).to_string()
+            }
+            crate::shader_preset::Selection::Preset(p) => format!("Preset: {}", p.name),
+            _ => "None".to_string(),
+        };
         egui::ComboBox::from_id_salt("shader-picker")
-            .selected_text(selected.map_or("None", crate::shader_select::player_name))
+            .selected_text(selected_text)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(selected.is_none(), "None").clicked() {
+                if ui
+                    .selectable_label(
+                        matches!(selection, crate::shader_preset::Selection::None),
+                        "None",
+                    )
+                    .clicked()
+                {
                     self.video.shader = None;
                     changed = true;
                 }
+                // Ticket W39-07: presets first (first-party, then the
+                // player's), then the single shaders.
+                let mut presets = crate::shader_preset::first_party();
+                presets.extend(self.settings.shaders.presets.values().cloned());
+                for p in presets {
+                    let saved = crate::shader_preset::saved_id(&p.id);
+                    if ui
+                        .selectable_label(
+                            self.video.shader.as_deref() == Some(saved.as_str()),
+                            format!("Preset: {}", p.name),
+                        )
+                        .clicked()
+                    {
+                        self.video.shader = Some(saved);
+                        self.shader_budget = rf_renderer::fog::BudgetGate::new();
+                        self.shader_note = None;
+                        changed = true;
+                    }
+                }
+                ui.separator();
                 for kind in crate::shader_select::KINDS {
                     let m = kind.manifest();
                     if ui
@@ -8883,11 +8931,46 @@ impl RetroForgeApp {
                 self.settings.shaders.reset(kind);
                 changed = true;
             }
-            if self.gpu.is_none() {
-                ui.small("No GPU available to this window, so shaders cannot run.");
+        }
+        match &selection {
+            crate::shader_preset::Selection::Unknown => {
+                ui.small("The saved shader is not in this version; showing the plain picture.");
             }
-        } else if self.video.shader.is_some() {
-            ui.small("The saved shader is not in this version; showing the plain picture.");
+            crate::shader_preset::Selection::None => {}
+            _ => {
+                // Ticket W39-07: save the current look (a tuned shader or a
+                // preset) under a name of the player's choosing.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.preset_name_draft)
+                            .hint_text("Preset name")
+                            .desired_width(140.0),
+                    );
+                    if ui.button("Save as preset").clicked() {
+                        if let Some(id) = self
+                            .settings
+                            .shaders
+                            .save_preset(&self.preset_name_draft, &selection)
+                        {
+                            self.video.shader = Some(crate::shader_preset::saved_id(&id));
+                            self.preset_name_draft.clear();
+                            changed = true;
+                        }
+                    }
+                });
+                if let crate::shader_preset::Selection::Preset(p) = &selection {
+                    if self.settings.shaders.presets.contains_key(&p.id)
+                        && ui.small_button("Delete this preset").clicked()
+                    {
+                        self.settings.shaders.delete_preset(&p.id);
+                        self.video.shader = None;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if selection != crate::shader_preset::Selection::None && self.gpu.is_none() {
+            ui.small("No GPU available to this window, so shaders cannot run.");
         }
         if let Some(note) = &self.shader_note {
             ui.small(note);

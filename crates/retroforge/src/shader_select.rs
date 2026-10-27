@@ -66,6 +66,9 @@ pub fn kind_from_id(id: &str) -> Option<ShaderKind> {
 #[serde(default)]
 pub struct ShaderSettings {
     pub params: BTreeMap<String, BTreeMap<String, f32>>,
+    /// Ticket W39-07: the player's saved presets, by id
+    /// (`crate::shader_preset`).
+    pub presets: BTreeMap<String, crate::shader_preset::ShaderPreset>,
 }
 
 impl ShaderSettings {
