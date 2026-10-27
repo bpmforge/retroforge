@@ -32,10 +32,12 @@ fi
 
 # 2c. rf-cheats (W41-01) turns codes into rf-core-api values; it never
 #     learns a console core or an upper layer.
-if grep -E '^\s*rf-' crates/rf-cheats/Cargo.toml 2>/dev/null | grep -vE '^\s*rf-core-api\s*=' >/dev/null 2>&1; then
-  echo "ARCH VIOLATION: rf-cheats may depend on rf-core-api only" >&2
+for k in rf-cheats rf-achievements; do
+if grep -E '^\s*rf-' crates/$k/Cargo.toml 2>/dev/null | grep -vE '^\s*rf-core-api\s*=' >/dev/null 2>&1; then
+  echo "ARCH VIOLATION: $k may depend on rf-core-api only" >&2
   fail=1
 fi
+done
 
 # 3. Only the app shell and the test harness may depend on console cores
 #    directly; everything else sees cores through rf-core-api (ARCH §3).

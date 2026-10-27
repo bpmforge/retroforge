@@ -88,9 +88,10 @@ interpreter-tier fallback.
 W41-04 RA condition evaluator. W41-05 RA client (sign-in, game lookup,
 unlocks, hardcore gate). W41-06 RA UI (toasts, list, progress).
 
-## 6. Open: how the RA evaluator is built
+## 6. Evaluator: rcheevos (D-031)
 
-Asked of Brad 2026-10-27. (1) vendor rcheevos, RA's MIT-licensed C client
-library, built with `cc`; this is the path every approved emulator takes.
-(2) a first-party Rust evaluator from RA's published logic docs; clean,
-but likely softcore-only for good. W41-04..06 wait on the answer.
+Brad chose option 1 on 2026-10-27: vendor rcheevos (RA's MIT-licensed C
+client library) in a new `rf-achievements` crate, built with `cc`, with our
+own bindings. The crate depends on rf-core-api only; rcheevos reads memory
+through a callback that calls `peek`, and its HTTP requests are carried out
+by the app layer, so no network code sits under a core.
