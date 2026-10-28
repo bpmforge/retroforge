@@ -5051,3 +5051,12 @@ stories, 10 decisions).
   368 bytes, reloads equal. Zelda bakes empty (no collision recipe or
   painted heights yet) and the scout canvas is not yet wired into the ROM
   runs: both are W39-03b. Workspace: **3771 passing**, gate green.
+- **W39-02 — Object-aware Diorama** (2026-10-28). `rf_renderer::diorama_objects`
+  gives each object class (player, enemy, projectile, pickup, scenery) its
+  own lift, depth bias and shadow; Unknown and Enemy keep the W34 numbers, so
+  with no recipe the output is bit-identical (tested for the top-down,
+  oriented and side builders). `rf_enhance::object_roles` maps recipe object
+  slots to roles as plain data. Original mode unchanged (palette pass bytes
+  identical before and after a classed render). Contact sheet:
+  `docs/screens/w39/contact-sheet.png` (synthetic scene). The app shell does
+  not yet feed recipe classes in. Workspace: **3787 passing**, gate green.
