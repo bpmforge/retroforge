@@ -17967,6 +17967,15 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::SetPresentation(spec));
     }
 
+    /// Ticket W38-11 test hook: give the loaded game a recipe reading (a real one comes from its
+    /// `recipe.toml`, found by ROM hash).
+    #[doc(hidden)]
+    pub fn set_presentation_spec_for_test(&mut self, spec: Option<crate::presentation::Spec>) {
+        self.presentation_spec = spec;
+        self.presentation_sent = None;
+        self.sync_presentation();
+    }
+
     /// Ticket W38-11 test hook: select the margins for the loaded game.
     #[doc(hidden)]
     pub fn set_presentation_for_test(&mut self, on: bool) {
