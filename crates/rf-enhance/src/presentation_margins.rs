@@ -358,12 +358,15 @@ pub struct Frame<'a> {
     pub sprite: &'a [u8],
     /// Frame counter (ages the trail).
     pub frame: u64,
-    /// The recipe has a full 2-D camera, so last-seen sprites may be placed (see module docs).
+    /// Last-seen sprites may be placed: a full 2-D camera, or a horizontal one with an object table
+    /// (that game scrolls sideways only); see the module docs.
     pub trail: bool,
 }
 
 /// Frames of evidence before the table's x is judged world- or camera-relative.
 const DECIDE_AFTER: u32 = 40;
+/// Frames with live slots and no explained sprite before a table is given up.
+const UNUSABLE_AFTER: u32 = 240;
 
 /// The whole presentation state of one session.
 #[derive(Debug, Clone, Default)]
@@ -373,6 +376,10 @@ pub struct Presentation {
     pub trail: SeenSprites,
     /// Frames in which the table read as world x / as camera-relative x explained sprites.
     score: (u32, u32),
+    /// Frames that had a live slot, and whether any slot ever explained a sprite (to judge a
+    /// table that never does).
+    live_frames: u32,
+    explained: bool,
 }
 
 impl Presentation {
@@ -385,6 +392,13 @@ impl Presentation {
     #[must_use]
     pub fn relative(&self) -> Option<bool> {
         (self.score.0 + self.score.1 >= DECIDE_AFTER).then_some(self.score.1 > self.score.0)
+    }
+
+    /// The table has had live slots for [`UNUSABLE_AFTER`] frames and not one explained a sprite
+    /// in either reading: it is of no use here, and last-seen sprites stand in.
+    #[must_use]
+    pub fn table_unusable(&self) -> bool {
+        !self.explained && self.live_frames >= UNUSABLE_AFTER
     }
 
     /// The object as placed in the world, given how the table's x reads.
@@ -405,11 +419,17 @@ impl Presentation {
             self.objects.clear();
             self.trail.clear();
             self.score = (0, 0);
+            self.live_frames = 0;
+            self.explained = false;
         }
         self.world.set_scene(f.scene);
         self.world
             .observe(f.rgba, w, f.h, f.cam, &is_sprite, skip_row);
         if let Some(objs) = f.objects {
+            self.live_frames += u32::from(objs.iter().any(|o| o.alive));
+        }
+        let use_table = f.objects.filter(|_| !self.table_unusable());
+        if let Some(objs) = use_table {
             if self.relative().is_none() {
                 let rel: Vec<ObjectFact> = objs
                     .iter()
@@ -422,6 +442,7 @@ impl Presentation {
                     ObjectMemory::new().explained(f, objs, &is_sprite),
                     ObjectMemory::new().explained(f, &rel, &is_sprite),
                 );
+                self.explained |= a + b > 0;
                 self.score.0 += u32::from(a > b);
                 self.score.1 += u32::from(b > a);
             }
@@ -454,7 +475,7 @@ impl Presentation {
             skip_row,
             usize::from(NARROW_WIDTH),
         );
-        if let Some(objs) = f.objects {
+        if let Some(objs) = f.objects.filter(|_| !self.table_unusable()) {
             let placed: Vec<ObjectFact> = objs.iter().map(|o| self.place(o, f.cam.0)).collect();
             self.objects
                 .paint_margins(&mut out, out_w, f.h, f.cam.0, &placed);
@@ -703,5 +724,26 @@ mod tests {
             p.observe(&f, NO_SKIP);
         }
         assert_eq!(p.relative(), Some(false));
+    }
+
+    #[test]
+    fn a_table_that_explains_nothing_gives_way_to_last_seen_sprites() {
+        let mut p = Presentation::new();
+        let (rgba, mask) = frame_with_block(200);
+        // A live slot far from any sprite, every frame.
+        let o = [ObjectFact {
+            slot: 1,
+            kind: 0,
+            alive: true,
+            world_x: 5000,
+            y: 0,
+        }];
+        for i in 0..=UNUSABLE_AFTER {
+            let mut f = fr(&rgba, &mask, (0, 0), Some(&o));
+            f.frame = u64::from(i);
+            p.observe(&f, NO_SKIP);
+        }
+        assert!(p.table_unusable());
+        assert!(!p.trail.is_empty(), "the trail took over");
     }
 }

@@ -101,7 +101,7 @@ pub struct Facts {
     pub scene: u64,
     /// `None` = no table in the recipe.
     pub objects: Option<Vec<ObjectFact>>,
-    /// The recipe has a vertical camera row.
+    /// Last-seen sprites may be placed (a vertical camera row, or an object table).
     pub full_camera: bool,
 }
 
@@ -175,7 +175,7 @@ impl Tracker {
             cam: (raw, cam_y),
             scene,
             objects,
-            full_camera: self.spec.cam_y.is_some(),
+            full_camera: self.spec.cam_y.is_some() || self.spec.table.is_some(),
         }
     }
 }

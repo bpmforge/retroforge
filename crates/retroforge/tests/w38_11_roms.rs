@@ -110,7 +110,7 @@ fn games() -> Vec<Game> {
             console: Console::Snes,
             rom: "snes/Super Mario World (USA).zip",
             profile: "snes/super-mario-world",
-            script: format!("{smw_to_level} {}", "R+Y14 R22 R+A+Y14 R22 ".repeat(60)),
+            script: format!("{smw_to_level} {}", "R+B14 R22 ".repeat(120)),
         },
         Game {
             name: "super-metroid",
@@ -154,6 +154,8 @@ struct Stats {
     best_known_pct: f32,
     best_objects_drawn: usize,
     centre_checks: usize,
+    alive_frames: usize,
+    max_alive: usize,
 }
 
 struct Best {
@@ -189,6 +191,7 @@ fn play(g: &Game, spec: Option<Spec>, rom: &[u8], aspect: Aspect) -> Run {
         stats: Stats::default(),
     };
     let mut last_scene = None;
+    let mut scene_from = 0usize;
     let mut best_score = -1.0f32;
     for (i, &pad) in pads.iter().enumerate() {
         let mut input = InputFrame::empty();
@@ -232,8 +235,37 @@ fn play(g: &Game, spec: Option<Spec>, rom: &[u8], aspect: Aspect) -> Run {
         if last_scene != Some(pf.facts.scene) {
             run.stats.scenes += 1;
             last_scene = Some(pf.facts.scene);
+            scene_from = i;
         }
         p.observe(&frame, &|_| false);
+        if std::env::var("RF_DEBUG").is_ok() && i % 300 == 0 {
+            let sp: Vec<(usize, usize)> = (0..rows)
+                .flat_map(|y| (0..msg.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| pf.sprite[y * msg.width + x] != 0)
+                .step_by(40)
+                .take(8)
+                .collect();
+            println!(
+                "DBG f{i} cam {:?} objs {:?} sprites {:?}",
+                pf.facts.cam,
+                pf.facts
+                    .objects
+                    .iter()
+                    .flatten()
+                    .filter(|o| o.alive)
+                    .collect::<Vec<_>>(),
+                sp
+            );
+        }
+        let alive = pf
+            .facts
+            .objects
+            .iter()
+            .flatten()
+            .filter(|o| o.alive)
+            .count();
+        run.stats.alive_frames += usize::from(alive > 0);
+        run.stats.max_alive = run.stats.max_alive.max(alive);
         if i % 40 != 0 {
             continue;
         }
@@ -259,26 +291,39 @@ fn play(g: &Game, spec: Option<Spec>, rom: &[u8], aspect: Aspect) -> Run {
             }
         }
         let pct = known as f32 * 100.0 / total as f32;
+        // A moment worth showing: a scene that has been going a while and a middle that is a
+        // picture (not a black fade or a text screen).
+        let dark = native
+            .chunks_exact(4)
+            .filter(|c| c[..3] == [0, 0, 0])
+            .count();
+        let showable = i - scene_from >= 300 && dark * 4 < msg.width * rows;
         let n_obj = p.objects.len();
-        // Prefer moments that learned objects, then coverage.
-        let score = pct + (n_obj.min(5) as f32) * 5.0;
-        if score > best_score && i > 600 {
+        let placed: Vec<_> = pf
+            .facts
+            .objects
+            .iter()
+            .flatten()
+            .map(|o| p.place(o, pf.facts.cam.0))
+            .collect();
+        let drawn = p.objects.paint_margins(
+            &mut vec![0u8; out_w * rows * 4],
+            out_w,
+            rows,
+            pf.facts.cam.0,
+            &placed,
+        ) + usize::from(
+            p.trail
+                .paint_margins(&mut vec![0u8; out_w * rows * 4], out_w, rows, pf.facts.cam)
+                > 0,
+        );
+        // Prefer moments that show objects in the margins, then coverage.
+        let score = pct + (drawn.min(3) as f32) * 30.0;
+        if score > best_score && showable {
             best_score = score;
             run.stats.best_known_pct = pct;
             run.stats.objects_seen = n_obj;
-            let drawn = p.objects.paint_margins(
-                &mut vec![0u8; out_w * rows * 4],
-                out_w,
-                rows,
-                pf.facts.cam.0,
-                &pf.facts
-                    .objects
-                    .iter()
-                    .flatten()
-                    .map(|o| p.place(o, pf.facts.cam.0))
-                    .collect::<Vec<_>>(),
-            );
-            run.stats.best_objects_drawn = drawn + p.trail.len().min(1);
+            run.stats.best_objects_drawn = drawn;
             run.best = Some(Best {
                 png: rf_renderer::png::encode_rgba(&wide, out_w as u32, rows as u32),
             });
@@ -297,7 +342,11 @@ fn learned_margins_32x9_on_four_games() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles");
     std::fs::create_dir_all(OUT_DIR).expect("out dir");
     let mut missing = 0;
+    let only = std::env::var("RF_GAMES").unwrap_or_default();
     for g in games() {
+        if !only.is_empty() && !only.split(',').any(|n| n == g.name) {
+            continue;
+        }
         let path = roms_dir().join(g.rom);
         if !path.exists() {
             println!("SKIP {}: ROM not found", g.name);
@@ -318,8 +367,8 @@ fn learned_margins_32x9_on_four_games() {
         );
         let s = &on.stats;
         println!(
-            "{}: {} frames, {} scenes, {} world chunks, {} objects remembered, best margin coverage {:.1}%, objects drawn at best {}, table x camera-relative: {:?}, centre checks {}, accuracy+WRAM identical over {} frames; mode: {blurb}",
-            g.name, s.frames, s.scenes, s.chunks, s.objects_seen, s.best_known_pct, s.best_objects_drawn, s.relative, s.centre_checks, on.hashes.len()
+            "{}: {} frames, {} scenes, {} world chunks, {} objects remembered ({} frames with live slots, max {} at once), best margin coverage {:.1}%, objects drawn at best {}, table x camera-relative: {:?}, centre checks {}, accuracy+WRAM identical over {} frames; mode: {blurb}",
+            g.name, s.frames, s.scenes, s.chunks, s.objects_seen, s.alive_frames, s.max_alive, s.best_known_pct, s.best_objects_drawn, s.relative, s.centre_checks, on.hashes.len()
         );
         assert!(s.chunks > 0, "{}: nothing learned", g.name);
         if let Some(b) = on.best {
