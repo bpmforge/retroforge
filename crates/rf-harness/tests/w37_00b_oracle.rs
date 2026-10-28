@@ -335,10 +335,15 @@ fn nes_fm2_trace_and_reference_script() {
 #[test]
 #[ignore = "needs Super Mario World (USA)"]
 fn smw_boot_timing_trace() {
-    let Some(raw) = rom_from_zip(
+    // `RF_W37B_SNES_ROM` (a raw .sfc) traces another cartridge instead.
+    let raw = if let Ok(p) = std::env::var("RF_W37B_SNES_ROM") {
+        std::fs::read(p).expect("rom")
+    } else if let Some(raw) = rom_from_zip(
         &roms_root().join("snes").join("Super Mario World (USA).zip"),
         false,
-    ) else {
+    ) {
+        raw
+    } else {
         println!("SKIP: SMW not found");
         return;
     };
