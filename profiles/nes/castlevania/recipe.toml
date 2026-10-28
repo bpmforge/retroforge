@@ -60,7 +60,7 @@ addr = 0x0354
 width = 1
 name = "player_y"
 grade = "candidate"
-source = "observed: the byte with the most changes while A is held among those within three of some sprite's y in 30% of frames; a candidate, not confirmed"
+source = "observed: the byte with the most changes while A is held among those within three of some sprite's y in 30% of frames (A-change share 234/1000); a candidate, not confirmed"
 
 [[ram]]
 addr = 0x00fd
@@ -87,4 +87,4 @@ y = 0x240
 type = 0x8c
 state = 0x2a8
 grade = "candidate"
-source = "observed: object-table finder (W38-02/02b) over 20851 frames of stage 1 patrol, chosen as the table with a state column that flips most without being a counter (154 up, 151 down); the finder rate here is 0.89 and the play shows no enemy on a column it binds with certainty; player is not in it (the player's x is camera-relative)"
+source = "observed: object-table finder (W38-02/02b) over 20851 frames of stage 1 patrol, chosen as the table with a state column that flips most without being a counter (154 up, 151 down); the finder rate here is 0.89 and the play shows no enemy on a column it binds with certainty; the player is not in it (its x is camera-relative)"

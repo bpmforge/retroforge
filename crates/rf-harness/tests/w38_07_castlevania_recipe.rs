@@ -505,16 +505,18 @@ fn castlevania_finders_and_recipe() {
         ));
     }
     if let Some(f) = writers_of(py).into_iter().max_by_key(|&f| count_of(py, f)) {
-        recipe.functions.push(function_row(
+        let mut row = function_row(
             &atlas,
             f,
             "player_y_writer",
             both,
             &format!(
-                "observed: the most frequent writer of the player's y byte ({} writes in the play)",
+                "observed: the most frequent writer of the byte graded candidate as the player's y ({} writes in the play); as weak as that byte",
                 count_of(py, f)
             ),
-        ));
+        );
+        row.grade = Grade::Candidate;
+        recipe.functions.push(row);
     }
     if let Some(f) = writers_of(cam.lo as u32)
         .into_iter()
@@ -554,7 +556,7 @@ fn castlevania_finders_and_recipe() {
     recipe.object_tables.push(rf_rebuild::ObjectTable {
         grade: Grade::Candidate,
         name: "actors".into(),
-        source: format!("observed: object-table finder (W38-02/02b) over {} frames of stage 1 patrol; player is not in it (the player's x is camera-relative)", trace.frames.len()),
+        source: format!("observed: object-table finder (W38-02/02b) over {} frames of stage 1 patrol, chosen as the table with a state column that flips most without being a counter (154 up, 151 down); the finder rate here is 0.89 and the play shows no enemy on a column it binds with certainty; the player is not in it (its x is camera-relative)", trace.frames.len()),
         ..table.clone()
     });
     let text = rf_profiles::recipe::recipe_to_toml(&recipe);
