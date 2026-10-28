@@ -38,6 +38,9 @@ const FILE: &str = "Super Mario World (USA).zip";
 const ZELDA: &str = "Legend of Zelda, The - A Link to the Past (USA).zip";
 const MODE: u32 = 0x7E_0100;
 const IN_LEVEL: u8 = 0x14;
+/// The player's world position words, as the harness `Watch` above reads them.
+const PLAYER_X: u32 = 0x7E_0094;
+const PLAYER_Y: u32 = 0x7E_0096;
 
 /// Menus to Yoshi's Island 1 and play: the token scripts of
 /// `crates/retroforge/tests/w33_07_common/mod.rs`, as `w36_08_atlas_smw`
@@ -172,12 +175,16 @@ fn scout_addr(profile: &str, role: &str) -> u32 {
 /// The scouted map of the session: each in-level frame's background rows placed at the
 /// camera the game reports (the profile's `camera_x` / `camera_y`), as the level scout
 /// stitches them. Returns the canvas and the in-level frame count.
-fn level_canvas(raw: &[u8], cam_x: u32, cam_y: u32) -> (Canvas, u32, (i64, i64)) {
+/// The scouted canvas, in-level frame count, camera x range, and the player's position per frame.
+type LevelScout = (Canvas, u32, (i64, i64), Vec<(i64, i64)>);
+
+fn level_canvas(raw: &[u8], cam_x: u32, cam_y: u32) -> LevelScout {
     let mut core = SnesCore::load(raw).expect("loads");
     core.reset(ResetKind::Hard);
     let mut canvas = Canvas::new();
     let mut in_level = 0;
     let mut cam_xs = (i64::MAX, i64::MIN);
+    let mut feet = Vec::new();
     for mask in session(raw) {
         // As `baseline` drives the session (the joypad latch, not the frame's input).
         core.system_mut().bus.joypads.ports[0] = mask;
@@ -190,11 +197,12 @@ fn level_canvas(raw: &[u8], cam_x: u32, cam_y: u32) -> (Canvas, u32, (i64, i64))
         let word = |a: u32| i64::from(core.peek(a)) | (i64::from(core.peek(a + 1)) << 8);
         let (cx, cy) = (word(cam_x), word(cam_y));
         cam_xs = (cam_xs.0.min(cx), cam_xs.1.max(cx));
+        feet.push((word(PLAYER_X), word(PLAYER_Y)));
         for (y, row) in sink.rows.iter().enumerate() {
             canvas.blit_row(cx, cy + y as i64, row);
         }
     }
-    (canvas, in_level, cam_xs)
+    (canvas, in_level, cam_xs, feet)
 }
 
 fn rom_dir() -> PathBuf {
@@ -283,21 +291,69 @@ fn smw_stage_set_bakes_caches_and_reloads() {
             .join("../../profiles/snes/super-mario-world/profile.toml"),
     )
     .expect("profile");
-    let (canvas, in_level, _) = level_canvas(
+    let (canvas, in_level, _, feet) = level_canvas(
         &raw,
         scout_addr(&profile, "camera_x"),
         scout_addr(&profile, "camera_y"),
     );
     let fp = visited_cells(&canvas, 16).expect("the session scouted some map");
-    let lo = *site.addrs.first().expect("addrs");
-    let id_at = |c: i64, r: i64| -> Option<u32> {
+    // Where the buffer's first cell sits is observed, not assumed: the read set also holds
+    // stray addresses far below the buffer (so its first address is no base). The base is the
+    // offset, within a screen-and-a-bit before the first dense run of reads, under which the
+    // cells at the player's feet are bodies and the cell he stands in is not, over the most
+    // in-level frames (the way W39-04 found its layout).
+    let mut runs: Vec<(u32, u32, usize)> = Vec::new();
+    for &a in &site.addrs {
+        match runs.last_mut() {
+            Some(r) if a - r.1 <= 0x100 => {
+                r.1 = a;
+                r.2 += 1;
+            }
+            _ => runs.push((a, a, 1)),
+        }
+    }
+    let dense_first = runs.iter().find(|r| r.2 >= 10).expect("a dense run").0;
+    let stride = BUF_COLS * BUF_ROWS;
+    let id_for = |base: u32, c: i64, r: i64| -> Option<u32> {
         if c < 0 || !(0..i64::from(BUF_ROWS)).contains(&r) {
             return None;
         }
         let (screen, col) = (c / i64::from(BUF_COLS), c % i64::from(BUF_COLS));
-        let a = lo + (screen as u32) * BUF_COLS * BUF_ROWS + (r as u32) * BUF_COLS + col as u32;
+        let a = base + (screen as u32) * stride + (r as u32) * BUF_COLS + col as u32;
         site.addrs.contains(&a).then(|| u32::from(d.core.peek(a)))
     };
+    let is_solid =
+        |id: Option<u32>| id.is_some_and(|i| rules.iter().any(|r| r.first <= i && i <= r.last));
+    let score_of = |base: u32| -> usize {
+        feet.iter()
+            .filter(|(px, py)| {
+                let (x, y) = (px + 8, *py);
+                let at = |dy: i64| {
+                    let (wx, wy) = (x, y + dy);
+                    if wx < 0 || wy < 0 {
+                        return None;
+                    }
+                    id_for(base, wx / 16, wy / 16)
+                };
+                !is_solid(at(8)) && is_solid(at(16)) | is_solid(at(32))
+            })
+            .count()
+    };
+    let mut scores: Vec<(usize, u32)> = (dense_first.saturating_sub(0x400)..=dense_first)
+        .map(|b| (score_of(b), b))
+        .collect();
+    scores.sort_unstable_by(|a, b| b.cmp(a));
+    println!(
+        "SMW buffer base search: best {:#x} scores {} of {} frames (next {:?}, first dense run {:#x}, first read addr {:#x})",
+        scores[0].1,
+        scores[0].0,
+        feet.len(),
+        &scores[1..4],
+        dense_first,
+        site.addrs.first().expect("addrs")
+    );
+    let base = scores[0].1;
+    let id_at = |c: i64, r: i64| id_for(base, c, r);
     let screen = bake_canvas(
         1,
         &canvas,
@@ -421,7 +477,7 @@ fn smw_footprint_is_the_scouted_camera_range() {
             .join("../../profiles/snes/super-mario-world/profile.toml"),
     )
     .expect("profile");
-    let (canvas, in_level, (lo, hi)) = level_canvas(
+    let (canvas, in_level, (lo, hi), _) = level_canvas(
         &raw,
         scout_addr(&profile, "camera_x"),
         scout_addr(&profile, "camera_y"),
