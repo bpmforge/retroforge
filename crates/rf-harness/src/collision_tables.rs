@@ -60,7 +60,8 @@ pub fn run_nes(
     Ok(reader.take_facts())
 }
 
-/// Run `inputs` on a SNES cartridge, observing from frame `from` on.
+/// Run `inputs` on a SNES cartridge, observing from frame `from` on; frames
+/// where `in_play` is false are left unsampled.
 ///
 /// # Errors
 /// A frame cannot be observed.
@@ -70,6 +71,7 @@ pub fn run_snes(
     from: usize,
     watch: &Watch,
     pushing: impl Fn(usize) -> bool,
+    in_play: impl Fn(&SnesDriver) -> bool,
 ) -> Result<CollisionFacts, String> {
     let mut reader = CollisionReader::new(rf_rebuild::Platform::Snes);
     for (f, input) in inputs.iter().enumerate() {
@@ -79,9 +81,13 @@ pub fn run_snes(
         }
         reader.set_resolver(d.resolver());
         d.frame_with(input, &mut reader)?;
-        let y = value(|a| d.core.peek(a), &watch.y);
-        let x = value(|a| d.core.peek(a), &watch.x);
-        reader.attach_player(y, x, pushing(f));
+        // Menus and the map move the watched bytes for other reasons: leave
+        // those frames unsampled.
+        if in_play(d) {
+            let y = value(|a| d.core.peek(a), &watch.y);
+            let x = value(|a| d.core.peek(a), &watch.x);
+            reader.attach_player(y, x, pushing(f));
+        }
     }
     Ok(reader.take_facts())
 }

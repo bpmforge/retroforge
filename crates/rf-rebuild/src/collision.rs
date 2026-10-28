@@ -581,11 +581,11 @@ pub fn infer(facts: &CollisionFacts) -> Vec<CollisionSite> {
             verdicts,
         });
     }
-    // Strongest evidence first: the routine that decides most ids.
+    // The widest level-buffer walker first, then the one that decides most ids.
     out.sort_by_key(|s| {
         (
+            std::cmp::Reverse(s.addrs.len()),
             std::cmp::Reverse(s.verdicts.len()),
-            std::cmp::Reverse(s.consumers.len()),
             s.site,
         )
     });
