@@ -94,6 +94,7 @@ pub mod scout_find;
 pub mod scout_ladder;
 pub mod script_panel;
 pub mod settings;
+pub mod shader_preset;
 pub mod shader_select;
 pub mod shadow_check;
 pub mod slot_cards;

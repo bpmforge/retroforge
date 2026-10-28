@@ -1015,6 +1015,10 @@ pub enum CoreCommand {
     /// writing the machine. Independent of `SetTileCapture` (an HD pack) and
     /// `SetStudioCapture`, which it shares the PPU's recording with.
     SetTileGridCapture(bool),
+    /// Keep each line's colour-math sub-screen in the bundle while the compare view or hold-to-peek may
+    /// show the "original" (`FrameBundle::sub`), so that picture keeps the game's translucency and fades.
+    /// Metadata only: the machine and `FrameBundle::video` are untouched.
+    SetCompareCapture(bool),
     /// Ticket W34-04: the profile's `[camera].mode` as an orientation (or
     /// `None`), which settles what the player detector would otherwise have
     /// to work out from play. Sent once per ROM.
@@ -1593,8 +1597,12 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     /// debug view of the indexed screens and does not blend).
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
         self.frame.sub_scanline(y, pixels, fixed_color);
-        // Ticket W33-01: the bundle keeps it only while widescreen is on.
-        self.bundle.sub_scanline(y, pixels, fixed_color);
+        // Ticket W33-01: the bundle keeps it only while it captures (widescreen, tile grids, compare).
+        // A hires line's sub-screen (one entry per half-dot, longer than the frame) is not offered:
+        // the bundle keeps 256 dots of a hires line's video, which those entries do not line up with.
+        if pixels.len() <= self.frame.width() {
+            self.bundle.sub_scanline(y, pixels, fixed_color);
+        }
     }
 
     /// Ticket W33-01: the per-line registers go to the bundle when it was asked to capture them
@@ -1740,6 +1748,7 @@ fn core_thread_main(
     let mut studio_capture = false;
     // Ticket W34-01: independent of both, see `CoreCommand::SetTileGridCapture`.
     let mut tile_grid_capture = false;
+    let mut compare_capture = false;
     // Ticket W34-04: the height learner, alive while the capture is on. It
     // keeps what it learned if the capture is switched off and on again.
     let mut live_heights: Option<crate::live_learn::LiveHeights> = None;
@@ -2102,7 +2111,15 @@ fn core_thread_main(
                     stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
                     // The SNES grids follow per-line scroll, which the bundle
                     // keeps only while it captures the wide channels.
-                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
+                }
+                CoreCommand::SetCompareCapture(on) => {
+                    compare_capture = on;
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
                 }
                 CoreCommand::SetOrientationHint(hint) => {
                     orientation_hint = hint;
@@ -2149,7 +2166,9 @@ fn core_thread_main(
                     snes_capture = false;
                     // Ticket W33-01: the bundle keeps the sub-screen and the
                     // per-line registers only while widescreen is on.
-                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
                     if widescreen.is_none() {
                         scout_driver.set(None);
                         stepper.set_widescreen_off();

@@ -13,6 +13,7 @@ pub mod collision;
 pub mod covio;
 pub mod dataregion;
 pub mod exec;
+pub mod facts;
 pub mod hw;
 pub mod ir;
 pub mod isa;
@@ -22,12 +23,13 @@ pub mod profile;
 pub mod recipe;
 pub mod superset;
 pub mod verify;
+pub mod widescreen;
 pub mod windows;
 
 pub use atlas::{
     entry, Atlas, AtlasError, Block, Edge, EdgeKind, Function, IndirectSite, InsnRec, Provenance,
     SiteKind, Stats, Target, VolatileRegion, Why, ATLAS_FORMAT_VERSION, CACHE_ASSET,
-    CACHE_PRODUCER, CACHE_SETTINGS,
+    CACHE_ASSET_SA1, CACHE_PRODUCER, CACHE_SETTINGS,
 };
 pub use build::build_atlas;
 pub use covio::{decode_coverage, encode_coverage, COVERAGE_ASSET, COVERAGE_SETTINGS};
@@ -35,6 +37,7 @@ pub use exec::{
     Delta, Dispatch, Fetch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,
 };
+pub use facts::{merge_facts, FactMerge, FactRefusal};
 pub use hw::{HwClass, Platform};
 pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 pub use recipe::{

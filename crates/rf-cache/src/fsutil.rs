@@ -108,6 +108,9 @@ pub(crate) fn ensure_contained(root: &Path, candidate: &Path) -> Result<(), Cach
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The symlink tests are Unix-only: Windows symlinks need a privilege
+    // (or Developer Mode) that a plain test run does not have.
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn unique_dir(label: &str) -> PathBuf {
@@ -133,6 +136,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn refuses_when_the_leaf_itself_is_a_symlink() {
         let root = unique_dir("leaf-root");
         let outside = unique_dir("leaf-outside");
@@ -159,6 +163,7 @@ mod tests {
     /// the leaf check would pass `refuses_when_the_leaf_itself_is_a_symlink`
     /// above yet wrongly accept this one.
     #[test]
+    #[cfg(unix)]
     fn refuses_when_an_ancestor_directory_is_a_symlink_pointing_outside() {
         let root = unique_dir("ancestor-root");
         let outside = unique_dir("ancestor-outside");
@@ -193,6 +198,7 @@ mod tests {
     /// against a future caller reaching for `File::create`, which *would*
     /// follow the link and create a file outside the root (NFR-010).
     #[test]
+    #[cfg(unix)]
     fn refuses_a_dangling_leaf_symlink_pointing_outside() {
         let root = unique_dir("dangling-root");
         let outside = unique_dir("dangling-outside");

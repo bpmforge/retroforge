@@ -64,6 +64,7 @@
 //! over a range, which stops at the grid edge.
 
 use crate::diorama_mesh::{kind, Vertex};
+use crate::diorama_objects::{class_at, ClassStyle, ObjectClass};
 
 /// Tint of a block's left and right faces.
 pub const SIDE_TINT: f32 = 0.62;
@@ -243,6 +244,22 @@ fn quad(out: &mut Vec<Vertex>, p: [[f32; 3]; 4], uv: [[f32; 2]; 4], tint: f32, k
 /// [`crate::diorama_mesh::build_vertices`]).
 #[must_use]
 pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> {
+    build_vertices_side_classed(scene, eye, &[])
+}
+
+/// [`build_vertices_side`] with a per-billboard [`ObjectClass`] (W39-02):
+/// `classes[i]` styles `scene.billboards[i]` (lift, shadow size and opacity,
+/// whether it casts one). Empty `classes` is bit-identical to the unclassed
+/// build.
+///
+/// # Panics
+/// Same length checks as [`build_vertices_side`].
+#[must_use]
+pub fn build_vertices_side_classed(
+    scene: &SideScene<'_>,
+    eye: [f32; 3],
+    classes: &[ObjectClass],
+) -> Vec<Vertex> {
     let n = scene.cols as usize * scene.rows as usize;
     assert_eq!(scene.depth.len(), n, "build_vertices_side: depth length");
     assert_eq!(scene.slope.len(), n, "build_vertices_side: slope length");
@@ -282,8 +299,8 @@ pub fn build_vertices_side(scene: &SideScene<'_>, eye: [f32; 3]) -> Vec<Vertex> 
     for p in pieces {
         verts.extend(p.verts);
     }
-    for b in scene.billboards {
-        push_billboard(scene, b, back, &mut verts);
+    for (i, b) in scene.billboards.iter().enumerate() {
+        push_billboard(scene, b, &class_at(classes, i).style(), back, &mut verts);
     }
     verts
 }
@@ -651,7 +668,13 @@ fn push_wedge(
 
 /// A contact shadow (when something solid is under the feet) and the
 /// upright sprite quad.
-fn push_billboard(scene: &SideScene<'_>, b: &SideBillboard, back: f32, out: &mut Vec<Vertex>) {
+fn push_billboard(
+    scene: &SideScene<'_>,
+    b: &SideBillboard,
+    st: &ClassStyle,
+    back: f32,
+    out: &mut Vec<Vertex>,
+) {
     // The cell just under the feet decides how deep the stage is.
     let col = ((b.center_x_px - scene.origin[0]) / scene.tile_px).floor();
     let row = ((b.feet_y_px + 1.0 - scene.origin[1]) / scene.tile_px).floor();
@@ -672,8 +695,11 @@ fn push_billboard(scene: &SideScene<'_>, b: &SideBillboard, back: f32, out: &mut
         (stage - back) / 2.0
     };
     let feet = scene.world_y(b.feet_y_px);
-    if under.is_some() {
-        let (hw, hd) = (b.width_px * 0.65, b.width_px * 0.35);
+    if under.is_some() && st.casts_shadow {
+        let (hw, hd) = (
+            b.width_px * 0.65 * st.shadow_scale,
+            b.width_px * 0.35 * st.shadow_scale,
+        );
         quad(
             out,
             [
@@ -688,7 +714,7 @@ fn push_billboard(scene: &SideScene<'_>, b: &SideBillboard, back: f32, out: &mut
         );
         // The shadow's alpha rides in the colour.
         for v in out.iter_mut().rev().take(6) {
-            v.color = [0.0, 0.0, 0.0, 0.45];
+            v.color = [0.0, 0.0, 0.0, st.effective_shadow_alpha()];
         }
     }
     let [u0, v0, u1, v1] = b.uv;
@@ -696,10 +722,12 @@ fn push_billboard(scene: &SideScene<'_>, b: &SideBillboard, back: f32, out: &mut
         b.center_x_px - b.width_px / 2.0,
         b.center_x_px + b.width_px / 2.0,
     );
-    let top = feet + b.height_px;
+    // A lifted class hovers: only the sprite rises, its shadow stays down.
+    let base = feet + st.lift_px;
+    let top = base + b.height_px;
     quad(
         out,
-        [[x0, top, z], [x1, top, z], [x1, feet, z], [x0, feet, z]],
+        [[x0, top, z], [x1, top, z], [x1, base, z], [x0, base, z]],
         [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
         1.0,
         kind::SPRITE,
@@ -981,5 +1009,37 @@ mod tests {
         let sprite: Vec<&Vertex> = v.iter().filter(|x| x.kind == kind::SPRITE).collect();
         assert_eq!(sprite.len(), 6);
         assert!(sprite.iter().all(|x| x.pos[2] < 0.0 && x.pos[2] > -2.0));
+    }
+    #[test]
+    fn classes_lift_and_unshadow_side_billboards_and_none_is_legacy() {
+        let d = [0, 0, 8, 8];
+        let s = [0i8; 4];
+        let b = [SideBillboard {
+            center_x_px: 24.0,
+            feet_y_px: 16.0,
+            width_px: 8.0,
+            height_px: 16.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            behind_bg: false,
+        }];
+        let sc = scene(2, 2, &d, &s, &b);
+        let eye = [24.0, 300.0, 400.0];
+        let plain = build_vertices_side(&sc, eye);
+        assert_eq!(plain, build_vertices_side_classed(&sc, eye, &[]));
+        assert_eq!(
+            plain,
+            build_vertices_side_classed(&sc, eye, &[ObjectClass::Unknown])
+        );
+        let low = |v: &[Vertex]| {
+            v.iter()
+                .filter(|x| x.kind == kind::SPRITE)
+                .map(|x| x.pos[1])
+                .fold(f32::MAX, f32::min)
+        };
+        let shot = build_vertices_side_classed(&sc, eye, &[ObjectClass::Projectile]);
+        assert!(low(&shot) > low(&plain), "a projectile floats");
+        let sign = build_vertices_side_classed(&sc, eye, &[ObjectClass::Scenery]);
+        assert_eq!(count(&sign, kind::SHADOW), 0);
+        assert_eq!(count(&plain, kind::SHADOW), 6);
     }
 }

@@ -14,7 +14,7 @@ use rf_core_api::{
     ColorMathOp, CoreEvent, CoreSink, LineRegisters, OverlayPixel, PixelLayer, PpuPixel, SubPixel,
 };
 
-use crate::palette::{bgr555_to_rgb, color_math_bgr555, resolve_index, LinePalette};
+use crate::palette::{resolve_index, LinePalette};
 
 /// NES visible frame width in pixels (nesdev.org/wiki/PPU_rendering: 256
 /// dots of visible output per scanline).
@@ -292,17 +292,7 @@ impl CoreSink for FrameBuffer {
             ) {
                 // Ticket W7-21: colour math, in BGR555, before brightness.
                 (Some(p), Some((sp, fixed_color))) => {
-                    let main = if sp.main_black {
-                        0
-                    } else {
-                        p.words[usize::from(pixel.palette_index)]
-                    };
-                    let sub_word = if sp.fixed {
-                        fixed_color
-                    } else {
-                        p.words[usize::from(sp.palette_index)]
-                    };
-                    bgr555_to_rgb(color_math_bgr555(main, sub_word, sp.op), p.brightness)
+                    p.rgb_with_math(pixel.palette_index, sp, fixed_color)
                 }
                 _ => resolve_index(pixel.palette_index, palette),
             };

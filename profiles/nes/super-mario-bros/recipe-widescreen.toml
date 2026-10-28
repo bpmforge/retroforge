@@ -1,0 +1,165 @@
+# W38-04: widescreen finder rows for Super Mario Bros., an OVERLAY on recipe.toml
+# (recipe format v1; append this file's text to that recipe to load it:
+# crates/rf-harness/tests/w38_04_rows.rs does exactly that and checks the grades).
+# It is a separate file because rf-profiles' own test pins the recipe file's
+# patch rows to the three W36-06 ones.
+#
+# Finder: crates/rf-rebuild/src/widescreen.rs. Trials: crates/rf-harness/tests/
+# w38_04_widescreen_*.rs. Offsets and constants only (law 5).
+#   mod "widescreen-objects":    lockstep keepers. With every row of the mod applied
+#       together, the first divergence from the unmodified run touched only
+#       off-screen object state (OAM and camera identical), and live objects
+#       were kept farther out than the unmodified game keeps them.
+#   mod "widescreen-candidates": finder output no trial kept (the constant
+#       never mattered in the run, or the change was visible). Graded candidate:
+#       no patch ever applies them.
+#   W38-04b: HUD anchors were trialed (a stored sprite coordinate byte moved by 16 px
+#       on a copy; kept only when nothing else differed for the whole run). The one
+#       keeper is the ROM TABLE byte at PRG offset 0xfce (sprite 0's x, 0x58): a table
+#       byte is not inside any atlas function, so a function-relative patch row cannot
+#       place it and it has no row here. The immediate-sourced candidate (0x226) is a
+#       vertical coordinate, read by game logic: candidate.
+[[function]]
+name = "wide_fn_dfc1"
+shape_hash = "0x7ab715075f12b2a2"
+exact_hash = "0x723c8480764b93ad"
+address_hint = 0xdfc1
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMB 1-1 play); W38-04"
+
+[[function]]
+name = "wide_fn_e15b"
+shape_hash = "0x96840a69cbf93e8b"
+exact_hash = "0x96840a69cbf93e8b"
+address_hint = 0xe15b
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMB 1-1 play); W38-04"
+
+[[function]]
+name = "wide_fn_84c3"
+shape_hash = "0xc4a1ca35ec446f90"
+exact_hash = "0xc0e5ac7bbcfdf5cd"
+address_hint = 0x84c3
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMB 1-1 play); W38-04"
+
+[[patch]]
+name = "wide-activation-418f"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 231
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate cmp (was 0xf), confidence high 75; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-activation-4754"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 509
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate cpx (was 0x5), confidence high 75; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-activation-41f6"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 334
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate cmp (was 0x37), confidence high 70; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-activation-4769"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 530
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate adc (was 0x18), confidence high 70; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-despawn-41e2"
+mod = "widescreen-objects"
+function = "enemy_activate"
+offset = 314
+value = 0xff
+grade = "confirmed"
+source = "observed: despawn operand of an immediate cmp (was 0xe0), confidence medium 65; lockstep keeper: only off-screen state changes first; acts only together with the patches at ROM offsets 0x4169, 0x569e"
+
+[[patch]]
+name = "wide-activation-41fe"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 342
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate cmp (was 0x6), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-activation-476f"
+mod = "widescreen-candidates"
+function = "enemy_activate"
+offset = 536
+value = 0xff
+grade = "candidate"
+source = "observed: activation operand of an immediate adc (was 0x0), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-despawn-568a"
+mod = "widescreen-candidates"
+function = "enemy_update"
+offset = 53
+value = 0xff
+grade = "candidate"
+source = "observed: despawn operand of an immediate cpy (was 0xd), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-5feb"
+mod = "widescreen-candidates"
+function = "wide_fn_dfc1"
+offset = 259
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cpy (was 0x2e), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-6161"
+mod = "widescreen-candidates"
+function = "wide_fn_e15b"
+offset = 6
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x44), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-4df"
+mod = "widescreen-candidates"
+function = "wide_fn_84c3"
+offset = 29
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x2b), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[function]]
+name = "wide_fn_8220"
+shape_hash = "0xf3ed1b9630e267c4"
+exact_hash = "0xc69692c3652836fa"
+address_hint = 0x8220
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMB 1-1 play); W38-04"
+
+[[patch]]
+name = "wide-hud-anchor-226"
+mod = "widescreen-candidates"
+function = "wide_fn_8220"
+offset = 6
+value = 0xe8
+grade = "candidate"
+source = "observed: HUD sprite coordinate stored from an immediate (was 0xf8), confidence low 41; finder candidate, not kept by a lockstep trial: a vertical coordinate: widescreen does not move it"
+

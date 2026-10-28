@@ -1,2 +1,1698 @@
 //! Object-table finder (ticket W38-02): slot stride, x/y/type fields and
 //! sprite-to-object binding from OAM writes. Offsets only (law 5, D-021).
+//!
+//! Console-agnostic, like [`crate::dataregion`]: a driver samples the game at
+//! the end of every frame (work RAM, the OAM the PPU holds, the background
+//! scroll the picture used) into a [`Trace`]; [`infer`] is pure and turns a
+//! trace into [`ObjectTable`] recipe rows plus the evidence behind them.
+//!
+//! The idea. A game keeps its objects in RAM as parallel byte arrays (one
+//! array per field, a byte per slot) or as records, and every frame turns the
+//! live ones into OAM entries. So a byte that *is* an object's x position
+//! satisfies `oam_x == x - scroll + dx` for some sprite of that object, every
+//! frame, with `dx` a constant of the game's drawing code. That is a strong
+//! signature: a random byte matches an arbitrary sprite about one frame in six
+//! (about as many x values are on screen), a position byte matches nearly
+//! every frame the object exists.
+//!
+//! 1. **x columns.** Every varying RAM byte is scored against the sprites'
+//!    x values; `dx` is the best of the 256 offsets and the score is a
+//!    z-score against the chance rate ([`score_x`]). RAM that mirrors OAM (the
+//!    shadow copy the game builds before the upload) is masked first.
+//! 2. **Strides.** Bytes that score are grouped into chains of equal stride
+//!    ([`chains`]); the chain with the most members wins its addresses.
+//! 3. **y, x high, state, kind.** Given an x chain, the y column is the one
+//!    whose bytes, added to the sprites that already share the object's x,
+//!    give one constant `dy`; the x high byte is the one that steps by one
+//!    when the low byte wraps; the state byte is non-zero exactly while a
+//!    sprite is bound; the type byte holds still for as long as a slot lives.
+//! 4. **Binding** (W38-02b). Each live, on-screen slot-frame is checked
+//!    against the picture *exactly*, with no pixel slack: some sprite must sit
+//!    at an offset from the slot's position that the slot is seen to draw at
+//!    ([`exact`]). Offsets are learned per slot (a hero may be drawn a pixel
+//!    or two off the others), the RAM history a slot's sprites show (this
+//!    capture or the one before: [`pick_back`]), the x high byte of an
+//!    8-bit table ([`find_hi_fit`]) and the state values a game never draws
+//!    are all learned from the run. Slots are claimed by evidence, including
+//!    rarely live ones past the x chain; the acceptance number is
+//!    [`Binding::rate`], and the misses are kept by cause
+//!    ([`Binding::undrawn`], [`Binding::off_set`], [`Binding::missed`]).
+//!
+//! Hardware notes: the NES takes OAM from a 256-byte RAM page by `$4014` DMA
+//! (nesdev "PPU OAM"), so object code builds sprites in RAM and the finder
+//! sees the shadow copy; the SNES moves its 544-byte table by DMA to `$2104`
+//! (fullsnes "OAM"). The OAM a PPU holds lags the RAM it was built from by up
+//! to a frame, hence [`Binding::lag`].
+
+// Slot-by-frame grids are indexed on both axes by design.
+#![allow(clippy::needless_range_loop)]
+
+use crate::recipe::{Grade, ObjectTable};
+
+/// One sprite as the picture shows it. Only the low eight bits of x are kept:
+/// object x bytes are eight bits wide, and a sprite beyond the edge is not
+/// evidence of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sprite {
+    /// Position in the OAM, in entries.
+    pub index: u16,
+    pub x: u8,
+    pub y: u8,
+}
+
+/// The game at the end of one frame.
+#[derive(Debug, Clone, Default)]
+pub struct Frame {
+    /// Work RAM from its start, as many bytes as the caller wants searched.
+    pub ram: Vec<u8>,
+    /// The raw OAM bytes (used only to mask RAM that mirrors it).
+    pub oam: Vec<u8>,
+    /// The sprites that can be on screen.
+    pub sprites: Vec<Sprite>,
+    /// Horizontal scroll of the playfield in effect below any status bar.
+    pub cam_x: u16,
+    pub cam_y: u16,
+}
+
+/// A run of frames.
+#[derive(Debug, Clone, Default)]
+pub struct Trace {
+    /// Added to a RAM index to make the address a recipe row carries (`0` on
+    /// the NES, `0x7E_0000` on the SNES).
+    pub ram_base: u32,
+    /// The scroll's modulus: 512 on the NES (two nametables), 65536 on the
+    /// SNES. Position arithmetic against the scroll is done in this ring.
+    pub wrap: u32,
+    pub frames: Vec<Frame>,
+}
+
+/// What we measured for one slot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SlotBinding {
+    pub slot: u32,
+    /// The OAM entry most often drawn at the slot's position.
+    pub oam_index: Option<u16>,
+    /// Frames the slot's position matched a sprite.
+    pub bound_frames: u32,
+    /// Frames the slot was live and its position on screen.
+    pub live_frames: u32,
+    /// Of those, the frames a sprite matched.
+    pub matched_frames: u32,
+    /// Frames of RAM history the slot's sprites were built from beyond the
+    /// table's `lag`: `1` for a slot whose object is drawn before the game
+    /// moves it that frame (its sprites show the position of the previous
+    /// capture), `0` for one drawn after. Chosen per slot by [`pick_back`].
+    pub back: u8,
+    /// The same test with the slot's position moved by [`CONTROL_SHIFT`]:
+    /// how often the picture would match a position that is *not* this
+    /// slot's. A real slot has this far below `matched_frames`.
+    pub control_frames: u32,
+    /// The sprite offsets `(dx, dy)` from the slot's position that this slot
+    /// was seen drawing at, learned from the run ([`learn_offsets`]). Empty
+    /// for a slot that borrowed the pooled set of the whole table.
+    pub offsets: Vec<(i8, i8)>,
+}
+
+/// How a found table lines up with the picture.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Binding {
+    /// Frames between the RAM a sprite was built from and the OAM that shows
+    /// it (`0` or `1`).
+    pub lag: usize,
+    /// Constant added to `x - scroll` to give the sprite x.
+    pub dx: i32,
+    pub dy: i32,
+    pub slots: Vec<SlotBinding>,
+    /// Slot-frames where a live slot's position was on screen.
+    pub expected: u64,
+    /// Of those, the ones whose x and y match a sprite exactly.
+    pub matched: u64,
+    /// Frames with at least one expected slot, and how many of them had every
+    /// expected slot matched.
+    pub frames_checked: u32,
+    pub frames_clean: u32,
+    /// How "live" was decided: from the state byte, or from the binding.
+    pub live_from_state: bool,
+    /// Slot-frames left out of `expected` because the slot's state byte had a
+    /// value the game never draws (learned, see [`non_drawn_states`]).
+    pub excluded: u64,
+    /// Frames left out whole because every live object in them was undrawn.
+    pub blank_frames: u32,
+    /// The state-byte values learned as not drawn.
+    pub non_drawn: Vec<u8>,
+    /// Misses by cause. `undrawn`: no sprite anywhere near the slot's
+    /// position (flicker, clipping, a frame the game skipped). `off_set`:
+    /// sprites near it, none at an offset the slot is known to draw at (a
+    /// pose seen too rarely to learn).
+    pub undrawn: u64,
+    pub off_set: u64,
+    /// The `(frame, slot)` of every miss.
+    pub missed: Vec<(u32, u32)>,
+}
+
+impl Binding {
+    /// The share of expected slot-frames that matched: the acceptance number.
+    #[must_use]
+    pub fn rate(&self) -> f64 {
+        if self.expected == 0 {
+            0.0
+        } else {
+            self.matched as f64 / self.expected as f64
+        }
+    }
+}
+
+/// A table with the evidence it was built from.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Found {
+    pub table: ObjectTable,
+    pub binding: Binding,
+    /// The z-score of the x column (the confidence in the table).
+    pub z: f64,
+}
+
+/// A recipe row for a found table: `grade` is what the caller's experiment
+/// earned; `experiment` is appended to the source note.
+#[must_use]
+pub fn to_row(f: &Found, grade: Grade, experiment: &str) -> ObjectTable {
+    let mut t = f.table.clone();
+    t.grade = grade;
+    t.source = format!(
+        "finder: {} slots stride {}, x z={:.0}, {}/{} live slot-frames match OAM (lag {}){}",
+        f.table.slots,
+        f.table.stride,
+        f.z,
+        f.binding.matched,
+        f.binding.expected,
+        f.binding.lag,
+        experiment
+    );
+    t
+}
+
+/// The grade a result earns on its own evidence: observed when the table
+/// follows the picture almost everywhere on a state-gated count, otherwise a
+/// candidate.
+#[must_use]
+pub fn grade_of(f: &Found) -> Grade {
+    if f.binding.live_from_state && f.binding.expected >= 200 && f.binding.rate() >= 0.95 {
+        Grade::Observed
+    } else {
+        Grade::Candidate
+    }
+}
+
+// ---------------------------------------------------------------------------
+// preparation
+
+/// Smallest z-score for a byte to count as an x position.
+pub const MIN_Z: f64 = 12.0;
+/// Fewest matching frames for the same.
+const MIN_MATCHES: u32 = 60;
+/// Largest stride searched.
+const MAX_STRIDE: usize = 64;
+/// Pixels a sprite column may sit from where the x byte puts it (see
+/// [`Cols::bound`]).
+pub const X_SLACK: i8 = 2;
+/// Pixels a sprite row may sit from a multiple of eight (see [`Cols::bound`]).
+pub const Y_SLACK: i8 = 2;
+/// Pixels two chain members' drawing offsets may differ and still agree.
+const DX_AGREE: u8 = 8;
+/// Empty slots tolerated between two members of a chain.
+const MAX_GAP: usize = 6;
+/// Share of its live frames a trailing slot must match to be claimed.
+const TRIM_BELOW: f64 = 0.7;
+/// Frames a trailing slot must match exactly to be claimed: a slot that is
+/// simply rarely live is kept on this much evidence, one that never matched
+/// is not.
+const MIN_SLOT_EVIDENCE: u32 = 3;
+/// Slots past the end of an x chain that are tried (a rarely live slot's x
+/// byte does not score, so the chain stops short of the table).
+const MAX_EXTEND: usize = 16;
+/// The window around a slot's position in which a sprite may belong to it:
+/// pixels left/right and up/down. Metasprites of 16..32 pixels, plus the
+/// drawing code's own nudges, fit; the next object's sprites mostly do not.
+const WIN_X: std::ops::RangeInclusive<i8> = -16..=24;
+const WIN_Y: std::ops::RangeInclusive<i8> = -24..=32;
+/// An offset is "drawn at" by a slot when it recurs in at least this many of
+/// the slot's live frames, and in at least [`OFFSET_SHARE`] of them. A stray
+/// sprite lands on one particular pixel offset in about 1 frame in 10^4, so
+/// 3 recurrences are never chance; and the share lets a pose seen in 2% of a
+/// slot's life (a turned or squashed enemy) count, which a one-offset rule
+/// would call a miss.
+const OFFSET_MIN_FRAMES: u32 = 3;
+const OFFSET_SHARE: f64 = 0.02;
+/// A slot with fewer live frames than this borrows the offsets of the whole
+/// table (it has not shown enough poses of its own).
+const OWN_MIN_LIVE: u32 = 20;
+/// A state value is "not drawn" when it covers at least this many live
+/// on-screen slot-frames and [`NON_DRAWN_SHARE`] of them had no sprite in the
+/// window.
+const NON_DRAWN_MIN: u32 = 5;
+const NON_DRAWN_SHARE: f64 = 0.9;
+/// The displacement `(x, y)` of the control position (see
+/// [`SlotBinding::control_frames`]): far enough to leave the window, odd enough
+/// not to land on another object's grid.
+pub const CONTROL_SHIFT: (u8, u8) = (83, 37);
+/// [`pick_back`] prefers the older RAM only when the slot's offsets are this
+/// much sharper (Herfindahl index ratio) with it.
+const BACK_RATIO: f64 = 1.2;
+/// Share of the live slot-frames a fitted x high byte must explain over none.
+const HI_FIT_GAIN: f64 = 0.05;
+/// From this stride on a chain needs [`MIN_WIDE`] members: three bytes at a
+/// wide stride are always "dense" and fit by chance (about forty bytes of a
+/// work RAM follow some sprite's x; that is hundreds of three-byte chains).
+const WIDE_STRIDE: usize = 8;
+const MIN_WIDE: usize = 4;
+/// Fewest slots in a table.
+const MIN_SLOTS: usize = 3;
+/// Rows of frames sampled when searching the other columns.
+const SAMPLE_FRAMES: usize = 900;
+
+struct Pre<'a> {
+    t: &'a Trace,
+    /// RAM bytes searched.
+    r: usize,
+    /// Per frame: the distinct sprite x values.
+    xs: Vec<Vec<u8>>,
+    /// Addresses (indices) that mirror the OAM.
+    masked: Vec<bool>,
+    /// Addresses whose value never changes.
+    constant: Vec<bool>,
+}
+
+fn distinct(it: impl Iterator<Item = u8>) -> Vec<u8> {
+    let mut seen = [false; 256];
+    let mut out = Vec::new();
+    for v in it {
+        if !seen[usize::from(v)] {
+            seen[usize::from(v)] = true;
+            out.push(v);
+        }
+    }
+    out
+}
+
+impl<'a> Pre<'a> {
+    fn new(t: &'a Trace) -> Self {
+        let r = t.frames.iter().map(|f| f.ram.len()).min().unwrap_or(0);
+        let xs = t
+            .frames
+            .iter()
+            .map(|f| distinct(f.sprites.iter().map(|s| s.x)))
+            .collect();
+        let constant = (0..r)
+            .map(|a| {
+                t.frames
+                    .first()
+                    .is_none_or(|f0| t.frames.iter().all(|f| f.ram[a] == f0.ram[a]))
+            })
+            .collect();
+        let mut pre = Self {
+            t,
+            r,
+            xs,
+            masked: vec![false; r],
+            constant,
+        };
+        pre.mask_oam_mirror();
+        pre
+    }
+
+    fn n(&self) -> usize {
+        self.t.frames.len()
+    }
+
+    fn ram(&self, f: usize, a: usize) -> u8 {
+        self.t.frames[f].ram[a]
+    }
+
+    /// Mask RAM that is a copy of the OAM: the window of OAM length whose
+    /// non-zero bytes equal the OAM bytes in at least 40% of sampled frames'
+    /// entries. Object arrays are not (their bytes are not in OAM order).
+    fn mask_oam_mirror(&mut self) {
+        let Some(len) = self.t.frames.iter().map(|f| f.oam.len()).max() else {
+            return;
+        };
+        if len == 0 || self.r < len {
+            return;
+        }
+        // Frames with the most sprites say the most.
+        let mut order: Vec<usize> = (0..self.n()).collect();
+        order.sort_by_key(|&f| std::cmp::Reverse(self.t.frames[f].sprites.len()));
+        let sample: Vec<usize> = order.into_iter().take(16).collect();
+        let mut best: Option<(usize, f64)> = None;
+        for off in 0..=(self.r - len) {
+            let (mut eq, mut tot) = (0u32, 0u32);
+            for &f in &sample {
+                let fr = &self.t.frames[f];
+                for (k, &o) in fr.oam.iter().enumerate() {
+                    if o != 0 {
+                        tot += 1;
+                        eq += u32::from(fr.ram[off + k] == o);
+                    }
+                }
+            }
+            if tot >= 64 {
+                let share = f64::from(eq) / f64::from(tot);
+                if share >= 0.4 && best.is_none_or(|(_, b)| share > b) {
+                    best = Some((off, share));
+                }
+            }
+        }
+        if let Some((off, _)) = best {
+            for m in &mut self.masked[off..off + len] {
+                *m = true;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stage 1: x columns
+
+/// One byte that follows a sprite's x.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct XCand {
+    addr: usize,
+    z: f64,
+    dx: u8,
+    matches: u32,
+}
+
+/// The peak of an offset histogram. A metasprite is several sprites, so the
+/// object's own coordinate also peaks 8 and 16 away; the coordinate is the
+/// lowest peak nearly as strong as the highest (the top-left sprite).
+fn peak(hist: &[u32; 256]) -> Option<(usize, u32)> {
+    let (mut d, &mut_best) = hist.iter().enumerate().max_by_key(|&(_, &c)| c)?;
+    for step in [8usize, 16, 24] {
+        let lower = (d + 256 - step) % 256;
+        if hist[lower] * 10 >= mut_best * 8 {
+            d = lower;
+        }
+    }
+    Some((d, hist[d]))
+}
+
+/// Score one byte as an x position at `lag`.
+fn score_x(pre: &Pre<'_>, a: usize, lag: usize) -> Option<XCand> {
+    let mut hist = [0u32; 256];
+    let (mut info, mut exp, mut var) = (0u32, 0f64, 0f64);
+    for f in (lag + 1)..pre.n() {
+        let v = pre.ram(f - lag, a);
+        // Evidence only when the on-screen position the byte implies moved: a
+        // byte that tracks the scroll implies a fixed position and would
+        // match any parked sprite (the status bar's) for free.
+        let cam = pre.t.frames[f].cam_x as u8;
+        let prev = pre
+            .ram(f - lag - 1, a)
+            .wrapping_sub(pre.t.frames[f - 1].cam_x as u8);
+        let moved = v.wrapping_sub(cam) != prev;
+        if !moved {
+            continue;
+        }
+        info += 1;
+        let p = pre.xs[f].len() as f64 / 256.0;
+        exp += p;
+        var += p * (1.0 - p);
+        for &x in &pre.xs[f] {
+            hist[usize::from(x.wrapping_sub(v).wrapping_add(cam))] += 1;
+        }
+    }
+    if info == 0 {
+        return None;
+    }
+    let (dx, best) = peak(&hist)?;
+    let z = (f64::from(best) - exp) / (var + 1.0).sqrt();
+    (best >= MIN_MATCHES && z >= MIN_Z).then_some(XCand {
+        addr: a,
+        z,
+        dx: dx as u8,
+        matches: best,
+    })
+}
+
+/// Every byte that follows an x position at `lag`.
+fn score_all_x(pre: &Pre<'_>, lag: usize) -> Vec<XCand> {
+    (0..pre.r)
+        .filter(|&a| !pre.masked[a] && !pre.constant[a])
+        .filter_map(|a| score_x(pre, a, lag))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// stage 2: chains
+
+/// Bytes at equal spacing: `base + k * stride`, with up to one missing between
+/// two members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chain {
+    pub base: usize,
+    pub stride: usize,
+    pub slots: usize,
+    pub members: usize,
+}
+
+/// Group addresses into chains: the chain with the most members claims its
+/// addresses, then the next one among what is left. Strides `1..=MAX_STRIDE`.
+#[must_use]
+pub fn chains(addrs: &[usize]) -> Vec<Chain> {
+    let weighted: Vec<(usize, f64)> = addrs.iter().map(|&a| (a, 1.0)).collect();
+    chains_weighted(&weighted)
+}
+
+/// Whether two x offsets (mod 256) are within [`DX_AGREE`] of each other.
+fn agree(a: u8, b: u8) -> bool {
+    (a.wrapping_sub(b) as i8).unsigned_abs() <= DX_AGREE
+}
+
+/// [`chains`] with a weight per address (its z-score): the heaviest chain wins
+/// its addresses. A table is rarely full in a short run, so up to
+/// [`MAX_GAP`] empty slots may sit between two members.
+#[must_use]
+pub fn chains_weighted(addrs: &[(usize, f64)]) -> Vec<Chain> {
+    let scored: Vec<(usize, f64, u8)> = addrs.iter().map(|&(a, z)| (a, z, 0)).collect();
+    chains_scored(&scored)
+}
+
+/// [`chains_weighted`] with the x offset each address was found at: the
+/// members of a table share the game's drawing offset, so a chain's weight
+/// counts only the members within [`DX_AGREE`] pixels of its commonest
+/// offset (a long sparse chain of unrelated bytes, each with its own offset,
+/// does not take bytes from a short dense one that agrees).
+#[must_use]
+pub fn chains_scored(addrs: &[(usize, f64, u8)]) -> Vec<Chain> {
+    let mut sorted: Vec<usize> = addrs.iter().map(|&(a, _, _)| a).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let by_addr: std::collections::BTreeMap<usize, (f64, u8)> =
+        addrs.iter().fold(Default::default(), |mut m, &(a, z, dx)| {
+            let e = m.entry(a).or_insert((z, dx));
+            if z > e.0 {
+                *e = (z, dx);
+            }
+            m
+        });
+    let weight = |a: usize| by_addr.get(&a).map_or(0.0, |e| e.0);
+    let has = |a: usize| sorted.binary_search(&a).is_ok();
+    let mut all: Vec<(Chain, f64, Vec<usize>)> = Vec::new();
+    for g in 1..=MAX_STRIDE {
+        for &a in &sorted {
+            if a >= g && has(a - g) {
+                continue; // not a start
+            }
+            let (mut mem, mut gap) = (vec![a], 0usize);
+            // `k` strictly increases, so this ends when the table does.
+            for k in 1..=64usize {
+                let next = a + k * g;
+                if has(next) {
+                    mem.push(next);
+                    gap = 0;
+                } else {
+                    gap += 1;
+                    if gap > MAX_GAP {
+                        break;
+                    }
+                }
+            }
+            if mem.len()
+                >= if g >= WIDE_STRIDE {
+                    MIN_WIDE
+                } else {
+                    MIN_SLOTS
+                }
+            {
+                let last = mem[mem.len() - 1];
+                let modal = mem
+                    .iter()
+                    .map(|m| by_addr.get(m).map_or(0, |e| e.1))
+                    .max_by_key(|&d| {
+                        mem.iter()
+                            .filter(|m| by_addr.get(m).is_some_and(|e| agree(e.1, d)))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let w: f64 = mem
+                    .iter()
+                    .filter(|m| by_addr.get(m).is_some_and(|e| agree(e.1, modal)))
+                    .map(|&m| weight(m))
+                    .sum::<f64>();
+                all.push((
+                    Chain {
+                        base: a,
+                        stride: g,
+                        slots: (last - a) / g + 1,
+                        members: mem.len(),
+                    },
+                    w,
+                    mem,
+                ));
+            }
+        }
+    }
+    all.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then(a.0.slots.cmp(&b.0.slots))
+            .then(a.0.stride.cmp(&b.0.stride))
+            .then(a.0.base.cmp(&b.0.base))
+    });
+    let mut taken = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (c, _, mem) in all {
+        if mem.iter().any(|m| taken.contains(m)) {
+            continue;
+        }
+        taken.extend(mem);
+        out.push(c);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// stage 3: the other columns
+
+fn col(c: &Chain, base: usize, i: usize) -> usize {
+    base + i * c.stride
+}
+
+/// The columns that fit in RAM for a chain.
+fn bases(pre: &Pre<'_>, c: &Chain) -> impl Iterator<Item = usize> {
+    let last = (c.slots - 1) * c.stride;
+    let r = pre.r;
+    (0..r).filter(move |&b| b + last < r)
+}
+
+fn signed(d: u8) -> i32 {
+    i32::from(d as i8)
+}
+
+/// Frames to look at when scanning every column: an even spread.
+fn sample(n: usize) -> Vec<usize> {
+    let step = n.div_ceil(SAMPLE_FRAMES).max(1);
+    (1..n).step_by(step).collect()
+}
+
+/// The y column: for slot-frames where a sprite shares the slot's x, the
+/// column whose value gives one constant offset to that sprite's y.
+fn find_y(
+    pre: &Pre<'_>,
+    c: &Chain,
+    xs: &[usize],
+    lag: usize,
+    dx: u8,
+) -> Option<(usize, u8, u32, u32)> {
+    // (frame, slot, y of a sprite at the slot's x)
+    let mut pairs: Vec<(usize, usize, u8)> = Vec::new();
+    for f in sample(pre.n()) {
+        if f < lag {
+            continue;
+        }
+        let cam = pre.t.frames[f].cam_x as u8;
+        for (i, &xa) in xs.iter().enumerate() {
+            let sx = pre.ram(f - lag, xa).wrapping_sub(cam).wrapping_add(dx);
+            pairs.extend(
+                pre.t.frames[f]
+                    .sprites
+                    .iter()
+                    .filter(|s| s.x == sx)
+                    .map(|s| (f, i, s.y)),
+            );
+        }
+    }
+    if pairs.len() < 30 {
+        return None;
+    }
+    let mut best: Option<(usize, u8, u32)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || xs.contains(&b) {
+            continue;
+        }
+        let mut hist = [0u32; 256];
+        for &(f, i, sy) in &pairs {
+            let v = pre.ram(f - lag, col(c, b, i));
+            let cam = pre.t.frames[f].cam_y as u8;
+            hist[usize::from(sy.wrapping_sub(v).wrapping_add(cam))] += 1;
+        }
+        let (dy, p) = peak(&hist)?;
+        if best.is_none_or(|(_, _, bp)| p > bp) {
+            best = Some((b, dy as u8, p));
+        }
+    }
+    let (b, dy, p) = best?;
+    let total = pairs.len() as u32;
+    (p >= 30 && f64::from(p) >= 0.1 * f64::from(total)).then_some((b, dy, p, total))
+}
+
+/// The high byte of a position: steps by one when the low byte wraps.
+fn find_hi(pre: &Pre<'_>, c: &Chain, xs: &[usize], lag: usize, skip: &[usize]) -> Option<usize> {
+    // (frame, slot, +1 or -1 as u8)
+    let mut events: Vec<(usize, usize, u8)> = Vec::new();
+    let mut steady = 0u32;
+    for f in (lag + 1)..pre.n() {
+        for (i, &xa) in xs.iter().enumerate() {
+            let (p, q) = (pre.ram(f - lag - 1, xa), pre.ram(f - lag, xa));
+            if p >= 224 && q < 32 {
+                events.push((f, i, 1));
+            } else if p < 32 && q >= 224 {
+                events.push((f, i, 255));
+            } else {
+                steady += 1;
+            }
+        }
+    }
+    if events.len() < 4 {
+        return None;
+    }
+    let mut best: Option<(usize, usize)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || skip.contains(&b) || xs.contains(&b) {
+            continue;
+        }
+        let ok = events
+            .iter()
+            .filter(|&&(f, i, d)| {
+                let a = col(c, b, i);
+                pre.ram(f - lag, a).wrapping_sub(pre.ram(f - lag - 1, a)) == d
+            })
+            .count();
+        if ok * 10 >= events.len() * 8 && best.is_none_or(|(_, o)| ok > o) {
+            // How often it changes when the low byte did not wrap.
+            let mut stray = 0u32;
+            for f in (lag + 1)..pre.n() {
+                for (i, &xa) in xs.iter().enumerate() {
+                    let (p, q) = (pre.ram(f - lag - 1, xa), pre.ram(f - lag, xa));
+                    let wrap = (p >= 224 && q < 32) || (p < 32 && q >= 224);
+                    let a = col(c, b, i);
+                    if !wrap && pre.ram(f - lag, a) != pre.ram(f - lag - 1, a) {
+                        stray += 1;
+                    }
+                }
+            }
+            if f64::from(stray) <= 0.1 * f64::from(steady.max(1)) {
+                best = Some((b, ok));
+            }
+        }
+    }
+    best.map(|(b, _)| b)
+}
+
+/// The x high byte when the wrap events [`find_hi`] needs are too few (a slow
+/// object never carries the low byte over): the column whose use as the high
+/// byte best tells apart the slot-frames where a sprite is near the slot's
+/// position from those where none is. With no high byte every live slot is
+/// "on screen" and an object in the next page counts as missing; with the
+/// right one it is off screen and left out. Accepted only when it explains at
+/// least [`HI_FIT_GAIN`] more of the live slot-frames than having none.
+fn find_hi_fit(pre: &Pre<'_>, cols: &Cols, state: usize, skip: &[usize]) -> Option<usize> {
+    let c = &cols.c;
+    // (frame, slot, a sprite is near the low-byte position)
+    let mut live: Vec<(usize, usize, bool)> = Vec::new();
+    for f in (cols.lag + 1)..pre.n() {
+        for i in 0..c.slots {
+            if pre.ram(f - cols.lag, col(c, state, i)) == 0 {
+                continue;
+            }
+            let (x, y, on) = cols.screen(pre, f, i);
+            if on {
+                live.push((f, i, !window(&pre.t.frames[f].sprites, x, y).is_empty()));
+            }
+        }
+    }
+    if live.len() < 30 {
+        return None;
+    }
+    let drawn = live.iter().filter(|l| l.2).count();
+    let mut best: Option<(usize, usize)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || skip.contains(&b) {
+            continue;
+        }
+        let mut seen = [false; 256];
+        for &(f, i, _) in &live {
+            seen[usize::from(pre.ram(f - cols.lag, col(c, b, i)))] = true;
+        }
+        if !(2..=16).contains(&seen.iter().filter(|&&s| s).count()) {
+            continue;
+        }
+        let with = Cols {
+            hi: Some(b),
+            ..cols.clone()
+        };
+        let agree = live
+            .iter()
+            .filter(|&&(f, i, d)| with.screen(pre, f, i).2 == d)
+            .count();
+        if best.is_none_or(|(_, a)| agree > a) {
+            best = Some((b, agree));
+        }
+    }
+    let (b, agree) = best?;
+    let gain = agree.saturating_sub(drawn);
+    (gain as f64 >= HI_FIT_GAIN * live.len() as f64 && gain >= 10).then_some(b)
+}
+
+// ---------------------------------------------------------------------------
+// stage 4: binding
+
+#[derive(Clone)]
+struct Cols {
+    c: Chain,
+    x: usize,
+    y: usize,
+    hi: Option<usize>,
+    /// The y high byte and the value it has while the object is in the
+    /// vertical range of the screen.
+    yhi: Option<(usize, u8)>,
+    lag: usize,
+    dx: i32,
+    dy: i32,
+}
+
+impl Cols {
+    /// Where slot `i` is drawn in frame `f`: `(screen x, screen y)` with the
+    /// wrap applied, and whether that is inside the visible picture.
+    fn screen(&self, pre: &Pre<'_>, f: usize, i: usize) -> (u8, u8, bool) {
+        self.screen_v(pre, f, i, self.lag, 0)
+    }
+
+    /// [`Self::screen`] with the RAM taken `rl` frames back and the scroll `cl`.
+    fn screen_v(&self, pre: &Pre<'_>, f: usize, i: usize, rl: usize, cl: usize) -> (u8, u8, bool) {
+        let fr = &pre.t.frames[f - cl];
+        let lo = i64::from(pre.ram(f - rl, col(&self.c, self.x, i)));
+        let world = match self.hi {
+            Some(h) => lo + 256 * i64::from(pre.ram(f - rl, col(&self.c, h, i))),
+            None => lo,
+        };
+        // Without a high byte the position is eight bits: only its low eight
+        // bits can be compared with a sprite's x.
+        let wrap = if self.hi.is_some() {
+            i64::from(pre.t.wrap.max(1))
+        } else {
+            256
+        };
+        let mut sx = (world - i64::from(fr.cam_x) + i64::from(self.dx)).rem_euclid(wrap);
+        if sx >= wrap / 2 {
+            sx -= wrap;
+        }
+        let yv = i64::from(pre.ram(f - rl, col(&self.c, self.y, i)));
+        let sy = (yv - i64::from(fr.cam_y as u8) + i64::from(self.dy)).rem_euclid(256);
+        let high_ok = self
+            .yhi
+            .is_none_or(|(h, home)| pre.ram(f - rl, col(&self.c, h, i)) == home);
+        let on = (0..248).contains(&sx) && sy < 224 && high_ok;
+        (sx.rem_euclid(256) as u8, sy as u8, on)
+    }
+
+    /// The lowest-numbered sprite drawn near the slot's position, loosely: the
+    /// view the *discovery* stages (state byte, type byte) work from, before
+    /// the exact per-slot offsets are known ([`exact`] is the acceptance
+    /// measure). An object is several 8x8 or 16x16 sprites on an 8-pixel grid,
+    /// and which of them the game's own coordinate names depends on the
+    /// object's size and pose, so a sprite counts when it is in the object's
+    /// first or second column (within [`X_SLACK`] pixels, a game may nudge a
+    /// pair by the facing direction) and in one of the rows from one above to
+    /// three below the coordinate (within [`Y_SLACK`]: a hero's sprite may
+    /// sit a pixel or two off the other objects', as on the NES where it is
+    /// two below its RAM y).
+    fn bound(&self, pre: &Pre<'_>, f: usize, i: usize) -> Option<u16> {
+        let (x, y, _) = self.screen(pre, f, i);
+        pre.t.frames[f]
+            .sprites
+            .iter()
+            .filter(|s| {
+                let (dx, dy) = (s.x.wrapping_sub(x) as i8, s.y.wrapping_sub(y) as i8);
+                (dx.unsigned_abs() <= X_SLACK.unsigned_abs()
+                    || dx.wrapping_sub(8).unsigned_abs() <= X_SLACK.unsigned_abs())
+                    && [-8i8, 0, 8, 16, 24]
+                        .iter()
+                        .any(|r| dy.abs_diff(*r) <= Y_SLACK.unsigned_abs())
+            })
+            .map(|s| s.index)
+            .min()
+    }
+}
+
+/// A byte that is non-zero while a slot is drawn and zero otherwise.
+fn find_state(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    bound: &[Vec<Option<u16>>],
+    skip: &[usize],
+) -> Option<usize> {
+    let c = &cols.c;
+    let mut best: Option<(usize, f64)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || skip.contains(&b) {
+            continue;
+        }
+        let (mut hit, mut nb, mut zero, mut nn) = (0u32, 0u32, 0u32, 0u32);
+        for (f, row) in bound.iter().enumerate() {
+            if f < cols.lag + 1 {
+                continue;
+            }
+            for (i, &b_i) in row.iter().enumerate() {
+                let v = pre.ram(f - cols.lag, col(c, b, i));
+                if b_i.is_some() {
+                    nb += 1;
+                    hit += u32::from(v != 0);
+                } else {
+                    nn += 1;
+                    zero += u32::from(v == 0);
+                }
+            }
+        }
+        if nb < 30 || nn == 0 {
+            continue;
+        }
+        let recall = f64::from(hit) / f64::from(nb);
+        let spec = f64::from(zero) / f64::from(nn);
+        let j = recall + spec - 1.0;
+        if recall >= 0.95 && j >= 0.25 && best.is_none_or(|(_, bj)| j > bj) {
+            best = Some((b, j));
+        }
+    }
+    best.map(|(b, _)| b)
+}
+
+/// A byte that holds still while a slot is drawn and takes several values
+/// over the run: the type id.
+fn find_kind(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    bound: &[Vec<Option<u16>>],
+    skip: &[usize],
+) -> Option<usize> {
+    let c = &cols.c;
+    let mut best: Option<(usize, usize)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || skip.contains(&b) {
+            continue;
+        }
+        let (mut same, mut pairs, mut zero, mut nb) = (0u32, 0u32, 0u32, 0u32);
+        let mut seen = [false; 256];
+        for f in (cols.lag + 1)..bound.len() {
+            for i in 0..c.slots {
+                if bound[f][i].is_none() {
+                    continue;
+                }
+                let v = pre.ram(f - cols.lag, col(c, b, i));
+                nb += 1;
+                zero += u32::from(v == 0);
+                seen[usize::from(v)] = true;
+                if bound[f - 1][i].is_some() {
+                    pairs += 1;
+                    same += u32::from(v == pre.ram(f - cols.lag - 1, col(c, b, i)));
+                }
+            }
+        }
+        let variety = seen.iter().filter(|&&s| s).count();
+        if nb >= 30
+            && pairs > 0
+            && f64::from(same) >= 0.98 * f64::from(pairs)
+            && f64::from(zero) <= 0.5 * f64::from(nb)
+            && (3..=128).contains(&variety)
+            && best.is_none_or(|(_, bv)| variety > bv)
+        {
+            best = Some((b, variety));
+        }
+    }
+    best.map(|(b, _)| b)
+}
+
+// ---------------------------------------------------------------------------
+// stage 4b: the exact match
+
+/// One live, on-screen slot-frame and the sprites around its position.
+struct Obs {
+    f: usize,
+    slot: usize,
+    /// The slot's state byte (`0` when the table has none).
+    state: u8,
+    /// `(dx, dy, OAM index)` of every sprite in the window ([`WIN_X`],
+    /// [`WIN_Y`]), relative to the slot's position.
+    win: Vec<(i8, i8, u16)>,
+    /// The same window around the control position.
+    ctl: Vec<(i8, i8)>,
+}
+
+/// The sprites of `sprites` inside the window around `(x, y)`, as offsets.
+fn window(sprites: &[Sprite], x: u8, y: u8) -> Vec<(i8, i8, u16)> {
+    let mut win: Vec<(i8, i8, u16)> = sprites
+        .iter()
+        .map(|s| {
+            (
+                s.x.wrapping_sub(x) as i8,
+                s.y.wrapping_sub(y) as i8,
+                s.index,
+            )
+        })
+        .filter(|(ox, oy, _)| WIN_X.contains(ox) && WIN_Y.contains(oy))
+        .collect();
+    win.sort_unstable();
+    win
+}
+
+/// The offsets that recur in at least [`OFFSET_MIN_FRAMES`] frames and
+/// [`OFFSET_SHARE`] of `live` ones. Sorted.
+fn learn_offsets(counts: &std::collections::BTreeMap<(i8, i8), u32>, live: u32) -> Vec<(i8, i8)> {
+    let need = OFFSET_MIN_FRAMES.max((OFFSET_SHARE * f64::from(live)).ceil() as u32);
+    counts
+        .iter()
+        .filter(|&(_, &c)| c >= need)
+        .map(|(&o, _)| o)
+        .collect()
+}
+
+/// The state-byte values the game never draws: a value that covers at least
+/// [`NON_DRAWN_MIN`] live on-screen slot-frames of which [`NON_DRAWN_SHARE`]
+/// had no sprite anywhere in the window (a dying, hidden or off-stage object).
+/// Learned from the run; nothing about any game is assumed.
+fn non_drawn_states(obs: &[Obs]) -> Vec<u8> {
+    let mut by = [(0u32, 0u32); 256];
+    for o in obs {
+        let e = &mut by[usize::from(o.state)];
+        e.0 += 1;
+        e.1 += u32::from(o.win.is_empty());
+    }
+    (0..=255u8)
+        .filter(|&v| {
+            let (n, u) = by[usize::from(v)];
+            n >= NON_DRAWN_MIN && f64::from(u) >= NON_DRAWN_SHARE * f64::from(n)
+        })
+        .collect()
+}
+
+/// Every live, on-screen slot-frame with the slot's position taken from the
+/// RAM `back` captures before the one the sprites were built from.
+fn observe(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    n_slots: usize,
+    state: Option<usize>,
+    bound: &[Vec<Option<u16>>],
+    back: usize,
+) -> Vec<Obs> {
+    let (lag, n, c) = (cols.lag, pre.n(), &cols.c);
+    let mut obs = Vec::new();
+    for f in (lag + 1)..n {
+        for i in 0..n_slots {
+            let st = state.map_or(1, |s| pre.ram(f - lag, col(c, s, i)));
+            let live = match state {
+                Some(_) => st != 0,
+                None => bound[f].get(i).is_some_and(Option::is_some),
+            };
+            if !live {
+                continue;
+            }
+            let (x, y, on) = cols.screen_v(pre, f, i, lag + back, 0);
+            if !on {
+                continue;
+            }
+            let sprites = &pre.t.frames[f].sprites;
+            obs.push(Obs {
+                f,
+                slot: i,
+                state: st,
+                win: window(sprites, x, y),
+                ctl: window(
+                    sprites,
+                    x.wrapping_add(CONTROL_SHIFT.0),
+                    y.wrapping_add(CONTROL_SHIFT.1),
+                )
+                .into_iter()
+                .map(|(a, b, _)| (a, b))
+                .collect(),
+            });
+        }
+    }
+    obs
+}
+
+/// How many frames of RAM history a slot's sprites show: the slot's offsets
+/// are far more concentrated (a metasprite is a handful of exact offsets) when
+/// the position is the right one, while a position one capture off smears them
+/// by the object's velocity. `1` only when that is clearly tighter
+/// ([`BACK_RATIO`]) and the slot was seen often enough ([`OWN_MIN_LIVE`]).
+fn pick_back(by_back: &[Vec<Obs>; 2], slot: usize) -> u8 {
+    let conc = |obs: &[Obs]| -> Option<f64> {
+        let mut counts: std::collections::BTreeMap<(i8, i8), u32> = Default::default();
+        let mut n = 0u32;
+        for o in obs.iter().filter(|o| o.slot == slot && !o.win.is_empty()) {
+            n += 1;
+            let mut seen: Vec<(i8, i8)> = o.win.iter().map(|&(x, y, _)| (x, y)).collect();
+            seen.dedup();
+            for k in seen {
+                *counts.entry(k).or_insert(0) += 1;
+            }
+        }
+        if n < OWN_MIN_LIVE {
+            return None;
+        }
+        // The Herfindahl index of the offsets: 1/k for k equally common
+        // offsets, so a smeared set scores lower than a sharp one.
+        let total: f64 = counts.values().map(|&c| f64::from(c)).sum();
+        Some(
+            counts
+                .values()
+                .map(|&c| (f64::from(c) / total).powi(2))
+                .sum(),
+        )
+    };
+    match (conc(&by_back[0]), conc(&by_back[1])) {
+        (Some(a), Some(b)) if b > a * BACK_RATIO => 1,
+        _ => 0,
+    }
+}
+
+/// The acceptance measure: for every live, on-screen slot-frame, is there a
+/// sprite whose x and y sit **exactly** at an offset from the slot's position
+/// that this slot is seen to draw at ([`learn_offsets`])? There is no pixel
+/// slack: a slot has a handful of exact offsets (a metasprite's tiles, one set
+/// per facing or pose), learned per slot because a game may draw one object
+/// (a hero) a pixel or two off the others. A slot with fewer than
+/// [`OWN_MIN_LIVE`] live frames has not shown its poses and uses the whole
+/// table's offsets. Frames whose state byte holds a value the game never draws
+/// ([`non_drawn_states`]) are left out of `expected` and counted in `excluded`.
+fn exact(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    n_slots: usize,
+    state: Option<usize>,
+    bound: &[Vec<Option<u16>>],
+) -> Binding {
+    use std::collections::BTreeMap;
+    let (lag, n) = (cols.lag, pre.n());
+    let mut b = Binding {
+        lag,
+        dx: cols.dx,
+        dy: cols.dy,
+        live_from_state: state.is_some(),
+        ..Binding::default()
+    };
+    let mut per: Vec<SlotBinding> = (0..n_slots)
+        .map(|i| SlotBinding {
+            slot: i as u32,
+            ..SlotBinding::default()
+        })
+        .collect();
+    for f in (lag + 1)..n {
+        for (i, p) in per.iter_mut().enumerate() {
+            p.bound_frames += u32::from(bound[f].get(i).is_some_and(Option::is_some));
+        }
+    }
+    let by_back = [
+        observe(pre, cols, n_slots, state, bound, 0),
+        observe(pre, cols, n_slots, state, bound, 1),
+    ];
+    for (i, p) in per.iter_mut().enumerate() {
+        p.back = pick_back(&by_back, i);
+    }
+    let [obs0, obs1] = by_back;
+    let mut obs: Vec<Obs> = obs0
+        .into_iter()
+        .filter(|o| per[o.slot].back == 0)
+        .chain(obs1.into_iter().filter(|o| per[o.slot].back == 1))
+        .collect();
+    obs.sort_by_key(|o| (o.f, o.slot));
+    b.non_drawn = if state.is_some() {
+        non_drawn_states(&obs)
+    } else {
+        Vec::new()
+    };
+    let (kept, dropped): (Vec<Obs>, Vec<Obs>) = obs
+        .into_iter()
+        .partition(|o| state.is_none() || !b.non_drawn.contains(&o.state));
+    b.excluded = dropped.len() as u64;
+    // Blank frames: two or more live objects and not one sprite near any of
+    // them. That is the game hiding the whole picture (a transition, a fade, a
+    // pause), not an object that is missing, so the frame says nothing about
+    // the table.
+    let mut kept = kept;
+    let (mut live_n, mut drawn_n) = (vec![0u32; n], vec![0u32; n]);
+    for o in &kept {
+        live_n[o.f] += 1;
+        drawn_n[o.f] += u32::from(!o.win.is_empty());
+    }
+    let blank: Vec<bool> = (0..n).map(|f| live_n[f] >= 2 && drawn_n[f] == 0).collect();
+    b.blank_frames = blank.iter().filter(|&&x| x).count() as u32;
+    b.excluded += kept.iter().filter(|o| blank[o.f]).count() as u64;
+    kept.retain(|o| !blank[o.f]);
+
+    // Offsets per slot, and pooled over the table.
+    let mut own: Vec<BTreeMap<(i8, i8), u32>> = vec![BTreeMap::new(); n_slots];
+    let mut pool: BTreeMap<(i8, i8), u32> = BTreeMap::new();
+    for o in &kept {
+        per[o.slot].live_frames += 1;
+        let mut seen: Vec<(i8, i8)> = o.win.iter().map(|&(x, y, _)| (x, y)).collect();
+        seen.dedup();
+        for k in seen {
+            *own[o.slot].entry(k).or_insert(0) += 1;
+            *pool.entry(k).or_insert(0) += 1;
+        }
+    }
+    let live_all: u32 = per.iter().map(|p| p.live_frames).sum();
+    let pooled = learn_offsets(&pool, live_all);
+    let accepted: Vec<Vec<(i8, i8)>> = per
+        .iter()
+        .zip(&own)
+        .map(|(p, m)| {
+            if p.live_frames >= OWN_MIN_LIVE {
+                learn_offsets(m, p.live_frames)
+            } else {
+                pooled.clone()
+            }
+        })
+        .collect();
+    for (p, a) in per.iter_mut().zip(&accepted) {
+        if p.live_frames >= OWN_MIN_LIVE {
+            p.offsets.clone_from(a);
+        }
+    }
+
+    let mut idx_count: Vec<BTreeMap<u16, u32>> = vec![BTreeMap::new(); n_slots];
+    let (mut exp_f, mut ok_f, mut last_f) = (0u32, 0u32, usize::MAX);
+    let close = |b: &mut Binding, exp_f: u32, ok_f: u32| {
+        if exp_f > 0 {
+            b.frames_checked += 1;
+            b.frames_clean += u32::from(ok_f == exp_f);
+        }
+    };
+    for o in &kept {
+        if o.f != last_f {
+            close(&mut b, exp_f, ok_f);
+            (exp_f, ok_f, last_f) = (0, 0, o.f);
+        }
+        b.expected += 1;
+        exp_f += 1;
+        let hit = o
+            .win
+            .iter()
+            .filter(|&&(x, y, _)| accepted[o.slot].binary_search(&(x, y)).is_ok())
+            .map(|&(_, _, i)| i)
+            .min();
+        per[o.slot].control_frames += u32::from(
+            o.ctl
+                .iter()
+                .any(|k| accepted[o.slot].binary_search(k).is_ok()),
+        );
+        if let Some(ix) = hit {
+            b.matched += 1;
+            ok_f += 1;
+            per[o.slot].matched_frames += 1;
+            *idx_count[o.slot].entry(ix).or_insert(0) += 1;
+        } else {
+            if o.win.is_empty() {
+                b.undrawn += 1;
+            } else {
+                b.off_set += 1;
+            }
+            b.missed.push((o.f as u32, o.slot as u32));
+        }
+    }
+    close(&mut b, exp_f, ok_f);
+    for (p, m) in per.iter_mut().zip(&idx_count) {
+        p.oam_index = m.iter().max_by_key(|&(_, &c)| c).map(|(&k, _)| k);
+    }
+    b.slots = per;
+    b
+}
+
+// ---------------------------------------------------------------------------
+// the driver of the stages
+
+/// Find the object tables a trace shows. Best first.
+#[must_use]
+pub fn infer(t: &Trace) -> Vec<Found> {
+    let pre = Pre::new(t);
+    if pre.n() < 60 || pre.r == 0 {
+        return Vec::new();
+    }
+    // The lag that explains more bytes.
+    let by_lag: Vec<Vec<XCand>> = (0..=1).map(|l| score_all_x(&pre, l)).collect();
+    let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
+    let lag = usize::from(strength(1) > strength(0));
+    let cands = &by_lag[lag];
+    let addrs: Vec<(usize, f64, u8)> = cands.iter().map(|c| (c.addr, c.z, c.dx)).collect();
+    let mut out = Vec::new();
+    for ch in chains_scored(&addrs) {
+        if let Some(f) = build(&pre, &ch, cands, lag) {
+            out.push(f);
+        }
+    }
+    out.sort_by(|a, b| {
+        quality(b)
+            .total_cmp(&quality(a))
+            .then(a.table.base.cmp(&b.table.base))
+    });
+    out
+}
+
+/// How much to believe a table: the slot-frames it explains, scaled by the
+/// cube of the share of the live slot-frames it explains (a table that
+/// matches 95% outranks a bigger one that matches 85%, and chance fits sink),
+/// counting what it had to leave out as a state it never draws
+/// ([`Binding::excluded`]) against it, and halved when "live" had to be read
+/// off the binding itself (no state byte found).
+fn quality(f: &Found) -> f64 {
+    let gate = if f.binding.live_from_state { 1.0 } else { 0.5 };
+    let seen = (f.binding.expected + f.binding.excluded).max(1);
+    let share = f.binding.matched as f64 / seen as f64;
+    f.binding.matched as f64 * share.powi(3) * gate
+}
+
+fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found> {
+    let xs: Vec<usize> = (0..ch.slots).map(|i| col(ch, ch.base, i)).collect();
+    // dx: the offset most of the chain's members agree on.
+    let mut votes = [0u32; 256];
+    let mut z = 0f64;
+    for c in cands.iter().filter(|c| xs.contains(&c.addr)) {
+        votes[usize::from(c.dx)] += c.matches;
+        z = z.max(c.z);
+    }
+    let (dx, _) = votes.iter().enumerate().max_by_key(|&(_, &v)| v)?;
+    let dx = dx as u8;
+    let yy = find_y(pre, ch, &xs, lag, dx);
+    let (yb, dy, _, _) = yy?;
+    let mut hi = find_hi(pre, ch, &xs, lag, &[yb]);
+    let ys: Vec<usize> = (0..ch.slots).map(|i| col(ch, yb, i)).collect();
+    let mut skip_hi = vec![ch.base];
+    skip_hi.extend(hi);
+    let yhi = find_hi(pre, ch, &ys, lag, &skip_hi);
+    let mut cols = Cols {
+        c: ch.clone(),
+        x: ch.base,
+        y: yb,
+        hi,
+        yhi: None,
+        lag,
+        dx: signed(dx),
+        dy: signed(dy),
+    };
+    let n = pre.n();
+    let mut bound: Vec<Vec<Option<u16>>> = vec![vec![None; ch.slots]; n];
+    for f in (lag + 1)..n {
+        for i in 0..ch.slots {
+            bound[f][i] = cols.bound(pre, f, i);
+        }
+    }
+    // The y high byte reads, among slots drawn, one value: the screen's own.
+    if let Some(yh) = yhi {
+        let mut count = [0u32; 256];
+        for f in (lag + 1)..n {
+            for i in 0..ch.slots {
+                if bound[f][i].is_some() {
+                    count[usize::from(pre.ram(f - lag, col(ch, yh, i)))] += 1;
+                }
+            }
+        }
+        if let Some((home, _)) = count.iter().enumerate().max_by_key(|&(_, &c)| c) {
+            cols.yhi = Some((yh, home as u8));
+        }
+    }
+    let mut skip = vec![ch.base, yb];
+    skip.extend(hi);
+    skip.extend(yhi);
+    let state = find_state(pre, &cols, &bound, &skip);
+    skip.extend(state);
+    if let (None, Some(st)) = (hi, state) {
+        hi = find_hi_fit(pre, &cols, st, &skip);
+        cols.hi = hi;
+        skip.extend(hi);
+    }
+    let kind = find_kind(pre, &cols, &bound, &skip);
+
+    // Count the match, per slot and per frame: exactly, at offsets learned
+    // from the run ([`exact`]). Slots past the chain are tried too: a rarely
+    // live slot's x byte does not score, so the chain stops short of it.
+    let used: Vec<usize> = [Some(ch.base), Some(yb), hi, yhi, state, kind]
+        .into_iter()
+        .flatten()
+        .collect();
+    let widest = used.iter().copied().max().unwrap_or(0);
+    let room = if ch.stride == 0 {
+        ch.slots
+    } else {
+        (pre.r.saturating_sub(widest + 1)) / ch.stride + 1
+    };
+    let n_eval = if state.is_some() {
+        (ch.slots + MAX_EXTEND).min(room).max(ch.slots)
+    } else {
+        ch.slots
+    };
+    let mut b = exact(pre, &cols, n_eval, state, &bound);
+
+    // A table claims only the slots with evidence: it ends at the last slot
+    // that matched [`MIN_SLOT_EVIDENCE`] frames and at least [`TRIM_BELOW`] of
+    // its live ones (a rarely live slot is kept; a neighbouring array that the
+    // chain ran on into, or one that never matched, is not).
+    let mut slots = ch.slots;
+    if state.is_some() {
+        let keep = b
+            .slots
+            .iter()
+            .rposition(|p| {
+                p.matched_frames >= MIN_SLOT_EVIDENCE
+                    && f64::from(p.matched_frames) >= TRIM_BELOW * f64::from(p.live_frames)
+                    && 2 * p.control_frames <= p.matched_frames
+            })
+            .map_or(0, |i| i + 1);
+        if keep >= MIN_SLOTS && keep < ch.slots {
+            let shorter = Chain {
+                slots: keep,
+                members: ch.members.min(keep),
+                ..ch.clone()
+            };
+            return build(pre, &shorter, cands, lag);
+        }
+        slots = keep.max(ch.slots);
+    }
+    if slots != n_eval {
+        b = exact(pre, &cols, slots, state, &bound);
+    }
+    let ch = &Chain {
+        slots,
+        ..ch.clone()
+    };
+
+    let fields = [Some(ch.base), Some(yb), hi, yhi, state, kind];
+    let lowest = fields.iter().flatten().copied().min()?;
+    let off = |a: Option<usize>| a.map(|a| (a - lowest) as u32);
+    let base = t_addr(pre, lowest);
+    Some(Found {
+        table: ObjectTable {
+            name: format!("objects_{base:x}"),
+            base,
+            slots: ch.slots as u32,
+            stride: ch.stride as u32,
+            x_lo: off(Some(ch.base)),
+            x_hi: off(hi),
+            y: off(Some(yb)),
+            y_hi: off(yhi),
+            kind: off(kind),
+            state: off(state),
+            source: String::new(),
+            grade: Grade::Candidate,
+        },
+        binding: b,
+        z,
+    })
+}
+
+fn t_addr(pre: &Pre<'_>, idx: usize) -> u32 {
+    pre.t.ram_base + idx as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small deterministic generator (the tests need no `rand`).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+    }
+
+    const SLOTS: usize = 6;
+    const X: usize = 0x40;
+    const HI: usize = 0x50;
+    const Y: usize = 0x60;
+    const ST: usize = 0x70;
+    const KIND: usize = 0x80;
+
+    /// A game with `SLOTS` objects in columns, a scrolling camera, and a
+    /// 16-wide object drawn as two sprites; the OAM shadow lives at `0x100`.
+    /// `record` lays the same fields out as stride-`rec` records instead.
+    fn game(frames: usize, shadow: bool, lag: usize) -> Trace {
+        game_with(frames, shadow, lag, Quirks::default())
+    }
+
+    /// Ways a real game differs from the plain one.
+    #[derive(Default, Clone, Copy)]
+    struct Quirks {
+        /// Pixels the hero's (slot 0) sprites sit lower than the others'.
+        hero_dy: u8,
+        /// The last this-many slots are rarely live and short-lived.
+        rare_tail: usize,
+    }
+
+    fn game_with(frames: usize, shadow: bool, lag: usize, q: Quirks) -> Trace {
+        let mut rng = Lcg(7);
+        let mut world = [0u32; SLOTS];
+        let mut yv = [0u8; SLOTS];
+        let mut kind = [0u8; SLOTS];
+        let mut live = [false; SLOTS];
+        let mut cam = 0u32;
+        let mut hist: Vec<Frame> = Vec::new();
+        for f in 0..frames {
+            cam += 1 + (f as u32 / 40) % 3;
+            for i in 0..SLOTS {
+                let rare = i >= SLOTS - q.rare_tail;
+                if !live[i] && rng.below(if rare { 250 } else { 30 }) == 0 {
+                    live[i] = true;
+                    world[i] = cam + 20 + rng.below(220);
+                    yv[i] = 40 + rng.below(150) as u8;
+                    kind[i] = 1 + rng.below(9) as u8;
+                } else if live[i] {
+                    world[i] = world[i].wrapping_sub(rng.below(3));
+                    if rng.below(8) == 0 {
+                        yv[i] = yv[i].wrapping_add(rng.below(5) as u8).wrapping_sub(2);
+                    }
+                    if world[i] + 16 <= cam || rng.below(if rare { 20 } else { 150 }) == 0 {
+                        live[i] = false;
+                    }
+                }
+            }
+            let mut ram = vec![0u8; 0x400];
+            let mut oam = vec![0u8; 256];
+            let mut sprites = Vec::new();
+            let mut k = 0usize;
+            for i in 0..SLOTS {
+                if !live[i] {
+                    ram[X + i] = world[i] as u8; // stale position
+                    ram[HI + i] = (world[i] >> 8) as u8;
+                    ram[Y + i] = yv[i];
+                    continue;
+                }
+                ram[X + i] = world[i] as u8;
+                ram[HI + i] = (world[i] >> 8) as u8;
+                ram[Y + i] = yv[i];
+                ram[ST + i] = 1;
+                ram[KIND + i] = kind[i];
+                let sx = world[i] as i64 - cam as i64;
+                if (-8..256).contains(&sx) {
+                    for part in 0..2i64 {
+                        let x = sx + 8 * part;
+                        if (0..256).contains(&x) && k < 60 {
+                            // dx = 0; the sprite's y is the byte plus 1
+                            let sy = yv[i].wrapping_add(1 + if i == 0 { q.hero_dy } else { 0 });
+                            oam[k * 4] = sy;
+                            oam[k * 4 + 3] = x as u8;
+                            sprites.push(Sprite {
+                                index: k as u16,
+                                x: x as u8,
+                                y: sy,
+                            });
+                            k += 1;
+                        }
+                    }
+                }
+            }
+            if shadow {
+                ram[0x100..0x200].copy_from_slice(&oam);
+            }
+            hist.push(Frame {
+                ram,
+                oam,
+                sprites,
+                cam_x: (cam & 0x1FF) as u16,
+                cam_y: 0,
+            });
+        }
+        // Sprites lag the RAM by `lag`: shift RAM later.
+        let mut out = hist.clone();
+        for f in 0..frames {
+            out[f].ram = hist[(f + lag).min(frames - 1)].ram.clone();
+        }
+        // The OAM of frame f was built from RAM of frame f - lag, so keep the
+        // shadow in step: the mask test runs on this frame's RAM and OAM.
+        Trace {
+            ram_base: 0,
+            wrap: 512,
+            frames: out,
+        }
+    }
+
+    #[test]
+    fn chains_finds_stride_and_slot_count() {
+        let a: Vec<usize> = (0..6).map(|i| 0x40 + i * 4).collect();
+        let c = chains(&a);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].base, c[0].stride, c[0].slots), (0x40, 4, 6));
+        // A hole of one slot stays inside the table.
+        let c = chains(&[0x10, 0x11, 0x13, 0x14]);
+        assert_eq!((c[0].base, c[0].stride, c[0].slots), (0x10, 1, 5));
+        // Two members are not a table.
+        assert!(chains(&[0x10, 0x20]).is_empty());
+    }
+
+    #[test]
+    fn chains_prefers_the_denser_stride() {
+        let a: Vec<usize> = (0x20..0x28).collect();
+        let c = chains(&a);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].stride, c[0].slots), (1, 8));
+    }
+
+    #[test]
+    fn finds_the_columns_of_a_synthetic_game() {
+        let t = game(900, false, 0);
+        let found = infer(&t);
+        assert!(!found.is_empty(), "no table");
+        let f = &found[0];
+        let tb = &f.table;
+        assert_eq!(tb.slots as usize, SLOTS);
+        assert_eq!(tb.stride, 1);
+        let at = |o: Option<u32>| o.map(|o| tb.base + o);
+        assert_eq!(at(tb.x_lo), Some(X as u32));
+        assert_eq!(at(tb.y), Some(Y as u32));
+        assert_eq!(at(tb.x_hi), Some(HI as u32));
+        assert_eq!(at(tb.state), Some(ST as u32));
+        assert_eq!(at(tb.kind), Some(KIND as u32));
+        assert_eq!(f.binding.lag, 0);
+        assert_eq!(f.binding.dx, 0);
+        assert!(f.binding.expected > 200, "{:?}", f.binding);
+        assert!(f.binding.rate() > 0.99, "{:?}", f.binding);
+        assert_eq!(grade_of(f), Grade::Observed);
+    }
+
+    #[test]
+    fn the_oam_shadow_is_not_a_table() {
+        let t = game(900, true, 0);
+        let found = infer(&t);
+        for f in &found {
+            // Whatever is found, none of it is the 0x100 page.
+            let lo = f.table.base;
+            assert!(!(0x100..0x200).contains(&lo), "{lo:#x}");
+        }
+        assert_eq!(found[0].table.base as usize, X);
+    }
+
+    #[test]
+    fn a_frame_of_lag_is_measured() {
+        let t = game(900, false, 1);
+        let f = &infer(&t)[0];
+        assert_eq!(f.binding.lag, 1);
+        assert!(f.binding.rate() > 0.99, "{:?}", f.binding);
+    }
+
+    #[test]
+    fn noise_alone_has_no_table() {
+        let mut rng = Lcg(99);
+        let frames = (0..400)
+            .map(|_| {
+                let sprites = (0..20)
+                    .map(|k| Sprite {
+                        index: k,
+                        x: rng.below(256) as u8,
+                        y: rng.below(200) as u8,
+                    })
+                    .collect();
+                Frame {
+                    ram: (0..0x200).map(|_| rng.below(256) as u8).collect(),
+                    oam: Vec::new(),
+                    sprites,
+                    cam_x: 0,
+                    cam_y: 0,
+                }
+            })
+            .collect();
+        let t = Trace {
+            ram_base: 0,
+            wrap: 512,
+            frames,
+        };
+        assert!(infer(&t).is_empty());
+    }
+
+    #[test]
+    fn the_hero_may_sit_off_the_others_offset() {
+        // W38-05: Zelda's hero is drawn two pixels below its RAM y, the other
+        // actors are not: one global offset cannot bind both.
+        let t = game_with(
+            900,
+            false,
+            0,
+            Quirks {
+                hero_dy: 2,
+                rare_tail: 0,
+            },
+        );
+        let f = &infer(&t)[0];
+        assert_eq!(f.table.slots as usize, SLOTS);
+        assert!(f.binding.rate() > 0.99, "{:?}", f.binding);
+        assert_eq!(grade_of(f), Grade::Observed);
+        let (hero, other) = (&f.binding.slots[0], &f.binding.slots[1]);
+        let dys = |s: &SlotBinding| -> std::collections::BTreeSet<i8> {
+            s.offsets.iter().map(|o| o.1).collect()
+        };
+        assert_ne!(dys(hero), dys(other), "{hero:?} {other:?}");
+    }
+
+    #[test]
+    fn rarely_live_trailing_slots_are_kept() {
+        // The last two slots are live for a few dozen frames in all: their x
+        // bytes do not score, so the x chain stops before them; the evidence
+        // that they match the picture claims them back.
+        let t = game_with(
+            1500,
+            false,
+            0,
+            Quirks {
+                hero_dy: 0,
+                rare_tail: 2,
+            },
+        );
+        let f = &infer(&t)[0];
+        assert_eq!(f.table.slots as usize, SLOTS, "{:?}", f.binding.slots);
+        assert!(f.binding.rate() > 0.99, "{:?}", f.binding);
+        let tail = &f.binding.slots[SLOTS - 1];
+        assert!(tail.matched_frames >= MIN_SLOT_EVIDENCE, "{tail:?}");
+    }
+
+    #[test]
+    fn a_slot_drawn_from_the_previous_capture_is_chosen_per_slot() {
+        // An object drawn before the game moves it shows last capture's
+        // position; its offsets only line up with that RAM.
+        let mut t = game(900, false, 0);
+        let prev: Vec<Vec<u8>> = t.frames.iter().map(|f| f.ram.clone()).collect();
+        for f in 1..t.frames.len() {
+            // Slot 2's x and y bytes run one capture ahead of its sprites.
+            for a in [X + 2, Y + 2] {
+                t.frames[f].ram[a] = prev[(f + 1).min(prev.len() - 1)][a];
+            }
+        }
+        let found = infer(&t);
+        let f = &found[0];
+        assert_eq!(f.binding.slots[2].back, 1, "{:?}", f.binding.slots[2]);
+        assert_eq!(f.binding.slots[1].back, 0);
+        assert!(f.binding.rate() > 0.99, "{:?}", f.binding);
+    }
+
+    #[test]
+    fn rows_carry_the_evidence() {
+        let t = game(900, false, 0);
+        let f = &infer(&t)[0];
+        let row = to_row(f, grade_of(f), "; synthetic");
+        assert!(row.source.starts_with("finder: 6 slots stride 1"));
+        assert_eq!(row.grade, Grade::Observed);
+    }
+}
