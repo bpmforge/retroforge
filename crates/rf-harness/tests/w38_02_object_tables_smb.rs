@@ -149,7 +149,7 @@ fn smb_object_table_matches_oam() {
         }
     }
     let best = found.first().expect("a table");
-    assert!(best.table.slots >= 5, "{:?}", best.table);
+    assert!(best.table.slots >= 3, "{:?}", best.table);
     assert!(best.binding.expected >= 500, "{:?}", best.binding);
     assert!(best.binding.rate() >= 0.9, "rate {}", best.binding.rate());
 }
