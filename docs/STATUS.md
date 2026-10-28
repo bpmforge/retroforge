@@ -5297,3 +5297,20 @@ stories, 10 decisions).
   `w37_04_shadow_cost` (W37-04b), `w36_10_smw_recipe` (generator vs W38-01
   rows). Running the SMW bake end to end exposed W39-03c (0 solid cells).
   Workspace: **3948 passing**, gate green.
+- **W39-03c — SMW baked geometry** (2026-10-28). The SMW bake took the level
+  buffer's base from a stray run of reads far below the buffer, so no rule id
+  landed on a footprint cell. It now picks the base by an observed alignment
+  search (the cell under Mario's feet is a rule-solid body; 0x7ec800 wins with
+  1962 of 2613 in-level frames). Over the 53x14-cell canvas footprint: 188
+  cells judged, 39 solid or one-way, 40 wall quads, cached and reloaded equal.
+  Workspace: **3948 passing**, gate green.
+- **W37-04b — Shadow lockstep divergence on SMW** (2026-10-28). The live
+  shadow reported one SMW divergence at frame 17: only the S-DSP `cycle`
+  counter differed, so the rebuilt tier was not at fault. `Apu::reset` fetched
+  the SPC700 reset vector through the counted bus, leaving two I/O accesses
+  charged to the first instruction; a fresh core ran the DSP two cycles short
+  while the shadow (built by a state restore, which W37-07b clears) did not.
+  Reset now clears the tallies; a regression test that fails without the fix
+  steps a fresh APU and its save/load round trip alike. `w37_04_shadow_cost`
+  passes (SMW shadow on 15.92 ms/frame vs 7.90 off). Workspace: **3949
+  passing**, gate green.
