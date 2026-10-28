@@ -522,3 +522,49 @@ fn only_a_visible_line_in_active_display_has_a_mid_line_position() {
     assert!(t.in_vblank());
     assert_eq!(t.mid_line_position(), None, "vblank writes are setup");
 }
+
+// ---- W37-00b: the per-scanline DRAM refresh stall ----------------------
+
+use crate::timing::{refresh_stall, REFRESH_AT, REFRESH_CYCLES};
+
+#[test]
+fn a_span_that_reaches_the_refresh_point_owes_one_stall() {
+    assert_eq!(
+        refresh_stall(REFRESH_AT - 8, 8),
+        REFRESH_CYCLES,
+        "ends on it"
+    );
+    assert_eq!(refresh_stall(REFRESH_AT - 8, 7), 0, "stops one short");
+    assert_eq!(refresh_stall(REFRESH_AT, 100), 0, "already past it");
+    assert_eq!(refresh_stall(0, 0), 0, "an empty span owes nothing");
+}
+
+#[test]
+fn a_span_over_several_lines_owes_one_stall_per_line() {
+    assert_eq!(refresh_stall(0, 3 * MASTER_PER_LINE), 3 * REFRESH_CYCLES);
+    assert_eq!(
+        refresh_stall(MASTER_PER_LINE - 1, MASTER_PER_LINE),
+        REFRESH_CYCLES
+    );
+}
+
+#[test]
+fn a_frame_cut_into_instruction_sized_spans_owes_forty_cycles_a_line() {
+    // Spans of 6 to 48 master cycles, the way instructions arrive.
+    let (mut pos, mut total, mut owed) = (0u64, 0u64, 0u64);
+    let frame = u64::from(LINES_PER_FRAME) * MASTER_PER_LINE;
+    let mut k = 0u64;
+    while total < frame {
+        // Every pass adds at least 6 to `total`, so this ends.
+        let span = 6 + (k * 7) % 43;
+        k += 1;
+        owed += refresh_stall(pos, span);
+        pos = (pos + span) % MASTER_PER_LINE;
+        total += span;
+    }
+    let lines = total / MASTER_PER_LINE;
+    assert!(
+        (lines * REFRESH_CYCLES..=(lines + 1) * REFRESH_CYCLES).contains(&owed),
+        "{owed} for {lines} lines"
+    );
+}
