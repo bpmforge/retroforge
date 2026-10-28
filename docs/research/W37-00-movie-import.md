@@ -132,6 +132,71 @@ so this is weak evidence, not a measured alignment.
   console's layout (bits 0-3 of every `.smv` word are clear; the dominant
   bits are the run and right buttons).
 
+## W37-00b: the desyncs, diffed against a reference (2026-10-28)
+
+W37-00 had no trace to diff against. W37-00b used a second emulator as a
+**black-box oracle**: Mesen 2 (already installed on the workstation; GPL,
+so only ever run, never read) in its headless `--testrunner` mode, fed the
+same pad words frame by frame from a generated Lua script and printing the
+same per-frame RAM facts as our core. Tool: `crates/rf-harness/tests/
+w37_00b_oracle.rs` (ROM- and movie-gated, `--ignored`); it writes our
+trace and the reference script, and the two traces are diffed outside the
+repo. Nothing from the ROM, the movie or the reference is stored.
+
+Three things had to be right before a diff meant anything, each found the
+hard way:
+
+- **Sample at the same raster point.** The runner's frame END is the
+  vblank (SNES line 225, NES line 240) but ours is the end of the last
+  line, so its trace is sampled at its frame START (SNES line 0, NES
+  pre-render), and its pads switch on its own input event (vblank).
+- **A controller.** With no settings the runner has no SNES pad: pass
+  `--snes.port1.type=SnesController` (the NES port has one by default).
+- **Clean SRAM.** The runner keeps a save per ROM file name; SMW found its
+  own earlier save and skipped the intro. Each run uses a fresh copy of the
+  ROM under a new name.
+
+Mesen itself does not replay either SMW movie to its end (they were made
+on bsnes v085 and Snes9x 1.43), so for SMW it is a timing reference, not
+proof the movie syncs. It does replay the SMB movies far further than we
+did, on the same multicart with the same plan.
+
+### Found and fixed
+
+| # | Where | What was wrong | Evidence | Effect |
+|---|---|---|---|---|
+| 1 | `rf-snes` `apu/boot.rs` (HLE IPL) | The handshake echoed each uploaded byte at the END of its 25-cycle loop and only looked at the ports again a cycle later (26). The boot ROM echoes 9 cycles after the compare (fullsnes "Boot ROM Disassembly": `jnz` 2, `mov A,$F5` 3, `mov $F4,Y` 4) and loops in 25. | Our SMW upload cost 30.6 SPC cycles a byte against the reference's ~25 (measured master clock between `$2140` writes); its 11,974-byte upload ended at frame 21 instead of 17. | SMW boots on the reference's frame. |
+| 2 | `rf-snes` `system.rs`/`timing.rs` | No WRAM refresh: the S-CPU (and DMA) lose 40 master cycles per scanline at H=538 (fullsnes "SNES Timings"), so the CPU ran about 2.9% fast. | The decompressor's pointer gained on the reference every frame; with the refresh its per-frame advance matches to a few bytes. | SMW state matches the reference to frame 1,325 instead of 190. |
+| 3 | `rf-harness` `movie_replay.rs` (NES) | Movie buttons switched at our frame boundary (end of pre-render). FCEUX's movie frame, and the reference, switch at vblank. SMB reads the pad before vblank when its NMI work runs over, and got the NEXT frame's buttons. | First divergence at plan frame 503: the pad byte `$06FC` held frame 503's buttons on ours, 502's on the reference; Mario jumped a frame early. | Warps movie plays to the 8-4 win; warpless gets from 1-1 into 4-2 (see below). |
+
+### Remaining divergences (pinned, not fixed)
+
+- **SMW, frame 1,326** (lsnes warps, plan delay 0): the overworld load
+  (game mode `$0C`) ends one frame early on ours. Mid-load the
+  decompressor pointer is up to ~0xA4 bytes ahead of the reference (its
+  first load, frames 67-84, is ~0x40 behind), so a sub-percent timing
+  difference is left in loads. Candidates, unverified: the SPC700 clock
+  (we use 21 master cycles per SPC cycle, the nominal 1.024 MHz; the
+  reference's own state reports ~1.0253 MHz, the commonly measured
+  32,040 Hz DSP rate), DMA/HDMA cost, or the refresh position. From there
+  the run takes a different route (translevel `$28` vs `$2A`), so the
+  heuristic's "first life lost at 4,616" is downstream of this frame.
+- **SMB warpless, plan frame 28,322** (in 4-2): ours has a lag frame the
+  reference does not (frame counter `$09` stalls one frame). An NES CPU,
+  OAM/DMC DMA or NMI-timing difference in a busy frame; not traced yet.
+
+### The multicart question (acceptance line 2)
+
+Answered by the reference, not by a standalone dump: with the identical
+plan (160 idle + 5 Start lead, offset -1) on the same SMB + Duck Hunt
+image, the reference plays the warpless movie to the 5-4 axe without losing a
+life (where its runner's time limit cut the run, plan frame 39,876) and
+we now match it to 28,322. So the multicart's SMB is not what broke the
+replay; the input-latch convention (fix 3) was. The FM2's ROM checksum
+still matches none of the cart's bank combinations, so a byte difference
+in the cart's SMB stays possible, but it is not needed to explain
+anything seen here.
+
 ## Not done / follow-ups
 
 - Replay to the end for any of the four movies (needs the cause above).
