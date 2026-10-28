@@ -15,6 +15,8 @@ use std::time::Instant;
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_harness::object_tables::{snes_cam, snes_step_frame, Console, Recorder};
 use rf_input::SnesButton;
+
+mod smw_drive;
 use rf_rebuild::objtable::{grade_of, infer, to_row};
 use rf_snes::core::SnesCore;
 
@@ -24,7 +26,6 @@ const FILE: &str = "Super Mario World (USA).zip";
 /// `crates/retroforge/tests/w33_07_common/mod.rs`, as `w36_08_atlas_smw`
 /// plays them. `wN` idles N frames, `<buttons>N` holds them
 /// (`A B X Y S E U D L R`).
-const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
 fn rom_path() -> Option<PathBuf> {
@@ -87,8 +88,8 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 /// Menus to the level, then play until the level has seen 1,500 frames.
-fn session() -> Vec<u16> {
-    let mut pad = frames_of(TO_LEVEL);
+fn session(raw: &[u8]) -> Vec<u16> {
+    let mut pad = smw_drive::level_pad(raw);
     let start = pad.len();
     pad.extend(frames_of(PLAY));
     let more = frames_of("R+B14 R22");
@@ -114,8 +115,8 @@ fn smw_object_table_matches_oam() {
     };
     let mut core = SnesCore::load(&raw).expect("loads");
     core.reset(ResetKind::Hard);
-    let pad = session();
-    let lead = frames_of(TO_LEVEL).len() - 60;
+    let pad = session(&raw);
+    let lead = smw_drive::level_pad(&raw).len() - 60;
     let mut rec = Recorder::new(Console::Snes, std::env::var("CAM_NEXT").is_ok());
     let t = Instant::now();
     for (f, &mask) in pad.iter().enumerate() {
