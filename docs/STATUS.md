@@ -5243,3 +5243,19 @@ stories, 10 decisions).
   first real external acceptance waits for a submitter. W38-06b parked: the
   Super Metroid script never leaves Ceres; D-032 (presentation margins)
   makes its keeper search moot. Workspace: **3904 passing**, gate green.
+- **W38-11 — Presentation margins, learned from play** (2026-10-28, D-032).
+  `rf_enhance::presentation_margins` stitches the background seen so far at
+  the recipe camera (`LearnedWorld`, reset on scene change), remembers each
+  object-table slot's last-seen sprite (`ObjectMemory`, with a check of
+  whether the table's x is world or camera-relative) and falls back to
+  sprites last seen leaving the view. The middle 256 columns are the core's
+  picture exactly. In the app: a "Margins: learned from play" option with an
+  aspect picker, available for games with a recipe, in Enhanced or Game-Aware
+  mode only; the core is only peeked. ROM-gated runs on SMW (7856 frames),
+  Super Metroid (15 791, Ceres only, level only), Castlevania (2960) and
+  Mega Man 2 (3641): accuracy frames and WRAM identical on every frame with
+  margins on. The margin behind the player fills with the level; the side not
+  yet reached stays black. Objects are weak: SMW has no object table in its
+  recipe (last-seen sprites only), Castlevania's candidate table does not line
+  up with sprites, Mega Man 2's is read camera-relative. No recipe has a
+  vertical camera row yet. Workspace: **3924 passing**, gate green.
