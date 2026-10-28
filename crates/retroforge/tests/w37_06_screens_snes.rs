@@ -169,9 +169,14 @@ fn three_presented_frames_of_smw_at_120_hz() {
     h.state_mut().resume_for_test();
     enter_yi1(&mut h);
     h.state_mut().log_presented_for_test();
+    // W37-00c: right with a hop every 36 frames (the W33-07 oracle's `R+B14 R22`, which clears the level's
+    // first obstacle) for 14 s; holding right and run alone stood at it.
     h.key_down(egui::Key::ArrowRight);
-    h.key_down(egui::Key::A);
-    run_for(&mut h, 14);
+    let hopping = Instant::now();
+    while hopping.elapsed() < Duration::from_secs(14) {
+        tap(&mut h, egui::Key::Z, 14);
+        wait_frames(&mut h, 22);
+    }
     println!("{}", h.state().frame_interp_debug_for_test());
     let tally = h.state().frame_interp_tally_for_test();
     println!("gaps between console frames: {tally:?}");
@@ -192,9 +197,12 @@ fn three_presented_frames_of_smw_at_120_hz() {
     // The best triple: console a, intermediate from a, console a + 1, with the picture moving.
     let mut best: Option<(usize, usize)> = None;
     for i in 12..log.len().saturating_sub(2) {
+        // W39-01: Super Mario World has a recipe (a tick counter), so the Presenter extrapolates from
+        // the frame on screen rather than interpolating back to the one before; the picture between
+        // console frame a and a + 1 is `Extrapolated { from: a }` and the shape of the triple is the same.
         let (
             (Shown::Console(a), pa),
-            (Shown::Intermediate { from, .. }, pm),
+            (Shown::Intermediate { from, .. } | Shown::Extrapolated { from, .. }, pm),
             (Shown::Console(b), pb),
         ) = (&log[i], &log[i + 1], &log[i + 2])
         else {
