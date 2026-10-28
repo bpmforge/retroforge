@@ -164,6 +164,14 @@ fn place(core: &mut NesCore, x: u8, y: u8) -> Option<(u8, u8)> {
         // Bounded: each pass runs a frame and stops after 3 equal positions or 20 frames.
         for _ in 0..20 {
             frame(core, 0);
+            if std::env::var("PROBE_TRACE").is_ok() {
+                println!(
+                    "    place f: ({}, {}) idx {:#x}",
+                    core.peek(PLAYER_X as u32),
+                    core.peek(PLAYER_Y as u32),
+                    core.peek(SCREEN_INDEX)
+                );
+            }
             let now = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
             still = if now == last { still + 1 } else { 0 };
             last = now;
@@ -180,7 +188,16 @@ fn place(core: &mut NesCore, x: u8, y: u8) -> Option<(u8, u8)> {
 
 const DIRS: [(i32, i32, u8); 4] = [(1, 0, RIGHT), (-1, 0, LEFT), (0, 1, DOWN), (0, -1, UP)];
 
+/// Link can stand on cells up to column 14 and row 9; the last column and row are where he
+/// leaves the screen (observed: standing at y 229 or x 240 starts a screen change), so
+/// they are judged only as targets.
+const STAND_COLS: i32 = 14;
+const STAND_ROWS: i32 = 9;
+
 fn cell_spot(c: i32, r: i32) -> Option<(u8, u8)> {
+    if c > STAND_COLS || r > STAND_ROWS {
+        return None;
+    }
     let x = u8::try_from(c * 16).ok()?;
     let y = u8::try_from(FIELD_FROM as i32 + r * 16 + LINK_Y_OFF as i32).ok()?;
     Some((x, y))
@@ -215,8 +232,8 @@ fn probe_screen(
         i32::from(core.peek(PLAYER_Y as u32)),
     );
     let seed = (
-        ((lx + 8) / 16).clamp(0, CELLS_W as i32 - 1),
-        ((ly - LINK_Y_OFF as i32 - FIELD_FROM as i32 + 8) / 16).clamp(0, CELLS_H as i32 - 1),
+        ((lx + 8) / 16).clamp(0, STAND_COLS),
+        ((ly - LINK_Y_OFF as i32 - FIELD_FROM as i32 + 8) / 16).clamp(0, STAND_ROWS),
     );
     let mut queue = std::collections::VecDeque::from([seed]);
     known.entry(seed).or_insert(true);
@@ -225,8 +242,10 @@ fn probe_screen(
     while let Some((c, r)) = queue.pop_front() {
         for (dc, dr, pad) in DIRS {
             let (nc, nr) = (c + dc, r + dr);
-            if !(0..CELLS_W as i32).contains(&nc)
-                || !(0..CELLS_H as i32).contains(&nr)
+            // The last column and row are where Link leaves the screen: pushing at them
+            // starts a screen change, so they are not judged.
+            if !(0..=STAND_COLS).contains(&nc)
+                || !(0..=STAND_ROWS).contains(&nr)
                 || known.contains_key(&(nc, nr))
                 || avoid.contains(&(nc, nr))
             {
@@ -241,6 +260,15 @@ fn probe_screen(
             };
             for _ in 0..PUSH_FRAMES {
                 frame(core, pad);
+                if std::env::var("PROBE_TRACE").is_ok() {
+                    println!(
+                        "    f: ({}, {}) idx {:#x} sx {}",
+                        core.peek(PLAYER_X as u32),
+                        core.peek(PLAYER_Y as u32),
+                        core.peek(SCREEN_INDEX),
+                        core.peek(SCROLL_X)
+                    );
+                }
             }
             let end = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
             // A door or stair cell swaps the screen: stop, the picture is not this one.
@@ -252,6 +280,25 @@ fn probe_screen(
                 .filter(|(a, b)| a != b)
                 .count();
             if diff > 60 {
+                if std::env::var("PROBE_DEBUG").is_ok() {
+                    let ch: Vec<_> = (FIELD_FROM / 8 * 32..now.len())
+                        .filter(|&i| now[i] != tiles[i])
+                        .take(8)
+                        .map(|i| (i % 32, i / 32, tiles[i], now[i]))
+                        .collect();
+                    for (name, g) in [("before", tiles), ("after", &now)] {
+                        for r in 8..30 {
+                            let line: String = (0..32)
+                                .map(|c| {
+                                    g[r * 32 + c].map_or("..".to_string(), |t| format!("{t:02x}"))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            println!("{name} {r:2}: {line}");
+                        }
+                    }
+                    println!("  diff {diff} start {start:?} end {end:?} sample {ch:?}");
+                }
                 st.door = Some((nc, nr));
                 return st;
             }
@@ -281,7 +328,7 @@ fn tally_known(tiles: &Tiles, known: &Known, tally: &mut WalkTally) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Hop {
     Left,
     Right,
@@ -356,6 +403,7 @@ fn hop(
     core: &mut NesCore,
     h: Hop,
     arrived: Option<(u8, u8)>,
+    walk_off: bool,
 ) -> Option<(u8, ScreenImage, (u8, u8), Tiles)> {
     let from = i32::from(core.peek(SCREEN_INDEX));
     let to = from + h.delta();
@@ -386,7 +434,9 @@ fn hop(
         let a = frame(core, 0);
         let tiles = tile_grid(core);
         img.fill_unknown_from(&ScreenImage::new(H, a.px)?);
-        for _ in 0..2 {
+        // The walk-off pushes Link back at the edge he came in by: the explorer wants the
+        // hidden pixels; a replay that only wants to stand on the screen does not.
+        for _ in 0..if walk_off { 2 } else { 0 } {
             // Walk Link off his spot so the pixels he hid show.
             for _ in 0..14 {
                 frame(core, h.opposite());
@@ -509,7 +559,7 @@ fn learn(raw: &[u8]) -> (Learned, usize, usize) {
         for h in route.into_iter().rev() {
             tried += 1;
             let back = arrivals.get(&(core.peek(SCREEN_INDEX), h.delta())).copied();
-            match hop(&mut core, h, back) {
+            match hop(&mut core, h, back, true) {
                 Some((idx, img, spot, tg)) => {
                     arrivals.insert((idx, -h.delta()), spot);
                     moved += 1;
@@ -530,7 +580,7 @@ fn learn(raw: &[u8]) -> (Learned, usize, usize) {
         tried_edges.insert((at, edge.delta()));
         tried += 1;
         let back = arrivals.get(&(at, edge.delta())).copied();
-        if let Some((idx, img, spot, tg)) = hop(&mut core, edge, back) {
+        if let Some((idx, img, spot, tg)) = hop(&mut core, edge, back, true) {
             arrivals.insert((idx, -edge.delta()), spot);
             moved += 1;
             seen.insert(idx);
@@ -589,15 +639,28 @@ fn probe_routes(raw: &[u8], l: &mut Learned, n: usize) {
             let mut core = scratch(raw);
             let mut tg = Some(tile_grid(&core));
             for &h in &route {
-                tg = hop(&mut core, h, None).map(|(_, _, _, g)| g);
+                tg = hop(&mut core, h, None, false).map(|(_, _, _, g)| g);
                 if tg.is_none() {
                     break;
                 }
             }
-            let Some(tg) = tg.filter(|_| core.peek(SCREEN_INDEX) == idx) else {
+            if tg.is_none() || core.peek(SCREEN_INDEX) != idx {
                 println!("screen {idx:#04x}: route did not reproduce");
                 break;
-            };
+            }
+            // The picture as it rests now (the explorer's capture is of the first frame).
+            for _ in 0..4 {
+                frame(&mut core, 0);
+            }
+            let tg = tile_grid(&core);
+            if std::env::var("PROBE_DEBUG").is_ok() {
+                println!(
+                    "  link at ({}, {}), idx {:#x}",
+                    core.peek(PLAYER_X as u32),
+                    core.peek(PLAYER_Y as u32),
+                    core.peek(SCREEN_INDEX)
+                );
+            }
             let st = probe_screen(&mut core, &tg, &avoid, &mut known);
             total.open += st.open;
             total.blocked += st.blocked;
@@ -668,7 +731,7 @@ fn zelda_stage_set_from_observed_walking() {
         learned.atlas.len(),
         learned.routes.len()
     );
-    probe_routes(&raw, &mut learned, 12);
+    probe_routes(&raw, &mut learned, 20);
     report(&learned);
     let rows = learned.tally.to_rows(
         "pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way",
@@ -766,6 +829,75 @@ fn probe_the_base_screen_only() {
         probed: Vec::new(),
         routes: BTreeMap::from([(0x77, Vec::new())]),
     };
+    probe_routes(&raw, &mut l, 1);
+    report(&l);
+}
+
+#[test]
+#[ignore = "debug: learn and save the routes"]
+fn learn_and_save_routes() {
+    let Some(path) = rom_path() else {
+        return;
+    };
+    let raw = load_rom(&path);
+    let (l, _, _) = learn(&raw);
+    std::fs::create_dir_all(OUT_DIR).expect("dir");
+    let text: String = l
+        .routes
+        .iter()
+        .map(|(i, r)| {
+            let hops: String = r
+                .iter()
+                .map(|h| match h {
+                    Hop::Left => 'L',
+                    Hop::Right => 'R',
+                    Hop::Up => 'U',
+                    Hop::Down => 'D',
+                })
+                .collect();
+            format!("{i} {hops}\n")
+        })
+        .collect();
+    std::fs::write(format!("{OUT_DIR}/routes.txt"), text).expect("writes");
+}
+
+#[test]
+#[ignore = "debug: probe screens from saved routes"]
+fn probe_saved_route() {
+    let Some(path) = rom_path() else {
+        return;
+    };
+    let raw = load_rom(&path);
+    let want: u8 = std::env::var("SCREEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(103);
+    let text = std::fs::read_to_string(format!("{OUT_DIR}/routes.txt")).expect("routes");
+    let mut l = Learned {
+        atlas: ScreenAtlas::new(),
+        tiles: BTreeMap::new(),
+        tally: WalkTally::new(),
+        probed: Vec::new(),
+        routes: BTreeMap::new(),
+    };
+    for line in text.lines() {
+        let (i, hops) = line.split_once(' ').unwrap_or((line, ""));
+        let idx: u8 = i.parse().expect("idx");
+        if idx != want {
+            continue;
+        }
+        let r = hops
+            .chars()
+            .map(|c| match c {
+                'L' => Hop::Left,
+                'R' => Hop::Right,
+                'U' => Hop::Up,
+                _ => Hop::Down,
+            })
+            .collect();
+        l.routes.insert(idx, r);
+    }
+    println!("routes {:?}", l.routes);
     probe_routes(&raw, &mut l, 1);
     report(&l);
 }
