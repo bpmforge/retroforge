@@ -140,6 +140,31 @@ pub fn to_level(step: &mut dyn FnMut(u16) -> u8) -> Vec<u16> {
     d.pad
 }
 
+/// The short route used by the `reach_yi1` copies of the scout and interpolation
+/// tests: the same boot and menu taps, one A on the introduction level, then straight from the
+/// map at Yoshi's House left to Yoshi's Island 1 (no walk through the house); returns
+/// once that level's first frames have run. Margins as in [`to_level`], counted from the
+/// observed state.
+pub fn to_yi1_direct(step: &mut dyn FnMut(u16) -> u8) -> Vec<u16> {
+    use SnesButton::{Left, Start, A};
+    let mut d = Drive::new(step);
+    d.idle(200);
+    for i in 0..10 {
+        d.hold(&[if i % 2 == 0 { Start } else { A }], 6);
+        d.idle(108);
+    }
+    d.idle(300);
+    d.hold(&[A], 8);
+    d.idle_until(MAP, STATE_CAP, "map after the introduction level");
+    d.idle(286);
+    d.hold(&[Left], 8);
+    d.idle(158);
+    d.hold(&[A], 8);
+    d.idle_until(IN_LEVEL, STATE_CAP, "Yoshi's Island 1");
+    d.idle(4);
+    d.pad
+}
+
 struct NullSink;
 impl rf_core_api::CoreSink for NullSink {
     fn video_scanline(&mut self, _y: u16, _p: &[rf_core_api::PpuPixel]) {}

@@ -29,6 +29,9 @@ use rf_enhance::extrapolation::Verdict;
 use rf_input::SnesButton;
 use rf_renderer::FrameBuffer;
 
+#[path = "../../rf-harness/tests/smw_drive/mod.rs"]
+mod smw_drive;
+
 const W: usize = 256;
 const H: usize = 224;
 
@@ -76,30 +79,15 @@ fn run(st: &mut EmuStepper, sink: &mut FrameBuffer, buttons: &[SnesButton], n: u
     }
 }
 
-fn tap(st: &mut EmuStepper, sink: &mut FrameBuffer, b: SnesButton, hold: u32) {
-    run(st, sink, &[b], hold);
-    run(st, sink, &[], 8);
-}
-
 /// Boot, menus, the map, Yoshi's Island 1, the fade-in (the script of `w37_06_interpolation_snes`).
 fn reach_yi1(st: &mut EmuStepper, sink: &mut FrameBuffer) {
-    run(st, sink, &[], 200);
-    for i in 0..10 {
-        let b = if i % 2 == 0 {
-            SnesButton::Start
-        } else {
-            SnesButton::A
-        };
-        tap(st, sink, b, 6);
-        run(st, sink, &[], 100);
-    }
-    run(st, sink, &[], 300);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 400);
-    tap(st, sink, SnesButton::Left, 8);
-    run(st, sink, &[], 150);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 150);
+    // W37-00c: closed-loop, waits on the game mode (`smw_drive::to_yi1_direct`).
+    smw_drive::to_yi1_direct(&mut |mask| {
+        let mut input = InputFrame::empty();
+        input.ports[0] = mask;
+        st.latch_and_advance_frame(input, sink);
+        st.peek_bus(smw_drive::MODE)
+    });
 }
 
 fn play(f: u32) -> Vec<SnesButton> {
