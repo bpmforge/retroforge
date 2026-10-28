@@ -427,10 +427,9 @@ impl Presentation {
             .observe(f.rgba, w, f.h, f.cam, &is_sprite, skip_row);
         if let Some(objs) = f.objects {
             self.live_frames += u32::from(objs.iter().any(|o| o.alive));
-        }
-        let use_table = f.objects.filter(|_| !self.table_unusable());
-        if let Some(objs) = use_table {
-            if self.relative().is_none() {
+            // Judged every frame until a reading explains sprites, so a table whose objects
+            // only show up later is not given up on for good.
+            if self.relative().is_none() || !self.explained {
                 let rel: Vec<ObjectFact> = objs
                     .iter()
                     .map(|o| ObjectFact {
@@ -446,6 +445,8 @@ impl Presentation {
                 self.score.0 += u32::from(a > b);
                 self.score.1 += u32::from(b > a);
             }
+        }
+        if let Some(objs) = f.objects.filter(|_| !self.table_unusable()) {
             let placed: Vec<ObjectFact> = objs.iter().map(|o| self.place(o, f.cam.0)).collect();
             self.objects
                 .observe(f.rgba, w, f.h, f.cam.0, &placed, &is_sprite);
