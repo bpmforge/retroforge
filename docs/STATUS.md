@@ -4967,3 +4967,19 @@ stories, 10 decisions).
   short. `Apu::load` now clears them. Regression test in
   `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
   Workspace: **3728 passing**, gate green.
+
+2026-10-27 W41-00..06 done — cheats and RetroAchievements (D-030 amends
+  NON_GOALS 14; D-031 rcheevos). `rf-cheats` parses NES/SNES Game Genie,
+  Pro Action Replay and raw codes; the cores answer CPU ROM reads with
+  Game Genie overrides (`EmulatorCore::set_rom_overrides`, compare
+  honoured, max 16); the Game settings Cheats section stores codes per
+  game, off by default, writes RAM codes before every frame (ledgered,
+  ids in `PROF`) and pauses the Rebuild lab while a ROM code is on.
+  `rf-achievements` vendors rcheevos v12.5.0 (cc, hand-written FFI with
+  a C layout probe); the core thread owns the session, a ureq worker does
+  HTTP, only the token is stored (0600), one table enforces hardcore.
+  Unlock toasts and a Quick Menu Achievements panel. RA accepts hardcore
+  only from approved emulators: approval is Brad's request to RAdmin.
+  Unverified: the real retroachievements.org server, SNES end to end,
+  Super FX/CX4/OBC1 cart RAM. Known rcheevos 12.5.0 unload crash worked
+  around (vendor/rcheevos/VENDORED.md).
