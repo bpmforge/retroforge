@@ -639,7 +639,8 @@ impl Cols {
             .iter()
             .filter(|s| {
                 let (dx, dy) = (s.x.wrapping_sub(x) as i8, s.y.wrapping_sub(y));
-                (dx.abs() <= X_SLACK || (dx - 8).abs() <= X_SLACK)
+                (dx.unsigned_abs() <= X_SLACK.unsigned_abs()
+                    || dx.wrapping_sub(8).unsigned_abs() <= X_SLACK.unsigned_abs())
                     && matches!(dy, 0 | 8 | 16 | 24 | 248)
             })
             .map(|s| s.index)
