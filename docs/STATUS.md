@@ -5223,3 +5223,13 @@ stories, 10 decisions).
   (9868 frames, zero divergence); no object table was found, so no
   widescreen trials and no verified tick point. Margins for both: approach
   pending Brad. Workspace: **3902 passing**, gate green.
+- **W38-07 — Engine recipe: Castlevania** (2026-10-28).
+  `profiles/nes/castlevania/recipe.toml`, regenerated from the committed
+  generator: NMI as the per-frame tick (36 567 of 36 569 watched writes inside
+  it, entry and exit hooks), player x $40 and scroll $FD/$FF observed, player y
+  and the actor table candidate (the object-table finder assumes world-space x;
+  Castlevania stores positions relative to the camera). Lockstep over 21 312
+  frames: zero divergence plain and hooked; position at the tick exit equals
+  end of frame in 100% of 20 902 frames. Widescreen: 20 candidates and 18 HUD
+  anchors tried, no keepers (about 305 state flips). Margins: approach pending
+  Brad. Workspace: **3904 passing**, gate green.
