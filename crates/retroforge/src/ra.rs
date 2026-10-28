@@ -1,5 +1,5 @@
 //! RetroAchievements in the app (ticket W41-05; `docs/design/CHEATS_ACHIEVEMENTS.md`
-//! section 4; decision D-031).
+//! section 4; decision D-033).
 //!
 //! `rf-achievements` is the network-free rcheevos wrapper. This module is
 //! everything the app adds around it:

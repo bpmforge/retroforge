@@ -111,7 +111,7 @@ interpreter-tier fallback.
 W41-04 RA condition evaluator. W41-05 RA client (sign-in, game lookup,
 unlocks, hardcore gate). W41-06 RA UI (toasts, list, progress).
 
-## 6. Evaluator: rcheevos (D-031)
+## 6. Evaluator: rcheevos (D-033)
 
 Brad chose option 1 on 2026-10-27: vendor rcheevos (RA's MIT-licensed C
 client library) in a new `rf-achievements` crate, built with `cc`, with our

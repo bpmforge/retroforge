@@ -5205,8 +5205,8 @@ stories, 10 decisions).
   from the committed generator: 1513-function atlas, 477 rule-named rows (all
   match), player x/y words found by a 16-bit motion match against OAM, every
   NMI-entry row hooked (the NMI is entered in several decode modes), 93
-  candidate data regions. Lockstep over 27 182 frames (Ceres, the escape, two
-  Zebes rooms): zero divergence plain and with 477 hooks; tick fires 26 991
+  candidate data regions. Lockstep over 27 182 frames (Ceres only: the escape
+  fails and the script ends back at the Ceres start, corrected 2026-10-28): zero divergence plain and with 477 hooks; tick fires 26 991
   times; position at the tick equals end of frame in 99.79% of 15 402 play
   frames. No widescreen keepers and no enemy table: this stretch has no
   roaming enemies (0 state flips); one camera-clamp candidate tried. Margins
@@ -5233,9 +5233,90 @@ stories, 10 decisions).
   end of frame in 100% of 20 902 frames. Widescreen: 20 candidates and 18 HUD
   anchors tried, no keepers (about 305 state flips). Margins: approach pending
   Brad. Workspace: **3904 passing**, gate green.
+- **W40-01 — Recipe hub** (2026-10-28). Moderation rule written first and
+  approved by Brad (D-031): facts-only submissions, no ROM bytes, patches,
+  disassembly or community-map provenance, incoming rows clamped to
+  candidate, patch rows refereed by shadow lockstep on a maintainer-chosen
+  replay. `scripts/recipe-hub/validate-submission.py` (ACCEPT / REJECT /
+  HOLD for patch rows) and the referee checklist
+  `docs/design/RECIPE_HUB_REVIEW.md`; samples use a made-up engine. The
+  first real external acceptance waits for a submitter. W38-06b parked: the
+  Super Metroid script never leaves Ceres; D-032 (presentation margins)
+  makes its keeper search moot. Workspace: **3904 passing**, gate green.
+- **W38-11 — Presentation margins, learned from play** (2026-10-28, D-032).
+  `rf_enhance::presentation_margins` stitches the background seen so far at
+  the recipe camera (`LearnedWorld`, reset on scene change), remembers each
+  object-table slot's last-seen sprite (`ObjectMemory`, with a check of
+  whether the table's x is world or camera-relative) and falls back to
+  sprites last seen leaving the view. The middle 256 columns are the core's
+  picture exactly. In the app: a "Margins: learned from play" option with an
+  aspect picker, available for games with a recipe, in Enhanced or Game-Aware
+  mode only; the core is only peeked. ROM-gated runs on SMW (7856 frames),
+  Super Metroid (15 791, Ceres only, level only), Castlevania (2960) and
+  Mega Man 2 (3641): accuracy frames and WRAM identical on every frame with
+  margins on. The margin behind the player fills with the level; the side not
+  yet reached stays black. Objects are weak: SMW has no object table in its
+  recipe (last-seen sprites only), Castlevania's candidate table does not line
+  up with sprites, Mega Man 2's is read camera-relative. No recipe has a
+  vertical camera row yet. Workspace: **3924 passing**, gate green.
+- **W39-01 — No-latency interpolation for recipe games** (2026-10-28).
+  When a recipe is loaded, each SNES frame carries a tick verdict from the
+  recipe's camera and player rows (`rf_enhance::extrapolation`): the newest
+  frame is shown at once and the in-between display frame is extrapolated
+  forward from it at the velocity just observed, instead of interpolating
+  between the last two frames. A scene cut, teleport or sharp velocity change
+  refuses extrapolation for that tick (the frame repeats). SMW: the first
+  changed Mario sprite after a Right press shows one arrival earlier than
+  W37-06's delayed path; pictures, all 128 KiB of WRAM and the frame count
+  are identical with it on or off over 900 frames; extrapolated frames have
+  36.5% of the wrong dots of repeating the current frame (3000 frames). Tick
+  facts are read at the frame boundary, not at the NMI hook (plain-core
+  sessions have no hook host). NES keeps the delayed path; SMW's recipe has no
+  object table yet. Workspace: **3943 passing**, gate green.
+- **W39-03b — Zelda stage set and canvas footprint** (2026-10-28).
+  `rf_rebuild::walkability` classifies tile ids by a walk probe on a scratch
+  core: Link is placed beside a cell and pushed; no advance means solid. Zelda
+  gives 6 candidate solid rows (added to its recipe; the tree border is solid
+  in ~67% of its cells, grass and bushes ambiguous). Over the W38-05b learned
+  screens the Zelda stage set bakes 33 screens, 7982 body cells and 504 wall
+  quads, 3009 bytes cached and reloaded equal. `baked::bake_canvas` takes the
+  grid from the canvas footprint (`visited_cells`) instead of an assumed
+  screen width. The SMW ROM bake is untested end to end: its menu script no
+  longer reaches a level after the W37-00b timing fixes (W37-00c).
+  Workspace: **3948 passing**, gate green.
+- **W37-00c — SMW test scripts after the timing fixes** (2026-10-28). The
+  W37-00b SNES timing fixes moved SMW's state changes by 1-3 frames, so
+  frame-timed menu scripts in the ROM-gated tests stopped reaching a level
+  (bisected: w38_03_collision_smw passes at a3d332c^1, fails at a3d332c). A
+  shared closed-loop drive (`crates/rf-harness/tests/smw_drive`, and the
+  `@smw-to-level` script token in the app tests) now waits on the observed
+  game mode ($7E0100) with a frame cap. Every SMW ROM test the shift broke
+  passes again (collision, object tables, widescreen, baked geometry, HD-2D,
+  atlas, lockstep, mode gate, interpolation and others). Still red and not
+  caused by the shift: `w30_screens` (ALttP scout shot, W37-00d),
+  `w37_04_shadow_cost` (W37-04b), `w36_10_smw_recipe` (generator vs W38-01
+  rows). Running the SMW bake end to end exposed W39-03c (0 solid cells).
+  Workspace: **3948 passing**, gate green.
+- **W39-03c — SMW baked geometry** (2026-10-28). The SMW bake took the level
+  buffer's base from a stray run of reads far below the buffer, so no rule id
+  landed on a footprint cell. It now picks the base by an observed alignment
+  search (the cell under Mario's feet is a rule-solid body; 0x7ec800 wins with
+  1962 of 2613 in-level frames). Over the 53x14-cell canvas footprint: 188
+  cells judged, 39 solid or one-way, 40 wall quads, cached and reloaded equal.
+  Workspace: **3948 passing**, gate green.
+- **W37-04b — Shadow lockstep divergence on SMW** (2026-10-28). The live
+  shadow reported one SMW divergence at frame 17: only the S-DSP `cycle`
+  counter differed, so the rebuilt tier was not at fault. `Apu::reset` fetched
+  the SPC700 reset vector through the counted bus, leaving two I/O accesses
+  charged to the first instruction; a fresh core ran the DSP two cycles short
+  while the shadow (built by a state restore, which W37-07b clears) did not.
+  Reset now clears the tallies; a regression test that fails without the fix
+  steps a fresh APU and its save/load round trip alike. `w37_04_shadow_cost`
+  passes (SMW shadow on 15.92 ms/frame vs 7.90 off). Workspace: **3949
+  passing**, gate green.
 
 2026-10-27 W41-00..06 done — cheats and RetroAchievements (D-030 amends
-  NON_GOALS 14; D-031 rcheevos). `rf-cheats` parses NES/SNES Game Genie,
+  NON_GOALS 14; D-033 rcheevos). `rf-cheats` parses NES/SNES Game Genie,
   Pro Action Replay and raw codes; the cores answer CPU ROM reads with
   Game Genie overrides (`EmulatorCore::set_rom_overrides`, compare
   honoured, max 16); the Game settings Cheats section stores codes per

@@ -66,7 +66,24 @@ pub fn button_mask(buttons: &str) -> u16 {
 /// The W36-08/09 session: menus to the level, the play script, then
 /// jump-and-run to `PLAY_FRAMES` level frames.
 pub fn smw_session() -> Vec<u16> {
-    let mut pad = frames_of(discovery::SMW_TO_LEVEL);
+    let mut pad = discovery::smw_level_pad();
+    let level_start = pad.len();
+    pad.extend(frames_of(discovery::SMW_PLAY));
+    let more = frames_of("R+B14 R22");
+    while pad.len() < level_start + PLAY_FRAMES {
+        pad.extend(&more);
+    }
+    pad
+}
+
+/// The pre-W37-00b frame-timed menu script. For `w36_10_rom_hacks` it is a fixed stimulus fed to hack
+/// ROMs (other games on the same engine, for which the generic drive found no level), not a drive of
+/// the base game; it stays as it was so the hooked-versus-plain counts compare the same run.
+const SMW_FIXED_TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
+
+/// [`smw_session`] with the fixed frame-timed menu script (a stimulus for hack ROMs, see above).
+pub fn smw_fixed_session() -> Vec<u16> {
+    let mut pad = frames_of(SMW_FIXED_TO_LEVEL);
     let level_start = pad.len();
     pad.extend(frames_of(discovery::SMW_PLAY));
     let more = frames_of("R+B14 R22");

@@ -1,4 +1,4 @@
-//! RetroAchievements client (D-031): RA's official, MIT-licensed `rcheevos`
+//! RetroAchievements client (D-033): RA's official, MIT-licensed `rcheevos`
 //! C library, vendored and built by `build.rs`, behind a safe wrapper with
 //! no networking and no file I/O.
 //!

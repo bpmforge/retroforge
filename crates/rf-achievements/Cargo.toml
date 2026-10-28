@@ -1,6 +1,6 @@
 [package]
 name = "rf-achievements"
-description = "RetroAchievements client: vendored rcheevos (MIT, C) behind a safe, network-free Rust wrapper (D-031)"
+description = "RetroAchievements client: vendored rcheevos (MIT, C) behind a safe, network-free Rust wrapper (D-033)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

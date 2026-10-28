@@ -1,5 +1,5 @@
 //! Hand-written `extern "C"` declarations for the slice of rcheevos'
-//! `rc_client` API this crate uses (D-031; no bindgen).
+//! `rc_client` API this crate uses (D-033; no bindgen).
 //!
 //! Every struct mirrors `vendor/rcheevos/include/rc_client.h` /
 //! `rc_api_request.h` at v12.5.0 field for field. `shim/layout_check.c`

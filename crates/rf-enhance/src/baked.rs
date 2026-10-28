@@ -275,6 +275,41 @@ pub fn visited_cells(canvas: &Canvas, cell_px: u8) -> Option<Footprint> {
     })
 }
 
+/// Bake the screen a scout canvas covers: the grid is the canvas's own
+/// [`visited_cells`] footprint (its origin, width and height on the world
+/// grid), never an assumed screen width, and a cell the canvas holds no pixel
+/// for stays [`Kind::Unknown`]. `id_at(col, row)` gives the block or character
+/// id at a world cell (`col = floor(world_x / cell_px)`), `None` when the game
+/// state does not say. `None` when the canvas is empty or too large.
+#[must_use]
+pub fn bake_canvas(
+    id: u32,
+    canvas: &Canvas,
+    cell_px: u8,
+    id_at: impl Fn(i64, i64) -> Option<u32>,
+    sol: &Solidity<'_>,
+) -> Option<BakedScreen> {
+    let fp = visited_cells(canvas, cell_px)?;
+    let cp = i64::from(cell_px);
+    let (c0, r0) = (fp.origin.0.div_euclid(cp), fp.origin.1.div_euclid(cp));
+    let ids: Vec<Option<u32>> = (0..i64::from(fp.rows))
+        .flat_map(|r| (0..i64::from(fp.cols)).map(move |c| (c, r)))
+        .map(|(c, r)| id_at(c0 + c, r0 + r))
+        .collect();
+    bake_screen(
+        &ScreenInput {
+            id,
+            origin: fp.origin,
+            cols: fp.cols,
+            rows: fp.rows,
+            cell_px,
+            ids: &ids,
+            visited: Some(&fp.visited),
+        },
+        sol,
+    )
+}
+
 fn judge(id: u32, sol: &Solidity<'_>) -> Cell {
     if !sol.rules.is_empty() {
         let class = sol

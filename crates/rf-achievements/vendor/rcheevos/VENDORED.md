@@ -3,7 +3,7 @@
 * Upstream: https://github.com/RetroAchievements/rcheevos
 * Tag: v12.5.0
 * Commit: 1433173220a7eaede6a9ed7a18e94117be1821e0 (commit date 2026-09-13)
-* Vendored: 2026-10-27 (ticket W41-04, decision D-031)
+* Vendored: 2026-10-27 (ticket W41-04, decision D-033)
 * Licence: MIT (`LICENSE`), except `src/rhash/md5.c` / `md5.h`, which are
   L. Peter Deutsch's Aladdin Enterprises zlib-style permissive MD5 (notice in
   the file headers). Both are in THIRD-PARTY-NOTICES at the repo root.

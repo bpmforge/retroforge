@@ -23,6 +23,8 @@ use rf_harness::widescreen::{
     observe_snes, rows_toml, snes_patch, snes_snaps, try_candidates, TrialSetup,
 };
 use rf_input::SnesButton;
+
+mod smw_drive;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
 use rf_rebuild::widescreen::{
     camera_aliases, find_camera, find_x_page, hud_watch, infer, oam_shadow, slots_from_rows,
@@ -35,7 +37,6 @@ const RAM_BASE: u32 = 0x7E_0000;
 const TRIALS: usize = 8;
 
 /// Menus to Yoshi's Island 1 and play (the W38-01 script, plain frames).
-const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
 fn rom_path() -> Option<PathBuf> {
@@ -98,8 +99,8 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 /// Menus to the level, then play until the level has seen 1,500 frames.
-fn session() -> Vec<u16> {
-    let mut pad = frames_of(TO_LEVEL);
+fn session(raw: &[u8]) -> Vec<u16> {
+    let mut pad = smw_drive::level_pad(raw);
     let start = pad.len();
     pad.extend(frames_of(PLAY));
     let more = frames_of("R+B14 R22");
@@ -109,8 +110,8 @@ fn session() -> Vec<u16> {
     pad
 }
 
-fn inputs() -> Vec<InputFrame> {
-    session()
+fn inputs(raw: &[u8]) -> Vec<InputFrame> {
+    session(raw)
         .into_iter()
         .map(|m| {
             let mut f = InputFrame::empty();
@@ -131,7 +132,7 @@ fn baseline(raw: &[u8]) -> CoverageLog {
     let mut core = SnesCore::load(raw).expect("loads");
     core.reset(ResetKind::Hard);
     core.set_coverage_recording(true);
-    for mask in session() {
+    for mask in session(raw) {
         core.system_mut().bus.joypads.ports[0] = mask;
         core.run_frame(&InputFrame::empty(), &mut Null);
     }
@@ -152,8 +153,8 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
     .expect("recipe");
 
     // 1. The trace: object table, camera, HUD sprites.
-    let ins = inputs();
-    let lead = frames_of(TO_LEVEL).len() - 60;
+    let ins = inputs(&raw);
+    let lead = smw_drive::level_pad(&raw).len() - 60;
     let mut core = SnesCore::load(&raw).expect("loads");
     core.reset(ResetKind::Hard);
     let mut rec = Recorder::new(Console::Snes, false);

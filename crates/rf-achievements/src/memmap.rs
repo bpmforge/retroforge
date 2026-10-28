@@ -1,7 +1,7 @@
 //! RetroAchievements flat address spaces mapped onto CPU-bus addresses.
 //!
 //! RA does not use CPU addresses: each console has its own flat map, defined
-//! by `rc_console_memory_regions` in rcheevos (MIT, readable under D-031).
+//! by `rc_console_memory_regions` in rcheevos (MIT, readable under D-033).
 //! Sources, from `vendor/rcheevos/src/rcheevos/consoleinfo.c`:
 //!
 //! * NES, lines 711-726 (`_rc_memory_regions_nes`): the map IS the CPU map,

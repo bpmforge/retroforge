@@ -104,7 +104,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 the version resolved in Cargo.lock at the time of this ticket.)
 
 ------------------------------------------------------------------------
-rcheevos v12.5.0 (W41-04, D-031) - crates/rf-achievements/vendor/rcheevos
+rcheevos v12.5.0 (W41-04, D-033) - crates/rf-achievements/vendor/rcheevos
 ------------------------------------------------------------------------
 
 RetroAchievements' client library, vendored as C source and statically
