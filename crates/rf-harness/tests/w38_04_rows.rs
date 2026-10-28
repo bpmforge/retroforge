@@ -2,7 +2,7 @@
 //! only, no ROM). Each game's `recipe-widescreen.toml` is appended to its
 //! `recipe.toml`; the result must load, every function a patch names must
 //! exist, no two patch rows may edit the same byte of a function, lockstep
-//! keepers (`widescreen-objects`) are `confirmed` and everything else
+//! keepers (`widescreen-objects`, `widescreen-hud`) are `confirmed` and everything else
 //! (`widescreen-candidates`) is `candidate`, which `resolve_patches` refuses.
 
 use rf_profiles::load_recipe_str;
@@ -33,7 +33,9 @@ fn check(game: &str) {
             p.function
         );
         match p.mod_name.as_str() {
-            "widescreen-objects" => assert_eq!(p.grade, Grade::Confirmed, "{}", p.name),
+            "widescreen-objects" | "widescreen-hud" => {
+                assert_eq!(p.grade, Grade::Confirmed, "{}", p.name);
+            }
             "widescreen-candidates" => assert_eq!(p.grade, Grade::Candidate, "{}", p.name),
             other => panic!("{}: unexpected mod {other}", p.name),
         }
@@ -73,4 +75,13 @@ fn the_smb_overlay_loads_and_is_graded() {
 #[test]
 fn the_smw_overlay_loads_and_is_graded() {
     check("snes/super-mario-world");
+    // W38-04b: the long session kept one window pair (adc/cmp, 4 bytes written).
+    let (_, after) = load("snes/super-mario-world");
+    let keep: Vec<_> = after
+        .patches
+        .iter()
+        .filter(|p| p.mod_name == "widescreen-objects")
+        .collect();
+    assert!(keep.len() >= 2, "{}", keep.len());
+    assert!(keep.iter().all(|p| p.source.contains("acts only together")));
 }

@@ -13,7 +13,12 @@
 #   mod "widescreen-candidates": finder output no trial kept (the constant
 #       never mattered in the run, or the change was visible). Graded candidate:
 #       no patch ever applies them.
-
+#   W38-04b: HUD anchors were trialed (a stored sprite coordinate byte moved by 16 px
+#       on a copy; kept only when nothing else differed for the whole run). The one
+#       keeper is the ROM TABLE byte at PRG offset 0xfce (sprite 0's x, 0x58): a table
+#       byte is not inside any atlas function, so a function-relative patch row cannot
+#       place it and it has no row here. The immediate-sourced candidate (0x226) is a
+#       vertical coordinate, read by game logic: candidate.
 [[function]]
 name = "wide_fn_dfc1"
 shape_hash = "0x7ab715075f12b2a2"
@@ -139,3 +144,22 @@ offset = 29
 value = 0xff
 grade = "candidate"
 source = "observed: edge-test operand of an immediate cmp (was 0x2b), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[function]]
+name = "wide_fn_8220"
+shape_hash = "0xf3ed1b9630e267c4"
+exact_hash = "0xc69692c3652836fa"
+address_hint = 0x8220
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMB 1-1 play); W38-04"
+
+[[patch]]
+name = "wide-hud-anchor-226"
+mod = "widescreen-candidates"
+function = "wide_fn_8220"
+offset = 6
+value = 0xe8
+grade = "candidate"
+source = "observed: HUD sprite coordinate stored from an immediate (was 0xf8), confidence low 41; finder candidate, not kept by a lockstep trial: a vertical coordinate: widescreen does not move it"
+

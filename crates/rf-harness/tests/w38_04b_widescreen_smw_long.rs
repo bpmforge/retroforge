@@ -445,6 +445,19 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
     }
     assert!(!cands.is_empty(), "candidates are found");
 
+    // HUD anchors: SMW's HUD is background tiles (BG3), so there is no sprite
+    // to anchor. The trace finds no sprite that stands still on screen, no
+    // OAM-shadow byte is watched, and the finder lists no HUD candidate.
+    println!(
+        "HUD: {} static sprites, {} watched HUD bytes, {} hud-anchor candidates",
+        statics.len(),
+        watch.hud.len(),
+        all_cands
+            .iter()
+            .filter(|c| c.kind == Kind::HudAnchor)
+            .count()
+    );
+
     // 3. Trials.
     let plain = snaps_of(&raw, &segs).expect("plain run");
     // Which levels the plain run was in (mode 0x14 at $7E0100, translevel at
