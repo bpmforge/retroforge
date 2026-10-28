@@ -34,8 +34,8 @@ use rf_input::SnesButton;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
 use rf_rebuild::widescreen::{
     camera_aliases, find_camera, find_x_page, hud_watch, infer, infer_all, oam_shadow,
-    slots_from_rows, static_sprites, widen_values, window_pairs, Candidate, Kind, View, Watch,
-    XPage,
+    slots_from_rows, static_sprites, widen_values, window_pairs, Candidate, Kind, Snap, View,
+    Watch, WideFacts, XPage,
 };
 use rf_snes::core::SnesCore;
 
@@ -150,9 +150,6 @@ fn movie_file(var: &str, default: &str) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// One frame of the long session: the pads and a reset to apply first.
-type Step = (InputFrame, Option<ResetKind>);
-
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -160,9 +157,17 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The long session (module doc). `(frames, segment starts)`.
-fn session() -> (Vec<Step>, Vec<(&'static str, usize)>) {
-    let mut out: Vec<Step> = Vec::new();
+/// One power-on run: its pads and any resets the movie itself makes.
+struct Seg {
+    name: &'static str,
+    ins: Vec<InputFrame>,
+    resets: Vec<Option<ResetKind>>,
+}
+
+/// The long session (module doc): each segment is played on a fresh core from
+/// power-on (`SnesCore::reset` only restarts the CPU, so a mid-run "hard
+/// reset" is not a power-on and the menu script and the movies drift).
+fn session() -> Vec<Seg> {
     let mut segs = Vec::new();
     // (name, movie, idle frames before it, frames to run): the offsets are
     // W37-00's sweep winners (docs/research/W37-00-movie-import.md).
@@ -176,33 +181,42 @@ fn session() -> (Vec<Step>, Vec<(&'static str, usize)>) {
         "2307/x/bahamete,kaizoman666,masterjun-supermarioworld-96exit.smv",
     ) {
         let m = movie::smv::parse(&std::fs::read(p).expect("reads")).expect("smv");
-        sources.push(("96exit", m, 4, env_usize("CAP_96", 14_000)));
+        sources.push(("96exit", m, 4, env_usize("CAP_96", 5_000)));
     }
     for (name, m, delay, cap) in sources {
-        segs.push((name, out.len()));
         let pl = plan(&[], delay, 0, &m);
-        for (i, f) in pl.frames.iter().take(cap).enumerate() {
+        let mut seg = Seg {
+            name,
+            ins: Vec::new(),
+            resets: Vec::new(),
+        };
+        for f in pl.frames.iter().take(cap) {
             let mut inp = InputFrame::empty();
             inp.ports[0] = f.pads[0];
             inp.ports[1] = f.pads[1];
-            let reset = if i == 0 {
-                Some(ResetKind::Hard)
-            } else {
-                f.reset.map(|r| match r {
-                    movie::Reset::Soft => ResetKind::Soft,
-                    movie::Reset::Hard => ResetKind::Hard,
-                })
-            };
-            out.push((inp, reset));
+            seg.ins.push(inp);
+            seg.resets.push(f.reset.map(|r| match r {
+                movie::Reset::Soft => ResetKind::Soft,
+                movie::Reset::Hard => ResetKind::Hard,
+            }));
         }
+        segs.push(seg);
     }
-    segs.push(("yi1-script", out.len()));
-    for (i, m) in script().into_iter().enumerate() {
-        let mut inp = InputFrame::empty();
-        inp.ports[0] = m;
-        out.push((inp, (i == 0).then_some(ResetKind::Hard)));
-    }
-    (out, segs)
+    let pads = script();
+    segs.push(Seg {
+        name: "yi1-script+patrol",
+        resets: vec![None; pads.len()],
+        ins: pads
+            .into_iter()
+            .map(|m| {
+                let mut f = InputFrame::empty();
+                f.ports[0] = m;
+                f
+            })
+            .collect(),
+    });
+    segs.retain(|s| !s.ins.is_empty());
+    segs
 }
 
 /// The Yoshi's Island 1 script alone, as W38-04 played it (the trace for the table and camera).
@@ -224,18 +238,42 @@ impl CoreSink for Null {
     fn event(&mut self, _e: CoreEvent) {}
 }
 
-fn baseline(raw: &[u8], steps: &[Step]) -> CoverageLog {
-    let mut core = SnesCore::load(raw).expect("loads");
-    core.reset(ResetKind::Hard);
-    core.set_coverage_recording(true);
-    for (inp, reset) in steps {
-        if let Some(r) = reset {
-            core.reset(*r);
+fn baseline(raw: &[u8], segs: &[Seg]) -> CoverageLog {
+    let mut all: Option<CoverageLog> = None;
+    for seg in segs {
+        let mut core = SnesCore::load(raw).expect("loads");
+        core.reset(ResetKind::Hard);
+        core.set_coverage_recording(true);
+        for (inp, reset) in seg.ins.iter().zip(&seg.resets) {
+            if let Some(r) = reset {
+                core.reset(*r);
+            }
+            core.system_mut().bus.joypads.ports[0] = inp.ports[0];
+            core.run_frame(&InputFrame::empty(), &mut Null);
         }
-        core.system_mut().bus.joypads.ports[0] = inp.ports[0];
-        core.run_frame(&InputFrame::empty(), &mut Null);
+        let log = core.take_coverage().expect("armed");
+        match all.as_mut() {
+            None => all = Some(log),
+            Some(a) => {
+                assert!(a.merge(&log), "coverage logs of one cartridge merge");
+            }
+        }
     }
-    core.take_coverage().expect("armed")
+    all.expect("a segment")
+}
+
+/// A plain run of every segment, snaps concatenated (law of `compare_trial`:
+/// frame-by-frame against the same layout).
+fn snaps_of(image: &[u8], segs: &[Seg]) -> Result<Vec<Snap>, String> {
+    let mut out = Vec::new();
+    for seg in segs {
+        out.extend(snes_snaps(image, &seg.ins, |f, core| {
+            if let Some(r) = seg.resets[f] {
+                core.reset(r);
+            }
+        })?);
+    }
+    Ok(out)
 }
 
 #[test]
@@ -255,20 +293,15 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
     // sprites. The long session below is what is observed and trialed.
     let ins1 = inputs();
     let lead = frames_of(TO_LEVEL).len() - 60;
-    let (steps, segs) = session();
-    let ins: Vec<InputFrame> = steps.iter().map(|s| s.0.clone()).collect();
-    let resets: Vec<Option<ResetKind>> = steps.iter().map(|s| s.1).collect();
+    let segs = session();
     println!(
-        "long session: {} frames, segments {:?}, {} resets",
-        ins.len(),
-        segs,
-        resets.iter().flatten().count()
+        "long session: {} frames in {} power-on segments {:?}",
+        segs.iter().map(|s| s.ins.len()).sum::<usize>(),
+        segs.len(),
+        segs.iter()
+            .map(|s| (s.name, s.ins.len()))
+            .collect::<Vec<_>>()
     );
-    let hook = |f: usize, core: &mut SnesCore| {
-        if let Some(r) = resets[f] {
-            core.reset(r);
-        }
-    };
     let mut core = SnesCore::load(&raw).expect("loads");
     core.reset(ResetKind::Hard);
     let mut rec = Recorder::new(Console::Snes, false);
@@ -339,7 +372,7 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
         shadow
     );
     let t0 = Instant::now();
-    let atlas = build_snes_atlas(&raw, &baseline(&raw, &steps)).expect("atlas");
+    let atlas = build_snes_atlas(&raw, &baseline(&raw, &segs)).expect("atlas");
     println!(
         "atlas: {} functions in {:?}",
         atlas.functions.len(),
@@ -367,7 +400,23 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
 
     // 2. The observed run.
     let t = Instant::now();
-    let facts = observe_snes_hooked(&raw, &atlas, &ins, 0, watch, hook).expect("observed run");
+    let mut facts = WideFacts::default();
+    for seg in &segs {
+        let f = observe_snes_hooked(&raw, &atlas, &seg.ins, 0, watch.clone(), |f, core| {
+            if let Some(r) = seg.resets[f] {
+                core.reset(r);
+            }
+        })
+        .expect("observed run");
+        println!(
+            "segment {}: {} frames, {} flips up / {} down",
+            seg.name,
+            seg.ins.len(),
+            f.flips_up,
+            f.flips_down
+        );
+        facts.merge(&f);
+    }
     let cands = infer(&facts);
     let all_cands = infer_all(&facts);
     println!(
@@ -397,7 +446,7 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
     assert!(!cands.is_empty(), "candidates are found");
 
     // 3. Trials.
-    let plain = snes_snaps(&raw, &ins, hook).expect("plain run");
+    let plain = snaps_of(&raw, &segs).expect("plain run");
     // Which levels the plain run was in (mode 0x14 at $7E0100, translevel at
     // $7E13BF): how much play the headline flip count stands on.
     let mut levels = std::collections::BTreeSet::new();
@@ -453,7 +502,7 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
             view: &view,
             plain: &plain,
             patch: &|r, at, b| snes_patch(r, at, b),
-            run: &|image| snes_snaps(image, &ins, hook),
+            run: &|image| snaps_of(image, &segs),
             values: 1,
         },
         &chosen,
@@ -484,7 +533,7 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
             view: &view,
             plain: &plain,
             patch: &|r, at, b| snes_patch(r, at, b),
-            run: &|image| snes_snaps(image, &ins, hook),
+            run: &|image| snaps_of(image, &segs),
             values: 1,
         },
         &pairs,

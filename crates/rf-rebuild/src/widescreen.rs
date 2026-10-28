@@ -190,6 +190,44 @@ pub struct WideFacts {
     pub cam_writes: u64,
 }
 
+impl WideFacts {
+    /// Fold in the facts of another run (W38-04b: separate power-on runs of
+    /// one cartridge, each from a fresh core). Counts add; a site seen with
+    /// another operand is marked varying.
+    pub fn merge(&mut self, o: &WideFacts) {
+        self.frames += o.frames;
+        self.flips_up += o.flips_up;
+        self.flips_down += o.flips_down;
+        self.cam_writes += o.cam_writes;
+        for (&rom, s) in &o.sites {
+            match self.sites.get_mut(&rom) {
+                None => {
+                    self.sites.insert(rom, s.clone());
+                }
+                Some(m) => {
+                    m.imm_varies |= s.imm_varies || m.imm != s.imm || m.width != s.width;
+                    m.hits += s.hits;
+                    m.frames += s.frames;
+                    m.obj_x += s.obj_x;
+                    m.cam += s.cam;
+                    m.both += s.both;
+                    m.taken += s.taken;
+                    m.not_taken += s.not_taken;
+                    m.cam_writes += s.cam_writes;
+                    m.flip_up += s.flip_up;
+                    m.flip_down += s.flip_down;
+                }
+            }
+        }
+        for (&addr, srcs) in &o.hud {
+            let e = self.hud.entry(addr).or_default();
+            for (&k, &n) in srcs {
+                *e.entry(k).or_default() += n;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Recent {
     step: u64,
@@ -1631,6 +1669,42 @@ mod tests {
         let mut oam = vec![0u8; 256];
         oam[3] = shadow_x;
         Snap { ram, oam, cam_x: 0 }
+    }
+
+    #[test]
+    fn merged_facts_add_up() {
+        let site = |hits| SiteFacts {
+            function: Some(1),
+            cpu: 0,
+            op: ImmOp::Cmp,
+            width: 1,
+            imm: 8,
+            imm_varies: false,
+            hits,
+            frames: 1,
+            obj_x: 1,
+            cam: 0,
+            both: 0,
+            taken: 1,
+            not_taken: 0,
+            cam_writes: 0,
+            flip_up: 1,
+            flip_down: 0,
+        };
+        let mut a = WideFacts {
+            flips_up: 2,
+            ..WideFacts::default()
+        };
+        a.sites.insert(0x10, site(3));
+        let mut b = WideFacts {
+            flips_up: 5,
+            ..WideFacts::default()
+        };
+        b.sites.insert(0x10, site(4));
+        b.sites.insert(0x20, site(1));
+        a.merge(&b);
+        assert_eq!((a.flips_up, a.sites.len(), a.sites[&0x10].hits), (7, 2, 7));
+        assert_eq!(a.sites[&0x10].flip_up, 2);
     }
 
     #[test]
