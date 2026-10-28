@@ -5211,3 +5211,15 @@ stories, 10 decisions).
   frames. No widescreen keepers and no enemy table: this stretch has no
   roaming enemies (0 state flips); one camera-clamp candidate tried. Margins
   are W38-06b (enemy-rich rooms). Workspace: **3898 passing**, gate green.
+- **W38-08 — Engine recipes: Mega Man 2 and Mega Man X** (2026-10-28).
+  Mega Man 2: `profiles/nes/mega-man-2/recipe.toml` by observation over
+  19 203 frames (forest and conveyor stages): a 32-slot object table (x lo
+  $0460 with the player in slot 0, x hi $0440, y $04A0, state $0400) found
+  by a walker plus period finder, camera $1F/$20, and NMI entry as the
+  no-latency tick (final player position there in 99.99% of 8045 frames).
+  Lockstep zero divergence over 10 311 frames plain and hooked. 16 widescreen
+  candidates tried, 0 keepers (31 state flips). Mega Man X: hooks (NMI rows
+  told apart by decode mode; 9867 of 9868 NMIs hooked) and lockstep only
+  (9868 frames, zero divergence); no object table was found, so no
+  widescreen trials and no verified tick point. Margins for both: approach
+  pending Brad. Workspace: **3902 passing**, gate green.
