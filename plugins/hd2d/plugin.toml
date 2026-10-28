@@ -1,0 +1,17 @@
+# HD-2D render plugin (ticket W39-04). Kind "render": it reads recipe facts and
+# memory and emits draw data only (it cannot ask for write_memory, hooks or
+# input). The colour index of each rectangle is an object class for the HD-2D
+# renderer (rf_renderer::hd2d::code): 1 player, 2 enemy, 3 projectile,
+# 4 pickup, 5 scenery. Rectangles are in picture pixels.
+[plugin]
+id = "hd2d"
+version = "0.1.0"
+api = "0.1"
+kind = "render"
+license = "MIT OR Apache-2.0"
+provenance = "first-party, authored for RetroForge ticket W39-04"
+
+[capabilities]
+read_memory = true
+draw_overlay = true
+frame_events = true
