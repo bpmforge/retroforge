@@ -79,8 +79,23 @@ pub fn vertices_for_camera(
     out_height: u32,
     camera: &DioramaCamera,
 ) -> Vec<Vertex> {
+    vertices_for_camera_classed(scene, out_width, out_height, camera, &[])
+}
+
+/// [`vertices_for_camera`] with a per-billboard
+/// [`ObjectClass`](crate::diorama_objects::ObjectClass) (W39-02): the depth
+/// and shadow of each sprite come from its class. Empty `classes` is
+/// [`vertices_for_camera`] exactly.
+#[must_use]
+pub fn vertices_for_camera_classed(
+    scene: &crate::diorama_mesh::DioramaScene<'_>,
+    out_width: u32,
+    out_height: u32,
+    camera: &DioramaCamera,
+    classes: &[crate::diorama_objects::ObjectClass],
+) -> Vec<Vertex> {
     if camera.clamped() == DioramaCamera::default() {
-        return crate::diorama_mesh::build_vertices(scene);
+        return crate::diorama_mesh::build_vertices_classed(scene, classes);
     }
     let aspect = out_width.max(1) as f32 / out_height.max(1) as f32;
     let p = camera_matrices::placement(
@@ -92,10 +107,11 @@ pub fn vertices_for_camera(
         DISTANCE_FACTOR,
         camera,
     );
-    crate::diorama_mesh::build_vertices_oriented(
+    crate::diorama_mesh::build_vertices_oriented_classed(
         scene,
         camera.clamped().yaw_deg,
         [p.eye[0], p.eye[2]],
+        classes,
     )
 }
 
