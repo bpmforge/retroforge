@@ -10215,7 +10215,12 @@ impl RetroForgeApp {
                 // Ticket W30-07: how many frames ahead.
                 // Ticket W36-07: the honesty label's claim under the switch.
                 if row.id == "frame_interpolation" && row.enabled {
-                    ui.weak(rf_enhance::interpolation::label().claim);
+                    // Ticket W39-01: with the recipe's tick hook nothing is held back.
+                    ui.weak(if self.frame_interp.is_no_latency() {
+                        rf_enhance::interpolation::extrapolation_label().claim
+                    } else {
+                        rf_enhance::interpolation::label().claim
+                    });
                 }
                 if row.id == "run_ahead"
                     && row.enabled
@@ -18230,6 +18235,10 @@ impl RetroForgeApp {
             _ => None,
         };
         self.send_command(CoreCommand::SetModSession(session));
+        // Ticket W39-01: the recipe's rows are what the tick hook of no-latency interpolation reads.
+        self.send_command(CoreCommand::SetInterpRecipe(
+            self.mod_recipe.clone().map(Box::new),
+        ));
     }
 
     /// Ticket W30-09: keep the core's S-DSP interpolation matching the

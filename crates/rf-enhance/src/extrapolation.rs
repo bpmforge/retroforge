@@ -227,7 +227,14 @@ mod tests {
     #[test]
     fn a_hard_reversal_snaps_for_that_tick_only() {
         // Running right at 3, then left at 3 (a change of 6), then steady left.
-        let v = run(&[(0, 10), (3, 13), (6, 16), (3, 13), (0, 10), (-3i16 as u16, 7)]);
+        let v = run(&[
+            (0, 10),
+            (3, 13),
+            (6, 16),
+            (3, 13),
+            (0, 10),
+            (-3i16 as u16, 7),
+        ]);
         assert!(matches!(v[2], Verdict::Extrapolate(_)));
         assert_eq!(v[3], Verdict::Snap(Refusal::SharpChange));
         assert!(matches!(v[4], Verdict::Extrapolate(_)), "{:?}", v[4]);
@@ -238,7 +245,10 @@ mod tests {
     fn small_accelerations_are_not_sharp() {
         // 0, 1, 3, 6 per tick: a change of 1, 2, 3.
         let v = run(&[(0, 0), (1, 1), (4, 4), (10, 10)]);
-        assert!(v[1..].iter().all(|x| matches!(x, Verdict::Extrapolate(_))), "{v:?}");
+        assert!(
+            v[1..].iter().all(|x| matches!(x, Verdict::Extrapolate(_))),
+            "{v:?}"
+        );
     }
 
     #[test]
@@ -264,7 +274,10 @@ mod tests {
         let mut f = facts(2, 2, 2);
         f.scene = 8;
         assert_eq!(t.tick(f), Verdict::Snap(Refusal::SceneCut));
-        assert!(matches!(t.tick(facts(3, 3, 3)), Verdict::Snap(Refusal::SceneCut)));
+        assert!(matches!(
+            t.tick(facts(3, 3, 3)),
+            Verdict::Snap(Refusal::SceneCut)
+        ));
         assert!(matches!(t.tick(facts(4, 4, 4)), Verdict::Extrapolate(_)));
     }
 
@@ -273,8 +286,14 @@ mod tests {
         let mut t = Tracker::new();
         let _ = t.tick(facts(0, 0, 0));
         let _ = t.tick(facts(1, 1, 1));
-        assert_eq!(t.tick(facts(5, 2, 2)), Verdict::Snap(Refusal::NotConsecutive));
-        assert_eq!(t.tick(facts(5, 2, 2)), Verdict::Snap(Refusal::NotConsecutive));
+        assert_eq!(
+            t.tick(facts(5, 2, 2)),
+            Verdict::Snap(Refusal::NotConsecutive)
+        );
+        assert_eq!(
+            t.tick(facts(5, 2, 2)),
+            Verdict::Snap(Refusal::NotConsecutive)
+        );
     }
 
     #[test]
