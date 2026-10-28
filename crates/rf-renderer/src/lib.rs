@@ -43,6 +43,7 @@
 pub mod compare;
 pub mod composite;
 pub mod diorama;
+pub mod diorama_gbuffer;
 pub mod diorama_mesh;
 pub mod diorama_objects;
 pub mod diorama_side;
@@ -67,6 +68,7 @@ pub mod scale;
 pub mod shader_chain;
 pub mod superfx_gpu;
 pub mod superfx_hd;
+pub mod temporal;
 
 pub use compare::{
     blink_shows_original, compose_split, original_rgba_from_indexed,

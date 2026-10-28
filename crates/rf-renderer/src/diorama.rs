@@ -1429,6 +1429,13 @@ pub struct DioramaPass {
     /// Whether the last render drew with a shadow map.
     shadow_map_used: std::sync::atomic::AtomicBool,
     async_readback: std::sync::atomic::AtomicBool,
+    /// W39-05: the matrix the shadow map is fitted over, when it differs
+    /// from the drawing matrix (a jittered one). `None`: fit over the
+    /// drawing matrix, as every earlier caller does.
+    fit_vp: Mutex<Option<camera_matrices::Mat4>>,
+    /// W39-05: skip the CPU readback; the frame stays on the GPU in
+    /// [`Self::resolved_texture`].
+    texture_only: std::sync::atomic::AtomicBool,
     _tally: Tally,
 }
 
@@ -1747,8 +1754,37 @@ impl DioramaPass {
             shadow_gate: Mutex::new(ShadowGate::default()),
             shadow_map_used: std::sync::atomic::AtomicBool::new(false),
             async_readback: std::sync::atomic::AtomicBool::new(false),
+            fit_vp: Mutex::new(None),
+            texture_only: std::sync::atomic::AtomicBool::new(false),
             _tally: Tally::new(&LIVE_PASSES, 1),
         }
+    }
+
+    /// Fit the sun's shadow map over `vp` instead of over the matrix a frame
+    /// is drawn with (W39-05). A temporal upscaler draws with a sub-pixel
+    /// jittered matrix every frame; fitting the map over the *unjittered* one
+    /// keeps the shadow texels still, so the jitter cannot make shadow edges
+    /// crawl. `None` restores the default.
+    pub fn set_shadow_fit_vp(&self, vp: Option<camera_matrices::Mat4>) {
+        *self.fit_vp.lock().unwrap_or_else(|e| e.into_inner()) = vp;
+    }
+
+    /// Keep frames on the GPU (W39-05): with this on, `render_with_vp`
+    /// submits the frame, skips the copy to the CPU and returns an empty
+    /// `Vec`; the image is [`Self::resolved_texture`]. Do not switch it while
+    /// [`Self::set_async_readback`] has a frame in flight.
+    pub fn set_texture_only(&self, on: bool) {
+        self.texture_only
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The resolved colour image of the last frame (`Rgba8Unorm`, colour
+    /// premultiplied by coverage over the transparent clear, usage
+    /// `RENDER_ATTACHMENT | COPY_SRC`), with its size; `None` before a frame.
+    #[must_use]
+    pub fn resolved_texture(&self) -> Option<(wgpu::Texture, (u32, u32))> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.target.as_ref().map(|t| (t.resolved.clone(), t.size))
     }
 
     /// Light the next frames (W34-06). `None` is the original look, the one
@@ -1971,11 +2007,12 @@ impl DioramaPass {
         // this mesh (W34-06). No map when there is no sun, the sun asks for
         // none, the budget gate dropped it, or there is nothing to fit.
         let lighting = self.lighting();
+        let fit_vp = (*self.fit_vp.lock().unwrap_or_else(|e| e.into_inner())).unwrap_or(vp);
         let fit: Option<ShadowFit> = match lighting {
             Some(l) if l.shadow_map && self.shadow_budget_allows_map() => scene_bounds(vertices)
                 .and_then(|b| {
                     lighting::fit_shadow_map(
-                        &vp,
+                        &fit_vp,
                         &b,
                         &l.sun,
                         lighting::map_size_for(out_w).min(max_dim),
@@ -2347,31 +2384,37 @@ impl DioramaPass {
             }
             flush(&mut rpass, run_start, vertices.len(), run_shadow);
         }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.resolved,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &target.readbacks[slot],
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(target.padded_bytes_per_row),
-                    rows_per_image: Some(out_h),
+        let texture_only = self.texture_only.load(std::sync::atomic::Ordering::Relaxed);
+        if !texture_only {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target.resolved,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d {
-                width: out_w,
-                height: out_h,
-                depth_or_array_layers: 1,
-            },
-        );
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &target.readbacks[slot],
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(target.padded_bytes_per_row),
+                        rows_per_image: Some(out_h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: out_w,
+                    height: out_h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         let t_stage = stage_us(3, t_stage);
         gpu.queue.submit(std::iter::once(encoder.finish()));
         let t_stage = stage_us(4, t_stage);
-        let rgba = if async_mode {
+        let rgba = if texture_only {
+            // The image stays on the GPU (W39-05).
+            Vec::new()
+        } else if async_mode {
             let (tx, done) = std::sync::mpsc::channel();
             target.readbacks[slot]
                 .slice(..)
