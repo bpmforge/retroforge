@@ -677,3 +677,79 @@ fn explore_poke_all() {
         );
     }
 }
+
+/// Explore (W37-00d): where in the frame does a poke of Link's x make the camera follow? After the
+/// first `RF_CUT` (default 60) tokens, a copy of the machine is run by instructions; Link's x is
+/// poked +0x40 before instruction `K` of the next frame (each `K` in `RF_KS`), the frame ends, two
+/// more frames run; prints the camera word after, and the instruction at which the game first
+/// changes the poked `$22` again (the poke's lifetime; `-` if it never does in that frame).
+#[test]
+#[ignore = "explore"]
+fn explore_poke_line() {
+    use rf_core_api::{CoreSink, EmulatorCore as _, Step};
+    struct Quiet;
+    impl CoreSink for Quiet {
+        fn video_scanline(&mut self, _y: u16, _p: &[rf_core_api::PpuPixel]) {}
+        fn audio(&mut self, _s: &[i16]) {}
+        fn event(&mut self, _e: rf_core_api::CoreEvent) {}
+    }
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    rig.script(&alttp_to_free_play());
+    let session = format!("{} {} {}", alttp_play_walk(), alttp_play_start(), alttp_play_tail());
+    let cut: usize = std::env::var("RF_CUT").ok().and_then(|c| c.parse().ok()).unwrap_or(60);
+    for tok in session.split_whitespace().take(cut + 1) {
+        rig.script(tok);
+    }
+    rig.script("w20");
+    let snap = rig.st.snapshot().expect("snapshot");
+    let ks: Vec<u32> = std::env::var("RF_KS")
+        .unwrap_or_else(|_| "0,300,1000,3000,8000,15000,25000,35000,50000".into())
+        .split(',')
+        .filter_map(|c| c.parse().ok())
+        .collect();
+    let p = |s: &retroforge::stepper::EmuStepper, a: u32| {
+        u16::from(s.peek_bus(0x7E_0000 + a)) | u16::from(s.peek_bus(0x7E_0001 + a)) << 8
+    };
+    for k in ks {
+        let mut c = Rig::open(ALTTP.0, ALTTP.1, None).expect("rig");
+        c.st.restore(&snap).expect("restore");
+        let (x0, cam0) = (p(&c.st, 0x22), p(&c.st, 0x11E));
+        let x = x0.wrapping_add(0x40);
+        let mut n = 0u32;
+        let mut changed = None;
+        loop {
+            if n == k {
+                c.st.poke_ram(0x7E_0022, (x & 0xFF) as u8);
+                c.st.poke_ram(0x7E_0023, (x >> 8) as u8);
+            }
+            let r = match c.st.core_mut() {
+                rf_harness::shadow::CoreMut::Snes(core) => core.step(Step::Instruction, &mut Quiet),
+                rf_harness::shadow::CoreMut::Nes(_) => return,
+            };
+            n += 1;
+            if n > k && changed.is_none() && p(&c.st, 0x22) != x {
+                changed = Some(n);
+            }
+            if r.frame_complete || n > 400_000 {
+                break;
+            }
+        }
+        if n <= k {
+            c.st.poke_ram(0x7E_0022, (x & 0xFF) as u8);
+            c.st.poke_ram(0x7E_0023, (x >> 8) as u8);
+        }
+        let first = n;
+        for _ in 0..2 {
+            match c.st.core_mut() {
+                rf_harness::shadow::CoreMut::Snes(core) => core.step(Step::Frame, &mut Quiet),
+                rf_harness::shadow::CoreMut::Nes(_) => return,
+            };
+        }
+        println!(
+            "PINSN {k} (frame ran {first} instructions) cam {cam0:04x} -> {:04x} (followed {}) $22 overwritten at {changed:?}, now {:04x}",
+            p(&c.st, 0x11E), p(&c.st, 0x11E) != cam0, p(&c.st, 0x22)
+        );
+    }
+}

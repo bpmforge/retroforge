@@ -89,6 +89,12 @@ use rf_nes::{Cpu, NesBus, NesLoadError};
 /// here is cycle-bounded".
 const CYCLE_BUDGET: u64 = 4 * 29_781;
 
+/// Instructions into a frame at which [`EmuStepper::latch_and_advance_frame_poking`] writes its
+/// pokes again (W37-00d). Spread by factors of four so one of them falls between a game's early
+/// "previous position" copy and its camera update whatever the phase; ALttP's window is about
+/// instructions 1 to 700 of the frame.
+const REPOKE_AT: [u32; 4] = [8, 32, 128, 512];
+
 /// `CoreEvent` subscriptions the enhanced-camera pipeline
 /// (`rf_enhance::canvas`) needs on every frame, unconditionally — turned
 /// on once by [`EmuStepper::from_ines_bytes`] below and re-asserted by
@@ -2114,6 +2120,42 @@ impl EmuStepper {
     /// `run_until_next_frame`'s doc).
     pub fn latch_and_advance_frame(&mut self, frame: InputFrame, sink: &mut dyn CoreSink) -> u64 {
         self.latch_input(frame);
+        self.run_until_next_frame(sink)
+    }
+
+    /// [`Self::latch_and_advance_frame`], with `pokes` (bus address, value) written again at a few
+    /// points in the first instructions of the frame ([`REPOKE_AT`]).
+    ///
+    /// W37-00d: a poke made at the frame boundary lands in one fixed phase of the game's main loop.
+    /// A game that copies the player's word to a "previous" word early in its frame and scrolls the
+    /// camera by the difference (A Link to the Past since the W37-00b refresh stall moved that
+    /// phase) never sees a poked move: the copy takes the new value before the difference is read.
+    /// The same pokes repeated a little later in the frame land after the copy in whatever
+    /// phase a game has, and cost nothing where the game reads the word only once (the pokes are
+    /// the same values). Which game, which address and which instruction are not known here.
+    pub fn latch_and_advance_frame_poking(
+        &mut self,
+        frame: InputFrame,
+        sink: &mut dyn CoreSink,
+        pokes: &[(u32, u8)],
+    ) -> u64 {
+        self.latch_input(frame);
+        if !pokes.is_empty() {
+            let mut done = 0u32;
+            // Bounded: the slice points, each a fixed instruction count.
+            for &at in &REPOKE_AT {
+                for _ in done..at {
+                    if self.advance(rf_core_api::Step::Instruction, sink).frame_complete {
+                        // A frame boundary inside the first instructions: nothing more to slice.
+                        return 1;
+                    }
+                }
+                done = at;
+                for &(addr, value) in pokes {
+                    self.poke_ram(addr, value);
+                }
+            }
+        }
         self.run_until_next_frame(sink)
     }
 
