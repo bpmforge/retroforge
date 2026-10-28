@@ -616,6 +616,7 @@ fn super_metroid_finders_and_recipe() {
                 slots: 1,
                 stride: 2,
                 x_lo: Some(0),
+                x_hi: Some(1),
                 y: Some(py.wrapping_sub(px)),
                 grade: Grade::Candidate,
                 ..ObjectTable::default()
