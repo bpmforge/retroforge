@@ -5150,3 +5150,15 @@ stories, 10 decisions).
   work. Live margins not applied: SMW has no keeper widescreen rows yet
   (W38-04b); 7 or 2 of the 11 candidate rows match exactly per hack and
   would go live once promoted. Workspace: **3875 passing**, gate green.
+- **W37-00b — TAS movie desync** (2026-10-28, movie-desync thread; merged by
+  the Rebuild lab thread after a merge test on current main). Diffed
+  against a black-box reference emulator (run only, never read) and fixed
+  three timing faults: the HLE SPC IPL echoed uploaded bytes a loop late
+  (SMW now boots on the reference's frame), the S-CPU lacked WRAM refresh
+  (40 master cycles per line; it ran ~2.9% fast), and NES movie buttons
+  switched at our frame boundary instead of vblank. The SMB warps movie now
+  reaches the 8-4 ending; warpless reaches 4-2. Open: SMW diverges at
+  frame 1 326 (overworld load one frame early; lead is the SPC clock, 21 vs
+  ~20.95 master cycles per SPC cycle, unchecked) and SMB warpless gains a
+  lag frame at plan frame 28 322. Details: `docs/research/W37-00-movie-import.md`.
+  Workspace: **3879 passing** on the merge with main, gate green.

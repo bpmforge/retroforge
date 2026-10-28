@@ -521,6 +521,16 @@ impl SnesSystem {
         let dma_cycles = self.bus.service_dma();
         self.master_cycles += dma_cycles;
         self.bus.apu_debt += dma_cycles;
+        // Ticket W37-00b: the per-scanline WRAM refresh stalls the bus (the
+        // CPU and DMA) for `REFRESH_CYCLES` at `REFRESH_AT` of every line;
+        // charged to whatever instruction or transfer spans that point.
+        // Without it the S-CPU ran about 2.9% fast (40 of 1364 master
+        // cycles per line), enough that a multi-frame load finished a frame
+        // early against a reference emulator and input movies drifted.
+        let refresh =
+            crate::timing::refresh_stall(self.bus.timing.line_cycles, scaled + dma_cycles);
+        self.master_cycles += refresh;
+        self.bus.apu_debt += refresh;
         self.bus.catch_up_apu();
 
         // Advance the frame clock by everything this instruction spent,
@@ -538,12 +548,12 @@ impl SnesSystem {
             let overscan = self.bus.ppu.setini.overscan;
             self.bus.timing.set_overscan(overscan);
         }
-        let events = self
-            .bus
-            .timing
-            .advance(scaled + dma_cycles, auto_joypad, |dot, line| {
-                timer.matches(irq_mode, dot, line)
-            });
+        let events =
+            self.bus
+                .timing
+                .advance(scaled + dma_cycles + refresh, auto_joypad, |dot, line| {
+                    timer.matches(irq_mode, dot, line)
+                });
 
         if events.irq {
             self.bus.irq.fired = true;
