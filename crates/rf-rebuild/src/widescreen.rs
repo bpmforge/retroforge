@@ -60,7 +60,7 @@ use rf_core_api::{BusAccess, StepFacts, StepObserver};
 use crate::atlas::Atlas;
 use crate::dataregion::Resolver;
 use crate::hw::{classify, Hit, Platform};
-use crate::objtable::Trace;
+use crate::objtable::{Frame, Trace};
 use crate::recipe::{Grade, ObjectTable};
 
 /// Steps a RAM read stays attached to an immediate op that follows it.
@@ -942,15 +942,18 @@ pub enum XPage {
     Zero,
 }
 
-/// Find the page column of a table that has none: the offset (from the table's
-/// base) of `slots` bytes that, with the x column, put each live slot within
-/// `-512..1024` of the camera in nine slot-frames of ten, and do so clearly
-/// better than a zero page would; else [`XPage::Zero`] when a zero page fits.
-/// Needs the camera page. `None` when the table already has a page column, or
-/// nothing fits.
+/// Find the page column of a table that has none. A correct page makes a live
+/// slot's world x move smoothly from one frame to the next (a slot's x low byte
+/// wraps at 256; a wrong page then jumps by 256). So: of the pairs of
+/// consecutive frames in which a slot is live in both, the share whose world x
+/// moved by at most 40; a column that scores 97% and clearly beats a zero page
+/// with the most slots near the camera (within -300..600 px of it) and clearly
+/// more than a zero page has is the page; else a zero page that scores 97% is
+/// [`XPage::Zero`]; else `None`. Returns `None` when the table already has a
+/// page column or too little is live.
 #[must_use]
 pub fn find_x_page(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<XPage> {
-    let (x_lo, cam_hi) = (table.x_lo?, cam.hi?);
+    let x_lo = table.x_lo?;
     if table.x_hi.is_some() || table.stride == 0 {
         return None;
     }
@@ -963,62 +966,75 @@ pub fn find_x_page(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<XPage
             .wrapping_add(i.wrapping_mul(table.stride))
             .wrapping_sub(t.ram_base) as usize
     };
-    // Live slot-frames and how many a page column places near the camera.
-    let score = |page: Option<u32>| -> (u32, u32) {
-        let (mut live, mut ok) = (0u32, 0u32);
-        for f in &t.frames {
-            let cam_x = i32::from(f.ram[cam_hi]) * 256 + i32::from(f.ram[cam.lo]);
+    let alive = |f: &Frame, i: u32| match table.state {
+        Some(st) => at(st, i) < r && f.ram[at(st, i)] != 0,
+        None => true,
+    };
+    let world = |f: &Frame, i: u32, page: Option<u32>| -> Option<i32> {
+        let lo = at(x_lo, i);
+        if lo >= r {
+            return None;
+        }
+        let hi = match page {
+            Some(o) => {
+                let a = at(o, i);
+                if a >= r {
+                    return None;
+                }
+                i32::from(f.ram[a])
+            }
+            None => 0,
+        };
+        Some(hi * 256 + i32::from(f.ram[lo]))
+    };
+    // The camera's world x in a frame (0 without a page byte: then the range
+    // test below passes nothing and smoothness decides alone).
+    let cam_x = |f: &Frame| {
+        cam.hi
+            .map(|h| i32::from(f.ram[h]) * 256 + i32::from(f.ram[cam.lo]))
+    };
+    // (pairs, smooth pairs, pairs near the camera) for a page choice.
+    let score = |page: Option<u32>| -> Option<(u32, u32, u32)> {
+        let (mut pairs, mut smooth, mut near) = (0u32, 0u32, 0u32);
+        for w in t.frames.windows(2) {
             for i in 0..table.slots {
-                let lo = at(x_lo, i);
-                if lo >= r {
+                if !(alive(&w[0], i) && alive(&w[1], i)) {
                     continue;
                 }
-                let alive = match table.state {
-                    Some(st) => at(st, i) < r && f.ram[at(st, i)] != 0,
-                    None => true,
-                };
-                if !alive {
-                    continue;
-                }
-                let hi = match page {
-                    Some(o) if at(o, i) < r => i32::from(f.ram[at(o, i)]),
-                    Some(_) => continue,
-                    None => 0,
-                };
-                live += 1;
-                let rel = hi * 256 + i32::from(f.ram[lo]) - cam_x;
-                ok += u32::from((-512..1024).contains(&rel));
+                let (a, b) = (world(&w[0], i, page)?, world(&w[1], i, page)?);
+                pairs += 1;
+                smooth += u32::from((b - a).abs() <= 40);
+                // Live objects sit within a screen or so of the camera.
+                near += u32::from(cam_x(&w[1]).is_none_or(|c| (-300..600).contains(&(b - c))));
             }
         }
-        (live, ok)
+        Some((pairs, smooth, near))
     };
-    let (live, base_ok) = score(None);
-    if live < 50 {
+    let (pairs, zero, zero_near) = score(None)?;
+    if pairs < 50 {
         return None;
     }
-    // A zero page that explains the run needs no column; one that explains it
-    // only because the camera never got far is told from a real page by the
-    // columns below beating it.
-    let zero_fits = base_ok * 10 >= live * 9;
-    let mut best: Option<(u32, u32)> = None;
-    let span = r as u32;
-    for a in 0..span {
+    let margin = (pairs / 200).max(2);
+    // Most pairs near the camera, then the smoothest, then the lowest offset.
+    let mut best: Option<(u32, u32, u32)> = None;
+    for a in 0..r as u32 {
         let o = t.ram_base.wrapping_add(a).wrapping_sub(table.base);
-        if o == x_lo || at(o, table.slots.saturating_sub(1)) >= r {
+        if o == x_lo {
             continue;
         }
-        let (n, ok) = score(Some(o));
-        if n == live
-            && ok * 10 >= n * 9
-            && ok > base_ok + n / 10
-            && best.is_none_or(|(_, b)| ok > b)
-        {
-            best = Some((o, ok));
+        if let Some((n, sm, near)) = score(Some(o)) {
+            if n == pairs
+                && sm * 100 >= pairs * 97
+                && best.is_none_or(|(_, b, c)| (near, sm) > (b, c))
+            {
+                best = Some((o, near, sm));
+            }
         }
     }
     match best {
-        Some((o, _)) => Some(XPage::Column(o)),
-        None if zero_fits => Some(XPage::Zero),
+        Some((o, near, _)) if near >= zero_near + margin => Some(XPage::Column(o)),
+        _ if zero * 100 >= pairs * 97 => Some(XPage::Zero),
+        Some((o, _, _)) => Some(XPage::Column(o)),
         None => None,
     }
 }

@@ -193,6 +193,28 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
         None => {}
     }
     println!("x page {page:?}");
+    if let Some(XPage::Column(o)) = page {
+        let tb = table.base as usize - 0x7E_0000;
+        let agree = trace
+            .frames
+            .iter()
+            .filter(|f| (0..8).all(|i| f.ram[tb + o as usize + i] == f.ram[0x14E0 + i]))
+            .count();
+        let nz = trace
+            .frames
+            .iter()
+            .filter(|f| (0..8).any(|i| f.ram[tb + o as usize + i] != 0))
+            .count();
+        let real_nz = trace
+            .frames
+            .iter()
+            .filter(|f| (0..8).any(|i| f.ram[0x14E0 + i] != 0))
+            .count();
+        println!("dbg column agrees with 0x14e0 in {agree}/{} frames; column nonzero {nz}, 0x14e0 nonzero {real_nz}", trace.frames.len());
+    }
+    if std::env::var("PAGE_ONLY").is_ok() {
+        return;
+    }
     println!(
         "camera lo {:#x} hi {:?} (recipe camera_x row is 0x7e001a)",
         RAM_BASE + cam.lo as u32,
