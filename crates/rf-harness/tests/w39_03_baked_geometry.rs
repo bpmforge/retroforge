@@ -178,7 +178,7 @@ fn level_canvas(raw: &[u8], cam_x: u32, cam_y: u32) -> (Canvas, u32, (i64, i64))
     let mut canvas = Canvas::new();
     let mut in_level = 0;
     let mut cam_xs = (i64::MAX, i64::MIN);
-    for mask in session() {
+    for mask in session(raw) {
         // As `baseline` drives the session (the joypad latch, not the frame's input).
         core.system_mut().bus.joypads.ports[0] = mask;
         let mut sink = RowSink::default();
