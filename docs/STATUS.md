@@ -5188,3 +5188,15 @@ stories, 10 decisions).
   check (no patch row: it is a table byte outside any function); SMW's HUD is
   BG3 tiles, so there is no sprite anchor to trial. Workspace: **3888
   passing**, gate green.
+- **W38-05b — Zelda margins from neighbouring screens** (2026-10-28).
+  `rf_enhance::screen_margins` holds a learned atlas of overworld screens
+  (grid index = row*16 + col; +-1 sideways, +-16 vertically) and lays the
+  +-1 and +-2 neighbours beside the live screen at 32:9; an agreement check
+  gates out caves, which reuse the overworld index. The atlas is learned by
+  observation on a scratch core (never the live one): a test-side RAM write
+  puts Link at an edge, the game's own loader brings in the next screen, and
+  a frontier explorer walks the hops that work. 33 of 128 screens learned
+  (85 of 334 hops; walled edges need items); unknown neighbours fall back to
+  the VRAM margin. Live-frame agreement 1.000 over 121 frames; frame and RAM
+  hashes identical with margins on and off. The shell does not hold an atlas
+  yet. Workspace: **3894 passing**, gate green.
