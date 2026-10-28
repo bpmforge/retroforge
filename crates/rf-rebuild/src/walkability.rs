@@ -39,6 +39,8 @@ pub enum Verdict {
 #[derive(Debug, Clone, Default)]
 pub struct WalkTally {
     counts: BTreeMap<u32, (u32, u32)>,
+    /// Ids of each blocked cell, settled against the free cells by [`Self::totals`].
+    blocked_cells: Vec<Vec<u32>>,
 }
 
 impl WalkTally {
@@ -58,21 +60,53 @@ impl WalkTally {
         }
     }
 
+    /// One judged cell showing `ids` (a cell is several tiles; the game's solidity belongs
+    /// to the cell, not to each tile). A walkable cell counts for every id it shows. A
+    /// blocked cell counts only for the ids never seen in a walkable cell: those are what can
+    /// have made it solid, while a tile that also stands in open ground (grass beside a rock)
+    /// is no evidence.
+    pub fn record_cell(&mut self, ids: &[u32], blocked: bool) {
+        if blocked {
+            self.blocked_cells.push(ids.to_vec());
+        } else {
+            for &id in ids {
+                self.record(id, false);
+            }
+        }
+    }
+
+    /// The counts with blocked cells settled.
+    fn totals(&self) -> BTreeMap<u32, (u32, u32)> {
+        let mut t = self.counts.clone();
+        for cell in &self.blocked_cells {
+            for &id in cell {
+                let e = t.entry(id).or_default();
+                if e.1 == 0 {
+                    e.0 = e.0.saturating_add(1);
+                }
+            }
+        }
+        t
+    }
+
     /// `(blocked, free)` for `id`.
     #[must_use]
     pub fn counts(&self, id: u32) -> (u32, u32) {
-        self.counts.get(&id).copied().unwrap_or_default()
+        self.totals().get(&id).copied().unwrap_or_default()
     }
 
     /// Distinct ids with at least one push.
     #[must_use]
     pub fn ids(&self) -> usize {
-        self.counts.len()
+        self.totals().len()
     }
 
     #[must_use]
     pub fn verdict(&self, id: u32) -> Verdict {
-        let (b, f) = self.counts(id);
+        Self::judge(self.counts(id))
+    }
+
+    fn judge((b, f): (u32, u32)) -> Verdict {
         let n = b + f;
         if n < MIN_PROBES {
             Verdict::Unseen
@@ -88,10 +122,10 @@ impl WalkTally {
     /// Ids with `verdict`, ascending.
     #[must_use]
     pub fn ids_with(&self, verdict: Verdict) -> Vec<u32> {
-        self.counts
-            .keys()
-            .copied()
-            .filter(|&id| self.verdict(id) == verdict)
+        self.totals()
+            .into_iter()
+            .filter(|&(_, c)| Self::judge(c) == verdict)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -168,6 +202,19 @@ mod tests {
         assert_eq!(spans, vec![(10, 11), (13, 13)]);
         assert!(rows.iter().all(|r| r.class == TileClass::Solid));
         assert_eq!(t.ids_with(Verdict::Ambiguous), vec![20]);
+    }
+
+    #[test]
+    fn a_blocked_cell_only_blames_ids_never_seen_in_open_ground() {
+        let mut t = WalkTally::new();
+        // Grass (1) is open everywhere; the rock (2) only ever appears with grass in blocked cells.
+        for _ in 0..5 {
+            t.record_cell(&[1, 1, 1, 1], false);
+            t.record_cell(&[1, 2, 2, 2], true);
+        }
+        assert_eq!(t.verdict(1), Verdict::Walkable);
+        assert_eq!(t.verdict(2), Verdict::Solid);
+        assert_eq!(t.counts(1), (0, 20));
     }
 
     #[test]

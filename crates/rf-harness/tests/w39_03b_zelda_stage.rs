@@ -135,9 +135,12 @@ struct ProbeStats {
     blocked: u32,
     partial: u32,
     skipped: u32,
-    stuck: u32,
-    aborted: bool,
+    /// The cell whose push began a screen change (a door or stair): to be avoided.
+    door: Option<(i32, i32)>,
 }
+
+/// What a flood fill found out about one screen's 16 px cells.
+type Known = BTreeMap<(i32, i32), bool>;
 
 /// How far Link advanced along the push `pad`.
 fn advance(pad: u8, from: (u8, u8), to: (u8, u8)) -> i32 {
@@ -175,134 +178,107 @@ fn place(core: &mut NesCore, x: u8, y: u8) -> Option<(u8, u8)> {
     None
 }
 
-/// Probe every playfield cell of the current screen (at rest) from each side. Link's body
-/// is put on the neighbouring cell (`y + 1` so the sprite's top meets the cell's top) and
-/// the pad held towards the cell for [`PUSH_FRAMES`]; he advanced (>= 4 px along the push)
-/// -> walkable, did not (<= 1 px) -> blocked, between -> not counted. Each of the four
-/// tile ids shown in the target cell gets the verdict.
-fn probe_screen(core: &mut NesCore, tiles: &Tiles, tally: &mut WalkTally) -> ProbeStats {
+const DIRS: [(i32, i32, u8); 4] = [(1, 0, RIGHT), (-1, 0, LEFT), (0, 1, DOWN), (0, -1, UP)];
+
+fn cell_spot(c: i32, r: i32) -> Option<(u8, u8)> {
+    let x = u8::try_from(c * 16).ok()?;
+    let y = u8::try_from(FIELD_FROM as i32 + r * 16 + LINK_Y_OFF as i32).ok()?;
+    Some((x, y))
+}
+
+/// The tile ids shown in a 16 px cell (`None`: some tile was not drawn).
+fn cell_ids(tiles: &Tiles, c: i32, r: i32) -> Option<[u32; 4]> {
+    let mut out = [0u32; 4];
+    for (i, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+        let (tc, tr) = (c as usize * 2 + dx, FIELD_FROM / 8 + r as usize * 2 + dy);
+        out[i] = u32::from(tiles[tr * 32 + tc]?);
+    }
+    Some(out)
+}
+
+/// Flood-fill the cells Link can reach on the current screen (at rest), judging each cell
+/// beside a cell he stands on: Link is put on the known-free cell (test-side write of his x/y)
+/// and the pad held towards the neighbour for [`PUSH_FRAMES`]; he advanced (>= 4 px along the
+/// push) -> the neighbour is walkable and joins the fill, did not (<= 1 px) -> it is solid. A
+/// cell in `avoid` is not pushed at. If a push changes the screen (a door), the fill stops
+/// and reports the cell in `door`.
+fn probe_screen(
+    core: &mut NesCore,
+    tiles: &Tiles,
+    avoid: &[(i32, i32)],
+    known: &mut Known,
+) -> ProbeStats {
     let mut st = ProbeStats::default();
-    // Bottom rows first: a door or stair cell (usually in the cliffs) starts a transition
-    // that ends the probing of this screen, so the cells beside the cliffs are done by then.
-    let mut stuck_run = 0;
-    for row in (0..CELLS_H).rev() {
-        for col in 0..CELLS_W {
-            let ids: Vec<u32> = [(0, 0), (1, 0), (0, 1), (1, 1)]
-                .iter()
-                .filter_map(|&(dx, dy)| tiles[(FIELD_FROM / 8 + row * 2 + dy) * 32 + col * 2 + dx])
-                .map(u32::from)
-                .collect();
-            if ids.len() < 4 {
-                st.skipped += 1;
+    // Seed: the cell Link stands in (cells round to his position).
+    let (lx, ly) = (
+        i32::from(core.peek(PLAYER_X as u32)),
+        i32::from(core.peek(PLAYER_Y as u32)),
+    );
+    let seed = (
+        ((lx + 8) / 16).clamp(0, CELLS_W as i32 - 1),
+        ((ly - LINK_Y_OFF as i32 - FIELD_FROM as i32 + 8) / 16).clamp(0, CELLS_H as i32 - 1),
+    );
+    let mut queue = std::collections::VecDeque::from([seed]);
+    known.entry(seed).or_insert(true);
+    // Each pop removes one cell and a cell is queued once (it enters `known` first): bounded
+    // by the grid.
+    while let Some((c, r)) = queue.pop_front() {
+        for (dc, dr, pad) in DIRS {
+            let (nc, nr) = (c + dc, r + dr);
+            if !(0..CELLS_W as i32).contains(&nc)
+                || !(0..CELLS_H as i32).contains(&nr)
+                || known.contains_key(&(nc, nr))
+                || avoid.contains(&(nc, nr))
+            {
                 continue;
             }
-            for (dc, dr, pad) in [
-                (-1i32, 0i32, RIGHT),
-                (1, 0, LEFT),
-                (0, -1, DOWN),
-                (0, 1, UP),
-            ] {
-                let (sc, sr) = (col as i32 + dc, row as i32 + dr);
-                if !(0..CELLS_W as i32).contains(&sc) || !(0..CELLS_H as i32).contains(&sr) {
-                    continue;
-                }
-                let (x0, y0) = (
-                    sc as u32 * 16,
-                    FIELD_FROM as u32 + sr as u32 * 16 + LINK_Y_OFF,
-                );
-                let (Ok(x0), Ok(y0)) = (u8::try_from(x0), u8::try_from(y0)) else {
-                    continue;
-                };
-                let Some((bx, by)) = place(core, x0, y0) else {
-                    st.skipped += 1;
-                    continue;
-                };
-                for _ in 0..PUSH_FRAMES {
-                    frame(core, pad);
-                }
-                let (ax, ay) = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
-                // A door or stair cell swaps the screen: stop, the picture is not this one.
-                let now = tile_grid(core);
-                let diff = now
-                    .iter()
-                    .zip(tiles)
-                    .skip(FIELD_FROM / 8 * 32)
-                    .filter(|(a, b)| a != b)
-                    .count();
-                if std::env::var("PROBE_DEBUG").is_ok() {
-                    println!("cell ({col},{row}) from ({sc},{sr}): start ({bx},{by}) end ({ax},{ay}) diff {diff}");
-                }
-                if diff > 60 {
-                    if std::env::var("PROBE_DEBUG").is_ok() {
-                        let rows: std::collections::BTreeSet<usize> = (0..now.len())
-                            .filter(|&i| now[i] != tiles[i] && i >= FIELD_FROM / 8 * 32)
-                            .map(|i| i / 32)
-                            .collect();
-                        let sample: Vec<_> = (0..now.len())
-                            .filter(|&i| now[i] != tiles[i] && i >= FIELD_FROM / 8 * 32)
-                            .take(6)
-                            .map(|i| (i % 32, i / 32, tiles[i], now[i]))
-                            .collect();
-                        println!(
-                            "changed rows {rows:?} sample {sample:?} idx {:#x} scroll {}",
-                            core.peek(SCREEN_INDEX),
-                            core.peek(SCROLL_X)
-                        );
-                    }
-                    st.aborted = true;
-                    return st;
-                }
-                let adv = advance(pad, (bx, by), (ax, ay));
-                if adv >= 4 {
-                    stuck_run = 0;
+            let Some((x0, y0)) = cell_spot(c, r) else {
+                continue;
+            };
+            let Some(start) = place(core, x0, y0) else {
+                st.skipped += 1;
+                continue;
+            };
+            for _ in 0..PUSH_FRAMES {
+                frame(core, pad);
+            }
+            let end = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
+            // A door or stair cell swaps the screen: stop, the picture is not this one.
+            let now = tile_grid(core);
+            let diff = now
+                .iter()
+                .zip(tiles)
+                .skip(FIELD_FROM / 8 * 32)
+                .filter(|(a, b)| a != b)
+                .count();
+            if diff > 60 {
+                st.door = Some((nc, nr));
+                return st;
+            }
+            match advance(pad, start, end) {
+                a if a >= 4 => {
+                    known.insert((nc, nr), true);
+                    queue.push_back((nc, nr));
                     st.open += 1;
-                } else if adv <= 1 {
-                    // Blocked counts only if Link can walk the other way from the same spot
-                    // (a start inside a wall is stuck in every direction).
-                    let away = match pad {
-                        RIGHT => LEFT,
-                        LEFT => RIGHT,
-                        DOWN => UP,
-                        _ => DOWN,
-                    };
-                    let (ec, er) = (sc + dc, sr + dr);
-                    if !(0..CELLS_W as i32).contains(&ec) || !(0..CELLS_H as i32).contains(&er) {
-                        st.skipped += 1;
-                        continue;
-                    }
-                    if place(core, x0, y0).is_none() {
-                        st.skipped += 1;
-                        continue;
-                    }
-                    let (cx, cy) = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
-                    for _ in 0..PUSH_FRAMES {
-                        frame(core, away);
-                    }
-                    let (dx, dy) = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
-                    if advance(away, (cx, cy), (dx, dy)) < 4 {
-                        st.stuck += 1;
-                        stuck_run += 1;
-                        // Stuck in every direction for many cells: Link is frozen (a door's
-                        // transition), not standing in rock.
-                        if stuck_run >= 8 {
-                            st.aborted = true;
-                            return st;
-                        }
-                        continue;
-                    }
-                    stuck_run = 0;
+                }
+                a if a <= 1 => {
+                    known.insert((nc, nr), false);
                     st.blocked += 1;
-                } else {
-                    st.partial += 1;
-                    continue;
                 }
-                for &id in &ids {
-                    tally.record(id, adv <= 1);
-                }
+                _ => st.partial += 1,
             }
         }
     }
     st
+}
+
+/// Give every tile id of every judged cell its verdict.
+fn tally_known(tiles: &Tiles, known: &Known, tally: &mut WalkTally) {
+    for (&(c, r), &free) in known {
+        if let Some(ids) = cell_ids(tiles, c, r) {
+            tally.record_cell(&ids, !free);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -464,7 +440,7 @@ fn learn(raw: &[u8]) -> (Learned, usize, usize) {
     let mut arrivals: BTreeMap<(u8, i32), (u8, u8)> = BTreeMap::new();
     let mut want_back: BTreeSet<(u8, i32)> = BTreeSet::new();
     seen.insert(core.peek(SCREEN_INDEX));
-    frame(&mut core, 0);
+    // `scratch` ends on a frame run with tile capture on: its record is the base screen's.
     let (base_idx, base_tiles) = (core.peek(SCREEN_INDEX), tile_grid(&core));
     land(base_idx, base_tiles, Some(Vec::new()), &mut out);
     let (mut tried, mut moved) = (0usize, 0usize);
@@ -561,7 +537,9 @@ fn learn(raw: &[u8]) -> (Learned, usize, usize) {
             good.entry(at).or_default().push((edge, idx));
             want_back.insert((idx, -edge.delta()));
             store(&mut out.atlas, idx, img);
-            land(idx, tg, None, &mut out);
+            let mut route = out.routes.get(&at).cloned().unwrap_or_default();
+            route.push(edge);
+            land(idx, tg, Some(route), &mut out);
         }
     }
     println!(
@@ -575,8 +553,8 @@ fn learn(raw: &[u8]) -> (Learned, usize, usize) {
 fn report(l: &Learned) {
     for (idx, p) in &l.probed {
         println!(
-            "screen {idx:#04x}: {} open pushes, {} blocked, {} partial, {} skipped, {} stuck starts, aborted {}",
-            p.open, p.blocked, p.partial, p.skipped, p.stuck, p.aborted
+            "screen {idx:#04x}: {} open pushes, {} blocked, {} partial, {} skipped, door {:?}",
+            p.open, p.blocked, p.partial, p.skipped, p.door
         );
     }
     let t = &l.tally;
@@ -593,40 +571,10 @@ fn report(l: &Learned) {
     }
 }
 
-#[test]
-#[ignore = "needs The Legend of Zelda (USA) (RF_SCREENS_ROMS_DIR)"]
-fn calibrate_probe_on_the_base_screen() {
-    let Some(path) = rom_path() else {
-        println!("SKIP: {FILE} not found");
-        return;
-    };
-    let raw = load_rom(&path);
-    let mut core = scratch(&raw);
-    frame(&mut core, 0);
-    let tg = tile_grid(&core);
-    let mut tally = WalkTally::new();
-    let st = probe_screen(&mut core, &tg, &mut tally);
-    for pad in [RIGHT, LEFT] {
-        let got = place(&mut core, 112, 133);
-        let mut trace = Vec::new();
-        for _ in 0..12 {
-            frame(&mut core, pad);
-            trace.push(core.peek(PLAYER_X as u32));
-        }
-        println!("after probe push {pad} from {got:?}: {trace:?}");
-    }
-    report(&Learned {
-        atlas: ScreenAtlas::new(),
-        tiles: BTreeMap::new(),
-        tally,
-        probed: vec![(core.peek(SCREEN_INDEX), st)],
-        routes: BTreeMap::new(),
-    });
-}
-
-/// Visit the first `n` screens (nearest the start first) on a fresh scratch machine each:
-/// replay to the base, walk the screen's route with the explorer's hops, and probe it. A
-/// door's transition ends a probe and spoils the machine, so each screen gets its own.
+/// Visit the first `n` screens (nearest the start first), each on fresh scratch machines:
+/// replay to the base, walk the screen's route with the explorer's hops, and flood-fill it.
+/// A door's transition ends a fill and spoils the machine, so the cell is avoided and the
+/// screen redone (up to 4 times); what each fill judged is kept.
 fn probe_routes(raw: &[u8], l: &mut Learned, n: usize) {
     let mut order: Vec<(u8, Vec<Hop>)> = l.routes.iter().map(|(&i, r)| (i, r.clone())).collect();
     order.sort_by_key(|(i, r)| (r.len(), *i));
@@ -635,29 +583,42 @@ fn probe_routes(raw: &[u8], l: &mut Learned, n: usize) {
         if done >= n {
             break;
         }
-        let mut core = scratch(raw);
-        let mut tiles = None;
-        let mut arrived = true;
-        if route.is_empty() {
-            frame(&mut core, 0);
-            tiles = Some(tile_grid(&core));
-        }
-        for h in route {
-            match hop(&mut core, h, None) {
-                Some((_, _, _, tg)) => tiles = Some(tg),
-                None => {
-                    arrived = false;
+        let (mut avoid, mut known, mut tiles) = (Vec::new(), Known::new(), None);
+        let mut total = ProbeStats::default();
+        for _ in 0..4 {
+            let mut core = scratch(raw);
+            let mut tg = Some(tile_grid(&core));
+            for &h in &route {
+                tg = hop(&mut core, h, None).map(|(_, _, _, g)| g);
+                if tg.is_none() {
                     break;
                 }
             }
+            let Some(tg) = tg.filter(|_| core.peek(SCREEN_INDEX) == idx) else {
+                println!("screen {idx:#04x}: route did not reproduce");
+                break;
+            };
+            let st = probe_screen(&mut core, &tg, &avoid, &mut known);
+            total.open += st.open;
+            total.blocked += st.blocked;
+            total.partial += st.partial;
+            total.skipped += st.skipped;
+            tiles = Some(tg);
+            match st.door {
+                Some(d) => avoid.push(d),
+                None => break,
+            }
         }
-        let Some(tg) = tiles.filter(|_| arrived && core.peek(SCREEN_INDEX) == idx) else {
-            println!("screen {idx:#04x}: route did not reproduce, skipped");
-            continue;
-        };
-        let st = probe_screen(&mut core, &tg, &mut l.tally);
-        l.probed.push((idx, st));
-        done += 1;
+        if let Some(tg) = tiles {
+            total.door = avoid.first().copied();
+            println!(
+                "screen {idx:#04x}: {} cells judged, doors avoided {avoid:?}",
+                known.len()
+            );
+            tally_known(&tg, &known, &mut l.tally);
+            l.probed.push((idx, total));
+            done += 1;
+        }
     }
 }
 
@@ -707,7 +668,7 @@ fn zelda_stage_set_from_observed_walking() {
         learned.atlas.len(),
         learned.routes.len()
     );
-    probe_routes(&raw, &mut learned, 6);
+    probe_routes(&raw, &mut learned, 12);
     report(&learned);
     let rows = learned.tally.to_rows(
         "pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way",
@@ -789,4 +750,22 @@ fn zelda_stage_set_from_observed_walking() {
     let mut again = Cache::open(&root, 256 << 20).expect("reopen");
     assert_eq!(load_stage_set(&mut again, &sha).expect("loads"), Some(set));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "needs The Legend of Zelda (USA) (RF_SCREENS_ROMS_DIR)"]
+fn probe_the_base_screen_only() {
+    let Some(path) = rom_path() else {
+        return;
+    };
+    let raw = load_rom(&path);
+    let mut l = Learned {
+        atlas: ScreenAtlas::new(),
+        tiles: BTreeMap::new(),
+        tally: WalkTally::new(),
+        probed: Vec::new(),
+        routes: BTreeMap::from([(0x77, Vec::new())]),
+    };
+    probe_routes(&raw, &mut l, 1);
+    report(&l);
 }
