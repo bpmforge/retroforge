@@ -84,15 +84,6 @@ fn frame(core: &mut NesCore, pad: u8) -> Cap {
     cap
 }
 
-fn ram_print(core: &NesCore) -> u64 {
-    core.state_view()
-        .wram
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        })
-}
-
 /// A machine replayed to the idle overworld spot after the cave (the scratch machine).
 fn scratch(raw: &[u8]) -> NesCore {
     let mut core = NesCore::from_ines_bytes(raw).expect("loads");
@@ -122,9 +113,7 @@ fn tile_grid(core: &NesCore) -> Tiles {
     g
 }
 
-/// Playfield: 16 x 11 cells of 16 px below the status band.
-const CELLS_W: usize = 16;
-const CELLS_H: usize = 11;
+/// Frames the pad is held per push. The playfield is 16 x 11 cells of 16 px below the status band.
 const PUSH_FRAMES: usize = 14;
 /// Pushing 14 frames, the distribution of how far Link got is bimodal (observed, 7 screens):
 /// open ground gives 13..=21 px; a wall gives 0..=5, or about 8 where his body overlaps the
@@ -169,14 +158,6 @@ fn place(core: &mut NesCore, x: u8, y: u8) -> Option<(u8, u8)> {
         // Bounded: each pass runs a frame and stops after 3 equal positions or 20 frames.
         for _ in 0..20 {
             frame(core, 0);
-            if std::env::var("PROBE_TRACE").is_ok() {
-                println!(
-                    "    place f: ({}, {}) idx {:#x}",
-                    core.peek(PLAYER_X as u32),
-                    core.peek(PLAYER_Y as u32),
-                    core.peek(SCREEN_INDEX)
-                );
-            }
             let now = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
             still = if now == last { still + 1 } else { 0 };
             last = now;
@@ -265,15 +246,6 @@ fn probe_screen(
             };
             for _ in 0..PUSH_FRAMES {
                 frame(core, pad);
-                if std::env::var("PROBE_TRACE").is_ok() {
-                    println!(
-                        "    f: ({}, {}) idx {:#x} sx {}",
-                        core.peek(PLAYER_X as u32),
-                        core.peek(PLAYER_Y as u32),
-                        core.peek(SCREEN_INDEX),
-                        core.peek(SCROLL_X)
-                    );
-                }
             }
             let end = (core.peek(PLAYER_X as u32), core.peek(PLAYER_Y as u32));
             // A door or stair cell swaps the screen: stop, the picture is not this one.
@@ -285,31 +257,8 @@ fn probe_screen(
                 .filter(|(a, b)| a != b)
                 .count();
             if diff > 60 {
-                if std::env::var("PROBE_DEBUG").is_ok() {
-                    let ch: Vec<_> = (FIELD_FROM / 8 * 32..now.len())
-                        .filter(|&i| now[i] != tiles[i])
-                        .take(8)
-                        .map(|i| (i % 32, i / 32, tiles[i], now[i]))
-                        .collect();
-                    for (name, g) in [("before", tiles), ("after", &now)] {
-                        for r in 8..30 {
-                            let line: String = (0..32)
-                                .map(|c| {
-                                    g[r * 32 + c].map_or("..".to_string(), |t| format!("{t:02x}"))
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            println!("{name} {r:2}: {line}");
-                        }
-                    }
-                    println!("  diff {diff} start {start:?} end {end:?} sample {ch:?}");
-                }
                 st.door = Some((nc, nr));
                 return st;
-            }
-            if std::env::var("PROBE_HIST").is_ok() {
-                let ids = cell_ids(tiles, nc, nr);
-                println!("adv {pad} {} cell ({nc},{nr}) from ({c},{r}) start {start:?} end {end:?} ids {ids:x?}", advance(pad, start, end));
             }
             match advance(pad, start, end) {
                 a if a >= OPEN_PX => {
@@ -625,15 +574,6 @@ fn report(l: &Learned) {
         t.ids_with(Verdict::Ambiguous).len(),
         t.ids_with(Verdict::Unseen).len()
     );
-    if std::env::var("PROBE_DEBUG").is_ok() {
-        for id in t.all_ids() {
-            println!(
-                "  id {id:#04x}: blocked cells / free cells {:?} -> {:?}",
-                t.counts(id),
-                t.verdict(id)
-            );
-        }
-    }
     for id in t.ids_with(Verdict::Ambiguous) {
         println!("  ambiguous {id:#04x}: {:?}", t.counts(id));
     }
@@ -671,14 +611,6 @@ fn probe_routes(raw: &[u8], l: &mut Learned, n: usize) {
                 frame(&mut core, 0);
             }
             let tg = tile_grid(&core);
-            if std::env::var("PROBE_DEBUG").is_ok() {
-                println!(
-                    "  link at ({}, {}), idx {:#x}",
-                    core.peek(PLAYER_X as u32),
-                    core.peek(PLAYER_Y as u32),
-                    core.peek(SCREEN_INDEX)
-                );
-            }
             let st = probe_screen(&mut core, &tg, &avoid, &mut known);
             total.open += st.open;
             total.blocked += st.blocked;
@@ -831,74 +763,4 @@ fn zelda_stage_set_from_observed_walking() {
     let mut again = Cache::open(&root, 256 << 20).expect("reopen");
     assert_eq!(load_stage_set(&mut again, &sha).expect("loads"), Some(set));
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore = "debug: learn and save the routes"]
-fn learn_and_save_routes() {
-    let Some(path) = rom_path() else {
-        return;
-    };
-    let raw = load_rom(&path);
-    let (l, _, _) = learn(&raw);
-    std::fs::create_dir_all(OUT_DIR).expect("dir");
-    let text: String = l
-        .routes
-        .iter()
-        .map(|(i, r)| {
-            let hops: String = r
-                .iter()
-                .map(|h| match h {
-                    Hop::Left => 'L',
-                    Hop::Right => 'R',
-                    Hop::Up => 'U',
-                    Hop::Down => 'D',
-                })
-                .collect();
-            format!("{i} {hops}\n")
-        })
-        .collect();
-    std::fs::write(format!("{OUT_DIR}/routes.txt"), text).expect("writes");
-}
-
-#[test]
-#[ignore = "debug: probe screens from saved routes"]
-fn probe_saved_route() {
-    let Some(path) = rom_path() else {
-        return;
-    };
-    let raw = load_rom(&path);
-    let wants: Vec<u8> = std::env::var("SCREEN")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|v| v.parse().ok())
-        .collect();
-    let text = std::fs::read_to_string(format!("{OUT_DIR}/routes.txt")).expect("routes");
-    let mut l = Learned {
-        atlas: ScreenAtlas::new(),
-        tiles: BTreeMap::new(),
-        tally: WalkTally::new(),
-        probed: Vec::new(),
-        routes: BTreeMap::new(),
-    };
-    for line in text.lines() {
-        let (i, hops) = line.split_once(' ').unwrap_or((line, ""));
-        let idx: u8 = i.parse().expect("idx");
-        if !wants.contains(&idx) {
-            continue;
-        }
-        let r = hops
-            .chars()
-            .map(|c| match c {
-                'L' => Hop::Left,
-                'R' => Hop::Right,
-                'U' => Hop::Up,
-                _ => Hop::Down,
-            })
-            .collect();
-        l.routes.insert(idx, r);
-    }
-    println!("routes {:?}", l.routes);
-    probe_routes(&raw, &mut l, wants.len());
-    report(&l);
 }
