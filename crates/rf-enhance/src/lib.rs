@@ -34,6 +34,7 @@ pub mod object_roles;
 pub mod overlay;
 pub mod patch;
 pub mod persistence;
+pub mod presentation_margins;
 pub mod scene_graph;
 pub mod scene_identity;
 pub mod scene_tracker;
