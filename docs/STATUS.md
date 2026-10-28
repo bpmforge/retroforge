@@ -5060,3 +5060,13 @@ stories, 10 decisions).
   identical before and after a classed render). Contact sheet:
   `docs/screens/w39/contact-sheet.png` (synthetic scene). The app shell does
   not yet feed recipe classes in. Workspace: **3787 passing**, gate green.
+- **W39-06 — Local AI HD asset pass** (2026-10-28). `rf_ai::hd_pass` upscales
+  each unique tile once (keyed by indexed pixels plus palette); tiles of one
+  recipe object are composed and upscaled together so seams match, and a
+  shared tile takes the lowest object id. The set is one rf-cache entry per
+  ROM + model + settings (`rf_cache::hd_assets`). `rf_renderer::hd_tiles`
+  draws by hash lookup only; per-ROM toggle, off by default, and off means no
+  lookup and no model call. Tests use a stub upscaler; no model is wired in
+  and the app shell does not yet run the pass. Note: `rf_ai::pack::settings_hash`
+  hashes keys but not values (pre-existing). Workspace: **3803 passing**,
+  gate green.

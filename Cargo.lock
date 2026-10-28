@@ -3960,6 +3960,7 @@ name = "rf-ai"
 version = "0.9.1"
 dependencies = [
  "ort",
+ "rf-cache",
  "rf-rebuild",
  "serde",
  "serde_json",
@@ -4103,6 +4104,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-metal-fx",
  "pollster",
+ "rf-cache",
  "rf-core-api",
  "wgpu",
 ]
