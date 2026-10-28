@@ -23,6 +23,9 @@
 //! RF_W38_WRITE=1 cargo test --release -p rf-harness --test w38_08_mm2_recipe -- --ignored --nocapture
 //! ```
 
+// Frame-by-byte grids are indexed on both axes by design.
+#![allow(clippy::needless_range_loop)]
+
 mod w38_08_mm2_common;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +46,7 @@ use rf_rebuild::widescreen::{
 };
 use rf_rebuild::{Atlas, Grade, HookPoints, ObjectTable, RamMeaning, Recipe, RecipeFunction};
 use w38_08_mm2_common::{
-    forest_script, inputs_of, metal_script, load_rom, poke, rom_path, NullSink, FILE, PLAY_FROM,
+    forest_script, inputs_of, load_rom, metal_script, poke, rom_path, NullSink, FILE, PLAY_FROM,
 };
 
 const RECIPE_DIR: &str = "../../profiles/nes/mega-man-2";
@@ -692,7 +695,7 @@ fn mm2_finders_and_recipe() {
             format!("nmi_{}", (b'a' + k as u8) as char)
         };
         recipe.functions.push(function_row(&atlas, id, &name, both, &format!(
-            "observed: an atlas function the NMI vector targets in a recording (the NMI may be entered in several decode modes, so every one is hooked); {inside_nmi} of {} writes to the player and object bytes and the scroll happened while an NMI handler ran, {outside_nmi} outside it",
+            "observed: an atlas function the NMI vector targets in a recording (the NMI may be entered in several decode modes, so every one is hooked); {inside_nmi} of {} writes to the player and object bytes and the scroll happened while an NMI handler ran, {outside_nmi} outside it: the logic runs in the main thread and ends before the vblank, so a hook at this function's ENTRY sees the frame's final positions (99.99% of 8045 frames, measured by w38_08_mm2_lockstep) and one at its EXIT sees the same until the next logic runs",
             inside_nmi + outside_nmi)));
     }
     let player_fn = writers_of(pxa)
