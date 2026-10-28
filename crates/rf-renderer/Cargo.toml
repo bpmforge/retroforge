@@ -18,6 +18,8 @@ metalfx = ["dep:objc2", "dep:objc2-metal", "dep:objc2-metal-fx", "dep:objc2-foun
 
 [dependencies]
 rf-core-api = { path = "../rf-core-api" }
+# HdAssetSet / HdTile data types for the HD tile layer (ticket W39-06).
+rf-cache = { path = "../rf-cache" }
 wgpu = "29.0.4"
 # Blocks on the async wgpu 29 request_adapter/request_device/enumerate_adapters
 # futures with no executor of our own (see docs/TECH_STACK.md's "wgpu 29 API

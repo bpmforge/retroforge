@@ -112,6 +112,8 @@ fn wall_height_px(depth_eighths: u8, tile_px: f32) -> f32 {
 /// measured lighting model, a plain reading of "shaded" for a first cut.
 const SIDE_SHADE: f32 = 0.55;
 
+use crate::diorama_objects::{class_at, ClassStyle, ObjectClass};
+
 /// One sprite footprint to stand up as a billboard (§5: "sprites stand as
 /// billboards at their OAM footprint with a contact-shadow ellipse under
 /// each").
@@ -162,6 +164,18 @@ pub struct DioramaScene<'a> {
 /// layer buffer.
 #[must_use]
 pub fn build_vertices(scene: &DioramaScene<'_>) -> Vec<Vertex> {
+    build_vertices_classed(scene, &[])
+}
+
+/// [`build_vertices`] with a per-billboard [`ObjectClass`] (W39-02):
+/// `classes[i]` styles `scene.billboards[i]`; a billboard past the end of
+/// `classes` is [`ObjectClass::Unknown`]. With no classes (or all unknown)
+/// the result is bit-identical to the unclassed build.
+///
+/// # Panics
+/// Same length checks as [`build_vertices`].
+#[must_use]
+pub fn build_vertices_classed(scene: &DioramaScene<'_>, classes: &[ObjectClass]) -> Vec<Vertex> {
     let (w, h) = (scene.tiles_w as usize, scene.tiles_h as usize);
     if w == 0 || h == 0 {
         return Vec::new();
@@ -215,10 +229,11 @@ pub fn build_vertices(scene: &DioramaScene<'_>) -> Vec<Vertex> {
         }
         let row_z_lo = row as f32 * tile_px;
         let row_z_hi = row_z_lo + tile_px;
-        for b in scene.billboards {
+        for (i, b) in scene.billboards.iter().enumerate() {
             if b.center_z_px >= row_z_lo && b.center_z_px < row_z_hi {
-                push_shadow(&mut verts, *b);
-                push_billboard(&mut verts, *b);
+                let st = class_at(classes, i).style();
+                push_shadow(&mut verts, *b, &st);
+                push_billboard(&mut verts, *b, &st);
             }
         }
     }
@@ -227,14 +242,15 @@ pub fn build_vertices(scene: &DioramaScene<'_>) -> Vec<Vertex> {
     // since a boundary billboard is more likely walking toward the camera
     // than receding from it, and drawing it last (rather than dropping it)
     // is the fail-safe direction.
-    for b in scene.billboards {
+    for (i, b) in scene.billboards.iter().enumerate() {
         let in_any_row = (0..h).any(|row| {
             let lo = row as f32 * tile_px;
             b.center_z_px >= lo && b.center_z_px < lo + tile_px
         });
         if !in_any_row {
-            push_shadow(&mut verts, *b);
-            push_billboard(&mut verts, *b);
+            let st = class_at(classes, i).style();
+            push_shadow(&mut verts, *b, &st);
+            push_billboard(&mut verts, *b, &st);
         }
     }
 
@@ -258,6 +274,21 @@ pub fn build_vertices_oriented(
     scene: &DioramaScene<'_>,
     yaw_deg: f32,
     eye_xz: [f32; 2],
+) -> Vec<Vertex> {
+    build_vertices_oriented_classed(scene, yaw_deg, eye_xz, &[])
+}
+
+/// [`build_vertices_oriented`] with a per-billboard [`ObjectClass`] (W39-02);
+/// see [`build_vertices_classed`].
+///
+/// # Panics
+/// Same length checks as [`build_vertices`].
+#[must_use]
+pub fn build_vertices_oriented_classed(
+    scene: &DioramaScene<'_>,
+    yaw_deg: f32,
+    eye_xz: [f32; 2],
+    classes: &[ObjectClass],
 ) -> Vec<Vertex> {
     let (w, h) = (scene.tiles_w as usize, scene.tiles_h as usize);
     if w == 0 || h == 0 {
@@ -326,8 +357,9 @@ pub fn build_vertices_oriented(
             }
             Item::Sprite(i) => {
                 let b = scene.billboards[i];
-                push_shadow(&mut verts, b);
-                push_billboard_facing(&mut verts, b, yaw_deg);
+                let st = class_at(classes, i).style();
+                push_shadow(&mut verts, b, &st);
+                push_billboard_facing(&mut verts, b, yaw_deg, &st);
             }
         }
     }
@@ -338,15 +370,15 @@ pub fn build_vertices_oriented(
 /// either side of the footprint centre along the screen-right direction
 /// `(cos yaw, -sin yaw)` (world X at yaw 0, matching [`push_billboard`]),
 /// and the top edge is directly above them.
-fn push_billboard_facing(out: &mut Vec<Vertex>, b: Billboard, yaw_deg: f32) {
+fn push_billboard_facing(out: &mut Vec<Vertex>, b: Billboard, yaw_deg: f32, st: &ClassStyle) {
     let yaw = yaw_deg.to_radians();
     let (rx, rz) = (yaw.cos() * b.width_px / 2.0, yaw.sin() * b.width_px / 2.0);
     push_quad_vertical_xz(
         out,
-        [b.center_x_px - rx, 0.0, b.center_z_px + rz],
-        [b.center_x_px + rx, 0.0, b.center_z_px - rz],
-        0.0,
-        b.height_px,
+        [b.center_x_px - rx, 0.0, b.center_z_px + rz + st.z_bias_px],
+        [b.center_x_px + rx, 0.0, b.center_z_px - rz + st.z_bias_px],
+        st.lift_px,
+        st.lift_px + b.height_px,
         b.uv,
         [1.0, 1.0, 1.0, 1.0],
         kind::SPRITE,
@@ -492,7 +524,10 @@ fn box_top_uv(row: usize, col: usize, tiles_w: usize, tiles_h: usize) -> [f32; 4
     [u0, v0, u1, v1]
 }
 
-fn push_shadow(out: &mut Vec<Vertex>, b: Billboard) {
+fn push_shadow(out: &mut Vec<Vertex>, b: Billboard, st: &ClassStyle) {
+    if !st.casts_shadow {
+        return;
+    }
     // A flat quad on the ground, slightly larger than the billboard's own
     // footprint width so the shadow reads as "under" rather than
     // "exactly the same size as" the sprite -- 1.3x is an
@@ -500,20 +535,20 @@ fn push_shadow(out: &mut Vec<Vertex>, b: Billboard) {
     // precedent), not a measured light-source calculation (no light
     // source is modelled at all; this is a contact-shadow convention, not
     // a shadow map).
-    let half_w = b.width_px * 0.65;
-    let half_d = b.width_px * 0.35;
+    let half_w = b.width_px * 0.65 * st.shadow_scale;
+    let half_d = b.width_px * 0.35 * st.shadow_scale;
     push_quad_xz(
         out,
         [b.center_x_px - half_w, b.center_z_px - half_d],
         [half_w * 2.0, half_d * 2.0],
         0.05, // a hair above the ground plane to avoid z-fighting-by-alpha-order with it
         [0.0, 0.0, 1.0, 1.0],
-        [0.0, 0.0, 0.0, 0.45],
+        [0.0, 0.0, 0.0, st.effective_shadow_alpha()],
         kind::SHADOW,
     );
 }
 
-fn push_billboard(out: &mut Vec<Vertex>, b: Billboard) {
+fn push_billboard(out: &mut Vec<Vertex>, b: Billboard, st: &ClassStyle) {
     // Upright: the quad spans X at the footprint's centre and rises in Y,
     // flat against a single Z (input rules note: "input and hit-testing
     // stay strictly 2D", so the billboard has no rotation to face the
@@ -521,10 +556,18 @@ fn push_billboard(out: &mut Vec<Vertex>, b: Billboard) {
     // §5's "only the camera pitches").
     push_quad_vertical_xz(
         out,
-        [b.center_x_px - b.width_px / 2.0, 0.0, b.center_z_px],
-        [b.center_x_px + b.width_px / 2.0, 0.0, b.center_z_px],
-        0.0,
-        b.height_px,
+        [
+            b.center_x_px - b.width_px / 2.0,
+            0.0,
+            b.center_z_px + st.z_bias_px,
+        ],
+        [
+            b.center_x_px + b.width_px / 2.0,
+            0.0,
+            b.center_z_px + st.z_bias_px,
+        ],
+        st.lift_px,
+        st.lift_px + b.height_px,
         b.uv,
         [1.0, 1.0, 1.0, 1.0],
         kind::SPRITE,

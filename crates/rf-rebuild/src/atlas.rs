@@ -30,6 +30,10 @@ pub const ATLAS_FORMAT_VERSION: u32 = 5;
 pub const CACHE_PRODUCER: &str = "rf-rebuild";
 /// `rf-cache` key `asset_hash` component: one atlas per ROM.
 pub const CACHE_ASSET: &str = "code-atlas";
+/// `rf-cache` key `asset_hash` component of the SA-1 coprocessor's own atlas
+/// (ticket W40-03): a second 65816 runs different code from the same ROM, so
+/// it is keyed apart from [`CACHE_ASSET`]. Same format, same settings name.
+pub const CACHE_ASSET_SA1: &str = "code-atlas-sa1";
 /// `rf-cache` key `settings_hash` component, `-vN` like rf-cache's other
 /// users (e.g. `canvas-chunk-v3`). v5 (W37-02): the atlas shape is the same
 /// as v4, but v4 atlases of Super FX, S-DD1 and LoROM carts could hold

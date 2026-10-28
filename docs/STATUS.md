@@ -5030,3 +5030,64 @@ stories, 10 decisions).
   slot counts are W38-02b. The gate caught an i8 overflow in the binding
   check (debug panic, false match in release), fixed in e80070a; rf-rebuild
   and rf-harness rerun 292/292 after it. Workspace: **3755 passing**.
+- **W39-00 — Plugin surface** (2026-10-28). `plugin.toml` declares
+  `kind = "logic" | "fact" | "render"` (`rf_plugin_sdk::surface`), with
+  capabilities limited per kind. Logic plugins see `rf.mode()` and must do
+  nothing unless Enhanced; `enable` refuses one without an Original-mode
+  proof from shadow lockstep (>= 30 frames, no divergence). Fact plugins merge
+  rows through `rf_rebuild::merge_facts` (clamped to Candidate, never demote
+  trusted rows, `[[patch]]` refused); render plugins turn recipe facts into
+  overlay draws. Samples in `plugins/samples/` (made-up engine). The sample
+  logic plugin runs 60 Original-mode frames clean; with its mode check removed
+  it diverges at frame 1 and is refused. App-shell wiring of the proof at
+  enable time is not done. Workspace: **3767 passing**.
+- **W39-03 — Baked level geometry** (2026-10-28). `rf_enhance::baked`
+  bakes each screen into a cell grid (Unknown / Open / Solid / OneWay, with
+  source and height) plus merged extruded wall quads; collision-fact id
+  ranges decide first, painted heights fill screens without rules, unseen
+  cells stay Unknown. One rf-cache entry per ROM sha256 beside the scout
+  scene entries (zstd, CRC, bounded decode, ids and counts only). SMW: 3
+  rule ranges from the W38-03 finder, 39 solid/one-way cells, 48 quads,
+  368 bytes, reloads equal. Zelda bakes empty (no collision recipe or
+  painted heights yet) and the scout canvas is not yet wired into the ROM
+  runs: both are W39-03b. Workspace: **3771 passing**, gate green.
+- **W39-02 — Object-aware Diorama** (2026-10-28). `rf_renderer::diorama_objects`
+  gives each object class (player, enemy, projectile, pickup, scenery) its
+  own lift, depth bias and shadow; Unknown and Enemy keep the W34 numbers, so
+  with no recipe the output is bit-identical (tested for the top-down,
+  oriented and side builders). `rf_enhance::object_roles` maps recipe object
+  slots to roles as plain data. Original mode unchanged (palette pass bytes
+  identical before and after a classed render). Contact sheet:
+  `docs/screens/w39/contact-sheet.png` (synthetic scene). The app shell does
+  not yet feed recipe classes in. Workspace: **3787 passing**, gate green.
+- **W39-06 — Local AI HD asset pass** (2026-10-28). `rf_ai::hd_pass` upscales
+  each unique tile once (keyed by indexed pixels plus palette); tiles of one
+  recipe object are composed and upscaled together so seams match, and a
+  shared tile takes the lowest object id. The set is one rf-cache entry per
+  ROM + model + settings (`rf_cache::hd_assets`). `rf_renderer::hd_tiles`
+  draws by hash lookup only; per-ROM toggle, off by default, and off means no
+  lookup and no model call. Tests use a stub upscaler; no model is wired in
+  and the app shell does not yet run the pass. Note: `rf_ai::pack::settings_hash`
+  hashes keys but not values (pre-existing). Workspace: **3803 passing**,
+  gate green.
+- **W40-02 — Local naming model** (2026-10-28). `rf_ai::local::LocalProvider`
+  talks to an OpenAI-compatible server on loopback only (default LM Studio
+  at `http://localhost:1234/v1`, `qwen/qwen3-8b`) with the cloud backend's
+  prompt, schema and output filtering; `localhttp.rs` is a std-only client
+  that refuses non-loopback hosts. Proposals are sourced `ai:local:<model>`
+  and graded candidate. Names stay labels: the atlas bytes and recipe
+  resolution are identical with naming off, cloud or local. A real run
+  against LM Studio named three synthetic functions offline in 2.45 s. The
+  `[ai_naming] backend` setting and its UI are not wired into the shell yet.
+  Workspace: **3800 passing** before main's W39-02/W39-06 merge; after it,
+  the rf-ai lib conflict (module list) was resolved and rf-ai rerun 99/99.
+- **W40-03 — SA-1 lifting** (2026-10-28). The SA-1's 65816 is recorded and
+  executed as a second core: own coverage log and observed-only atlas
+  (`CACHE_ASSET_SA1`), fetches through the SA-1's live bank map, I-RAM and
+  BW-RAM code counted as RAM fallback, reset/NMI/IRQ entries noted. SNES
+  lockstep now compares SA-1 registers, I-RAM and BW-RAM. Kirby's Dream
+  Land 3 on the generic tier, both CPUs lifted: zero divergence over two
+  play scripts (3420 and 3452 frames; S-CPU ~39 M and SA-1 ~122 M
+  instructions observed). SA-1 interrupts covered only by a synthetic test
+  (Kirby 3 polls). Super Mario RPG not run: the menu script stalls on a
+  static screen. Workspace: **3823 passing**, gate green.
