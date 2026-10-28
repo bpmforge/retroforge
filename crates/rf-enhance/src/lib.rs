@@ -10,6 +10,7 @@
 //! actual `EnhancementRuntime`) and why.
 
 pub mod atmosphere;
+pub mod baked;
 pub mod bus;
 pub mod camera;
 pub mod camera_finder;
@@ -29,6 +30,7 @@ pub mod loading;
 pub mod margin_draw;
 pub mod margin_sprites;
 pub mod mods;
+pub mod object_roles;
 pub mod overlay;
 pub mod patch;
 pub mod persistence;

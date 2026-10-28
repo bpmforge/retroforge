@@ -12,8 +12,9 @@
 //! interrupt moves it) and the handler a NMI/IRQ reached is known only once
 //! the dispatch ran.
 //!
-//! The SA-1 and Super FX are separate CPUs with their own steppers; their
-//! code is never recorded. What *is* counted is the main CPU fetching from
+//! The SA-1 and Super FX are separate CPUs with their own steppers. The SA-1's
+//! 65816 has its own recorder and atlas (ticket W40-03,
+//! [`crate::rebuild::sa1`]); the Super FX's code is never recorded. What *is* counted is the main CPU fetching from
 //! memory a coprocessor owns ([`CoverageLog::coproc_exec`]), since such code
 //! cannot be in the ROM atlas.
 //!
