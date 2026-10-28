@@ -620,14 +620,23 @@ impl SnesCore {
                 sink.line_registers(y, &self.system.bus.ppu.line_registers(y));
             }
             // Ticket W7-21: the sub-screen, before the line it blends
-            // into, on lines whose colour math can act. A true-hires line
-            // already carries its sub-screen as half-dots of `line`, and
-            // math on hires is not modelled.
+            // into, on lines whose colour math can act.
             // Ticket W30-03 follow-up: a widescreen line carries its
             // sub-screen at the same width (it is not hires, even when it
             // is 512 dots long), or colour math silently drops on it.
-            let wide_line = width > crate::ppu::WIDTH && !self.system.bus.ppu.line_hires(y);
-            if (line.pixels.len() == crate::ppu::WIDTH || wide_line)
+            let hires_line = self.system.bus.ppu.line_hires(y);
+            let wide_line = width > crate::ppu::WIDTH && !hires_line;
+            if hires_line
+                && line.pixels.len() == 2 * crate::ppu::WIDTH
+                && self.system.bus.ppu.line_color_math_active(y)
+            {
+                // A hires line carries its sub-screen as the even
+                // half-dots of `line`; math acts on both halves, so the
+                // sink gets one entry per half-dot.
+                let (sub, fixed_color) = self.system.bus.ppu.render_sub_scanline(y);
+                let halves = crate::ppu::Ppu::hires_sub_pixels(&line.pixels, &sub);
+                sink.sub_scanline(y, &halves, fixed_color);
+            } else if (line.pixels.len() == crate::ppu::WIDTH || wide_line)
                 && self.system.bus.ppu.line_color_math_active(y)
             {
                 let (sub, fixed_color) = if wide_line {

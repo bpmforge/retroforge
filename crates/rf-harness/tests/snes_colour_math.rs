@@ -13,6 +13,11 @@ use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, OverlayPixel, PpuPixel, Ste
 use rf_snes::core::SnesCore;
 
 fn rom() -> Vec<u8> {
+    rom_with(&[])
+}
+
+/// [`rom`] with `setup` (register writes) run before the program's own.
+fn rom_with(setup: &[u8]) -> Vec<u8> {
     let mut rom = vec![0u8; 0x8000];
     let code = [
         0xA9, 0x0F, 0x8D, 0x00, 0x21, // LDA #$0F, STA $2100: screen on, full brightness
@@ -20,7 +25,8 @@ fn rom() -> Vec<u8> {
         0xA9, 0x3F, 0x8D, 0x32, 0x21, // LDA #$3F, STA $2132: fixed colour red 31
         0x80, 0xFE, // BRA *
     ];
-    rom[..code.len()].copy_from_slice(&code);
+    rom[..setup.len()].copy_from_slice(setup);
+    rom[setup.len()..setup.len() + code.len()].copy_from_slice(&code);
     for (i, b) in b"RF COLOUR MATH TEST  ".iter().enumerate() {
         rom[0x7FC0 + i] = *b;
     }
@@ -81,5 +87,36 @@ fn backdrop_colour_math_adds_the_fixed_colour_to_every_pixel() {
         .all(|op| *op == rf_core_api::ColorMathOp::Add));
     for (i, px) in sink.fb.rgba().chunks_exact(4).enumerate() {
         assert_eq!(px, [255, 0, 0, 255], "pixel {i}: black + red 31");
+    }
+}
+
+/// Hires lines take colour math on BOTH half-dots (fullsnes "Hires and
+/// Pseudo 3-Layer Math"). Before this, a hires line sent no sub-screen at
+/// all, so the same all-backdrop fade stayed black on a 512-dot line.
+#[test]
+fn hires_lines_add_the_fixed_colour_to_both_half_dots() {
+    let setups: [(&str, &[u8]); 2] = [
+        // LDA #$08, STA $2133: pseudo-hires
+        ("pseudo-hires", &[0xA9, 0x08, 0x8D, 0x33, 0x21]),
+        // LDA #$05, STA $2105: BG mode 5
+        ("mode 5", &[0xA9, 0x05, 0x8D, 0x05, 0x21]),
+    ];
+    for (what, setup) in setups {
+        let mut core = SnesCore::load(&rom_with(setup)).expect("loads");
+        let mut sink = Counting {
+            fb: rf_renderer::FrameBuffer::with_size(512, 224),
+            subs: 0,
+            ops: Vec::new(),
+        };
+        for _ in 0..4 {
+            sink.subs = 0;
+            sink.ops.clear();
+            core.step(Step::Frame, &mut sink);
+        }
+        assert_eq!(sink.subs, 224, "{what}: one sub-screen per visible line");
+        assert_eq!(sink.ops.len(), 224 * 512, "{what}: one entry per half-dot");
+        for (i, px) in sink.fb.rgba().chunks_exact(4).enumerate() {
+            assert_eq!(px, [255, 0, 0, 255], "{what}: half-dot {i}: black + red 31");
+        }
     }
 }

@@ -124,6 +124,29 @@ impl LinePalette {
     pub fn rgb(&self, index: u8) -> [u8; 3] {
         bgr555_to_rgb(self.words[usize::from(index)], self.brightness)
     }
+
+    /// Ticket W7-21: main pixel `index` after colour math with its
+    /// sub-screen entry `sub` (`fixed_color` being the line's `$2132`), in
+    /// BGR555 and before brightness — the one rule every RGB sink applies.
+    #[must_use]
+    pub fn rgb_with_math(
+        &self,
+        index: u8,
+        sub: &rf_core_api::SubPixel,
+        fixed_color: u16,
+    ) -> [u8; 3] {
+        let main = if sub.main_black {
+            0
+        } else {
+            self.words[usize::from(index)]
+        };
+        let sub_word = if sub.fixed {
+            fixed_color
+        } else {
+            self.words[usize::from(sub.palette_index)]
+        };
+        bgr555_to_rgb(color_math_bgr555(main, sub_word, sub.op), self.brightness)
+    }
 }
 
 pub use rf_core_api::color::{bgr555_to_rgb, color_math_bgr555};

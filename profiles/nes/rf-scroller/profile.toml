@@ -307,6 +307,13 @@ mode = "default"
 exclude_oam = [14]
 blink_periods = [16]
 
+# **This loop is never run** (checked 2026-10-27): $C000-$FFF9 of this
+# 32 KiB NROM is fill, not code (CODE ends at $91D6 in build/rf-scroller.map;
+# the reset vector is $8000), so the PC never reaches it, and the vblank wait
+# the game does run (main.c `main_loop`) waits every frame, not on loading.
+# The row stays because it is what offers the "Loading fast-forward" switch
+# for tests/loading_fast_forward.rs; the core half is tested on a synthetic
+# ROM (core_thread::tests::a_matching_wait_loop_runs_unpaced_and_is_reported).
 [loading]
 [[loading.wait_loops]]
 pc = 0xC000

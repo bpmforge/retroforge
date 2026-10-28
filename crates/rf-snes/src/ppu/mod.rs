@@ -1369,6 +1369,59 @@ impl Ppu {
         (pixels, fixed)
     }
 
+    /// The colour-math sub-screen for a 512-dot HIRES line: one
+    /// [`rf_core_api::SubPixel`] per half-dot of `line` (the interleaved
+    /// output of [`Self::render_scanline_hires`]), built from the 256-dot
+    /// `sub` that [`Self::render_sub_scanline`] returned for the same row.
+    ///
+    /// fullsnes "Hires and Pseudo 3-Layer Math": in hires "the main/sub
+    /// screen pixels are rendered as half-pixels of the high-resolution
+    /// image", and colour math still acts on both. Per half-dot (bsnes
+    /// `sfc/ppu/screen.cpp`, `Screen::above`/`Screen::below(hires)`, read
+    /// for behaviour only):
+    ///
+    /// * the RIGHT (main) half-dot is the 256-dot rule unchanged: the
+    ///   main pixel blended with the sub pixel or the fixed colour;
+    /// * the LEFT (sub) half-dot is the sub pixel blended the other way
+    ///   round, with the MAIN pixel (when `$2130` bit 1 picks the
+    ///   sub-screen and it is opaque) or the fixed colour, under the same
+    ///   operation, which the main screen's layer decided for the dot.
+    ///   Force Main Screen Black zeroes the main colour: with no math the
+    ///   left half-dot is black too; with math, `sub + 0` leaves it as is.
+    ///
+    /// Not modelled (recorded): bsnes reads the left half's flags from the
+    /// previous dot's main-screen decision, a one-dot lag this applies at
+    /// the same dot.
+    #[must_use]
+    pub fn hires_sub_pixels(
+        line: &[PpuPixel],
+        sub: &[rf_core_api::SubPixel],
+    ) -> Vec<rf_core_api::SubPixel> {
+        use rf_core_api::{ColorMathOp, SubPixel};
+        let mut out = Vec::with_capacity(sub.len() * 2);
+        for (x, sp) in sub.iter().enumerate() {
+            let Some(main) = line.get(x * 2 + 1) else {
+                break;
+            };
+            let left = if sp.main_black {
+                SubPixel {
+                    op: ColorMathOp::None,
+                    main_black: sp.op == ColorMathOp::None,
+                    ..*sp
+                }
+            } else {
+                SubPixel {
+                    palette_index: main.palette_index,
+                    layer: main.layer,
+                    ..*sp
+                }
+            };
+            out.push(left);
+            out.push(*sp);
+        }
+        out
+    }
+
     /// Compose one visible scanline.
     ///
     /// Returns accuracy-exact pixels plus the overlay channel; see the

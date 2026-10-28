@@ -1582,6 +1582,8 @@ pub struct RetroForgeApp {
     snes_capture_active: bool,
     /// Ticket W34-01: whether `SetTileGridCapture(true)` was last sent.
     tile_grid_capture_active: bool,
+    /// Whether `SetCompareCapture(true)` was last sent.
+    compare_capture_active: bool,
     /// Ticket W4-10a: the UI-thread half of the trace transport, present
     /// only while a capture is armed.
     trace_drain: Option<crate::trace_capture::TraceDrain>,
@@ -2176,6 +2178,7 @@ impl RetroForgeApp {
             event_subscription_active: false,
             snes_capture_active: false,
             tile_grid_capture_active: false,
+            compare_capture_active: false,
             trace_drain: None,
             trace_writer: None,
             show_states: false,
@@ -4597,6 +4600,7 @@ impl RetroForgeApp {
                 self.debug_panels.data.cpu_regs = rf_core_api::CpuRegs::None;
                 self.snes_capture_active = false;
                 self.tile_grid_capture_active = false;
+                self.compare_capture_active = false;
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
                 // A fresh `EmuStepper` (inside `core_thread::spawn` below)
@@ -4844,6 +4848,18 @@ impl RetroForgeApp {
         } else {
             None
         };
+        // The "original" keeps colour math: the bundle's sub-screen, kept while it may be shown.
+        let latest_bundle_sub = if want_compare_buffers {
+            core.frame_bundle.latest().sub.clone()
+        } else {
+            Vec::new()
+        };
+        // Only an SNES core has a sub-screen to keep.
+        let want_compare_capture = want_compare_buffers && self.console_label == "SNES";
+        if want_compare_capture != self.compare_capture_active {
+            self.compare_capture_active = want_compare_capture;
+            self.send_command(CoreCommand::SetCompareCapture(want_compare_capture));
+        }
         if crashed {
             // FM-01's recovery row is "Reload ROM / load last state" — the
             // core thread has already halted for good (`run_guarded_loop`
@@ -4925,11 +4941,12 @@ impl RetroForgeApp {
                 Some(CompareBuffers {
                     // Ticket W7-20: in the frame's own palette, so an
                     // SNES "original" is not in NES colours.
-                    original: rf_renderer::original_rgba_from_indexed_with(
+                    original: rf_renderer::original_rgba_with_math(
                         &video,
                         w,
                         h,
                         &msg.line_palettes,
+                        &latest_bundle_sub,
                     ),
                     enhanced: msg.rgba.clone(),
                     width: w,

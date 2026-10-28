@@ -86,8 +86,9 @@ pub struct FrameBundle {
     /// [`CoreSink::sub_scanline`] delivered it (the console's own dots
     /// only). `height` entries, `None` on a line with no colour math, or
     /// EMPTY when the builder was not asked to capture
-    /// ([`FrameBundleBuilder::set_capture_wide`]): Accuracy Mode never sets
-    /// it and nothing reads it there. Not part of the accuracy-exact stream:
+    /// ([`FrameBundleBuilder::set_capture_wide`]): set for widescreen, the
+    /// tile grids, and the compare/peek "original" (which blends with it).
+    /// Not part of the accuracy-exact stream:
     /// [`Self::video`] (and any hash over it) is unaffected.
     pub sub: Vec<Option<SubLine>>,
     /// Ticket W33-01: per visible line, the registers it was drawn with
