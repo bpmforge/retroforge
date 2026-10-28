@@ -1351,6 +1351,7 @@ impl Sa1State {
         rom: &[u8],
         rom_contended: bool,
         bwram_contended: bool,
+        obs: &mut crate::rebuild::sa1::Sa1Obs,
     ) -> Result<u64, u8> {
         if self.regs.sa1_reset_asserted() {
             self.booted = false;
@@ -1361,6 +1362,10 @@ impl Sa1State {
             self.cpu.pbr = 0;
             self.cpu.pc = self.regs.sa1_reset_vector();
             self.booted = true;
+            if obs.active() {
+                // Ticket W40-03: every release of Reset is a Reset entry.
+                obs.note_reset(&self.cpu, &self.banks());
+            }
         }
         if self.regs.sa1_wait_asserted() {
             return Ok(0);
@@ -1381,17 +1386,36 @@ impl Sa1State {
         // edge-triggered and single-shot; IRQ is level and re-checked
         // every step (masked by the CPU's own I flag, same as the SNES
         // CPU's `bus.irq.fired`).
+        // Ticket W40-03: the recorder/executor halves (peek-only, one
+        // `Option::is_some` pair per instruction while both are off).
+        let board = self.board;
+        let watching = obs.active();
+        let resume = watching.then(|| crate::rebuild::sa1::Sa1Obs::resume_point(&self.cpu));
+        let mut entered = None;
         if bus.regs.take_sa1_nmi_edge() && bus.regs.sa1_nmi_enabled() {
             let vector = bus.regs.sa1_nmi_vector();
             self.cpu.interrupt_to_vector(&mut bus, vector);
+            entered = Some(rf_core_api::InterruptKind::Nmi);
         } else if bus.regs.sa1_irq_pending() && !self.cpu.flag(crate::cpu::flags::I) {
             let vector = bus.regs.sa1_irq_vector();
             self.cpu.interrupt_to_vector(&mut bus, vector);
+            entered = Some(rf_core_api::InterruptKind::Irq);
         }
+        if let (Some(kind), Some(resume)) = (entered, resume) {
+            obs.note_interrupt(kind, resume, &self.cpu, &bus, board);
+        }
+        let observing = if watching {
+            obs.before(&self.cpu, &bus, board)
+        } else {
+            None
+        };
 
         let was_waiting = self.cpu.stopped && self.cpu.wai;
         let start_pc = (self.cpu.pbr, self.cpu.pc);
         let result = self.cpu.step(&mut bus);
+        if let Some(before) = observing {
+            obs.after(before, &self.cpu, &bus, board);
+        }
         let cost = if bus.cycles == 0 && self.cpu.stopped {
             // A halted SA-1 still burns clock, the same reasoning
             // `SnesSystem::step` documents for the main CPU's WAI/STP: one
@@ -1478,7 +1502,9 @@ impl<'a> Sa1Bus<'a> {
         }
     }
 
-    fn target(&self, addr: u32) -> Target {
+    /// Where `addr` lands on the SA-1's own map (`&self`, no side effects;
+    /// the W40-03 recorder and executor resolve fetches through it).
+    pub(crate) fn target(&self, addr: u32) -> Target {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = addr as u16;
         crate::mapping::sa1_side_target(&self.banks(), bank, offset)
