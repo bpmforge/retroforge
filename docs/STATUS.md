@@ -4967,3 +4967,13 @@ stories, 10 decisions).
   short. `Apu::load` now clears them. Regression test in
   `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
   Workspace: **3728 passing**, gate green.
+- **W39-07 — Shader presets** (2026-10-28). Named presets are chains of
+  first-party shader stages with clamped values (`shader_preset.rs`): five
+  first-party ones (Consumer CRT, PVM, Sharp LCD, Smooth upscaler, Smoothed
+  CRT) and player presets saved from the current tuning. Saved through the
+  existing shader setting as `preset:<id>`, so per-game layering is
+  unchanged; presentation only, the same with Rebuild on or off. By-eye pass
+  over a synthetic test card recorded (all five). Quick Menu preview tiles
+  still list single shaders only. Workspace: **3734 passing**;
+  `ui_smoke` (load-time budget) and `w36_05_hooks` failed under load in
+  the gate and pass alone.
