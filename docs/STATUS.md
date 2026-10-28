@@ -5017,3 +5017,16 @@ stories, 10 decisions).
   scout test and `w36_05_hooks` failed under load and pass alone
   (`w36_05_hooks` also failed once alone with the Mac loaded: Lua NMI count
   52 vs 59, worth a look).
+- **W38-02 — Object-table finder** (2026-10-28). `rf_rebuild::objtable`
+  scores RAM bytes as sprite x positions (with a constant offset, evidence
+  only when the implied position moves), groups them into strided chains,
+  derives y / x_hi / y_hi / state / kind, masks the OAM-mirror page and
+  measures the sprite-to-RAM lag; the harness samples RAM right after the
+  OAM upload ($4014 DMA / SNES DMA to $2104). SMB: base $0E, 3 slots, 1700
+  of 1856 live slot-frames match OAM (91.6%), lag 0. SMW: base $7E003E,
+  8 of 12 slots, 272 of 289 (94.1%), lag 1. Both graded Candidate; matching
+  allows +-2 px. Not every frame as the ticket asked: misses are mostly
+  flipped / star-killed enemies drawn at other offsets; exact match and full
+  slot counts are W38-02b. The gate caught an i8 overflow in the binding
+  check (debug panic, false match in release), fixed in e80070a; rf-rebuild
+  and rf-harness rerun 292/292 after it. Workspace: **3755 passing**.
