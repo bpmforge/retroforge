@@ -70,6 +70,28 @@ fn zelda_actor_table_matches_oam() {
             );
         }
     }
-    // The hero's x and y bytes: the W38-05 recipe found them by their sprite.
-    assert!(!found.is_empty(), "no table");
+    // The actor table the W38-05 recipe committed by hand: x bytes at $70..,
+    // y bytes at $84.. (hero first). The finder must now produce it unaided.
+    let (rank, hit) = found
+        .iter()
+        .enumerate()
+        .find(|(_, f)| {
+            let t = &f.table;
+            t.stride == 1
+                && t.slots >= 5
+                && t.x_lo.map(|o| t.base + o) == Some(0x70)
+                && t.y.map(|o| t.base + o) == Some(0x84)
+        })
+        .expect("the actor table ($70 x, $84 y) was found");
+    println!(
+        "ACTOR TABLE rank {rank} of {} slots {} rate {:.4}",
+        found.len(),
+        hit.table.slots,
+        hit.binding.rate()
+    );
+    assert!(hit.binding.rate() >= 0.95, "{:?}", hit.binding);
+    // The hero's sprite is drawn lower than its RAM y; the others' are not.
+    let hero = &hit.binding.slots[0];
+    let other = &hit.binding.slots[1];
+    assert_ne!(hero.offsets, other.offsets, "{hero:?} {other:?}");
 }

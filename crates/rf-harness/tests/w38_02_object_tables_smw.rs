@@ -171,7 +171,11 @@ fn smw_object_table_matches_oam() {
         }
     }
     let best = found.first().expect("a table");
+    // W38-02b: exact match in 98% or more of the live slot-frames, Observed.
+    // Slots 8..12 of the game's twelve are never live in this level (the
+    // finder does not claim a slot it has no evidence for).
     assert!(best.table.slots >= 8, "{:?}", best.table);
-    assert!(best.binding.expected >= 200, "{:?}", best.binding);
-    assert!(best.binding.rate() >= 0.9, "rate {}", best.binding.rate());
+    assert!(best.binding.expected >= 500, "{:?}", best.binding);
+    assert!(best.binding.rate() >= 0.98, "rate {}", best.binding.rate());
+    assert_eq!(grade_of(best), rf_rebuild::recipe::Grade::Observed);
 }

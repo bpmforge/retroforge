@@ -1,6 +1,7 @@
 //! **W38-02: the object-table finder on Super Mario Bros.** (ROM-gated, law 5).
 //!
-//! Plays the first stretch of 1-1 (plain frames, no instrumentation), samples
+//! Plays 1-1 for about 3,600 recorded frames (the run dies and restarts at the
+//! same places; plain frames, no instrumentation), samples
 //! RAM, OAM and scroll after every frame, and asks the finder for the object
 //! tables. The acceptance number is the share of live slot-frames whose x and
 //! y match an OAM entry exactly. Only offsets, strides and counts are printed
@@ -24,7 +25,8 @@ const FILE: &str = "Super Mario Bros. + Duck Hunt (USA).zip";
 const START: u8 = 1 << 3;
 const A: u8 = 1 << 0;
 const RIGHT: u8 = 1 << 7;
-/// 500 frames to get through both title screens plus the intro, then play.
+/// 500 frames to get through both title screens plus the intro, then play
+/// (long enough to meet four live object slots, W38-02b).
 const LEAD_IN: u32 = 500;
 const PLAY: u32 = 4500;
 /// Last frame sampled.
@@ -167,7 +169,10 @@ fn smb_object_table_matches_oam() {
         }
     }
     let best = found.first().expect("a table");
-    assert!(best.table.slots >= 3, "{:?}", best.table);
-    assert!(best.binding.expected >= 500, "{:?}", best.binding);
-    assert!(best.binding.rate() >= 0.9, "rate {}", best.binding.rate());
+    // W38-02b: the table follows the picture exactly (no pixel slack) in
+    // 99.5% or more of the live slot-frames, state-gated: an Observed grade.
+    assert!(best.table.slots >= 4, "{:?}", best.table);
+    assert!(best.binding.expected >= 5000, "{:?}", best.binding);
+    assert!(best.binding.rate() >= 0.995, "rate {}", best.binding.rate());
+    assert_eq!(grade_of(best), rf_rebuild::recipe::Grade::Observed);
 }
