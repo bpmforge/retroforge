@@ -5211,6 +5211,28 @@ stories, 10 decisions).
   frames. No widescreen keepers and no enemy table: this stretch has no
   roaming enemies (0 state flips); one camera-clamp candidate tried. Margins
   are W38-06b (enemy-rich rooms). Workspace: **3898 passing**, gate green.
+- **W38-08 — Engine recipes: Mega Man 2 and Mega Man X** (2026-10-28).
+  Mega Man 2: `profiles/nes/mega-man-2/recipe.toml` by observation over
+  19 203 frames (forest and conveyor stages): a 32-slot object table (x lo
+  $0460 with the player in slot 0, x hi $0440, y $04A0, state $0400) found
+  by a walker plus period finder, camera $1F/$20, and NMI entry as the
+  no-latency tick (final player position there in 99.99% of 8045 frames).
+  Lockstep zero divergence over 10 311 frames plain and hooked. 16 widescreen
+  candidates tried, 0 keepers (31 state flips). Mega Man X: hooks (NMI rows
+  told apart by decode mode; 9867 of 9868 NMIs hooked) and lockstep only
+  (9868 frames, zero divergence); no object table was found, so no
+  widescreen trials and no verified tick point. Margins for both: approach
+  pending Brad. Workspace: **3902 passing**, gate green.
+- **W38-07 — Engine recipe: Castlevania** (2026-10-28).
+  `profiles/nes/castlevania/recipe.toml`, regenerated from the committed
+  generator: NMI as the per-frame tick (36 567 of 36 569 watched writes inside
+  it, entry and exit hooks), player x $40 and scroll $FD/$FF observed, player y
+  and the actor table candidate (the object-table finder assumes world-space x;
+  Castlevania stores positions relative to the camera). Lockstep over 21 312
+  frames: zero divergence plain and hooked; position at the tick exit equals
+  end of frame in 100% of 20 902 frames. Widescreen: 20 candidates and 18 HUD
+  anchors tried, no keepers (about 305 state flips). Margins: approach pending
+  Brad. Workspace: **3904 passing**, gate green.
 
 2026-10-27 W41-00..06 done — cheats and RetroAchievements (D-030 amends
   NON_GOALS 14; D-031 rcheevos). `rf-cheats` parses NES/SNES Game Genie,
