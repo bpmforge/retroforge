@@ -5314,3 +5314,15 @@ stories, 10 decisions).
   steps a fresh APU and its save/load round trip alike. `w37_04_shadow_cost`
   passes (SMW shadow on 15.92 ms/frame vs 7.90 off). Workspace: **3949
   passing**, gate green.
+- **W37-00d — ALttP scout shot after the W37-00b timing shift** (2026-10-28).
+  The scout's PlayerMove trials poked the player word at the frame boundary.
+  After W37-00b's refresh stall, ALttP copies Link's x to a previous-position
+  word about 40 instructions after that boundary and scrolls by the
+  difference, so a boundary poke was taken into the copy and the camera never
+  moved (confirmed by poking at instruction K: 50..600 follows, 0..32 and
+  800+ do not; the game never restores the word). New
+  `EmuStepper::latch_and_advance_frame_poking` writes the pokes 128
+  instructions into the frame; `Scout::step` uses it. Generic, no game
+  address. `w30_screens` passes in full; SMW/NES/vertical scout suites pass.
+  `w32_09_scout_nes::walk_confidence` fails on main too (no `Scout::step`
+  involved). Workspace: **3949 passing**, gate green.
