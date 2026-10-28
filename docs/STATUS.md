@@ -4967,3 +4967,28 @@ stories, 10 decisions).
   short. `Apu::load` now clears them. Regression test in
   `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
   Workspace: **3728 passing**, gate green.
+- **W39-07 — Shader presets** (2026-10-28). Named presets are chains of
+  first-party shader stages with clamped values (`shader_preset.rs`): five
+  first-party ones (Consumer CRT, PVM, Sharp LCD, Smooth upscaler, Smoothed
+  CRT) and player presets saved from the current tuning. Saved through the
+  existing shader setting as `preset:<id>`, so per-game layering is
+  unchanged; presentation only, the same with Rebuild on or off. By-eye pass
+  over a synthetic test card recorded (all five). Quick Menu preview tiles
+  still list single shaders only. Workspace: **3734 passing**;
+  `ui_smoke` (load-time budget) and `w36_05_hooks` failed under load in
+  the gate and pass alone.
+- **W38-03 — Collision-table finder** (2026-10-28). `rf_rebuild::collision`
+  watches RAM loads that walk the level buffer near the player and classifies
+  tile ids by what the player did on the frames they were read (stopped
+  falling = solid; stops a fall but read while rising = one-way; slow-swim
+  run = water). SMB: one collision site (ROM 0x641b) over the $0502-$068F
+  buffer; solid ids 0x12-0x13 (floor) and 0x1f (wall), still thin (6 of 384
+  cells mid-1-1). SMW: the Map16 reader at 0x74d3; solid ids 0x00, 0x74,
+  0x79; lower-ranked sites noisy. Water and real one-way cases not exercised
+  in either run. The hand-painted height-map comparison was dropped at
+  Brad's call (2026-10-28): no painted map exists for SMB or SMW; the
+  comparator is unit-tested and picks up a profile's `[heights]` if one
+  appears. Workspace: **3737 passing**; `ui_smoke` (load-time budget), a
+  scout test and `w36_05_hooks` failed under load and pass alone
+  (`w36_05_hooks` also failed once alone with the Mac loaded: Lua NMI count
+  52 vs 59, worth a look).
