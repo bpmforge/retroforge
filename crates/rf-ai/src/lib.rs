@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod anthropic;
+pub mod hd_pass;
 pub mod naming;
 pub mod pack;
 pub mod pipeline;
