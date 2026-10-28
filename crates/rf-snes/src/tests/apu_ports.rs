@@ -1130,6 +1130,13 @@ fn the_listings_cycle_counts_match_this_crates_own_timing_table() {
         + cycles(0xFC, false)  // $FFE4 inc Y
         + cycles(0xD0, true); // $FFE5 jnz, taken (loop back)
     assert_eq!(u16::from(per_byte), BYTE_HANDSHAKE_CYCLES);
+
+    // W37-00b: from the compare's `$F4` sample (its last cycle) to the
+    // echo's write (the last cycle of `mov dp,Y`).
+    let to_echo = cycles(0xD0, false) // $FFDC jnz, not taken
+        + cycles(0xE4, false)  // $FFDE mov A,dp
+        + cycles(0xCB, false); // $FFE0 mov dp,Y (the echo)
+    assert_eq!(u16::from(to_echo), crate::apu::boot::BYTE_ECHO_CYCLES);
 }
 
 /// The handoff is not observable one cycle early: with
@@ -1162,10 +1169,13 @@ fn the_immediate_run_handoff_is_not_observable_before_its_listed_cycles_elapse()
 }
 
 /// Same shape for the per-byte handshake: the echo/store must not be
-/// visible before `BYTE_HANDSHAKE_CYCLES` polls, and must be exactly at
-/// that count.
+/// visible before `BYTE_ECHO_CYCLES` polls and must be exactly at that
+/// count (W37-00b: the boot ROM echoes mid-loop, then stores and branches
+/// back); the ports are not looked at again until `BYTE_HANDSHAKE_CYCLES`
+/// have passed.
 #[test]
 fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
+    use crate::apu::boot::BYTE_ECHO_CYCLES;
     let mut apu = Apu::new();
     apu.cpu_write_port(1, 0x01);
     apu.cpu_write_port(2, 0x00);
@@ -1180,7 +1190,7 @@ fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
     apu.cpu_write_port(1, 0xAB);
     apu.cpu_write_port(0, 0x00);
     apu.poll_boot();
-    for _ in 0..BYTE_HANDSHAKE_CYCLES - 1 {
+    for _ in 0..BYTE_ECHO_CYCLES - 1 {
         apu.poll_boot();
         assert_eq!(
             apu.ports_out[0], 0xCC,
@@ -1197,6 +1207,25 @@ fn the_byte_handshake_is_not_observable_before_its_listed_cycles_elapse() {
         "and exactly at the count, both must have"
     );
     assert_eq!(apu.aram[0x0200], 0xAB);
+
+    // The CPU answers at once with the next byte; the ROM is still in the
+    // loop's tail and does not see it until the loop comes round.
+    apu.cpu_write_port(1, 0xCD);
+    apu.cpu_write_port(0, 0x01);
+    for _ in 0..BYTE_HANDSHAKE_CYCLES - BYTE_ECHO_CYCLES {
+        apu.poll_boot();
+        assert_eq!(apu.ports_out[0], 0x00, "the next counter was seen mid-tail");
+    }
+    for _ in 0..BYTE_ECHO_CYCLES - 1 {
+        apu.poll_boot();
+        assert_eq!(apu.ports_out[0], 0x00, "echoed before the loop came round");
+    }
+    apu.poll_boot();
+    assert_eq!(
+        apu.ports_out[0], 0x01,
+        "one loop (BYTE_HANDSHAKE_CYCLES) after the first sample, it is accepted"
+    );
+    assert_eq!(apu.aram[0x0201], 0xCD);
 }
 
 /// W14-49/W14-50 (Urban Strike, `$2140` before `$2141`): the boot ROM

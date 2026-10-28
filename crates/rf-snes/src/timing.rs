@@ -123,6 +123,30 @@ pub const VBLANK_START_LINE_OVERSCAN: u16 = 240;
 /// Roughly three scanlines, per §3.1's "starts ~line 225, 3-4 lines".
 pub const AUTO_JOYPAD_CYCLES: u64 = 4224;
 
+/// Master cycle within a scanline at which the S-CPU's WRAM refresh starts
+/// (ticket W37-00b). fullsnes "SNES Timings": "the CPU is paused for 40
+/// master cycles per scanline (DRAM refresh), at around H=538" — the
+/// whole bus stops, so the CPU and DMA lose the time while the raster,
+/// the APU and the math unit's wall clock carry on.
+pub const REFRESH_AT: u64 = 538;
+
+/// How long the refresh holds the bus each scanline (see [`REFRESH_AT`]).
+pub const REFRESH_CYCLES: u64 = 40;
+
+/// Master cycles of refresh stall owed for a span of `elapsed` master
+/// cycles that starts `line_cycles` into a scanline: [`REFRESH_CYCLES`]
+/// for every refresh point (`REFRESH_AT` of each line) the span crosses.
+/// Closed form, no loop.
+#[must_use]
+pub fn refresh_stall(line_cycles: u64, elapsed: u64) -> u64 {
+    // Positions measured from the refresh point of the line `line_cycles`
+    // belongs to (offset by one line so the subtraction never goes below
+    // zero); a point is crossed when the span reaches it.
+    let start = line_cycles + MASTER_PER_LINE - REFRESH_AT;
+    let end = start + elapsed;
+    (end / MASTER_PER_LINE - start / MASTER_PER_LINE) * REFRESH_CYCLES
+}
+
 /// What advancing the clock produced.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Events {
