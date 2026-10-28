@@ -43,22 +43,23 @@ pub struct Capture {
 /// OAM changed (`None` when it never did).
 fn capture_frame<C: EmulatorCore>(
     core: &mut C,
-    oam: impl Fn(&C) -> Vec<u8>,
+    oam: fn(&C) -> &[u8],
     snap: impl Fn(&C) -> Vec<u8>,
 ) -> Option<Capture> {
-    let mut last = oam(core);
+    let mut last = oam(core).to_vec();
     let mut cap = None;
     // Bounded: a frame is a few tens of thousands of instructions; a core
     // that never reports a frame boundary would otherwise hang the caller.
     for _ in 0..2_000_000u32 {
         let r = core.step(Step::Instruction, &mut Null);
         let now = oam(core);
-        if now != last {
+        if now != last.as_slice() {
+            last.clear();
+            last.extend_from_slice(now);
             cap = Some(Capture {
                 ram: snap(core),
-                oam: now.clone(),
+                oam: last.clone(),
             });
-            last = now;
         }
         if r.frame_complete {
             break;
@@ -78,7 +79,11 @@ pub fn nes_step_frame(core: &mut NesCore, input: &InputFrame) -> Option<Capture>
         .set_controller_buttons(0, input.ports[0] as u8);
     core.bus_mut()
         .set_controller_buttons(1, input.ports[1] as u8);
-    capture_frame(core, |c| c.bus().oam().to_vec(), |c| c.bus().ram().to_vec())
+    capture_frame(
+        core,
+        |c| c.bus().oam().as_slice(),
+        |c| c.bus().ram().to_vec(),
+    )
 }
 
 /// The playfield scroll of the frame just run.
@@ -99,7 +104,7 @@ pub fn snes_step_frame(core: &mut SnesCore, input: &InputFrame) -> Option<Captur
     }
     capture_frame(
         core,
-        |c| c.system().bus.ppu.oam.to_vec(),
+        |c| c.system().bus.ppu.oam.as_slice(),
         |c| c.system().bus.wram[..SNES_RAM_WINDOW].to_vec(),
     )
 }

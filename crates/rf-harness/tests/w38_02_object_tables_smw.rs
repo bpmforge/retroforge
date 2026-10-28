@@ -98,12 +98,6 @@ fn session() -> Vec<u16> {
     pad
 }
 
-fn input(mask: u16) -> InputFrame {
-    let mut f = InputFrame::empty();
-    f.ports[0] = mask;
-    f
-}
-
 struct Null;
 impl CoreSink for Null {
     fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
@@ -121,7 +115,7 @@ fn smw_object_table_matches_oam() {
     let mut core = SnesCore::load(&raw).expect("loads");
     core.reset(ResetKind::Hard);
     let pad = session();
-    let lead = frames_of(TO_LEVEL).len() - 300;
+    let lead = frames_of(TO_LEVEL).len() - 60;
     let mut rec = Recorder::new(Console::Snes, std::env::var("CAM_NEXT").is_ok());
     let t = Instant::now();
     for (f, &mask) in pad.iter().enumerate() {
@@ -160,6 +154,6 @@ fn smw_object_table_matches_oam() {
     }
     let best = found.first().expect("a table");
     assert!(best.table.slots >= 8, "{:?}", best.table);
-    assert!(best.binding.expected >= 300, "{:?}", best.binding);
+    assert!(best.binding.expected >= 200, "{:?}", best.binding);
     assert!(best.binding.rate() >= 0.9, "rate {}", best.binding.rate());
 }

@@ -88,6 +88,8 @@ pub struct SlotBinding {
     pub bound_frames: u32,
     /// Frames the slot was live and its position on screen.
     pub live_frames: u32,
+    /// Of those, the frames a sprite matched.
+    pub matched_frames: u32,
 }
 
 /// How a found table lines up with the picture.
@@ -176,6 +178,10 @@ const MAX_STRIDE: usize = 64;
 /// Pixels a sprite column may sit from where the x byte puts it (see
 /// [`Cols::bound`]).
 pub const X_SLACK: i8 = 2;
+/// Empty slots tolerated between two members of a chain.
+const MAX_GAP: usize = 6;
+/// Share of its live frames a trailing slot must match to be claimed.
+const TRIM_BELOW: f64 = 0.7;
 /// Fewest slots in a table.
 const MIN_SLOTS: usize = 3;
 /// Rows of frames sampled when searching the other columns.
@@ -369,11 +375,29 @@ pub struct Chain {
 /// addresses, then the next one among what is left. Strides `1..=MAX_STRIDE`.
 #[must_use]
 pub fn chains(addrs: &[usize]) -> Vec<Chain> {
-    let mut sorted = addrs.to_vec();
+    let weighted: Vec<(usize, f64)> = addrs.iter().map(|&a| (a, 1.0)).collect();
+    chains_weighted(&weighted)
+}
+
+/// [`chains`] with a weight per address (its z-score): the heaviest chain wins
+/// its addresses. A table is rarely full in a short run, so up to
+/// [`MAX_GAP`] empty slots may sit between two members.
+#[must_use]
+pub fn chains_weighted(addrs: &[(usize, f64)]) -> Vec<Chain> {
+    let mut sorted: Vec<usize> = addrs.iter().map(|&(a, _)| a).collect();
     sorted.sort_unstable();
     sorted.dedup();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let weight = |a: usize| {
+        addrs
+            .iter()
+            .filter(|x| x.0 == a)
+            .map(|x| x.1)
+            .fold(0.0, f64::max)
+    };
     let has = |a: usize| sorted.binary_search(&a).is_ok();
-    let mut all: Vec<(Chain, Vec<usize>)> = Vec::new();
+    let mut all: Vec<(Chain, f64, Vec<usize>)> = Vec::new();
     for g in 1..=MAX_STRIDE {
         for &a in &sorted {
             if a >= g && has(a - g) {
@@ -388,13 +412,14 @@ pub fn chains(addrs: &[usize]) -> Vec<Chain> {
                     gap = 0;
                 } else {
                     gap += 1;
-                    if gap > 1 {
+                    if gap > MAX_GAP {
                         break;
                     }
                 }
             }
             if mem.len() >= MIN_SLOTS {
                 let last = mem[mem.len() - 1];
+                let w: f64 = mem.iter().map(|&m| weight(m)).sum();
                 all.push((
                     Chain {
                         base: a,
@@ -402,21 +427,21 @@ pub fn chains(addrs: &[usize]) -> Vec<Chain> {
                         slots: (last - a) / g + 1,
                         members: mem.len(),
                     },
+                    w,
                     mem,
                 ));
             }
         }
     }
     all.sort_by(|a, b| {
-        b.0.members
-            .cmp(&a.0.members)
+        b.1.total_cmp(&a.1)
             .then(a.0.slots.cmp(&b.0.slots))
             .then(a.0.stride.cmp(&b.0.stride))
             .then(a.0.base.cmp(&b.0.base))
     });
     let mut taken = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for (c, mem) in all {
+    for (c, _, mem) in all {
         if mem.iter().any(|m| taken.contains(m)) {
             continue;
         }
@@ -724,21 +749,27 @@ pub fn infer(t: &Trace) -> Vec<Found> {
     let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
     let lag = usize::from(strength(1) > strength(0));
     let cands = &by_lag[lag];
-    if std::env::var("OBJDBG").is_ok() { eprintln!("lag strengths {} {}", strength(0), strength(1)); for l in 0..2 { for c in &by_lag[l] { eprintln!("cand lag{l} {:#x} z {:.0} dx {} m {}", c.addr, c.z, c.dx, c.matches);} } }
-    let addrs: Vec<usize> = cands.iter().map(|c| c.addr).collect();
+    let addrs: Vec<(usize, f64)> = cands.iter().map(|c| (c.addr, c.z)).collect();
     let mut out = Vec::new();
-    for ch in chains(&addrs) {
+    for ch in chains_weighted(&addrs) {
         if let Some(f) = build(&pre, &ch, cands, lag) {
             out.push(f);
         }
     }
     out.sort_by(|a, b| {
-        b.binding
-            .matched
-            .cmp(&a.binding.matched)
+        quality(b)
+            .total_cmp(&quality(a))
             .then(a.table.base.cmp(&b.table.base))
     });
     out
+}
+
+/// How much to believe a table: the slot-frames it explains, scaled by how
+/// well it explains the ones it claims, halved when "live" had to be read off
+/// the binding itself (no state byte found).
+fn quality(f: &Found) -> f64 {
+    let gate = if f.binding.live_from_state { 1.0 } else { 0.5 };
+    f.binding.matched as f64 * f.binding.rate() * gate
 }
 
 fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found> {
@@ -830,6 +861,7 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
                 b.expected += 1;
                 exp_f += 1;
                 if bound[f][i].is_some() {
+                    per[i].matched_frames += 1;
                     b.matched += 1;
                     ok_f += 1;
                 }
@@ -842,6 +874,26 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
     }
     for (p, m) in per.iter_mut().zip(&idx_count) {
         p.oam_index = m.iter().max_by_key(|&(_, &c)| c).map(|(&k, _)| k);
+    }
+    // A table claims only the slots that verifiably follow the picture: cut
+    // trailing slots that were never live, or matched under `TRIM_BELOW`.
+    // (A chain with gaps can run on into a neighbouring array.)
+    if state.is_some() {
+        let keep = per
+            .iter()
+            .rposition(|p| {
+                p.live_frames >= 20
+                    && f64::from(p.matched_frames) >= TRIM_BELOW * f64::from(p.live_frames)
+            })
+            .map_or(0, |i| i + 1);
+        if keep >= MIN_SLOTS && keep < ch.slots {
+            let shorter = Chain {
+                slots: keep,
+                members: ch.members.min(keep),
+                ..ch.clone()
+            };
+            return build(pre, &shorter, cands, lag);
+        }
     }
     b.slots = per;
 

@@ -14,7 +14,7 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
+use rf_core_api::{EmulatorCore, InputFrame, ResetKind};
 use rf_harness::object_tables::{nes_cam, nes_prepare, nes_step_frame, Console, Recorder};
 use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
@@ -71,14 +71,6 @@ fn script_one(frame: u32) -> u8 {
         f if (f - 500) % 60 < 34 => RIGHT | A,
         _ => RIGHT,
     }
-}
-
-struct NullSink;
-
-impl CoreSink for NullSink {
-    fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
-    fn audio(&mut self, _s: &[i16]) {}
-    fn event(&mut self, _e: CoreEvent) {}
 }
 
 #[test]
