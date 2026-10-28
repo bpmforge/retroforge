@@ -212,8 +212,8 @@ fn smw_lsmv_trace_and_reference_script() {
 // ---------------------------------------------------------------- NES
 
 /// CPU RAM bytes printed per frame, then the hash of `$0000-$00FF`.
-const NES_FACTS: [u32; 8] = [
-    0x0770, 0x075A, 0x075F, 0x075C, 0x006D, 0x0086, 0x00CE, 0x07A7,
+const NES_FACTS: [u32; 10] = [
+    0x0770, 0x075A, 0x075F, 0x075C, 0x006D, 0x0086, 0x00CE, 0x07A7, 0x06FC, 0x0009,
 ];
 
 const NES_KEYS: [&str; 8] = ["a", "b", "select", "start", "up", "down", "left", "right"];
@@ -280,7 +280,25 @@ fn nes_fm2_trace_and_reference_script() {
     };
     let text = std::fs::read_to_string(&fm2).expect("fm2");
     let m: Movie = movie::fm2::parse(&text).expect("fm2 parses");
-    let pl = plan(&[], delay(), 0, &m);
+    // `RF_W37B_MULTICART`: W37-00's multicart lay-out (160 idle frames and
+    // 5 of Start leave the game select, then the movie slid by
+    // `RF_W37B_OFFSET`, default -1), so both emulators get the same plan.
+    let pl = if std::env::var_os("RF_W37B_MULTICART").is_some() {
+        let start = 1u16 << rf_input::NesButton::Start.bit();
+        let lead: Vec<u16> = std::iter::repeat_n(0u16, 160)
+            .chain(std::iter::repeat_n(start, 5))
+            .collect();
+        let offset: i32 = std::env::var("RF_W37B_OFFSET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(-1);
+        match usize::try_from(offset) {
+            Ok(d) => plan(&lead, d, 0, &m),
+            Err(_) => plan(&lead, 0, offset.unsigned_abs() as usize, &m),
+        }
+    } else {
+        plan(&[], delay(), 0, &m)
+    };
     let cap = frame_cap().min(pl.frames.len());
     let dir = out_dir();
     std::fs::write(
@@ -297,6 +315,13 @@ fn nes_fm2_trace_and_reference_script() {
         }
         let h = fnv((0..256u32).map(|a| c.peek(a)));
         let _ = writeln!(out, " {h:08x}");
+        if dump_frame() == Some(f as usize) {
+            let _ = write!(out, "D ");
+            for a in 0..0x800u32 {
+                let _ = write!(out, "{:02x}", c.peek(a));
+            }
+            let _ = writeln!(out);
+        }
         (f as usize) + 1 < cap
     })
     .expect("loads");
