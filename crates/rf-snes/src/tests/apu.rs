@@ -524,3 +524,33 @@ fn a_load_clears_the_access_tallies_left_by_the_apu_it_replaces() {
         "the restored APU must run the same DSP cycles as the original"
     );
 }
+
+/// Ticket W37-04b: a fresh APU and the same APU saved and loaded must run
+/// the same DSP cycles from the first instruction; reset's vector fetch must
+/// not leave access tallies behind for that instruction to pay.
+#[test]
+fn a_fresh_apu_and_its_save_load_round_trip_step_alike() {
+    let mut fresh = Apu::new();
+    // Real SPC700 code, not the high-level IPL boot, so the first
+    // instruction pays whatever reset left charged.
+    fresh.ipl_enabled = false;
+    fresh.aram[0x0200] = 0xCF; // MUL YA: 9 cycles, one access
+    fresh.aram[0x0201] = 0xCF;
+    fresh.aram[0x0202] = 0xCF;
+    fresh.aram[0x0203] = 0xCF;
+    fresh.cpu.pc = 0x0200;
+    let state = saved(&fresh);
+    let mut restored = Apu::new();
+    let mut s = VecState { buf: state, at: 0 };
+    restored
+        .load(&mut crate::state::StateIn::new(&mut s))
+        .expect("loads");
+    for _ in 0..4 {
+        fresh.step_counted().expect("steps");
+        restored.step_counted().expect("steps");
+    }
+    assert!(
+        saved(&fresh) == saved(&restored),
+        "a fresh APU must step exactly like its own save/load round trip"
+    );
+}
