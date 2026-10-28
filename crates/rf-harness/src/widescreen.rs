@@ -412,7 +412,7 @@ pub fn rows_toml(
             .unwrap_or_else(|| {
                 let n = format!("wide_fn_{:x}", f.entry_cpu);
                 fns.push_str(&format!(
-                    "[[function]]\nname = \"{n}\"\nshape_hash = {:#x}\nexact_hash = {:#x}\naddress_hint = {:#x}\nhooks = []\ngrade = \"observed\"\nsource = \"observed: the atlas function holding a widescreen finder site ({what}); W38-04\"\n\n",
+                    "[[function]]\nname = \"{n}\"\nshape_hash = \"{:#x}\"\nexact_hash = \"{:#x}\"\naddress_hint = {:#x}\nhooks = []\ngrade = \"observed\"\nsource = \"observed: the atlas function holding a widescreen finder site ({what}); W38-04\"\n\n",
                     f.shape_hash, f.byte_hash, f.entry_cpu
                 ));
                 named.push((fi, n.clone()));
