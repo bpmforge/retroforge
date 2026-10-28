@@ -47,6 +47,8 @@ use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
 use rf_snes::core::SnesCore;
 
+mod smw_drive;
+
 // ---------------------------------------------------------------- locations
 
 fn roms_root() -> PathBuf {
@@ -686,11 +688,11 @@ mod smw {
 
     // ---- the W36-08 drive script (the "before" coverage) -------------------
 
-    /// Menus to Yoshi's Island 1 and play: the token scripts of
-    /// `crates/retroforge/tests/w33_07_common/mod.rs` (`SMW_TO_LEVEL`,
-    /// `SMW_PLAY`), as `w36_08_atlas_smw` plays them. `wN` idles N frames,
-    /// `<buttons>N` holds them (`A B X Y S E U D L R`).
-    const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
+    /// Menus to Yoshi's Island 1 (`smw_drive::level_pad`, which waits on the
+    /// game mode) and play: the token script of
+    /// `crates/retroforge/tests/w33_07_common/mod.rs` (`SMW_PLAY`), as
+    /// `w36_08_atlas_smw` plays them. `wN` idles N frames, `<buttons>N` holds
+    /// them (`A B X Y S E U D L R`).
     const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
     fn frames_of(text: &str) -> Vec<u16> {
@@ -726,7 +728,7 @@ mod smw {
     }
 
     pub fn baseline(raw: &[u8]) -> CoverageLog {
-        let mut pad = frames_of(TO_LEVEL);
+        let mut pad = super::smw_drive::level_pad(raw);
         let level_start = pad.len();
         pad.extend(frames_of(PLAY));
         let more = frames_of("R+B14 R22");

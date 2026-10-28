@@ -31,6 +31,8 @@ use rf_harness::widescreen::{
     observe_snes_hooked, rows_toml, snes_patch, snes_snaps, try_candidates, try_windows, TrialSetup,
 };
 use rf_input::SnesButton;
+
+mod smw_drive;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
 use rf_rebuild::widescreen::{
     camera_aliases, find_camera, find_x_page, hud_watch, infer, infer_all, oam_shadow,
@@ -46,7 +48,6 @@ const TRIALS: usize = 16;
 const PATROL_LEG: usize = 12;
 
 /// Menus to Yoshi's Island 1 and play (the W38-01 script, plain frames).
-const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
 fn rom_path() -> Option<PathBuf> {
@@ -109,8 +110,8 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 /// Menus to the level, then play until the level has seen 1,500 frames.
-fn script_base() -> Vec<u16> {
-    let mut pad = frames_of(TO_LEVEL);
+fn script_base(raw: &[u8]) -> Vec<u16> {
+    let mut pad = smw_drive::level_pad(raw);
     let start = pad.len();
     pad.extend(frames_of(PLAY));
     let more = frames_of("R+B14 R22");
@@ -121,8 +122,8 @@ fn script_base() -> Vec<u16> {
 }
 
 /// The base script plus a patrol.
-fn script() -> Vec<u16> {
-    let mut pad = script_base();
+fn script(raw: &[u8]) -> Vec<u16> {
+    let mut pad = script_base(raw);
     // The patrol: right then back left over the level, so sprites are loaded
     // on the way out and again (and dropped) on the way back; `A` now and then
     // re-enters a level after a death.
@@ -167,7 +168,7 @@ struct Seg {
 /// The long session (module doc): each segment is played on a fresh core from
 /// power-on (`SnesCore::reset` only restarts the CPU, so a mid-run "hard
 /// reset" is not a power-on and the menu script and the movies drift).
-fn session() -> Vec<Seg> {
+fn session(raw: &[u8]) -> Vec<Seg> {
     let mut segs = Vec::new();
     // (name, movie, idle frames before it, frames to run): the offsets are
     // W37-00's sweep winners (docs/research/W37-00-movie-import.md).
@@ -202,7 +203,7 @@ fn session() -> Vec<Seg> {
         }
         segs.push(seg);
     }
-    let pads = script();
+    let pads = script(raw);
     segs.push(Seg {
         name: "yi1-script+patrol",
         resets: vec![None; pads.len()],
@@ -220,8 +221,8 @@ fn session() -> Vec<Seg> {
 }
 
 /// The Yoshi's Island 1 script alone, as W38-04 played it (the trace for the table and camera).
-fn inputs() -> Vec<InputFrame> {
-    script_base()
+fn inputs(raw: &[u8]) -> Vec<InputFrame> {
+    script_base(raw)
         .into_iter()
         .map(|m| {
             let mut f = InputFrame::empty();
@@ -291,9 +292,9 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
 
     // 1. The trace (Yoshi's Island 1, as W38-04): object table, camera, HUD
     // sprites. The long session below is what is observed and trialed.
-    let ins1 = inputs();
-    let lead = frames_of(TO_LEVEL).len() - 60;
-    let segs = session();
+    let ins1 = inputs(&raw);
+    let lead = smw_drive::level_pad(&raw).len() - 60;
+    let segs = session(&raw);
     println!(
         "long session: {} frames in {} power-on segments {:?}",
         segs.iter().map(|s| s.ins.len()).sum::<usize>(),
