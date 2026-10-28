@@ -4071,6 +4071,8 @@ version = "0.9.1"
 dependencies = [
  "mlua",
  "rf-core-api",
+ "rf-profiles",
+ "rf-rebuild",
  "wasmtime",
  "wat",
 ]

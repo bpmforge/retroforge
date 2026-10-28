@@ -10,6 +10,7 @@
 //! actual `EnhancementRuntime`) and why.
 
 pub mod atmosphere;
+pub mod baked;
 pub mod bus;
 pub mod camera;
 pub mod camera_finder;

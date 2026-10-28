@@ -13,6 +13,7 @@ pub mod collision;
 pub mod covio;
 pub mod dataregion;
 pub mod exec;
+pub mod facts;
 pub mod hw;
 pub mod ir;
 pub mod isa;
@@ -35,6 +36,7 @@ pub use exec::{
     Delta, Dispatch, Fetch, FunctionEvent, Node, RebuildExec, TraceEntry, TraceKind, MAX_DELTAS,
     MAX_SHADOW_DEPTH,
 };
+pub use facts::{merge_facts, FactMerge, FactRefusal};
 pub use hw::{HwClass, Platform};
 pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 pub use recipe::{

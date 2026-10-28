@@ -5030,3 +5030,24 @@ stories, 10 decisions).
   slot counts are W38-02b. The gate caught an i8 overflow in the binding
   check (debug panic, false match in release), fixed in e80070a; rf-rebuild
   and rf-harness rerun 292/292 after it. Workspace: **3755 passing**.
+- **W39-00 — Plugin surface** (2026-10-28). `plugin.toml` declares
+  `kind = "logic" | "fact" | "render"` (`rf_plugin_sdk::surface`), with
+  capabilities limited per kind. Logic plugins see `rf.mode()` and must do
+  nothing unless Enhanced; `enable` refuses one without an Original-mode
+  proof from shadow lockstep (>= 30 frames, no divergence). Fact plugins merge
+  rows through `rf_rebuild::merge_facts` (clamped to Candidate, never demote
+  trusted rows, `[[patch]]` refused); render plugins turn recipe facts into
+  overlay draws. Samples in `plugins/samples/` (made-up engine). The sample
+  logic plugin runs 60 Original-mode frames clean; with its mode check removed
+  it diverges at frame 1 and is refused. App-shell wiring of the proof at
+  enable time is not done. Workspace: **3767 passing**.
+- **W39-03 — Baked level geometry** (2026-10-28). `rf_enhance::baked`
+  bakes each screen into a cell grid (Unknown / Open / Solid / OneWay, with
+  source and height) plus merged extruded wall quads; collision-fact id
+  ranges decide first, painted heights fill screens without rules, unseen
+  cells stay Unknown. One rf-cache entry per ROM sha256 beside the scout
+  scene entries (zstd, CRC, bounded decode, ids and counts only). SMW: 3
+  rule ranges from the W38-03 finder, 39 solid/one-way cells, 48 quads,
+  368 bytes, reloads equal. Zelda bakes empty (no collision recipe or
+  painted heights yet) and the scout canvas is not yet wired into the ROM
+  runs: both are W39-03b. Workspace: **3771 passing**, gate green.
