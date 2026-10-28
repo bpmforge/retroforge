@@ -1018,3 +1018,46 @@ pointer_ram = 0x0
 confidence = 66
 grade = "candidate"
 source = "finder: 9260 reads through a RAM pointer by 8 site(s), 8 of 8 bytes read"
+
+[[tile]]
+class = "solid"
+first = 0x8e
+last = 0x8e
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
+[[tile]]
+class = "solid"
+first = 0x90
+last = 0x90
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
+[[tile]]
+class = "solid"
+first = 0x93
+last = 0x93
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
+[[tile]]
+class = "solid"
+first = 0x95
+last = 0x95
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
+[[tile]]
+class = "solid"
+first = 0xce
+last = 0xd3
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
+[[tile]]
+class = "solid"
+first = 0xd8
+last = 0xdb
+grade = "candidate"
+source = "observed: walk probe W39-03b: pushes at 16 px cells on a scratch machine; Link placed beside the cell, pad held 8 frames, blocked = no advance and he can walk the other way"
+
