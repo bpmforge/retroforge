@@ -5273,3 +5273,14 @@ stories, 10 decisions).
   facts are read at the frame boundary, not at the NMI hook (plain-core
   sessions have no hook host). NES keeps the delayed path; SMW's recipe has no
   object table yet. Workspace: **3943 passing**, gate green.
+- **W39-03b — Zelda stage set and canvas footprint** (2026-10-28).
+  `rf_rebuild::walkability` classifies tile ids by a walk probe on a scratch
+  core: Link is placed beside a cell and pushed; no advance means solid. Zelda
+  gives 6 candidate solid rows (added to its recipe; the tree border is solid
+  in ~67% of its cells, grass and bushes ambiguous). Over the W38-05b learned
+  screens the Zelda stage set bakes 33 screens, 7982 body cells and 504 wall
+  quads, 3009 bytes cached and reloaded equal. `baked::bake_canvas` takes the
+  grid from the canvas footprint (`visited_cells`) instead of an assumed
+  screen width. The SMW ROM bake is untested end to end: its menu script no
+  longer reaches a level after the W37-00b timing fixes (W37-00c).
+  Workspace: **3948 passing**, gate green.
