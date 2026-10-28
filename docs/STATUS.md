@@ -5070,3 +5070,14 @@ stories, 10 decisions).
   and the app shell does not yet run the pass. Note: `rf_ai::pack::settings_hash`
   hashes keys but not values (pre-existing). Workspace: **3803 passing**,
   gate green.
+- **W40-02 — Local naming model** (2026-10-28). `rf_ai::local::LocalProvider`
+  talks to an OpenAI-compatible server on loopback only (default LM Studio
+  at `http://localhost:1234/v1`, `qwen/qwen3-8b`) with the cloud backend's
+  prompt, schema and output filtering; `localhttp.rs` is a std-only client
+  that refuses non-loopback hosts. Proposals are sourced `ai:local:<model>`
+  and graded candidate. Names stay labels: the atlas bytes and recipe
+  resolution are identical with naming off, cloud or local. A real run
+  against LM Studio named three synthetic functions offline in 2.45 s. The
+  `[ai_naming] backend` setting and its UI are not wired into the shell yet.
+  Workspace: **3800 passing** before main's W39-02/W39-06 merge; after it,
+  the rf-ai lib conflict (module list) was resolved and rf-ai rerun 99/99.
