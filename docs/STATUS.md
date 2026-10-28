@@ -5105,3 +5105,14 @@ stories, 10 decisions).
   layout is a heuristic fit of the level buffer, slopes render as blocks,
   only the player is classed (SMW recipe has no object table yet).
   Workspace: **3841 passing**, gate green.
+- **W38-04 — Widescreen checklist finders** (2026-10-28).
+  `rf_rebuild::widescreen` watches immediate-operand compares/adds near
+  object-x and camera reads and ranks candidates (activation, despawn,
+  edge test, camera clamp, position trigger, HUD anchor) with a 0-100 score;
+  the harness tries each with a wider constant under lockstep, then a group
+  trial with leave-one-out, and keeps only those whose first divergence is
+  off-screen object state. SMB: 60 candidates; the three W36-06 bytes found
+  without hints plus a new keeper (0x41e2); group reach right +205 px, left
+  +442 px. SMW: 60 candidates, 8 tried, no keeper yet (W38-04b, with HUD
+  trials). Rows live in `profiles/*/recipe-widescreen.toml` overlays.
+  Workspace: **3850 passing**, gate green.

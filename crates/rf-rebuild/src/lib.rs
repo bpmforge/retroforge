@@ -23,6 +23,7 @@ pub mod profile;
 pub mod recipe;
 pub mod superset;
 pub mod verify;
+pub mod widescreen;
 pub mod windows;
 
 pub use atlas::{
