@@ -956,6 +956,10 @@ pub enum CoreCommand {
     /// stamps into a state's `PROF` chunk, and, while widescreen is on, what the margin redraw draws
     /// objects for (`crate::margin_draw`, needs the recipe's object-table RAM meanings).
     SetModSession(Option<Box<crate::mod_chunk::ModSession>>),
+    /// Ticket W39-01: the game's recipe (`None` for none), for the tick hook of no-latency
+    /// interpolation: its camera, player and object rows are read at the end of every tick
+    /// (`crate::frame_interp::Ticks`). Without one, interpolation keeps its one frame of delay.
+    SetInterpRecipe(Option<Box<rf_rebuild::Recipe>>),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -1691,6 +1695,8 @@ fn core_thread_main(
     // (recipe-optional); `interp_oam` the OAM at the end of the previous frame, which drew this picture.
     let mut interp_on = false;
     let mut interp_objects: Option<crate::frame_interp::Objects> = None;
+    // Ticket W39-01: the tick hook of no-latency interpolation (SNES, recipe rows).
+    let mut interp_ticks: Option<crate::frame_interp::Ticks> = None;
     let mut interp_oam = [0xF8u8; 256];
     // Widescreen (W11-03). `None` is off, and off means the core never
     // reaches its widening path at all.
@@ -1920,6 +1926,11 @@ fn core_thread_main(
                         .and_then(|s| crate::frame_interp::Objects::from_recipe(&s.recipe));
                     mod_session = session.map(|s| *s);
                     margin_capture = false;
+                }
+                CoreCommand::SetInterpRecipe(recipe) => {
+                    interp_ticks = recipe
+                        .as_deref()
+                        .and_then(crate::frame_interp::Ticks::from_recipe);
                 }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
@@ -3041,14 +3052,19 @@ fn core_thread_main(
             // Ticket W36-07: the layers of this picture, read from the captures; nothing is written back.
             if interp_wanted && ran && spec_shown.is_none() {
                 msg.interp = if snes_wanted {
-                    crate::frame_interp::capture_snes(
+                    let mut layers = crate::frame_interp::capture_snes(
                         &stepper,
                         sink.layer_codes(),
                         sink.sprite_ids(),
                         sink.line_regs(),
                         msg.width,
                         msg.height,
-                    )
+                    );
+                    // Ticket W39-01: the tick's facts, read here at the end of the frame's logic.
+                    if let (Some(t), Some(l)) = (interp_ticks.as_mut(), layers.as_deref_mut()) {
+                        t.attach(&stepper, l);
+                    }
+                    layers
                 } else {
                     crate::frame_interp::capture(
                         &stepper,

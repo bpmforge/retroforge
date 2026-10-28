@@ -69,6 +69,12 @@ pub enum Refusal {
     MidLine,
     /// W37-06 (SNES): the lines were force-blanked, or use direct colour: there are no layers to move.
     Blanked,
+    /// W39-01 (no-latency extrapolation): the tick hook saw the player or the camera move further in one
+    /// tick than motion does (a warp, a respawn): the next position is not this one plus its velocity.
+    Teleport,
+    /// W39-01: the tick hook saw the velocity of the player or the camera change sharply (a reversal, a
+    /// bounce): continuing the old velocity would draw the wrong way, so the frame is shown as it is.
+    SharpChange,
 }
 
 /// The honesty label of frame interpolation (D-028): the whole picture between two console frames is
@@ -82,6 +88,21 @@ pub fn label() -> crate::experiments::HonestyLabel {
         feature: FRAME_INTERPOLATION,
         claim: "Frames between the game's own are made up from its layers, and every picture is \
                 shown one frame (about 17 ms) late to make room for them.",
+        invents: true,
+    }
+}
+
+/// W39-01: the honesty label of no-latency extrapolation: the frame between two of the game's own is
+/// the current one moved on at its last velocity, which can be wrong when motion changes.
+pub const FRAME_EXTRAPOLATION: &str = "frame_extrapolation";
+
+/// The label a surface must show with extrapolated frames.
+#[must_use]
+pub fn extrapolation_label() -> crate::experiments::HonestyLabel {
+    crate::experiments::HonestyLabel {
+        feature: FRAME_EXTRAPOLATION,
+        claim: "Frames between the game's own are made up by moving the current one on at the speed it \
+                just had. Nothing is delayed, but a frame can be a little wrong when motion changes.",
         invents: true,
     }
 }
@@ -108,6 +129,8 @@ impl std::fmt::Display for Refusal {
             Refusal::Fade => "the brightness or the backdrop colour changed: colour, not motion",
             Refusal::MidLine => "a register changed mid-line, so the scroll has no single step",
             Refusal::Blanked => "the lines are blanked or in direct colour",
+            Refusal::Teleport => "the player or camera jumped further than motion does in one tick",
+            Refusal::SharpChange => "the velocity changed sharply at the tick: not extrapolated",
         };
         f.write_str(s)
     }

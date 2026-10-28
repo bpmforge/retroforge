@@ -12,9 +12,17 @@
 //!   each repaint composes a frame `alpha` of the way from the older to the newer
 //!   ([`rf_enhance::interpolate::compose`], [`rf_enhance::interpolate_snes::compose_snes`]); a pair the
 //!   composer refuses is simply repeated.
+//!
+//! **No-latency mode (W39-01).** When the frame carries the verdict of the game's tick hook
+//! ([`Ticks`]: the recipe's camera, player and object rows read at the end of every tick, SNES only)
+//! the Presenter does not hold a frame back. It shows the NEW console frame the moment it arrives and,
+//! between arrivals, composes the NEW frame moved on at the velocity it just had
+//! ([`rf_enhance::interpolate_snes::extrapolate_snes`]); a tick that teleported, changed scene or
+//! turned sharply is shown as it is (a repeat). The accuracy-exact stream is untouched either way.
 
 use std::time::Instant;
 
+use rf_enhance::extrapolation::{TickFacts, Tracker, Verdict};
 use rf_enhance::interpolate::{self, Layers, OAM_ENTRIES};
 use rf_enhance::interpolate_snes::{self, SnesLayers, SnesLine};
 use rf_enhance::interpolation::Refusal;
@@ -42,6 +50,133 @@ impl Objects {
     #[must_use]
     pub fn from_recipe(recipe: &rf_rebuild::Recipe) -> Option<Self> {
         Map::from_recipe(recipe).map(Self)
+    }
+}
+
+/// Where the recipe keeps what the tick hook reads (W39-01), resolved to RAM addresses. Names are the
+/// recipe vocabulary: `camera_x` (required), `camera_y`, `player_x`, `player_y`, `game_mode`,
+/// `level_id`, and the recipe's object tables.
+#[derive(Debug, Clone)]
+pub struct TickReader {
+    camera: (u32, u8, Option<(u32, u8)>),
+    player: Option<((u32, u8), (u32, u8))>,
+    scene: Vec<(u32, u8)>,
+    objects: Vec<ObjectRows>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectRows {
+    base: u32,
+    slots: u32,
+    stride: u32,
+    x: (u32, Option<u32>),
+    y: (u32, Option<u32>),
+    state: Option<u32>,
+}
+
+impl TickReader {
+    /// `None` when the recipe has no camera row (nothing to judge a tick by).
+    #[must_use]
+    pub fn from_recipe(recipe: &rf_rebuild::Recipe) -> Option<Self> {
+        let row = |name: &str| {
+            recipe
+                .ram
+                .iter()
+                .find(|r| r.name == name)
+                .map(|r| (r.addr, r.width.clamp(1, 2)))
+        };
+        let objects = recipe
+            .object_tables
+            .iter()
+            .filter_map(|t| {
+                Some(ObjectRows {
+                    base: t.base,
+                    slots: t.slots,
+                    stride: t.stride,
+                    x: (t.x_lo?, t.x_hi),
+                    y: (t.y?, t.y_hi),
+                    state: t.state,
+                })
+            })
+            .collect();
+        Some(Self {
+            camera: (row("camera_x")?.0, row("camera_x")?.1, row("camera_y")),
+            player: row("player_x").zip(row("player_y")),
+            scene: ["game_mode", "level_id"]
+                .iter()
+                .filter_map(|n| row(n))
+                .collect(),
+            objects,
+        })
+    }
+
+    /// The facts at the end of the tick that produced frame `index`.
+    #[must_use]
+    pub fn read(&self, peek: &dyn Fn(u32) -> u8, index: u64) -> TickFacts {
+        let word = |(addr, width): (u32, u8)| {
+            let lo = u16::from(peek(addr));
+            if width >= 2 {
+                lo | u16::from(peek(addr + 1)) << 8
+            } else {
+                lo
+            }
+        };
+        let scene = self.scene.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, r| {
+            (h ^ u64::from(word(*r))).wrapping_mul(0x0100_0000_01b3)
+        });
+        let mut objects = Vec::new();
+        for t in &self.objects {
+            for slot in 0..t.slots.min(64) {
+                let at = |off: u32| t.base + off + slot * t.stride;
+                let live = t.state.is_none_or(|s| peek(at(s)) != 0);
+                // A coordinate is its low byte plus the high byte the table names (none: 8 bits).
+                let coord = |(lo, hi): (u32, Option<u32>)| {
+                    u16::from(peek(at(lo))) | hi.map_or(0, |h| u16::from(peek(at(h))) << 8)
+                };
+                objects.push(live.then(|| (coord(t.x), coord(t.y))));
+            }
+        }
+        TickFacts {
+            index,
+            scene,
+            camera: (
+                word((self.camera.0, self.camera.1)),
+                self.camera.2.map_or(0, word),
+            ),
+            player: self.player.map(|(x, y)| (word(x), word(y))),
+            objects,
+        }
+    }
+}
+
+/// The core-thread half of no-latency mode: the reader and the tracker, one per game.
+#[derive(Debug, Clone)]
+pub struct Ticks {
+    reader: TickReader,
+    tracker: Tracker,
+}
+
+impl Ticks {
+    #[must_use]
+    pub fn from_recipe(recipe: &rf_rebuild::Recipe) -> Option<Self> {
+        TickReader::from_recipe(recipe).map(|reader| Self {
+            reader,
+            tracker: Tracker::new(),
+        })
+    }
+
+    /// Read the tick that produced `layers` (RAM as the frame ended) and stamp the verdict on it. Only
+    /// reads the machine.
+    pub fn attach(&mut self, stepper: &EmuStepper, layers: &mut Captured) {
+        if let Captured::Snes(l) = layers {
+            let facts = self.reader.read(&|a| stepper.peek_bus(a), l.index);
+            l.tick = Some(self.tracker.tick(facts));
+        }
+    }
+
+    /// Forget the history (interpolation was switched off, so ticks were not read for a while).
+    pub fn reset(&mut self) {
+        self.tracker.reset();
     }
 }
 
@@ -172,6 +307,25 @@ fn compose(prev: &Captured, cur: &Captured, alpha: u8, out: &mut Vec<u8>) -> Res
     }
 }
 
+/// Move `cur` on from `prev` into `out` (no-latency mode): a refused tick is a repeat.
+fn extrapolate(
+    prev: &Captured,
+    cur: &Captured,
+    alpha: u8,
+    out: &mut Vec<u8>,
+) -> Result<(), Refusal> {
+    match (prev, cur) {
+        (Captured::Snes(a), Captured::Snes(b)) => match &b.tick {
+            Some(Verdict::Extrapolate(_)) => {
+                interpolate_snes::extrapolate_snes(a, b, alpha, out).map(|_| ())
+            }
+            Some(Verdict::Snap(r)) => Err(*r),
+            None => Err(Refusal::Malformed),
+        },
+        _ => Err(Refusal::Malformed),
+    }
+}
+
 /// How far back each (layer, priority) is in a mode's order, for every `bg_mode | bg3_priority << 3`
 /// (`rf_snes::ppu::priority_slots`).
 fn snes_ranks() -> Vec<[[u8; 4]; 5]> {
@@ -242,6 +396,7 @@ pub fn capture_snes(
         lines,
         ranks: snes_ranks(),
         index: stepper.frame_count(),
+        tick: None,
     })))
 }
 
@@ -268,6 +423,8 @@ pub enum Shown {
     Console(u64),
     /// Composed between console frames `from` and `from + 1`, `alpha` of 256 of the way.
     Intermediate { from: u64, alpha: u8 },
+    /// W39-01: console frame `from` moved on `alpha` of 256 of a tick at the velocity it just had.
+    Extrapolated { from: u64, alpha: u8 },
 }
 
 /// The UI-thread half.
@@ -298,6 +455,9 @@ pub struct Presenter {
     pub alpha_override: Option<u8>,
     /// The last composed picture: `(from, alpha)` it was made for.
     cached: Option<(u64, u8)>,
+    /// W39-01: the newest frame carries a tick verdict, so it is shown on arrival and moved on, not
+    /// held back.
+    no_latency: bool,
 }
 
 /// The gap between console frames when nothing has been measured yet (NTSC, 60.0988 Hz).
@@ -322,18 +482,29 @@ impl Presenter {
         self.cur = None;
         self.arrived = None;
         self.cached = None;
+        self.no_latency = false;
     }
 
     /// Whether a frame is being held back (so the shown picture lags the machine).
     #[must_use]
     pub fn is_delaying(&self) -> bool {
-        self.prev.is_some()
+        self.prev.is_some() && !self.no_latency
+    }
+
+    /// Whether frames are shown on arrival and moved on (W39-01) rather than held back.
+    #[must_use]
+    pub fn is_no_latency(&self) -> bool {
+        self.no_latency
     }
 
     /// The console frame number on screen.
     #[must_use]
     pub fn shown_frame(&self) -> Option<u64> {
-        self.prev.as_ref().map(Captured::index)
+        if self.no_latency {
+            self.cur.as_ref().map(Captured::index)
+        } else {
+            self.prev.as_ref().map(Captured::index)
+        }
     }
 
     fn close_gap(&mut self) {
@@ -369,11 +540,17 @@ impl Presenter {
         // The first frame has nothing before it: shown as it comes, with no gap to fill yet.
         self.prev_ok = self.cur_ok;
         self.cur_ok = layers.describes_its_picture();
+        self.no_latency = matches!(&layers, Captured::Snes(l) if l.tick.is_some());
         let first = layers.rgba().to_vec();
         let Some(shown) = self.cur.replace(layers) else {
             self.prev = None;
             return first;
         };
+        if self.no_latency {
+            // The new frame is the one to show; the old one only supplies the velocity.
+            self.prev = Some(shown);
+            return first;
+        }
         let out = shown.rgba().to_vec();
         self.prev = Some(shown);
         out
@@ -401,13 +578,21 @@ impl Presenter {
         }
         // Compose again only when the shift could have changed (about 16 steps across a gap).
         let step = alpha & 0xF0;
-        let from = prev.index();
+        let from = if self.no_latency {
+            cur.index()
+        } else {
+            prev.index()
+        };
         if self.cached == Some((from, step)) {
             return None; // that picture (or the repeat of a refusal) is already on screen
         }
         let started = Instant::now();
         let composed = if self.prev_ok && self.cur_ok {
-            let r = compose(prev, cur, alpha.max(1), &mut self.scratch);
+            let r = if self.no_latency {
+                extrapolate(prev, cur, alpha.max(1), &mut self.scratch)
+            } else {
+                compose(prev, cur, alpha.max(1), &mut self.scratch)
+            };
             if r.is_ok() {
                 let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
                 self.compose_cost = (
@@ -423,7 +608,12 @@ impl Presenter {
             Ok(_) => {
                 self.tried = Some(true);
                 self.cached = Some((from, step));
-                Some((self.scratch.as_slice(), Shown::Intermediate { from, alpha }))
+                let shown = if self.no_latency {
+                    Shown::Extrapolated { from, alpha }
+                } else {
+                    Shown::Intermediate { from, alpha }
+                };
+                Some((self.scratch.as_slice(), shown))
             }
             Err(r) => {
                 // One success makes the gap count as interpolated; a refusal only if none came before.
@@ -579,5 +769,218 @@ mod tests {
         assert!(!p.is_delaying());
         let (l2, f2) = layers(2, 13);
         assert_eq!(p.arrive(l2, Instant::now()), f2);
+    }
+
+    // ---- W39-01: no-latency mode ----
+
+    /// A 256x224 SNES frame: BG1 at scroll `hofs` (a function of the world column), a 4x4 sprite at
+    /// `sprite_x` on rows 100..104, and the tick verdict the hook gave it.
+    fn snes(index: u64, hofs: u16, sprite_x: usize, tick: Option<Verdict>) -> (Captured, Vec<u8>) {
+        let (w, h) = (256usize, 224usize);
+        let mut rgba = vec![255u8; w * h * 4];
+        let mut codes = vec![0u8; w * h];
+        let mut ids = vec![interpolate::NO_SPRITE; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let c = resolve(((usize::from(hofs) + x) % 60) as u8);
+                rgba[(y * w + x) * 4..(y * w + x) * 4 + 3].copy_from_slice(&c);
+            }
+        }
+        for y in 100..104 {
+            for x in sprite_x..sprite_x + 4 {
+                let at = y * w + x;
+                codes[at] = interpolate_snes::CODE_SPRITE | (2 << 3);
+                ids[at] = 3;
+                rgba[at * 4..at * 4 + 3].copy_from_slice(&[200, 1, 2]);
+            }
+        }
+        let line = SnesLine {
+            hofs: [hofs, 0, 0, 0],
+            vofs: [0; 4],
+            tm: 0x11,
+            brightness: 15,
+            backdrop: 0,
+            mode_key: 1,
+            hazards: 0,
+        };
+        let l = SnesLayers {
+            width: w,
+            height: h,
+            rgba: rgba.clone(),
+            codes,
+            ids,
+            lines: vec![line; h],
+            ranks: snes_ranks(),
+            index,
+            tick,
+        };
+        (Captured::Snes(l), rgba)
+    }
+
+    fn steady() -> Option<Verdict> {
+        Some(Verdict::Extrapolate(
+            rf_enhance::extrapolation::Motion::default(),
+        ))
+    }
+
+    fn sprite_at(px: &[u8], x: usize) -> bool {
+        let at = (101 * 256 + x) * 4;
+        px[at..at + 3] == [200, 1, 2]
+    }
+
+    #[test]
+    fn with_a_tick_verdict_the_new_frame_is_shown_on_arrival_and_moved_on() {
+        let mut p = Presenter::new();
+        p.alpha_override = Some(128);
+        let t0 = Instant::now();
+        let (l1, f1) = snes(1, 0, 40, steady());
+        let (l2, f2) = snes(2, 4, 44, steady());
+        assert_eq!(p.arrive(l1, t0), f1);
+        // The next frame is on screen the moment it arrives: no frame held back.
+        assert_eq!(
+            p.arrive(l2, t0 + Duration::from_millis(17)),
+            f2,
+            "no latency"
+        );
+        assert!(p.is_no_latency() && !p.is_delaying());
+        assert_eq!(p.shown_frame(), Some(2));
+        // The picture between is the NEW frame moved on: the sprite is 2 dots past where f2 has it.
+        let (px, shown) = p
+            .intermediate(t0 + Duration::from_millis(25))
+            .map(|(px, s)| (px.to_vec(), s))
+            .expect("extrapolated");
+        assert!(
+            matches!(shown, Shown::Extrapolated { from: 2, .. }),
+            "{shown:?}"
+        );
+        assert!(
+            sprite_at(&px, 46) && sprite_at(&px, 47),
+            "sprite moved on by half a step"
+        );
+        assert!(
+            !sprite_at(&px, 44),
+            "and left where the current frame had it"
+        );
+        assert!(sprite_at(&f2, 44));
+    }
+
+    #[test]
+    fn without_a_tick_verdict_the_old_delay_stays() {
+        let mut p = Presenter::new();
+        let t0 = Instant::now();
+        let (l1, f1) = snes(1, 0, 40, None);
+        let (l2, _f2) = snes(2, 4, 44, None);
+        assert_eq!(p.arrive(l1, t0), f1);
+        assert_eq!(
+            p.arrive(l2, t0 + Duration::from_millis(17)),
+            f1,
+            "one frame late"
+        );
+        assert!(!p.is_no_latency() && p.is_delaying());
+    }
+
+    /// The latency the ticket is about: input at tick 3 moves the sprite; the first picture after that
+    /// tick already shows it moved in no-latency mode, and the delayed mode still shows the old position.
+    #[test]
+    fn the_first_picture_after_an_input_reflects_it_where_interpolation_lags() {
+        // The sprite stands still for two ticks, then the button is pressed and it moves 4 dots.
+        let seq = |tick: fn() -> Option<Verdict>| {
+            vec![
+                snes(1, 0, 40, tick()),
+                snes(2, 0, 40, tick()),
+                snes(3, 0, 44, tick()),
+            ]
+        };
+        let shown_after_press = |tick: fn() -> Option<Verdict>| {
+            let mut p = Presenter::new();
+            let t0 = Instant::now();
+            let mut last = Vec::new();
+            for (i, (l, _)) in seq(tick).into_iter().enumerate() {
+                last = p.arrive(l, t0 + Duration::from_millis(17 * i as u64));
+            }
+            last
+        };
+        let now = shown_after_press(steady);
+        let lag = shown_after_press(|| None);
+        assert!(
+            sprite_at(&now, 44),
+            "no-latency: the pressed position is on screen at once"
+        );
+        assert!(
+            !sprite_at(&lag, 44) && sprite_at(&lag, 40),
+            "interpolation: one frame behind"
+        );
+    }
+
+    #[test]
+    fn a_snapped_tick_is_shown_as_it_is() {
+        let mut p = Presenter::new();
+        p.alpha_override = Some(128);
+        let t0 = Instant::now();
+        let (l1, _) = snes(1, 0, 40, steady());
+        let (l2, f2) = snes(2, 4, 44, Some(Verdict::Snap(Refusal::SharpChange)));
+        p.arrive(l1, t0);
+        assert_eq!(p.arrive(l2, t0 + Duration::from_millis(17)), f2);
+        assert!(
+            p.intermediate(t0 + Duration::from_millis(25)).is_none(),
+            "repeat"
+        );
+        assert_eq!(p.last_refusal, Some(Refusal::SharpChange));
+        assert_eq!(p.refusals.get("SharpChange"), Some(&1));
+        assert_eq!(p.tally.repeated, 0, "counted when the gap closes");
+    }
+
+    /// The reader resolves the recipe's rows to addresses and reads what a tick leaves in RAM.
+    #[test]
+    fn the_tick_reader_reads_the_recipes_rows() {
+        use rf_rebuild::{ObjectTable, RamMeaning, Recipe};
+        let ram = |addr: u32, width: u8, name: &str| RamMeaning {
+            addr,
+            width,
+            name: name.into(),
+            ..RamMeaning::default()
+        };
+        let recipe = Recipe {
+            ram: vec![
+                ram(0x7E_001A, 2, "camera_x"),
+                ram(0x7E_0094, 2, "player_x"),
+                ram(0x7E_0096, 2, "player_y"),
+                ram(0x7E_0100, 1, "game_mode"),
+            ],
+            object_tables: vec![ObjectTable {
+                base: 0x7E_0200,
+                slots: 3,
+                stride: 1,
+                x_lo: Some(0),
+                x_hi: Some(0x10),
+                y: Some(0x20),
+                state: Some(0x30),
+                ..ObjectTable::default()
+            }],
+            ..Recipe::default()
+        };
+        let reader = TickReader::from_recipe(&recipe).expect("has a camera");
+        let mem = |a: u32| -> u8 {
+            match a {
+                0x7E_001A => 0x34,
+                0x7E_001B => 0x12,
+                0x7E_0094 => 7,
+                0x7E_0096 => 9,
+                0x7E_0100 => 0x14,
+                // Slot 1 in use at x 0x0105, y 6; slot 0 and 2 empty.
+                0x7E_0231 => 1,
+                0x7E_0201 => 5,
+                0x7E_0211 => 1,
+                0x7E_0221 => 6,
+                _ => 0,
+            }
+        };
+        let f = reader.read(&mem, 42);
+        assert_eq!(f.index, 42);
+        assert_eq!(f.camera, (0x1234, 0));
+        assert_eq!(f.player, Some((7, 9)));
+        assert_eq!(f.objects, vec![None, Some((0x0105, 6)), None]);
+        // No camera row, no reader.
+        assert!(TickReader::from_recipe(&Recipe::default()).is_none());
     }
 }
