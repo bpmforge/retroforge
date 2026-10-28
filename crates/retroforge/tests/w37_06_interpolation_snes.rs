@@ -91,7 +91,7 @@ fn bg1_hofs(st: &EmuStepper) -> u16 {
 /// the game, so the session keeps scrolling through whatever the levels do.
 fn play(st: &EmuStepper, f: u32) -> Vec<SnesButton> {
     if game_mode(st) == 0x0E {
-        return vec![if (f / 30) % 2 == 0 {
+        return vec![if (f / 30).is_multiple_of(2) {
             SnesButton::Right
         } else {
             SnesButton::A
