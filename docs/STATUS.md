@@ -5174,3 +5174,17 @@ stories, 10 decisions).
   misses are itemised in the tests (SMB's 18 all in one slot). Full slot
   counts were not reached: SMW slots 1-4, 8, 10, 11 are never live in these
   runs. Workspace: **3884 passing**, gate green.
+- **W38-04b — Widescreen keepers on SMW, HUD trials** (2026-10-28). SMW was
+  observed over 30 309 frames in three power-on runs (two movies plus a
+  patrol script; 33 level entries), with 190 object state flips up and 183
+  down (W38-04 had 5 and 5). 16 single candidates, a group and 4 adc/cmp
+  window pairs were trialed under lockstep in parallel. One keeper: the
+  16-bit window pair at 0xa459 / 0xa45c widened by 0x80, first divergence an
+  off-screen state byte at frame 2260 with OAM and camera identical. It is
+  marginal (19 px more left reach; the picture differs from frame 2267). The
+  other 40 trial lines print their reason (16 changed the picture or camera,
+  13 never diverged, 10 kept nothing farther out, 2 touched an on-screen
+  object). HUD anchors: SMB's sprite-0 x table byte 0xfce kept on a state
+  check (no patch row: it is a table byte outside any function); SMW's HUD is
+  BG3 tiles, so there is no sprite anchor to trial. Workspace: **3888
+  passing**, gate green.
