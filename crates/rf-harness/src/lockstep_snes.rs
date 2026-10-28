@@ -22,7 +22,9 @@
 //! a bug those share with the interpreter is invisible: the checker proves
 //! the *executor* (and, later, a JIT) did not change the machine, not that
 //! the machine is right. The coprocessors' own CPUs (SA-1, Super FX) are
-//! covered only through their serialised state in the `cart` chunk. The fine
+//! covered only through their serialised state in the `cart` chunk, except
+//! the SA-1's 65816, whose registers, I-RAM and BW-RAM are also compared by
+//! name (`sa1.cpu.*`, `sa1.iram`, `sa1.bwram`; ticket W40-03). The fine
 //! pass (the diverging frame re-run an instruction at a time) compares the
 //! registers, the cycle counter and work RAM after every instruction; a
 //! difference that appears only in VRAM/OAM/CGRAM/APU/PPU state or in the

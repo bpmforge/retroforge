@@ -471,4 +471,55 @@ mod tests {
             0
         );
     }
+
+    /// The SA-1 takes an NMI from the S-CPU through its own vector (`$2205`):
+    /// the recorder notes the handler as an NMI entry, the executor counts
+    /// the entry and checks the handler's `RTI` landing.
+    #[test]
+    fn sa1_interrupt_entries_are_recorded_and_counted() {
+        let mut rom = image();
+        rom[0..2].copy_from_slice(&[0x80, 0xFE]); // S-CPU: BRA *
+        let sa1: &[u8] = &[
+            0xA9, 0xFF, 0x8D, 0x2A, 0x22, // CIWP: open I-RAM (the RTI pulls from it)
+            0x80, 0xFE, // BRA *
+        ];
+        rom[0x100..0x100 + sa1.len()].copy_from_slice(sa1);
+        rom[0x1000..0x1002].copy_from_slice(&[0xEA, 0x40]); // handler at $9000: NOP ; RTI
+        let drive = |s: &mut SnesSystem| {
+            s.bus.write(0x00_2203, 0x00);
+            s.bus.write(0x00_2204, 0x81); // reset vector $8100
+            s.bus.write(0x00_2205, 0x00);
+            s.bus.write(0x00_2206, 0x90); // NMI vector $9000
+            s.bus.write(0x00_2200, 0x00); // release Reset
+            for _ in 0..20 {
+                s.step().expect("steps");
+            }
+            s.bus.write(0x00_220A, 0x10); // CIE: enable NMI-from-SNES
+            s.bus.write(0x00_2200, 0x10); // CCNT: raise it
+            for _ in 0..20 {
+                s.step().expect("steps");
+            }
+        };
+        let mut s = SnesSystem::load(&rom).expect("loads");
+        let board = s.bus.sa1.as_ref().unwrap().board;
+        s.sa1_obs.coverage = Some(Sa1Obs::fresh_log(s.bus.rom.len(), board));
+        drive(&mut s);
+        let log = *s.sa1_obs.coverage.take().unwrap();
+        let nmi = log
+            .interrupts
+            .iter()
+            .find(|e| e.kind == InterruptKind::Nmi)
+            .expect("NMI entry");
+        assert_eq!((nmi.target.cpu, nmi.target.rom), (0x9000, Some(0x1000)));
+        assert!(log.indirect.iter().any(|e| e.kind == IndirectKind::Rti));
+
+        let atlas = crate::rebuild::build_sa1_atlas_from_image(&rom, &log).expect("builds");
+        let mut s = SnesSystem::load(&rom).expect("loads");
+        s.sa1_obs.rebuild = Some(Box::new(RebuildExec::new(atlas)));
+        drive(&mut s);
+        let st = s.sa1_obs.rebuild.as_deref().unwrap().stats();
+        assert_eq!(st.interrupt_entries, 1, "{st:?}");
+        assert!(st.indirect_checked >= 1, "{st:?}");
+        assert_eq!((st.fallback, st.dispatch_misses), (0, 0), "{st:?}");
+    }
 }

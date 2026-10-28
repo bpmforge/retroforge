@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Environment (all optional): `RF_SCREENS_ROMS_DIR` (ROM root),
-//! `RF_W40_GAME` (`kdl3` or `smrpg`; default `kdl3`), `RF_W40_SCRIPT`
+//! `RF_W40_REPS` (play bouts per script, default 8), `RF_W40_SCRIPT`
 //! (replace the built-in pad script), `RF_W40_OUT` (directory for probe PNGs,
 //! used by `probe_script` only).
 
@@ -40,21 +40,13 @@ struct Game {
 }
 
 fn game() -> Game {
-    match std::env::var("RF_W40_GAME").as_deref() {
-        Ok("smrpg") => Game {
-            file: "Super Mario RPG - Legend of the Seven Stars (USA).zip",
-            menus: "w600",
-            play_a: "w60",
-            play_b: "w60",
-        },
-        // Kirby's Dream Land 3: Nintendo/HAL logos, title, file select, the
-        // opening Grass Land level (found with `probe_script`).
-        _ => Game {
-            file: "Kirby's Dream Land 3 (USA).zip",
-            menus: "w300 S6 w194 S6 w194 S6 w194 A6 w194 A6 w194 A6 w194 S6 w194 A6 w194",
-            play_a: "R50 R+A20 R40 A8 w20 R30 R+B12 w10",
-            play_b: "R20 R+A30 A12 w14 R+B16 L20 R50 R+A24 w8",
-        },
+    // Kirby's Dream Land 3: Nintendo/HAL logos, title, file select, the
+    // opening Grass Land level (found with `probe_script`).
+    Game {
+        file: "Kirby's Dream Land 3 (USA).zip",
+        menus: "w300 S6 w194 S6 w194 S6 w194 A6 w194 A6 w194 A6 w194 S6 w194 A6 w194",
+        play_a: "R50 R+A20 R40 A8 w20 R30 R+B12 w10",
+        play_b: "R20 R+A30 A12 w14 R+B16 L20 R50 R+A24 w8",
     }
 }
 
