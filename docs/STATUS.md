@@ -5297,3 +5297,10 @@ stories, 10 decisions).
   `w37_04_shadow_cost` (W37-04b), `w36_10_smw_recipe` (generator vs W38-01
   rows). Running the SMW bake end to end exposed W39-03c (0 solid cells).
   Workspace: **3948 passing**, gate green.
+- **W39-03c — SMW baked geometry** (2026-10-28). The SMW bake took the level
+  buffer's base from a stray run of reads far below the buffer, so no rule id
+  landed on a footprint cell. It now picks the base by an observed alignment
+  search (the cell under Mario's feet is a rule-solid body; 0x7ec800 wins with
+  1962 of 2613 in-level frames). Over the 53x14-cell canvas footprint: 188
+  cells judged, 39 solid or one-way, 40 wall quads, cached and reloaded equal.
+  Workspace: **3948 passing**, gate green.
