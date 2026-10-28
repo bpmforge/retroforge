@@ -74,6 +74,7 @@ pub mod mode_invariant;
 pub mod overclock_ui;
 pub mod pacer;
 pub mod play_view;
+pub mod presentation;
 pub mod profile_builder;
 pub mod profile_editor;
 pub mod quick_menu;
