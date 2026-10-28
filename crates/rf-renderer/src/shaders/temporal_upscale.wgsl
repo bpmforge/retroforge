@@ -28,9 +28,9 @@ struct U {
 @group(0) @binding(6) var out_color: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(7) var out_history: texture_storage_2d<rgba16float, write>;
 
-// Gaussian sigma over input texels (0.5: the texel itself dominates, its
+// Gaussian variance over input texels (measured: a wider kernel is visibly softer than a bilinear upscale of the same frame)
 // neighbours fill in between the jitter samples).
-const SIGMA2: f32 = 0.25;
+const SIGMA2: f32 = 0.08;
 // History weight is reduced toward this blend when the pixel moves fast.
 const FAST_BLEND: f32 = 0.5;
 const FAST_PIXELS: f32 = 4.0;

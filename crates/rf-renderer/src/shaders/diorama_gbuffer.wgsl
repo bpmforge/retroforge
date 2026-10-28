@@ -83,5 +83,9 @@ fn fs_main(in: VsOut) -> @location(0) vec2<f32> {
     }
     let d = in.prev.xy / in.prev.w - in.cur.xy / in.cur.w;
     // NDC is y-up, pixels are y-down.
-    return vec2<f32>(d.x * 0.5 * cam.size.x, -d.y * 0.5 * cam.size.y);
+    let px = vec2<f32>(d.x * 0.5 * cam.size.x, -d.y * 0.5 * cam.size.y);
+    // Interpolating two clip positions leaves ~1e-5 px of rounding noise on a
+    // static point; below 1/256 px nothing moved, so say exactly zero (a
+    // static scene then reprojects without any resampling blur).
+    return select(px, vec2<f32>(0.0), abs(px) < vec2<f32>(0.004));
 }

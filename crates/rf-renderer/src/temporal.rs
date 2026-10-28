@@ -131,9 +131,9 @@ pub struct TemporalUpscaler {
 }
 
 enum Inner {
-    Portable(Portable),
+    Portable(Box<Portable>),
     #[cfg(all(feature = "metalfx", target_os = "macos"))]
-    MetalFx(crate::metalfx::MetalFxTemporalScaler),
+    MetalFx(Box<crate::metalfx::MetalFxTemporalScaler>),
 }
 
 impl TemporalUpscaler {
@@ -141,7 +141,7 @@ impl TemporalUpscaler {
     #[must_use]
     pub fn portable(gpu: &GpuContext, input: (u32, u32), output: (u32, u32)) -> Self {
         Self {
-            inner: Inner::Portable(Portable::new(gpu, input, output)),
+            inner: Inner::Portable(Box::new(Portable::new(gpu, input, output))),
             fallback_reason: None,
         }
     }
@@ -159,19 +159,15 @@ impl TemporalUpscaler {
             return Self::portable(gpu, input, output);
         }
         #[cfg(all(feature = "metalfx", target_os = "macos"))]
-        {
-            match crate::metalfx::MetalFxTemporalScaler::new(gpu, input, output) {
-                Ok(s) => {
-                    return Self {
-                        inner: Inner::MetalFx(s),
-                        fallback_reason: None,
-                    }
-                }
-                Err(e) => {
-                    let mut p = Self::portable(gpu, input, output);
-                    p.fallback_reason = Some(e.to_string());
-                    return p;
-                }
+        match crate::metalfx::MetalFxTemporalScaler::new(gpu, input, output) {
+            Ok(s) => Self {
+                inner: Inner::MetalFx(Box::new(s)),
+                fallback_reason: None,
+            },
+            Err(e) => {
+                let mut p = Self::portable(gpu, input, output);
+                p.fallback_reason = Some(e.to_string());
+                p
             }
         }
         #[cfg(not(all(feature = "metalfx", target_os = "macos")))]
@@ -238,6 +234,17 @@ impl TemporalUpscaler {
                 )
                 .map_err(|e| e.to_string()),
         }
+    }
+
+    /// Override the sign the jitter is handed to MetalFX with (a no-op for
+    /// the portable back end, whose convention is this module's own). For
+    /// the sign-convention test; production uses `metalfx::apple::JITTER_SIGN`.
+    pub fn set_metalfx_jitter_sign(&mut self, sign: (f32, f32)) {
+        #[cfg(all(feature = "metalfx", target_os = "macos"))]
+        if let Inner::MetalFx(m) = &mut self.inner {
+            m.set_jitter_sign(sign);
+        }
+        let _ = sign;
     }
 
     /// The most recent output (`Rgba8Unorm`, `COPY_SRC | TEXTURE_BINDING`).

@@ -21,8 +21,8 @@
 //! from the *unjittered* current and previous matrices, so the sub-pixel
 //! jitter never leaks into the motion vector (it would blur for ever).
 //! Moving objects: pass the previous frame's vertices; they are used only
-//! when they pair up with this frame's one for one (same count, kinds and
-//! uvs), otherwise the frame is treated as camera motion only. Said plainly:
+//! when they pair up with this frame's one for one (same count and kinds, and
+//! the same uvs for everything but billboards), otherwise the frame is treated as camera motion only. Said plainly:
 //! the HD-2D plan rebuilds its mesh every frame, so an entity that appears or
 //! disappears reorders the list, and that frame's object motion is dropped
 //! (the upscaler's history clamp absorbs it).
@@ -120,7 +120,7 @@ impl GBufferPass {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -253,6 +253,13 @@ impl GBufferPass {
                 prev: None,
             }),
         }
+    }
+
+    /// The images of the last frame, `None` before one.
+    #[must_use]
+    pub fn last(&self) -> Option<GBuffer> {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.gbuffer.clone()
     }
 
     /// Draw the frame's depth and motion; the images stay on the GPU.
@@ -504,9 +511,11 @@ impl GBufferPass {
     }
 }
 
-/// Two vertices are the same slot of the mesh in two frames.
+/// Two vertices are the same slot of the mesh in two frames: the same kind,
+/// and for everything but a billboard (whose uv window into the sprite layer
+/// moves with the sprite) the same uv.
 fn same_slot(a: &Vertex, b: &Vertex) -> bool {
-    a.kind == b.kind && a.uv == b.uv
+    a.kind == b.kind && (a.kind == crate::diorama_mesh::kind::SPRITE || a.uv == b.uv)
 }
 
 /// Decode an IEEE half to `f32` (the motion image's texel type).
