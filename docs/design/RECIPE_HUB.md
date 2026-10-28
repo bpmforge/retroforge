@@ -31,7 +31,7 @@ RetroForge tooling can observe on the submitter's own copy of the game.
 Submitters state in the pull request that every row was observed on their
 own copy and that they hold the right to submit it.
 
-**3. Intake check.** `tools/recipe-hub/validate-submission.py` runs first.
+**3. Intake check.** `scripts/recipe-hub/validate-submission.py` runs first.
 Any REJECT verdict ends review. It checks schema (the exact keys the loader
 accepts), banned provenance words, byte payloads, hash and range shapes, and
 grades. It is a filter, not a verdict on honesty: a human reviewer reads
@@ -85,10 +85,10 @@ docs/DECISIONS.md. Changes to this rule need the same approval.
 | piece | status |
 |---|---|
 | This rule | draft, awaiting Brad |
-| `tools/recipe-hub/validate-submission.py` | built; checked on made-up samples |
+| `scripts/recipe-hub/validate-submission.py` | built; checked on made-up samples |
 | `docs/design/RECIPE_HUB_REVIEW.md` | lead's referee checklist (commands only) |
 | Real external submission accepted | pending: needs Brad's approval and a real submitter |
 
-The in-repo samples under `tools/recipe-hub/samples/` are for a made-up
+The in-repo samples under `scripts/recipe-hub/samples/` are for a made-up
 engine and are not game content; the "first external recipe accepted"
 acceptance is not met by them.

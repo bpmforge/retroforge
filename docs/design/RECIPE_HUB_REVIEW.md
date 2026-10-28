@@ -11,7 +11,7 @@ ROMs, patches or movies. Use `CARGO_INCREMENTAL=0` and
 
 1. Put the submission outside the repo or on a branch under
    `profiles/<console>/<game>/` as `recipe.submission.toml`.
-2. `python3 tools/recipe-hub/validate-submission.py <file>`
+2. `python3 scripts/recipe-hub/validate-submission.py <file>`
    - REJECT (exit 1): stop, reply with the printed reasons.
    - HOLD (exit 2): the file has `[[patch]]` rows; ask for the facts split
      into their own file, and referee the patch rows in step 3.
