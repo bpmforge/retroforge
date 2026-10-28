@@ -64,7 +64,7 @@ use crate::objtable::Trace;
 use crate::recipe::{Grade, ObjectTable};
 
 /// Steps a RAM read stays attached to an immediate op that follows it.
-const WINDOW: u64 = 12;
+const WINDOW: u64 = 32;
 /// Steps after a site in which a state flip or a camera write is credited to it.
 const AFTER: u64 = 40;
 /// Steps after a site in which a camera write is credited to it.
@@ -324,7 +324,11 @@ impl WideReader {
             let Some(ram) = self.ram(a.addr, true) else {
                 continue;
             };
-            let prev = self.last.insert(ram, a.value);
+            let mut prev = self.last.insert(ram, a.value);
+            // State bytes start at zero on power-on; a first sight is a 0.
+            if prev.is_none() && self.watch.obj_state.contains(&ram) {
+                prev = Some(0);
+            }
             if self.watch.cam.contains(&ram) {
                 self.facts.cam_writes += 1;
                 let step = self.step;
@@ -596,7 +600,23 @@ fn screen_const(imm: u16, width: u8) -> bool {
     }
 }
 
-fn kind_of(s: &SiteFacts, f: &WideFacts) -> Option<Kind> {
+/// Per function, the state flips credited to its sites: a function that
+/// spawns or removes objects is where a bare camera-relative constant (checked
+/// against the level data, not a slot) belongs too.
+fn flip_functions(f: &WideFacts) -> BTreeMap<u32, (u32, u32)> {
+    let mut m: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+    for s in f.sites.values() {
+        if let Some(func) = s.function {
+            let e = m.entry(func).or_default();
+            e.0 += s.flip_up;
+            e.1 += s.flip_down;
+        }
+    }
+    m.retain(|_, v| v.0 + v.1 > 0);
+    m
+}
+
+fn kind_of(s: &SiteFacts, f: &WideFacts, flips: &BTreeMap<u32, (u32, u32)>) -> Option<Kind> {
     let up_down = (s.flip_up, s.flip_down);
     if s.obj_x > 0 && (up_down.0 > 0 || up_down.1 > 0) {
         return Some(if up_down.0 >= up_down.1 {
@@ -605,8 +625,21 @@ fn kind_of(s: &SiteFacts, f: &WideFacts) -> Option<Kind> {
             Kind::Despawn
         });
     }
+    // Operands 0 to 3 are carries and unit steps, not distances.
+    if s.imm < 4 && s.width == 1 {
+        return screen_const(s.imm, s.width).then_some(Kind::ScreenConst);
+    }
     if s.cam > 0 && s.cam_writes > 0 && s.cam_writes as u64 * 4 >= s.cam {
         return Some(Kind::CameraClamp);
+    }
+    if s.cam > 0 && s.obj_x == 0 {
+        if let Some(&(up, down)) = s.function.and_then(|func| flips.get(&func)) {
+            return Some(if up >= down {
+                Kind::Activation
+            } else {
+                Kind::Despawn
+            });
+        }
     }
     if s.both > 0 {
         return Some(Kind::EdgeTest);
@@ -634,7 +667,7 @@ fn score(s: &SiteFacts, kind: Kind, f: &WideFacts) -> (u8, String) {
     };
     match kind {
         Kind::Activation | Kind::Despawn => {
-            sc += 30;
+            sc += 40;
             if recall >= 0.5 {
                 sc += 15;
             }
@@ -690,12 +723,20 @@ pub const MAX_CANDIDATES: usize = 60;
 /// Rank what a run saw into candidates, best first.
 #[must_use]
 pub fn infer(f: &WideFacts) -> Vec<Candidate> {
+    let flips = flip_functions(f);
     let mut out: Vec<Candidate> = Vec::new();
     for (&rom, s) in &f.sites {
-        let Some(kind) = kind_of(s, f) else {
+        let Some(kind) = kind_of(s, f, &flips) else {
             continue;
         };
-        let (sc, evidence) = score(s, kind, f);
+        let (mut sc, evidence) = score(s, kind, f);
+        // Sharing a function with the state flips is evidence in itself.
+        if s.flip_up + s.flip_down == 0
+            && s.function.is_some_and(|func| flips.contains_key(&func))
+            && matches!(kind, Kind::Activation | Kind::Despawn)
+        {
+            sc = sc.saturating_add(25).min(100);
+        }
         out.push(Candidate {
             kind,
             site: rom,
@@ -808,17 +849,34 @@ pub fn find_camera(t: &Trace) -> Option<Camera> {
     if moving < 20 {
         return None;
     }
-    let mut best: Option<(usize, usize)> = None;
-    for a in 0..r {
-        let hits = t
-            .frames
-            .iter()
-            .filter(|f| f.ram[a] == (f.cam_x & 0xFF) as u8)
-            .count();
-        if hits * 10 >= n * 9 && best.is_none_or(|(_, h)| hits > h) {
-            best = Some((a, hits));
+    // The scroll the PPU used and the byte the game keeps can differ by a
+    // frame of travel, so "equal" means within a few pixels (mod 256); the
+    // exact matches break ties.
+    // The game's byte is the one the PPU scroll is loaded from, so it is level
+    // with the scroll or ahead of it; a byte a few pixels *behind* is another
+    // edge (a right edge one pixel short of the picture's width, say). Only
+    // when nothing is level or ahead is a byte behind accepted.
+    let ahead = |ram: u8, cam: u16| ram.wrapping_sub((cam & 0xFF) as u8) <= 4;
+    let behind = |ram: u8, cam: u16| {
+        let d = ram.wrapping_sub((cam & 0xFF) as u8);
+        d <= 4 || d >= 252
+    };
+    let pick = |near: &dyn Fn(u8, u16) -> bool| {
+        let mut best: Option<(usize, usize)> = None;
+        for a in 0..r {
+            let hits = t.frames.iter().filter(|f| near(f.ram[a], f.cam_x)).count();
+            let exact = t
+                .frames
+                .iter()
+                .filter(|f| f.ram[a] == (f.cam_x & 0xFF) as u8)
+                .count();
+            if hits * 10 >= n * 9 && best.is_none_or(|(_, e)| exact > e) {
+                best = Some((a, exact));
+            }
         }
-    }
+        best
+    };
+    let best = pick(&ahead).or_else(|| pick(&behind));
     let (lo, _) = best?;
     // The page byte: smoothest (hi * 256 + lo) among the bytes that change.
     let mut hi: Option<(usize, usize)> = None;
@@ -843,6 +901,35 @@ pub fn find_camera(t: &Trace) -> Option<Camera> {
         lo,
         hi: hi.map(|(a, _)| a),
     })
+}
+
+/// RAM bytes that keep a fixed distance from the camera's low (or page) byte
+/// in nine frames of ten and are not constant: the right edge, the copy the
+/// PPU is loaded from. Code that compares against the screen's other edge
+/// reads these, not the camera itself. Excludes the camera bytes.
+#[must_use]
+pub fn camera_aliases(t: &Trace, cam: &Camera) -> Vec<usize> {
+    let n = t.frames.len();
+    let r = t.frames.iter().map(|f| f.ram.len()).min().unwrap_or(0);
+    let mut out = Vec::new();
+    for (base, is_hi) in [(Some(cam.lo), false), (cam.hi, true)] {
+        let Some(base) = base else { continue };
+        for a in (0..r).filter(|&a| a != cam.lo && Some(a) != cam.hi) {
+            if t.frames.windows(2).all(|w| w[0].ram[a] == w[1].ram[a]) {
+                continue;
+            }
+            let mut votes = [0usize; 256];
+            for f in &t.frames {
+                votes[usize::from(f.ram[a].wrapping_sub(f.ram[base]))] += 1;
+            }
+            // A page byte that merely counts up is not tied to the camera.
+            let top = votes.iter().copied().max().unwrap_or(0);
+            if top * 100 >= n * 95 && (!is_hi || top * 100 >= n * 98) && !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// A sprite that stands still on screen while the camera moves.
@@ -1004,28 +1091,63 @@ pub struct Reach {
     pub min_left: i32,
 }
 
-/// The farthest right and left any live slot sat from the camera.
+/// Frames an object must stay out at a distance for it to count as reach: an
+/// object spawned and removed again in the next frame has not been kept.
+pub const PERSIST: usize = 8;
+
+/// The farthest right and left any live slot stayed from the camera for
+/// [`PERSIST`] frames running (the nearer of its extremes over the window).
 #[must_use]
 pub fn reach(v: &View, run: &[Snap]) -> Reach {
     let mut r = Reach {
         max_right: VIEW_W,
         min_left: 0,
     };
-    for s in run {
-        for i in 0..v.table.slots {
-            if !v.live(s, i) {
-                continue;
-            }
-            if let Some(x) = v.rel_x(s, i) {
-                // Wrapped garbage (a dead-looking slot) is not reach.
-                if (-2048..4096).contains(&x) {
-                    r.max_right = r.max_right.max(x);
-                    r.min_left = r.min_left.min(x);
+    for i in 0..v.table.slots {
+        let pos: Vec<Option<i32>> = run
+            .iter()
+            .map(|s| {
+                if !v.live(s, i) {
+                    return None;
                 }
+                // Wrapped garbage (a dead-looking slot) is not reach.
+                v.rel_x(s, i).filter(|x| (-2048..4096).contains(x))
+            })
+            .collect();
+        // `windows` yields nothing for a run shorter than the window.
+        for w in pos.windows(PERSIST) {
+            if w.iter().all(Option::is_some) {
+                let (lo, hi) = w
+                    .iter()
+                    .flatten()
+                    .fold((i32::MAX, i32::MIN), |(l, h), &x| (l.min(x), h.max(x)));
+                r.max_right = r.max_right.max(lo);
+                r.min_left = r.min_left.min(hi);
             }
         }
     }
     r
+}
+
+/// Widen a table to the slots the recipe's RAM rows say exist. The finder only
+/// claims slots it bound to a sprite, and objects that never show have slots
+/// too; a `[[ram]]` row whose address falls in the table's state (or x) column
+/// says how far that column runs (a row must start inside the slots already
+/// claimed or right after them, so a different array is not mistaken for it).
+/// Never shrinks the table.
+#[must_use]
+pub fn slots_from_rows(table: &ObjectTable, rows: &[crate::recipe::RamMeaning]) -> ObjectTable {
+    let mut out = table.clone();
+    for off in [table.state, table.x_lo].into_iter().flatten() {
+        let start = table.base + off;
+        for r in rows {
+            let end = r.addr + u32::from(r.width);
+            if r.addr >= start && r.addr - start <= table.slots && table.stride > 0 {
+                out.slots = out.slots.max((end - start).div_ceil(table.stride));
+            }
+        }
+    }
+    out
 }
 
 /// The first divergence, classified.
@@ -1046,6 +1168,8 @@ pub struct Divergence {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Trial {
     pub frames: u32,
+    /// Object slots the comparison used (the table, grown by [`extend_slots`]).
+    pub slots: u32,
     pub first: Option<Divergence>,
     /// First frame the picture differs (OAM, camera or an on-screen slot), if
     /// ever.
@@ -1068,7 +1192,7 @@ impl Trial {
         d.on_screen.is_empty()
             && !d.oam
             && !d.camera
-            && !d.off_screen.is_empty()
+            && (!d.off_screen.is_empty() || !d.bookkeeping.is_empty())
             && d.bookkeeping.len() <= BOOKKEEPING_MAX
             && self.widened()
     }
@@ -1079,6 +1203,19 @@ impl Trial {
         self.gain_right >= MIN_GAIN || self.gain_left >= MIN_GAIN
     }
 
+    /// What the widening did, when it did: objects kept farther right is an
+    /// activation window, farther left a despawn window.
+    #[must_use]
+    pub fn reach_kind(&self) -> Option<Kind> {
+        if !self.widened() {
+            None
+        } else if self.gain_right >= self.gain_left {
+            Some(Kind::Activation)
+        } else {
+            Some(Kind::Despawn)
+        }
+    }
+
     /// Why this trial is not a keeper (empty for a keeper).
     #[must_use]
     pub fn why_not(&self) -> &'static str {
@@ -1086,7 +1223,9 @@ impl Trial {
             None => "never diverged (the constant did not matter in this run)",
             Some(d) if d.oam || d.camera => "first divergence changed the picture or camera",
             Some(d) if !d.on_screen.is_empty() => "first divergence touched an on-screen object",
-            Some(d) if d.off_screen.is_empty() => "first divergence touched no object field",
+            Some(d) if d.off_screen.is_empty() && d.bookkeeping.is_empty() => {
+                "first divergence changed no state"
+            }
             Some(d) if d.bookkeeping.len() > BOOKKEEPING_MAX => {
                 "first divergence touched too much other state"
             }
@@ -1103,6 +1242,7 @@ pub fn compare_trial(v: &View, plain: &[Snap], patched: &[Snap]) -> Trial {
     let n = plain.len().min(patched.len());
     let mut t = Trial {
         frames: n as u32,
+        slots: v.table.slots,
         ..Trial::default()
     };
     let base = reach(v, &plain[..n]);
@@ -1395,7 +1535,7 @@ mod tests {
 
     /// Slot 1 alive 300 px right of the camera in `patched` only.
     fn runs() -> (Vec<Snap>, Vec<Snap>) {
-        let plain: Vec<Snap> = (0..10).map(|_| snap()).collect();
+        let plain: Vec<Snap> = (0..20).map(|_| snap()).collect();
         let mut patched = plain.clone();
         for s in patched.iter_mut().skip(4) {
             s.ram[0x11] = 0x2C; // x lo
@@ -1417,6 +1557,44 @@ mod tests {
         assert_eq!(t.visible_at, None);
         assert!(t.keeper(), "{}", t.why_not());
         assert_eq!(grade_of(Some(&t)), Grade::Confirmed);
+    }
+
+    #[test]
+    fn an_object_kept_for_one_frame_is_not_reach() {
+        let (plain, mut patched) = runs();
+        for s in patched.iter_mut().skip(5) {
+            s.ram[0x31] = 0;
+        }
+        let t = compare_trial(&view(), &plain, &patched);
+        assert_eq!(t.gain_right, 0, "{t:?}");
+        assert!(!t.keeper());
+        assert_eq!(t.reach_kind(), None);
+        let (plain, patched) = runs();
+        let t = compare_trial(&view(), &plain, &patched);
+        assert_eq!(t.reach_kind(), Some(Kind::Activation));
+    }
+
+    #[test]
+    fn recipe_rows_widen_a_table_but_never_shrink_it() {
+        use crate::recipe::RamMeaning;
+        let table = ObjectTable {
+            base: 0x0e,
+            slots: 3,
+            stride: 1,
+            x_lo: Some(0x78),
+            state: Some(0),
+            ..ObjectTable::default()
+        };
+        let row = |addr, width| RamMeaning {
+            addr,
+            width,
+            ..RamMeaning::default()
+        };
+        // Flags at $0F-$13 run to slot 5 of a table whose slot 0 is $0E.
+        assert_eq!(slots_from_rows(&table, &[row(0x0f, 5)]).slots, 6);
+        assert_eq!(slots_from_rows(&table, &[row(0x0f, 1)]).slots, 3);
+        assert_eq!(slots_from_rows(&table, &[row(0x300, 9)]).slots, 3);
+        assert_eq!(slots_from_rows(&table, &[]).slots, 3);
     }
 
     #[test]

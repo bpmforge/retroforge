@@ -51,6 +51,7 @@ pub mod shadow;
 mod tolerance;
 pub mod understand;
 mod vector_json;
+pub mod widescreen;
 
 pub use accuracy::{
     build_report, AccuracyRow, Counts, Report, ReportError, ReportRow, RowStatus, Waiver,
