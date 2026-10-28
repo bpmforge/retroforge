@@ -783,6 +783,13 @@ pub struct RetroForgeApp {
     gsu_clock_sent: Option<crate::clock_governor::ClockPolicy>,
     /// Ticket W30-07: the run-ahead frames last sent to the core.
     run_ahead_sent: Option<u8>,
+    /// Ticket W38-11 (D-032): the recipe's camera/object reading for the presentation margins, the
+    /// state they learn, and whether the core was told to read.
+    presentation_spec: Option<crate::presentation::Spec>,
+    presentation: rf_enhance::presentation_margins::Presentation,
+    presentation_sent: Option<bool>,
+    /// Ticket W38-11: the last frame's margins drew from the learned world (tests, the badge).
+    presentation_drew: bool,
     /// Ticket W36-07 (D-028): the interpolated presentation. The Presenter holds back one console
     /// frame and composes the pictures between; `frame_interp_sent` is what the core was last told.
     frame_interp: crate::frame_interp::Presenter,
@@ -1925,6 +1932,10 @@ impl RetroForgeApp {
             loading_sent: None,
             gsu_clock_sent: None,
             run_ahead_sent: None,
+            presentation_spec: None,
+            presentation: rf_enhance::presentation_margins::Presentation::new(),
+            presentation_sent: None,
+            presentation_drew: false,
             frame_interp: crate::frame_interp::Presenter::new(),
             frame_interp_sent: None,
             rebuild_sent: None,
@@ -4294,6 +4305,7 @@ impl RetroForgeApp {
         };
         self.mod_choices = recipe.mods().iter().map(|m| (*m).to_owned()).collect();
         self.mod_recipe = Some(recipe.clone());
+        self.presentation_spec = crate::presentation::Spec::from_recipe(&recipe);
         let enabled = match &self.config_root {
             Some(root) => crate::game_settings::load(root, &hashes.sha256).mods_enabled,
             None => Vec::new(),
@@ -4364,6 +4376,7 @@ impl RetroForgeApp {
         self.mod_choices.clear();
         self.mod_messages.clear();
         self.mod_recipe = None;
+        self.presentation_spec = None;
         self.mod_session_sent = false;
         let bytes = if let Some(base_sha) = &base_sha {
             self.patch_discovery =
@@ -4457,6 +4470,8 @@ impl RetroForgeApp {
         self.loading_sent = None;
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
+        self.presentation_sent = None;
+        self.presentation = rf_enhance::presentation_margins::Presentation::new();
         self.frame_interp_sent = None;
         self.rebuild_sent = None;
         self.rebuild_status = crate::rebuild::RebuildStatus::Off;
@@ -5001,7 +5016,9 @@ impl RetroForgeApp {
                         // Ticket W30-03: margins of a native-scale frame
                         // (an HD pack or HD Mode 7 frame is already at a
                         // different scale, so it is left alone).
-                        if self.widescreen_on {
+                        if let Some(done) = self.presentation_margins_for_frame(&msg, &native) {
+                            done
+                        } else if self.widescreen_on {
                             self.widen_margins_for_frame(&msg, native.0, native.1)
                         } else {
                             native
@@ -6524,6 +6541,44 @@ impl RetroForgeApp {
         self.store_diorama_result(result, msg.frame_count);
     }
 
+    /// Ticket W38-11 (D-032): the 32:9-style picture from the learned world and remembered objects,
+    /// presentation only (the core's frame is the middle of it, byte for byte). `None` when the mode
+    /// is off or the frame carries no readings (the caller then widens as before).
+    fn presentation_margins_for_frame(
+        &mut self,
+        msg: &core_thread::FrameMsg,
+        native: &(Vec<u8>, (usize, usize)),
+    ) -> Option<(Vec<u8>, (usize, usize))> {
+        self.presentation_drew = false;
+        if !self.presentation_active() {
+            return None;
+        }
+        let p = msg.presentation.as_deref()?;
+        let (w, h) = native.1;
+        let out_w = self.widescreen_out_width(h);
+        if w != usize::from(rf_enhance::widescreen::NARROW_WIDTH) || out_w <= w {
+            return None;
+        }
+        let hud = self.declared_hud;
+        let skip =
+            move |y: usize| hud.is_some_and(|r| u16::try_from(y).is_ok_and(|y| r.contains(y)));
+        let frame = rf_enhance::presentation_margins::Frame {
+            rgba: &native.0,
+            w,
+            h,
+            scene: p.facts.scene,
+            cam: p.facts.cam,
+            objects: p.facts.objects.as_deref(),
+            sprite: &p.sprite,
+            frame: msg.frame_count,
+            trail: p.facts.full_camera,
+        };
+        self.presentation.observe(&frame, &skip);
+        let picture = self.presentation.compose(&frame, out_w, &skip);
+        self.presentation_drew = true;
+        Some((picture, (out_w, h)))
+    }
+
     /// [`Self::widen_margins_layered`] for a frame the core sent. While a layered
     /// Diorama is wanted it also keeps the wide picture and its layer map
     /// (`Self::wide_ground` stands the Diorama on them: the margins are
@@ -6686,7 +6741,7 @@ impl RetroForgeApp {
     /// capped at the PPU's 512 dots, so at 21:9 and 32:9 it is not the
     /// picture's width; ticket W34-09).
     fn display_frame_size(&self) -> Option<(usize, usize)> {
-        if self.widescreen_on {
+        if self.widescreen_on || self.presentation_active() {
             self.last_frame_size.or(self.core_frame_size)
         } else {
             self.core_frame_size
@@ -6698,7 +6753,7 @@ impl RetroForgeApp {
     /// ([`crate::play_view::DisplayGrid::for_frame`]).
     fn display_grid(&self, width: f32, height: f32) -> crate::play_view::DisplayGrid {
         // 512 exactly is the PPU's hires width, not an aspect's.
-        if self.widescreen_on && width > 512.0 {
+        if (self.widescreen_on || self.presentation_active()) && width > 512.0 {
             crate::play_view::DisplayGrid::for_widened_frame(width, height)
         } else {
             crate::play_view::DisplayGrid::for_frame(width, height)
@@ -10181,6 +10236,20 @@ impl RetroForgeApp {
                 {
                     actions.settings_changed = true;
                     actions.widescreen_aspect_changed = true;
+                }
+                // Ticket W38-11 (D-032): learned-from-play margins, for a game with a recipe.
+                if row.id == "widescreen_decoded" {
+                    let blurb = self.presentation_blurb();
+                    let (toggled, aspect) = crate::enhance_dock::presentation_controls(
+                        ui,
+                        blurb,
+                        &mut self.current_game_settings.presentation_margins,
+                        &mut self.current_game_settings.widescreen_aspect,
+                    );
+                    if toggled || aspect {
+                        actions.settings_changed = true;
+                        actions.presentation_changed = true;
+                    }
                 }
                 // Ticket W35-16: the game's own objects past the picture's edge.
                 if row.id == "widescreen_decoded"
@@ -15389,6 +15458,7 @@ impl RetroForgeApp {
             bg_rgba: Vec::new(),
             sprite_rgba,
             margin_sprites: Vec::new(),
+            presentation: None,
             margin_draw: None,
             interp: None,
             copies_refused_by_hooks: false,
@@ -17655,6 +17725,7 @@ impl RetroForgeApp {
                     hd_report: self.hd_report,
                     superfx_hd_readout: self.superfx_hd_readout.clone(),
                     margin_readout: self.margin_readout.clone(),
+                    presentation: self.presentation_blurb(),
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session
@@ -17737,6 +17808,9 @@ impl RetroForgeApp {
         }
         if actions.margin_sprites_changed {
             self.sync_margin_sprites();
+        }
+        if actions.presentation_changed {
+            self.sync_presentation();
         }
         if actions.settings_changed {
             self.save_current_game_settings();
@@ -17854,6 +17928,57 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::SetNesExtraLines(lines));
             self.nes_lines_sent = Some(lines);
         }
+    }
+
+    /// Ticket W38-11 (D-032): the presentation margins are in force: the game has a recipe with a
+    /// camera, the per-game option is on, and the mode is an enhancement one. Accuracy Mode never.
+    #[must_use]
+    pub fn presentation_active(&self) -> bool {
+        self.presentation_spec.is_some()
+            && self.current_game_settings.presentation_margins
+            && self.current_game_settings.mode.enhancement_active()
+    }
+
+    /// What the presentation margins would show for this game (`None`: the game has no usable recipe).
+    #[must_use]
+    pub fn presentation_blurb(&self) -> Option<&'static str> {
+        self.presentation_spec
+            .as_ref()
+            .map(crate::presentation::Spec::describe)
+    }
+
+    /// Ticket W38-11: tell the core to read (or stop reading) the recipe's rows; sends only on a
+    /// change. Turning it off forgets what was learned.
+    fn sync_presentation(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let want = self.presentation_active();
+        if self.presentation_sent == Some(want) {
+            return;
+        }
+        self.presentation_sent = Some(want);
+        self.presentation = rf_enhance::presentation_margins::Presentation::new();
+        let spec = self
+            .presentation_spec
+            .clone()
+            .filter(|_| want)
+            .map(Box::new);
+        self.send_command(CoreCommand::SetPresentation(spec));
+    }
+
+    /// Ticket W38-11 test hook: select the margins for the loaded game.
+    #[doc(hidden)]
+    pub fn set_presentation_for_test(&mut self, on: bool) {
+        self.current_game_settings.presentation_margins = on;
+        self.sync_presentation();
+    }
+
+    /// Ticket W38-11 test hook: the last frame's margins drew from the learned world.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn presentation_drew_for_test(&self) -> bool {
+        self.presentation_drew
     }
 
     /// Ticket W30-07: keep the core's run-ahead matching the row's
@@ -19135,6 +19260,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
+        self.sync_presentation();
         self.sync_frame_interpolation();
         self.sync_rebuild();
         self.sync_mod_session();

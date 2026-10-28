@@ -349,6 +349,8 @@ pub struct GameSettings {
     /// the widescreen margins (SNES; `docs/research/W35-16-margin-sprites.md`). Off by default and
     /// persisted only when on.
     pub margin_sprites: bool,
+    /// Ticket W38-11 (D-032): margins learned from play (recipe games; presentation only).
+    pub presentation_margins: bool,
     /// Shader name, `None` for the default pipeline. A string rather than
     /// an enum because W3-02a owns the shader set and this must not have to
     /// change when that lands.
@@ -499,6 +501,7 @@ impl Default for GameSettings {
             diorama_follow: false,
             widescreen_aspect: rf_enhance::widescreen::Aspect::default(),
             margin_sprites: false,
+            presentation_margins: false,
             shader: None,
             trust: rf_enhance::trust::TrustLadder::default(),
             last_played_epoch_secs: None,
@@ -723,6 +726,9 @@ impl GameSettings {
                 self.widescreen_aspect.key().to_string(),
             );
         }
+        if self.presentation_margins {
+            fields.insert("presentation_margins".to_string(), "true".to_string());
+        }
         if self.margin_sprites {
             fields.insert("margin_sprites".to_string(), "true".to_string());
         }
@@ -867,6 +873,7 @@ impl GameSettings {
                     }
                 }
                 "margin_sprites" => settings.margin_sprites = value == "true",
+                "presentation_margins" => settings.presentation_margins = value == "true",
                 "hd_mode7" => settings.hd_mode7 = value == "true",
                 "hd_mode7_supersample" => settings.hd_mode7_supersample = value == "true",
                 "hd_mode7_perspective" => settings.hd_mode7_perspective = value != "false",
@@ -1457,6 +1464,22 @@ mod mode_and_feature_persistence_tests {
     }
 
     #[test]
+    fn presentation_margins_default_off_and_round_trip() {
+        assert!(!GameSettings::default().presentation_margins);
+        let on = GameSettings {
+            presentation_margins: true,
+            ..GameSettings::default()
+        };
+        let text = on.to_text();
+        assert!(text.contains("presentation_margins=true"), "{text}");
+        assert!(
+            GameSettings::from_text(&text)
+                .expect("parses")
+                .presentation_margins
+        );
+    }
+
+    #[test]
     fn margin_sprites_defaults_off_and_persists_only_when_on() {
         assert!(!GameSettings::default().margin_sprites);
         let on = GameSettings {
@@ -1501,6 +1524,7 @@ mod mode_and_feature_persistence_tests {
             "superfx_hd",
             "lens_",
             "margin_sprites",
+            "presentation_margins",
         ] {
             assert!(
                 !untouched.contains(key),

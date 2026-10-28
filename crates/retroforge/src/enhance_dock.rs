@@ -98,6 +98,8 @@ pub struct EnhanceCtx<'a> {
     /// Ticket W33-04: the stitcher's placement confidence, one line, shown
     /// under the widescreen row.
     pub margin_readout: Option<String>,
+    /// Ticket W38-11: what the learned-from-play margins would show for this game (`None`: no recipe).
+    pub presentation: Option<&'static str>,
     /// FM-13's "view too large for GPU, reduced" message, if any.
     pub fm13_message: Option<&'a str>,
     /// Whether a GPU compositor exists at all. Without one there is
@@ -132,6 +134,8 @@ pub struct EnhanceActions {
     pub widescreen_aspect_changed: bool,
     /// Ticket W35-16: the "Objects past the edge" checkbox changed.
     pub margin_sprites_changed: bool,
+    /// Ticket W38-11: the learned-from-play margins checkbox (or the aspect beside it) changed.
+    pub presentation_changed: bool,
     /// Ticket W11-02: the full-level view was toggled; the level probe
     /// must be armed or disarmed.
     pub full_level_set: Option<bool>,
@@ -418,6 +422,44 @@ pub fn aspect_picker(ui: &mut egui::Ui, aspect: &mut rf_enhance::widescreen::Asp
     changed
 }
 
+/// Ticket W38-11 (D-032): the "Margins: learned from play" checkbox and the aspect picker beside
+/// it. Selectable only for a game with a recipe (`blurb`, from `Spec::describe`); the label always
+/// says where the margins come from. Returns `(checkbox changed, aspect changed)`.
+pub fn presentation_controls(
+    ui: &mut egui::Ui,
+    blurb: Option<&'static str>,
+    on: &mut bool,
+    aspect: &mut rf_enhance::widescreen::Aspect,
+) -> (bool, bool) {
+    let toggled = ui
+        .add_enabled(
+            blurb.is_some(),
+            egui::Checkbox::new(
+                on,
+                format!("Margins: {}", rf_enhance::presentation_margins::LABEL),
+            ),
+        )
+        .on_hover_text(
+            "Scrolling games. The level you have already seen is drawn beyond the picture's edge, \
+             and the objects the game's tables place there as they were last seen. Nothing in the \
+             game changes: the middle of the picture is exactly the original.",
+        )
+        .changed();
+    let mut aspect_changed = false;
+    match blurb {
+        Some(b) => {
+            ui.weak(format!("    {b}"));
+            if *on {
+                aspect_changed = aspect_picker(ui, aspect);
+            }
+        }
+        None => {
+            ui.weak("    needs a game recipe (none for this game)");
+        }
+    }
+    (toggled, aspect_changed)
+}
+
 /// Ticket W35-16: the "Objects past the edge" checkbox (off by default). `true` when it changed.
 /// Shared by the Enhance workspace and the Enhancements cards so the two cannot drift.
 pub fn margin_sprites_toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
@@ -682,6 +724,19 @@ fn features_body(ui: &mut egui::Ui, ctx: &mut EnhanceCtx<'_>, actions: &mut Enha
             if margin_sprites_toggle(ui, &mut ctx.settings.margin_sprites) {
                 actions.settings_changed = true;
                 actions.margin_sprites_changed = true;
+            }
+        }
+        // Ticket W38-11 (D-032).
+        if row.id == "widescreen_decoded" {
+            let (toggled, aspect) = presentation_controls(
+                ui,
+                ctx.presentation,
+                &mut ctx.settings.presentation_margins,
+                &mut ctx.settings.widescreen_aspect,
+            );
+            if toggled || aspect {
+                actions.settings_changed = true;
+                actions.presentation_changed = true;
             }
         }
         // Ticket W30-08: each clock's ceiling, mode and live status, and the
