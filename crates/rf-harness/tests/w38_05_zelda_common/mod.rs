@@ -21,7 +21,7 @@ pub const LEFT: u8 = 1 << 6;
 pub const RIGHT: u8 = 1 << 7;
 /// First frame of play (the game start fade ends a little after it).
 pub const PLAY_FROM: u32 = 720;
-pub const FRAMES: u32 = 2600;
+pub const FRAMES: u32 = 2800;
 
 pub fn rom_path() -> Option<PathBuf> {
     let root = std::env::var("RF_SCREENS_ROMS_DIR")
@@ -53,8 +53,8 @@ pub fn load_rom(path: &std::path::Path) -> Vec<u8> {
 
 /// Start (title), Start on "register your name", one letter, three Selects to
 /// reach REGISTER, Start, then Start on the new file; then play: into the first
-/// cave (Left, Up), out again (Down), Right across the overworld, then Up and
-/// Left so a few screens in every direction are crossed.
+/// cave (Left, Up), out again (Down), Right across the overworld, then Up,
+/// Left and Down so screens in every direction are crossed.
 pub fn script(frame: u32) -> u8 {
     match frame {
         200..=204 | 300..=304 | 480..=484 | 600..=604 => START,
@@ -63,13 +63,16 @@ pub fn script(frame: u32) -> u8 {
         // In play.
         710..=753 => LEFT,
         754..=880 => UP,
-        // In the cave: up to the old man's item row, then back out.
-        881..=930 => UP,
-        931..=1030 => DOWN,
-        1031..=1120 => RIGHT | DOWN,
-        1121..=1900 => RIGHT,
-        1901..=2200 => UP,
-        2201..=2600 => LEFT,
+        // In the cave: the text locks Link for a while; then right and up to
+        // the item, a pause for the pickup, and back down and out.
+        1261..=1270 => RIGHT,
+        1271..=1330 => UP,
+        1431..=1560 => DOWN,
+        1561..=1633 => DOWN,
+        1634..=2300 => RIGHT,
+        2301..=2500 => UP,
+        2501..=2540 => LEFT,
+        2541..=2800 => DOWN,
         _ => 0,
     }
 }
