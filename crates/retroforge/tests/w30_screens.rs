@@ -441,8 +441,29 @@ fn shot_hdmode7(readme: &mut Vec<String>) {
     );
 }
 
+/// W37-00c: advance until the game-mode byte (`$7E0100`, in the app's work-RAM snapshot) is `want`, at
+/// most `cap` core frames, pacing off; panics naming the stage if the game never gets there.
+fn wait_mode(h: &mut H, want: u8, cap: u64, stage: &str) {
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(false));
+    let end = h.state().frame_count_for_test() + cap;
+    while h.state().wram_for_test()[0x100] != want {
+        assert!(
+            h.state().frame_count_for_test() < end,
+            "SMW drive stuck at '{stage}': game mode never reached {want:#04x} within {cap} frames (mode {:#04x})",
+            h.state().wram_for_test()[0x100]
+        );
+        let t = h.state().frame_count_for_test() + 1;
+        run_frames(h, t, Duration::from_secs(60));
+    }
+    h.state()
+        .send_core_command_for_test(CoreCommand::SetPacingEnabled(true));
+}
+
 /// Menus, the map, Yoshi's Island 1, and the fade-in: the shared start of
-/// the Super Mario World widescreen shots.
+/// the Super Mario World widescreen shots. The map and the level are waited
+/// for on the game mode (W37-00c); the margins after them are those of the
+/// frame-timed script it replaces.
 fn smw_enter_yi1(h: &mut H) {
     use egui::Key as K;
     wait(h, "smw", 200);
@@ -454,7 +475,8 @@ fn smw_enter_yi1(h: &mut H) {
     // Close the "Welcome to Dinosaur Land" message; the game then shows the
     // map at Yoshi's House.
     tap(h, K::X, 8);
-    wait(h, "smw", 400);
+    wait_mode(h, 0x0E, 1500, "map after the introduction level");
+    wait(h, "smw", 286);
     let dir = match std::env::var("RF_SMW_MAP_DIR").as_deref() {
         Ok("right") => K::ArrowRight,
         Ok("up") => K::ArrowUp,
@@ -465,11 +487,12 @@ fn smw_enter_yi1(h: &mut H) {
     probe(h, "smw-map");
     tap(h, K::X, 8);
     // "MARIO START!" and the fade-in, but not long enough for the first
-    // enemy to walk into a Mario standing still.
+    // enemy to walk into a Mario standing still: a few frames into the level.
+    wait_mode(h, 0x14, 1500, "Yoshi's Island 1");
     let enter: u64 = std::env::var("RF_SMW_ENTER_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(150);
+        .unwrap_or(4);
     wait(h, "smw", enter);
     probe(h, "smw-level-start");
 }

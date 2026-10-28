@@ -109,7 +109,7 @@ fn frames_of(text: &str) -> Vec<u16> {
 /// The whole session: menus to the level, then the W33-07 play script, then
 /// jump-and-run until the level has seen `PLAY_FRAMES` frames.
 fn session() -> (Vec<u16>, usize) {
-    let to_level = frames_of(discovery::SMW_TO_LEVEL);
+    let to_level = discovery::smw_level_pad();
     let level_start = to_level.len();
     let mut pad = to_level;
     pad.extend(frames_of(discovery::SMW_PLAY));

@@ -368,7 +368,7 @@ fn analyse(
     let mut how = "generic Start/A drive".to_string();
     if d.cam_span < 200 {
         // Never scrolled a level: also try the SMW session script.
-        let s = drive_script(raw, smw_session());
+        let s = drive_script(raw, smw_fixed_session());
         println!(
             "[{label}] generic drive: in level {} frames, camera span {}; SMW script: in level {} frames, camera span {}",
             d.in_level, d.cam_span, s.in_level, s.cam_span

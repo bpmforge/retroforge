@@ -5284,3 +5284,16 @@ stories, 10 decisions).
   screen width. The SMW ROM bake is untested end to end: its menu script no
   longer reaches a level after the W37-00b timing fixes (W37-00c).
   Workspace: **3948 passing**, gate green.
+- **W37-00c — SMW test scripts after the timing fixes** (2026-10-28). The
+  W37-00b SNES timing fixes moved SMW's state changes by 1-3 frames, so
+  frame-timed menu scripts in the ROM-gated tests stopped reaching a level
+  (bisected: w38_03_collision_smw passes at a3d332c^1, fails at a3d332c). A
+  shared closed-loop drive (`crates/rf-harness/tests/smw_drive`, and the
+  `@smw-to-level` script token in the app tests) now waits on the observed
+  game mode ($7E0100) with a frame cap. Every SMW ROM test the shift broke
+  passes again (collision, object tables, widescreen, baked geometry, HD-2D,
+  atlas, lockstep, mode gate, interpolation and others). Still red and not
+  caused by the shift: `w30_screens` (ALttP scout shot, W37-00d),
+  `w37_04_shadow_cost` (W37-04b), `w36_10_smw_recipe` (generator vs W38-01
+  rows). Running the SMW bake end to end exposed W39-03c (0 solid cells).
+  Workspace: **3948 passing**, gate green.

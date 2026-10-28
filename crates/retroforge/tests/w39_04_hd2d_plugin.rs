@@ -44,6 +44,9 @@ use rf_renderer::layers::LayeredFrame;
 use rf_renderer::lens::LensPass;
 use rf_snes::core::SnesCore;
 
+#[path = "../../rf-harness/tests/smw_drive/mod.rs"]
+mod smw_drive;
+
 const FILE: &str = "Super Mario World (USA).zip";
 const MODE: u32 = 0x7E_0100;
 const IN_LEVEL: u8 = 0x14;
@@ -57,7 +60,6 @@ const CELL: i64 = 16;
 /// the foot-cell check, not assumed.
 const SCREEN_ROWS: i64 = 27;
 
-const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
 fn plugin_dir() -> PathBuf {
@@ -326,8 +328,8 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 /// Menus to the level, then play until the level has seen 1,500 frames.
-fn session() -> (Vec<u16>, usize) {
-    let mut pad = frames_of(TO_LEVEL);
+fn session(raw: &[u8]) -> (Vec<u16>, usize) {
+    let mut pad = smw_drive::level_pad(raw);
     let start = pad.len();
     pad.extend(frames_of(PLAY));
     let more = frames_of("R+B14 R22");
@@ -597,7 +599,7 @@ fn smw_demo_renders_hd2d_frames_and_leaves_original_mode_identical() {
         println!("SKIP: no wgpu adapter");
         return;
     };
-    let (pad, start) = session();
+    let (pad, start) = session(&raw);
     let finding = find_collision(&raw, &pad);
     let recipe_text = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

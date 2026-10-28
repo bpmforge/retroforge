@@ -90,7 +90,7 @@ fn frames_of(text: &str) -> Vec<u16> {
 /// Menus to the level, then `play`, then `more` until the level has seen
 /// `PLAY_FRAMES` frames. Returns the pad words and the level start frame.
 fn session(play: &str, more: &str) -> (Vec<u16>, usize) {
-    let to_level = frames_of(discovery::SMW_TO_LEVEL);
+    let to_level = discovery::smw_level_pad();
     let level_start = to_level.len();
     let mut pad = to_level;
     pad.extend(frames_of(play));

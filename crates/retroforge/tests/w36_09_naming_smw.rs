@@ -69,7 +69,7 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 fn session(play: &str, more: &str) -> Vec<u16> {
-    let to_level = frames_of(discovery::SMW_TO_LEVEL);
+    let to_level = discovery::smw_level_pad();
     let level_start = to_level.len();
     let mut pad = to_level;
     pad.extend(frames_of(play));
