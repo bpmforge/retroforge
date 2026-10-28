@@ -190,6 +190,44 @@ pub struct WideFacts {
     pub cam_writes: u64,
 }
 
+impl WideFacts {
+    /// Fold in the facts of another run (W38-04b: separate power-on runs of
+    /// one cartridge, each from a fresh core). Counts add; a site seen with
+    /// another operand is marked varying.
+    pub fn merge(&mut self, o: &WideFacts) {
+        self.frames += o.frames;
+        self.flips_up += o.flips_up;
+        self.flips_down += o.flips_down;
+        self.cam_writes += o.cam_writes;
+        for (&rom, s) in &o.sites {
+            match self.sites.get_mut(&rom) {
+                None => {
+                    self.sites.insert(rom, s.clone());
+                }
+                Some(m) => {
+                    m.imm_varies |= s.imm_varies || m.imm != s.imm || m.width != s.width;
+                    m.hits += s.hits;
+                    m.frames += s.frames;
+                    m.obj_x += s.obj_x;
+                    m.cam += s.cam;
+                    m.both += s.both;
+                    m.taken += s.taken;
+                    m.not_taken += s.not_taken;
+                    m.cam_writes += s.cam_writes;
+                    m.flip_up += s.flip_up;
+                    m.flip_down += s.flip_down;
+                }
+            }
+        }
+        for (&addr, srcs) in &o.hud {
+            let e = self.hud.entry(addr).or_default();
+            for (&k, &n) in srcs {
+                *e.entry(k).or_default() += n;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Recent {
     step: u64,
@@ -589,6 +627,9 @@ pub struct Candidate {
     pub band: Band,
     /// One line of counts that justify the score (offsets and numbers only).
     pub evidence: String,
+    /// For a [`Kind::HudAnchor`]: the (watch-form) RAM address of the OAM
+    /// shadow byte the stored value ends up in.
+    pub hud_ram: Option<u32>,
 }
 
 /// 8-bit screen edges and 16-bit widths that mark a bare compare as a screen
@@ -723,6 +764,15 @@ pub const MAX_CANDIDATES: usize = 60;
 /// Rank what a run saw into candidates, best first.
 #[must_use]
 pub fn infer(f: &WideFacts) -> Vec<Candidate> {
+    let mut out = infer_all(f);
+    out.truncate(MAX_CANDIDATES);
+    out
+}
+
+/// Every candidate, best first (no [`MAX_CANDIDATES`] cut): pairs such as
+/// [`window_pairs`] look through all of them.
+#[must_use]
+pub fn infer_all(f: &WideFacts) -> Vec<Candidate> {
     let flips = flip_functions(f);
     let mut out: Vec<Candidate> = Vec::new();
     for (&rom, s) in &f.sites {
@@ -748,6 +798,7 @@ pub fn infer(f: &WideFacts) -> Vec<Candidate> {
             score: sc,
             band: Band::of(sc),
             evidence,
+            hud_ram: None,
         });
     }
     for (addr, srcs) in &f.hud {
@@ -767,6 +818,7 @@ pub fn infer(f: &WideFacts) -> Vec<Candidate> {
                 imm: 0,
                 score: sc,
                 band: Band::of(sc),
+                hud_ram: Some(*addr),
                 evidence: format!(
                     "stored to ram {addr:#x} {n} times from a {} byte",
                     match src {
@@ -783,7 +835,6 @@ pub fn infer(f: &WideFacts) -> Vec<Candidate> {
             .then(a.site.cmp(&b.site))
             .then(a.kind.cmp(&b.kind))
     });
-    out.truncate(MAX_CANDIDATES);
     out
 }
 
@@ -804,6 +855,50 @@ pub fn widen_values(c: &Candidate) -> Vec<u16> {
     v.retain(|&x| x > c.imm);
     v.dedup();
     v
+}
+
+/// A sprite on-screen window: `adc #lo` then `cmp #hi` back to back, 16-bit
+/// (`(x - camera + lo) < hi`, an unsigned test: on screen from `-lo` to
+/// `hi - lo`). Widening the window by `w` each side is `lo + w` and
+/// `hi + 2w`; each constant alone only moves one edge or the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowPair {
+    pub adc: Candidate,
+    pub cmp: Candidate,
+}
+
+impl WindowPair {
+    /// The `(adc operand, cmp operand)` values for a window `w` wider each
+    /// side, `None` past 16 bits.
+    #[must_use]
+    pub fn widened(&self, w: u16) -> Option<(u16, u16)> {
+        Some((
+            self.adc.imm.checked_add(w)?,
+            self.cmp.imm.checked_add(w.checked_mul(2)?)?,
+        ))
+    }
+}
+
+/// The 16-bit `adc #lo` / `cmp #hi` pairs among `cands` (every observed
+/// candidate, not just the trialed ones): the `cmp` opcode is the byte right
+/// after the `adc`'s two operand bytes and its constant is the larger.
+#[must_use]
+pub fn window_pairs(cands: &[Candidate]) -> Vec<WindowPair> {
+    let mut out = Vec::new();
+    for a in cands
+        .iter()
+        .filter(|c| c.op == Some(ImmOp::Adc) && c.width == 2)
+    {
+        if let Some(c) = cands.iter().find(|c| {
+            c.op == Some(ImmOp::Cmp) && c.width == 2 && c.site == a.site + 3 && c.imm > a.imm
+        }) {
+            out.push(WindowPair {
+                adc: a.clone(),
+                cmp: c.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// The bytes to write at [`Candidate::operand`] for operand value `value`.
@@ -1424,6 +1519,104 @@ pub fn compare_trial(v: &View, plain: &[Snap], patched: &[Snap]) -> Trial {
 }
 
 // ---------------------------------------------------------------------------
+// The HUD-anchor trial (W38-04b).
+// ---------------------------------------------------------------------------
+
+/// What moving one HUD coordinate byte did over a run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HudTrial {
+    pub frames: u32,
+    /// Frames the target OAM-shadow byte differs from the unmodified run.
+    pub moved: u32,
+    pub first_moved: Option<u32>,
+    /// Every moved frame differs by the same amount (mod 256).
+    pub delta: Option<i32>,
+    pub consistent: bool,
+    /// Distinct RAM bytes other than the target that ever differ, and the
+    /// first frame one does.
+    pub other_ram: usize,
+    pub first_other: Option<u32>,
+    /// An OAM byte other than the target's differs.
+    pub other_oam: bool,
+    pub camera: bool,
+}
+
+impl HudTrial {
+    /// A HUD anchor is kept when the sprite moved by the one constant amount
+    /// and nothing else in RAM, OAM or the camera ever differed from the
+    /// unmodified run (no game logic read the coordinate).
+    #[must_use]
+    pub fn keeper(&self) -> bool {
+        self.moved > 0 && self.consistent && self.other_ram == 0 && !self.other_oam && !self.camera
+    }
+
+    #[must_use]
+    pub fn why_not(&self) -> &'static str {
+        if self.moved == 0 {
+            "the byte never reached the sprite in this run"
+        } else if !self.consistent {
+            "the sprite moved by different amounts (the byte is not a plain coordinate)"
+        } else if self.camera {
+            "the camera changed (the byte is read by game logic)"
+        } else if self.other_ram > 0 || self.other_oam {
+            "other state changed (the byte is read by game logic or shared)"
+        } else {
+            ""
+        }
+    }
+}
+
+/// Compare an unmodified run with a run where the byte that lands in RAM index
+/// `target` (an OAM-shadow byte; `target - shadow` is its OAM index) was
+/// changed. Law 8: bounded `for` walks over the shorter run.
+#[must_use]
+pub fn compare_hud(plain: &[Snap], patched: &[Snap], target: usize, shadow: usize) -> HudTrial {
+    let n = plain.len().min(patched.len());
+    let oam_ix = target.wrapping_sub(shadow);
+    let mut t = HudTrial {
+        frames: n as u32,
+        consistent: true,
+        ..HudTrial::default()
+    };
+    let mut others: BTreeSet<usize> = BTreeSet::new();
+    for f in 0..n {
+        let (a, b) = (&plain[f], &patched[f]);
+        if let (Some(&x), Some(&y)) = (a.ram.get(target), b.ram.get(target)) {
+            if x != y {
+                t.moved += 1;
+                t.first_moved.get_or_insert(f as u32);
+                let d = i32::from(y.wrapping_sub(x) as i8);
+                match t.delta {
+                    None => t.delta = Some(d),
+                    Some(prev) if prev != d => t.consistent = false,
+                    Some(_) => {}
+                }
+            }
+        }
+        for (i, (x, y)) in a.ram.iter().zip(&b.ram).enumerate() {
+            if x != y && i != target && others.insert(i) {
+                t.first_other.get_or_insert(f as u32);
+            }
+        }
+        if a.oam
+            .iter()
+            .zip(&b.oam)
+            .enumerate()
+            .any(|(i, (x, y))| x != y && i != oam_ix)
+        {
+            t.other_oam = true;
+            t.first_other.get_or_insert(f as u32);
+        }
+        if a.cam_x != b.cam_x {
+            t.camera = true;
+            t.first_other.get_or_insert(f as u32);
+        }
+    }
+    t.other_ram = others.len();
+    t
+}
+
+// ---------------------------------------------------------------------------
 // Rows.
 // ---------------------------------------------------------------------------
 
@@ -1468,6 +1661,98 @@ pub fn grade_of(trial: Option<&Trial>) -> Grade {
 mod tests {
     use super::*;
     use crate::objtable::{Frame, Sprite};
+
+    fn hud_snap(shadow_x: u8, other: u8) -> Snap {
+        let mut ram = vec![0u8; 0x300];
+        ram[0x203] = shadow_x;
+        ram[0x10] = other;
+        let mut oam = vec![0u8; 256];
+        oam[3] = shadow_x;
+        Snap { ram, oam, cam_x: 0 }
+    }
+
+    #[test]
+    fn merged_facts_add_up() {
+        let site = |hits| SiteFacts {
+            function: Some(1),
+            cpu: 0,
+            op: ImmOp::Cmp,
+            width: 1,
+            imm: 8,
+            imm_varies: false,
+            hits,
+            frames: 1,
+            obj_x: 1,
+            cam: 0,
+            both: 0,
+            taken: 1,
+            not_taken: 0,
+            cam_writes: 0,
+            flip_up: 1,
+            flip_down: 0,
+        };
+        let mut a = WideFacts {
+            flips_up: 2,
+            ..WideFacts::default()
+        };
+        a.sites.insert(0x10, site(3));
+        let mut b = WideFacts {
+            flips_up: 5,
+            ..WideFacts::default()
+        };
+        b.sites.insert(0x10, site(4));
+        b.sites.insert(0x20, site(1));
+        a.merge(&b);
+        assert_eq!((a.flips_up, a.sites.len(), a.sites[&0x10].hits), (7, 2, 7));
+        assert_eq!(a.sites[&0x10].flip_up, 2);
+    }
+
+    #[test]
+    fn a_window_pair_widens_both_edges() {
+        let mk = |op, site, imm| Candidate {
+            kind: Kind::EdgeTest,
+            site,
+            operand: site + 1,
+            function: None,
+            op: Some(op),
+            width: 2,
+            imm,
+            score: 50,
+            band: Band::Medium,
+            evidence: String::new(),
+            hud_ram: None,
+        };
+        let c = vec![
+            mk(ImmOp::Adc, 0x100, 0x40),
+            mk(ImmOp::Cmp, 0x103, 0x180),
+            mk(ImmOp::Cmp, 0x200, 0x180),
+        ];
+        let p = window_pairs(&c);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].widened(0x40), Some((0x80, 0x200)));
+        assert_eq!(p[0].widened(0x8000), None);
+    }
+
+    #[test]
+    fn a_hud_byte_that_only_moves_the_sprite_is_a_keeper() {
+        let plain = vec![hud_snap(88, 0); 4];
+        let patched = vec![hud_snap(104, 0); 4];
+        let t = compare_hud(&plain, &patched, 0x203, 0x200);
+        assert!(t.keeper(), "{t:?}");
+        assert_eq!((t.moved, t.delta, t.consistent), (4, Some(16), true));
+    }
+
+    #[test]
+    fn a_hud_byte_the_game_reads_is_not_a_keeper() {
+        let plain = vec![hud_snap(88, 0); 4];
+        let mut patched = vec![hud_snap(104, 0); 4];
+        patched[2] = hud_snap(104, 9);
+        let t = compare_hud(&plain, &patched, 0x203, 0x200);
+        assert!(!t.keeper());
+        assert_eq!((t.other_ram, t.first_other), (1, Some(2)));
+        let never = compare_hud(&plain, &plain, 0x203, 0x200);
+        assert!(!never.keeper() && never.why_not().contains("never"));
+    }
 
     fn fetch(pc: u32, bytes: &[u8]) -> Vec<BusAccess> {
         bytes
@@ -1613,6 +1898,7 @@ mod tests {
             score: 0,
             band: Band::Low,
             evidence: String::new(),
+            hud_ram: None,
         };
         assert_eq!(widen_values(&c), vec![0xA8, 0xFF]);
         c.imm = 0xFF;

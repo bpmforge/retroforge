@@ -1,0 +1,3 @@
+# W38-08: widescreen overlay for Mega Man X: no rows. No object table was
+# bound (the W38-02 finder returned only chance fits), so no widescreen trial
+# could be run; see crates/rf-harness/tests/w38_08_mmx_recipe.rs.

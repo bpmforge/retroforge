@@ -25,7 +25,8 @@ use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, Reset
 use rf_harness::atlas::build_nes_atlas;
 use rf_harness::object_tables::{nes_cam, nes_prepare, nes_step_frame, Console, Recorder};
 use rf_harness::widescreen::{
-    nes_patch, nes_snaps, observe_nes, rows_toml, try_candidates, TrialSetup,
+    hud_rows_toml, nes_patch, nes_snaps, observe_nes, rows_toml, try_candidates, try_hud,
+    TrialSetup,
 };
 use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
@@ -336,8 +337,56 @@ fn smb_widescreen_candidates_and_lockstep_trials() {
             t.partners
         );
     }
+    // W38-04b: the HUD-anchor candidates. Each stored coordinate byte is moved
+    // by 16 px on a copy; kept only when nothing but that sprite coordinate
+    // differs for the whole run. (NES OAM entry: y, tile, attr, x.)
+    let huds: Vec<&Candidate> = cands.iter().filter(|c| c.kind == Kind::HudAnchor).collect();
+    let hud_tried = try_hud(
+        &TrialSetup {
+            raw: &raw,
+            view: &view,
+            plain: &plain,
+            patch: &|r, at, b| nes_patch(r, at, b),
+            run: &|image| nes_snaps(image, &ins, poke),
+            values: 1,
+        },
+        &huds,
+        oam_shadow(&trace).expect("an OAM shadow"),
+        3,
+        &mut |l| println!("{l}"),
+    )
+    .expect("hud trials");
+    for h in &hud_tried {
+        println!(
+            "HUDRESULT rom {:#07x} sprite byte {:?} x {} original {:?} grade {} {}",
+            h.cand.operand,
+            h.sprite_byte,
+            h.is_x,
+            h.original,
+            h.grade().as_str(),
+            h.why_not()
+        );
+    }
+    println!(
+        "HUD KEEPERS {:x?} of {} trialed",
+        hud_tried
+            .iter()
+            .filter(|h| h.kept().is_some())
+            .map(|h| h.cand.operand)
+            .collect::<Vec<_>>(),
+        hud_tried.len()
+    );
     let skip: Vec<u32> = known.iter().map(|k| k.prg_offset).collect();
-    let toml = rows_toml(
+    let mut toml = hud_rows_toml(
+        &atlas,
+        &recipe,
+        &hud_tried,
+        "widescreen-hud",
+        "widescreen-candidates",
+        &skip,
+        "SMB 1-1 play",
+    );
+    let toml_objects = rows_toml(
         &atlas,
         &recipe,
         &tried,
@@ -346,6 +395,7 @@ fn smb_widescreen_candidates_and_lockstep_trials() {
         &skip,
         "SMB 1-1 play",
     );
+    toml = format!("{toml_objects}{toml}");
     if let Ok(out) = std::env::var("W3804_ROWS_OUT") {
         std::fs::write(out, &toml).expect("writes the rows");
     }

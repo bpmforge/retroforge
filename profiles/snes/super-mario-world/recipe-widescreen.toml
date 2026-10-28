@@ -13,6 +13,21 @@
 #   mod "widescreen-candidates": finder output no trial kept (the constant
 #       never mattered in the run, or the change was visible). Graded candidate:
 #       no patch ever applies them.
+#   W38-04b: observed over 30,309 frames in three power-on runs (two TAS movies and a
+#       Yoshi's Island 1 patrol; 33 level entries, 4 translevels, 190 state flips up
+#       / 183 down against W38-04's 5 / 5). One keeper pair: the 16-bit adc/cmp window
+#       at ROM 0xa459 / 0xa45c widened by 0x80 each side (the pair must change together;
+#       marginal: objects kept 19 px farther left, and the picture differs 7 frames
+#       after the first off-screen divergence). Everything else: candidate.
+#   mod "widescreen-hud": none for SMW (its HUD is background tiles, not sprites).
+[[function]]
+name = "wide_fn_18387"
+shape_hash = "0x20d630881917714"
+exact_hash = "0x98af14480942e85c"
+address_hint = 0x18387
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
 
 [[function]]
 name = "wide_fn_3b84f"
@@ -21,25 +36,7 @@ exact_hash = "0x158d9d5efd053bc6"
 address_hint = 0x3b84f
 hooks = []
 grade = "observed"
-source = "observed: the atlas function holding a widescreen finder site (SMW Yoshi's Island 1 play); W38-04"
-
-[[function]]
-name = "wide_fn_18387"
-shape_hash = "0x20d630881917714"
-exact_hash = "0x98af14480942e85c"
-address_hint = 0x18387
-hooks = []
-grade = "observed"
-source = "observed: the atlas function holding a widescreen finder site (SMW Yoshi's Island 1 play); W38-04"
-
-[[function]]
-name = "wide_fn_1b844"
-shape_hash = "0x6f0fb712d9813def"
-exact_hash = "0x6f0fb712d9813def"
-address_hint = 0x1b844
-hooks = []
-grade = "observed"
-source = "observed: the atlas function holding a widescreen finder site (SMW Yoshi's Island 1 play); W38-04"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
 
 [[function]]
 name = "wide_fn_1a365"
@@ -48,7 +45,115 @@ exact_hash = "0xe10abe594f518da0"
 address_hint = 0x1a365
 hooks = []
 grade = "observed"
-source = "observed: the atlas function holding a widescreen finder site (SMW Yoshi's Island 1 play); W38-04"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_1abd8"
+shape_hash = "0xb1baa1ac406f065d"
+exact_hash = "0x295e72edf28cb4e6"
+address_hint = 0x1abd8
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_1ac31"
+shape_hash = "0x85547941aa70f05c"
+exact_hash = "0x43d3e657fcf6a4a8"
+address_hint = 0x1ac31
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_1b844"
+shape_hash = "0x6f0fb712d9813def"
+exact_hash = "0x6f0fb712d9813def"
+address_hint = 0x1b844
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_2ac5c"
+shape_hash = "0xa981125eb1255bcd"
+exact_hash = "0x992044655f3ad0c9"
+address_hint = 0x2ac5c
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_18904"
+shape_hash = "0xef031510a0e1c65b"
+exact_hash = "0x849bfc0d6e05fd9d"
+address_hint = 0x18904
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_19d67"
+shape_hash = "0x6898c455296da7cb"
+exact_hash = "0x8118ff99b8ab0a3b"
+address_hint = 0x19d67
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_1ad6e"
+shape_hash = "0xb98ad35752177a41"
+exact_hash = "0x8da43eaed6c85e07"
+address_hint = 0x1ad6e
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_2d288"
+shape_hash = "0xeed5ff4e73f3bb4e"
+exact_hash = "0xae46ec2040901b5a"
+address_hint = 0x2d288
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_2d378"
+shape_hash = "0x329968c9e57f383c"
+exact_hash = "0xc39f9bab866f6bca"
+address_hint = 0x2d378
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_3b760"
+shape_hash = "0x329968c9e57f383c"
+exact_hash = "0x6cf5ccc653f86eb2"
+address_hint = 0x3b760
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[function]]
+name = "wide_fn_1a40d"
+shape_hash = "0x8f3f308f87118b4"
+exact_hash = "0xc83a7fe777c7c15a"
+address_hint = 0x1a40d
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (SMW long session: two TAS movies and Yoshi's Island 1); W38-04"
+
+[[patch]]
+name = "wide-despawn-ac92"
+mod = "widescreen-candidates"
+function = "wide_fn_18387"
+offset = 33
+value = 0xff
+grade = "candidate"
+source = "observed: despawn operand of an immediate cmp (was 0x8), confidence high 85; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
 name = "wide-despawn-1b86e"
@@ -57,7 +162,7 @@ function = "wide_fn_3b84f"
 offset = 23
 value = 0xff
 grade = "candidate"
-source = "observed: despawn operand of an immediate adc (was 0x50), confidence high 80; finder candidate, not kept by a lockstep trial"
+source = "observed: despawn operand of an immediate adc (was 0x50), confidence high 85; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
 name = "wide-despawn-ac83"
@@ -69,15 +174,6 @@ grade = "candidate"
 source = "observed: despawn operand of an immediate cmp (was 0x1f), confidence high 70; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
-name = "wide-despawn-ac92"
-mod = "widescreen-candidates"
-function = "wide_fn_18387"
-offset = 33
-value = 0xff
-grade = "candidate"
-source = "observed: despawn operand of an immediate cmp (was 0x8), confidence high 70; finder candidate, not kept by a lockstep trial"
-
-[[patch]]
 name = "wide-despawn-1b8b0"
 mod = "widescreen-candidates"
 function = "wide_fn_3b84f"
@@ -85,6 +181,33 @@ offset = 89
 value = 0xff
 grade = "candidate"
 source = "observed: despawn operand of an immediate cmp (was 0x8), confidence high 70; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-a39b"
+mod = "widescreen-candidates"
+function = "wide_fn_1a365"
+offset = 54
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x9), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-abf2"
+mod = "widescreen-candidates"
+function = "wide_fn_1abd8"
+offset = 26
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x8), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-despawn-ac49"
+mod = "widescreen-candidates"
+function = "wide_fn_1ac31"
+offset = 24
+value = 0xff
+grade = "candidate"
+source = "observed: despawn operand of an immediate cmp (was 0x2), confidence medium 60; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
 name = "wide-edge-test-b84c"
@@ -103,6 +226,33 @@ offset = 9
 value = 0x02
 grade = "candidate"
 source = "observed: edge-test operand of an immediate cmp (was 0x100), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-camera-clamp-12cd4"
+mod = "widescreen-candidates"
+function = "wide_fn_2ac5c"
+offset = 120
+value = 0xff
+grade = "candidate"
+source = "observed: camera-clamp operand of an immediate cmp (was 0x20), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-8c0d"
+mod = "widescreen-candidates"
+function = "wide_fn_18904"
+offset = 706
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x8), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-9d7c"
+mod = "widescreen-candidates"
+function = "wide_fn_19d67"
+offset = 21
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cpy (was 0xf), confidence medium 50; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
 name = "wide-edge-test-a386"
@@ -141,10 +291,128 @@ grade = "candidate"
 source = "observed: edge-test operand of an immediate cmp (was 0x180), confidence medium 50; finder candidate, not kept by a lockstep trial"
 
 [[patch]]
-name = "wide-edge-test-a39b"
+name = "wide-edge-test-ae05"
 mod = "widescreen-candidates"
-function = "wide_fn_1a365"
-offset = 54
+function = "wide_fn_1ad6e"
+offset = 151
 value = 0xff
 grade = "candidate"
-source = "observed: edge-test operand of an immediate cmp (was 0x9), confidence medium 50; finder candidate, not kept by a lockstep trial"
+source = "observed: edge-test operand of an immediate cmp (was 0x8), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1528b"
+mod = "widescreen-candidates"
+function = "wide_fn_2d288"
+offset = 3
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate adc (was 0xc), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-15399"
+mod = "widescreen-candidates"
+function = "wide_fn_2d378"
+offset = 33
+value = 0xc0
+grade = "candidate"
+source = "observed: edge-test operand of an immediate adc (was 0x40), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1539a"
+mod = "widescreen-candidates"
+function = "wide_fn_2d378"
+offset = 34
+value = 0x01
+grade = "candidate"
+source = "observed: edge-test operand of an immediate adc (was 0x40), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1539c"
+mod = "widescreen-candidates"
+function = "wide_fn_2d378"
+offset = 36
+value = 0x00
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x180), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1539d"
+mod = "widescreen-candidates"
+function = "wide_fn_2d378"
+offset = 37
+value = 0x03
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x180), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1b781"
+mod = "widescreen-candidates"
+function = "wide_fn_3b760"
+offset = 33
+value = 0xc0
+grade = "candidate"
+source = "observed: edge-test operand of an immediate adc (was 0x40), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1b782"
+mod = "widescreen-candidates"
+function = "wide_fn_3b760"
+offset = 34
+value = 0x01
+grade = "candidate"
+source = "observed: edge-test operand of an immediate adc (was 0x40), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1b784"
+mod = "widescreen-candidates"
+function = "wide_fn_3b760"
+offset = 36
+value = 0x00
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x180), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1b785"
+mod = "widescreen-candidates"
+function = "wide_fn_3b760"
+offset = 37
+value = 0x03
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x180), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-despawn-a459"
+mod = "widescreen-objects"
+function = "wide_fn_1a40d"
+offset = 77
+value = 0x90
+grade = "confirmed"
+source = "observed: despawn operand of an immediate adc (was 0x10), confidence low 25; lockstep keeper: only off-screen state changes first; acts only together with the patches at ROM offsets 0xa45c"
+
+[[patch]]
+name = "wide-despawn-a45a"
+mod = "widescreen-objects"
+function = "wide_fn_1a40d"
+offset = 78
+value = 0x00
+grade = "confirmed"
+source = "observed: despawn operand of an immediate adc (was 0x10), confidence low 25; lockstep keeper: only off-screen state changes first; acts only together with the patches at ROM offsets 0xa45c"
+
+[[patch]]
+name = "wide-despawn-a45c"
+mod = "widescreen-objects"
+function = "wide_fn_1a40d"
+offset = 80
+value = 0x20
+grade = "confirmed"
+source = "observed: despawn operand of an immediate cmp (was 0x20), confidence low 40; lockstep keeper: only off-screen state changes first; acts only together with the patches at ROM offsets 0xa459"
+
+[[patch]]
+name = "wide-despawn-a45d"
+mod = "widescreen-objects"
+function = "wide_fn_1a40d"
+offset = 81
+value = 0x01
+grade = "confirmed"
+source = "observed: despawn operand of an immediate cmp (was 0x20), confidence low 40; lockstep keeper: only off-screen state changes first; acts only together with the patches at ROM offsets 0xa459"
+

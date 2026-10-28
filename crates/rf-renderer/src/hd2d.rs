@@ -408,6 +408,13 @@ pub fn dof_params(look: &Hd2dLook, focus_frac: f32) -> LensParams {
     }
 }
 
+/// The sun `look` asks for, `None` when it is unlit.
+#[must_use]
+pub fn lighting_for(look: &Hd2dLook) -> Option<Lighting> {
+    look.sun_time
+        .map(|t| Lighting::new(Sun::for_time(t, Weather::None, LightView::Side)))
+}
+
 /// Draw one HD-2D frame: the plan's mesh through the Diorama pass (sun and
 /// shadow map when `look.sun_time` is set), then the depth-of-field lens.
 /// Returns RGBA at `look.out`.
@@ -423,10 +430,7 @@ pub fn render(
     look: &Hd2dLook,
 ) -> Result<(Vec<u8>, Hd2dPlan), String> {
     let plan = plan(stage, markers, look);
-    pass.set_lighting(
-        look.sun_time
-            .map(|t| Lighting::new(Sun::for_time(t, Weather::None, LightView::Side))),
-    );
+    pass.set_lighting(lighting_for(look));
     let ground = fill_holes(stage.picture_rgba, stage.size.0, stage.size.1);
     let rgba = pass.render_with_vp(
         gpu,

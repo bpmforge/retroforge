@@ -130,6 +130,10 @@ fn smw_object_table_matches_oam() {
         }
     }
     let trace = rec.trace;
+    if let Ok(p) = std::env::var("RF_OBJ_TRACE_OUT") {
+        rf_harness::object_tables::save_trace(&trace, Console::Snes, std::path::Path::new(&p))
+            .expect("saves");
+    }
     println!("sampled {} frames in {:?}", trace.frames.len(), t.elapsed());
     let t = Instant::now();
     let found = infer(&trace);
@@ -145,15 +149,33 @@ fn smw_object_table_matches_oam() {
             "  lag {} dx {} dy {} expected {} matched {} rate {:.4} frames {} clean {} from_state {} grade {:?}",
             b.lag, b.dx, b.dy, b.expected, b.matched, b.rate(), b.frames_checked, b.frames_clean, b.live_from_state, row.grade
         );
+        println!(
+            "  misses: undrawn {} off_set {} excluded {} (blank frames {}) non_drawn {:?}",
+            b.undrawn, b.off_set, b.excluded, b.blank_frames, b.non_drawn
+        );
         for s in &b.slots {
             println!(
-                "  slot {} oam {:?} bound {} live {}",
-                s.slot, s.oam_index, s.bound_frames, s.live_frames
+                "  slot {} oam {:?} bound {} live {} matched {} control {} back {} offsets {}",
+                s.slot,
+                s.oam_index,
+                s.bound_frames,
+                s.live_frames,
+                s.matched_frames,
+                s.control_frames,
+                s.back,
+                s.offsets.len()
             );
+        }
+        if std::env::var("MISSES").is_ok() {
+            println!("  missed {:?}", &b.missed[..b.missed.len().min(60)]);
         }
     }
     let best = found.first().expect("a table");
+    // W38-02b: exact match in 98% or more of the live slot-frames, Observed.
+    // Slots 8..12 of the game's twelve are never live in this level (the
+    // finder does not claim a slot it has no evidence for).
     assert!(best.table.slots >= 8, "{:?}", best.table);
-    assert!(best.binding.expected >= 200, "{:?}", best.binding);
-    assert!(best.binding.rate() >= 0.9, "rate {}", best.binding.rate());
+    assert!(best.binding.expected >= 500, "{:?}", best.binding);
+    assert!(best.binding.rate() >= 0.98, "rate {}", best.binding.rate());
+    assert_eq!(grade_of(best), rf_rebuild::recipe::Grade::Observed);
 }
