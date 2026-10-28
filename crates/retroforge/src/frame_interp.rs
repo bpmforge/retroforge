@@ -242,6 +242,7 @@ pub fn capture_snes(
         lines,
         ranks: snes_ranks(),
         index: stepper.frame_count(),
+        tick: None,
     })))
 }
 
