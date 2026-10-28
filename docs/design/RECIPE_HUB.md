@@ -1,7 +1,7 @@
 # Recipe hub (ticket W40-01)
 
-Status: draft, awaiting Brad's approval. The hub does not open, and no
-external submission is accepted, until Brad approves the moderation rule
+Status: moderation rule approved by Brad 2026-10-28 (D-031). The hub may
+open; no external submission has been accepted yet. Rule as approved
 below (REBUILD_LAB.md section 9: "a community recipe hub is approved once a
 moderation rule exists").
 
@@ -13,7 +13,7 @@ game's code.
 
 ## Moderation rule
 
-Status: draft, awaiting Brad's approval.
+Status: approved by Brad 2026-10-28 (D-031). Changes need the same approval.
 
 **1. What a submission may contain.** One `recipe.toml` in the existing
 recipe format (`format = 1`) and nothing else. Allowed: offsets and
