@@ -1,0 +1,25 @@
+# Facts for a made-up engine (no game): one RAM byte and a table of four
+# actors laid out as columns. Rows a plugin adds are always read as
+# candidates, whatever grade is written here.
+[recipe]
+format = 1
+id = "sample"
+engine = "sample"
+
+[[ram]]
+addr = 0x0300
+width = 1
+name = "mod_flag"
+grade = "observed"
+source = "sample: a scratch byte the sample logic plugin sets"
+
+[[object_table]]
+name = "actors"
+base = 0x0400
+slots = 4
+stride = 1
+x_lo = 0
+y = 4
+state = 8
+grade = "observed"
+source = "sample: four actors, one column per field, columns 4 bytes apart"

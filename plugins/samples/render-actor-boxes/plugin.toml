@@ -1,0 +1,14 @@
+# Sample RENDER plugin (ticket W39-00): reads recipe facts and memory, emits
+# draw data, nothing else. It cannot ask for write_memory or hooks.
+[plugin]
+id = "sample-render-actor-boxes"
+version = "0.1.0"
+api = "0.1"
+kind = "render"
+license = "MIT OR Apache-2.0"
+provenance = "first-party sample, authored for RetroForge ticket W39-00"
+
+[capabilities]
+read_memory = true
+draw_overlay = true
+frame_events = true

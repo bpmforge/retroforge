@@ -52,6 +52,7 @@ use rf_core_api::{CoreEvent, CoreSink, CpuRegs, FunctionEvent, HookCtx, PpuPixel
 use crate::host::{Budget, LedgerEntry, ScriptState, WriteLedger};
 use crate::manifest::{Capabilities, Manifest};
 use crate::sandbox::{self, Bridge, ScriptLog};
+use crate::surface::PlayMode;
 
 /// How a hook names its function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +112,7 @@ pub struct ModCtx<'a> {
     plugin: &'a str,
     frame: u64,
     ledger: &'a RefCell<WriteLedger>,
+    mode: PlayMode,
 }
 
 impl ModCtx<'_> {
@@ -122,6 +124,14 @@ impl ModCtx<'_> {
     #[must_use]
     pub fn peek(&self, addr: u32) -> u8 {
         self.ctx.peek(addr)
+    }
+
+    /// Whether the player is in Original or Enhanced mode (ticket W39-00). A
+    /// logic plugin must do nothing in Original mode; the lockstep gate in
+    /// [`crate::surface`] is what proves it.
+    #[must_use]
+    pub fn mode(&self) -> PlayMode {
+        self.mode
     }
 
     /// The frame number the host was last told ([`HookHost::set_frame`]).
@@ -200,6 +210,7 @@ struct Inner {
     state: ScriptState,
     ledger: Rc<RefCell<WriteLedger>>,
     frame: Rc<Cell<u64>>,
+    mode: Rc<Cell<PlayMode>>,
     lua: Option<mlua::Lua>,
     regs: Rc<RefCell<Vec<Reg>>>,
     resolution: Resolution,
@@ -235,6 +246,7 @@ impl HookHost {
             state: ScriptState::Running,
             ledger: Rc::new(RefCell::new(WriteLedger::default())),
             frame: Rc::new(Cell::new(0)),
+            mode: Rc::new(Cell::new(PlayMode::Original)),
             lua: None,
             regs: Rc::new(RefCell::new(Vec::new())),
             resolution: Resolution::default(),
@@ -266,16 +278,17 @@ impl HookHost {
         bridge: &Bridge,
     ) -> mlua::Result<Self> {
         let host = Self::new(manifest, budget);
-        let (caps, log, regs) = {
+        let (caps, log, regs, mode) = {
             let i = host.0.borrow();
             (
                 i.manifest.capabilities.clone(),
                 i.log.clone(),
                 i.regs.clone(),
+                i.mode.clone(),
             )
         };
         let lua = sandbox::build_with_bridge(&caps, &log, bridge)?;
-        install_lua_api(&lua, &caps, &regs)?;
+        install_lua_api(&lua, &caps, &regs, &mode)?;
         lua.load(source).exec()?;
         host.0.borrow_mut().lua = Some(lua);
         Ok(host)
@@ -369,6 +382,17 @@ impl HookHost {
     /// this once per frame on the core thread.
     pub fn set_frame(&self, frame: u64) {
         self.0.borrow().frame.set(frame);
+    }
+
+    /// Tell the host which mode the player is in (ticket W39-00). A new host
+    /// is in [`PlayMode::Original`], the safe default.
+    pub fn set_mode(&self, mode: PlayMode) {
+        self.0.borrow().mode.set(mode);
+    }
+
+    #[must_use]
+    pub fn mode(&self) -> PlayMode {
+        self.0.borrow().mode.get()
     }
 
     #[must_use]
@@ -472,7 +496,7 @@ impl HookHost {
         };
         // Collect first and drop every borrow: callbacks run Lua and Rust
         // code that reach back into the host's shared cells.
-        let (calls, caps, plugin, ledger, frame, lua) = {
+        let (calls, caps, plugin, ledger, frame, mode, lua) = {
             let mut i = self.0.borrow_mut();
             if matches!(i.state, ScriptState::Paused { .. }) {
                 return;
@@ -505,6 +529,7 @@ impl HookHost {
                 i.manifest.id.clone(),
                 i.ledger.clone(),
                 i.frame.get(),
+                i.mode.get(),
                 i.lua.clone(),
             )
         };
@@ -520,6 +545,7 @@ impl HookHost {
                         plugin: &plugin,
                         frame,
                         ledger: &ledger,
+                        mode,
                     };
                     (f.borrow_mut())(ev, &mut mc);
                     Ok(())
@@ -586,8 +612,16 @@ fn install_lua_api(
     lua: &mlua::Lua,
     caps: &Capabilities,
     regs: &Rc<RefCell<Vec<Reg>>>,
+    mode: &Rc<Cell<PlayMode>>,
 ) -> mlua::Result<()> {
     let rf: mlua::Table = lua.globals().get("rf")?;
+    // `rf.mode()` is "original" or "enhanced" (ticket W39-00). It is always
+    // present: it reveals nothing about the machine.
+    let m = mode.clone();
+    rf.set(
+        "mode",
+        lua.create_function(move |_, ()| Ok(m.get().as_str()))?,
+    )?;
     let stub = |lua: &mlua::Lua| {
         lua.create_function(|_, _: mlua::MultiValue| -> mlua::Result<()> {
             Err(mlua::Error::runtime(OUTSIDE))
