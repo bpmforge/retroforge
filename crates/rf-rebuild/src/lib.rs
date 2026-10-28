@@ -23,6 +23,7 @@ pub mod profile;
 pub mod recipe;
 pub mod superset;
 pub mod verify;
+pub mod walkability;
 pub mod widescreen;
 pub mod windows;
 

@@ -229,6 +229,30 @@ fn visited_cells_follow_the_scout_canvas() {
     assert!(visited_cells(&canvas, 0).is_none());
 }
 
+#[test]
+fn bake_canvas_uses_the_canvas_footprint_not_an_assumed_width() {
+    let mut canvas = Canvas::new();
+    // A 3-cell-wide strip (world cells 2..=4) on one row of 16 px cells.
+    canvas.blit_row(32, 0, &[px(); 48]);
+    let s = bake_canvas(
+        9,
+        &canvas,
+        16,
+        |c, _r| Some(if c == 3 { 1 } else { 0 }),
+        &Solidity {
+            rules: &SOLID_1,
+            painted: None,
+        },
+    )
+    .unwrap();
+    assert_eq!((s.cols, s.rows, s.origin), (3, 1, (32, 0)));
+    let kinds: Vec<Kind> = s.cells.iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, [Kind::Open, Kind::Solid, Kind::Open]);
+    // Ids the game state reports outside the scouted footprint are never baked.
+    assert_eq!(s.cell(3, 0), None);
+    assert!(bake_canvas(1, &Canvas::new(), 16, |_, _| Some(0), &Solidity::default()).is_none());
+}
+
 fn sample_set() -> StageSet {
     let (c, r, v) = ids(&["0000", "0120", "1111"]);
     let s = bake_screen(
