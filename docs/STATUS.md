@@ -5162,3 +5162,15 @@ stories, 10 decisions).
   ~20.95 master cycles per SPC cycle, unchecked) and SMB warpless gains a
   lag frame at plan frame 28 322. Details: `docs/research/W37-00-movie-import.md`.
   Workspace: **3879 passing** on the merge with main, gate green.
+- **W38-02b — Object-table finder, exact match** (2026-10-28). A slot-frame
+  now matches only at an exact offset the slot is seen to draw at (learned
+  per slot; rare slots borrow the table's), each slot picks this or the
+  previous capture's RAM, slots are claimed on match evidence with a
+  displaced-position control, an x high byte is fitted when wraps are rare,
+  and never-drawn states and transition frames are excluded and counted.
+  SMB: 7221 of 7239 live slot-frames (99.75%), 7 slots, Observed. SMW: 784
+  of 791 (99.12%), 8 slots, Observed. Zelda: actor table x $70 / y $84,
+  97.18%, 5 slots, Candidate (no state byte). Not every frame: the remaining
+  misses are itemised in the tests (SMB's 18 all in one slot). Full slot
+  counts were not reached: SMW slots 1-4, 8, 10, 11 are never live in these
+  runs. Workspace: **3884 passing**, gate green.
