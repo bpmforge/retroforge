@@ -753,3 +753,33 @@ fn explore_poke_line() {
         );
     }
 }
+
+/// Explore (W37-00d): the scout's move by `latch_and_advance_frame_poking`: Link's x +`RF_STEP`
+/// (default 4) a frame for 60 frames after the first `RF_CUT` tokens; camera word every 10 frames.
+#[test]
+#[ignore = "explore"]
+fn explore_poke_stream() {
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    rig.script(&alttp_to_free_play());
+    let session = format!("{} {} {}", alttp_play_walk(), alttp_play_start(), alttp_play_tail());
+    let cut: usize = std::env::var("RF_CUT").ok().and_then(|c| c.parse().ok()).unwrap_or(60);
+    for tok in session.split_whitespace().take(cut + 1) {
+        rig.script(tok);
+    }
+    rig.script("w20");
+    let step: u16 = std::env::var("RF_STEP").ok().and_then(|c| c.parse().ok()).unwrap_or(4);
+    let p = |s: &retroforge::stepper::EmuStepper, a: u32| {
+        u16::from(s.peek_bus(0x7E_0000 + a)) | u16::from(s.peek_bus(0x7E_0001 + a)) << 8
+    };
+    for f in 0..60 {
+        let x = p(&rig.st, 0x22).wrapping_add(step);
+        let pokes = [(0x7E_0022, (x & 0xFF) as u8), (0x7E_0023, (x >> 8) as u8)];
+        rig.st
+            .latch_and_advance_frame_poking(rf_core_api::InputFrame::empty(), &mut rig.sink, &pokes);
+        if f % 10 == 9 {
+            println!("STREAM +{f} link {:04x} cam {:04x}", p(&rig.st, 0x22), p(&rig.st, 0x11E));
+        }
+    }
+}

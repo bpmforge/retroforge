@@ -1329,9 +1329,6 @@ impl Scout {
             self.y_target = Some(self.plan.moved(dir, player));
         }
         let pokes = self.plan.pokes(dir, cam, player);
-        for &(addr, value) in &pokes {
-            self.stepper.poke_ram(addr, value);
-        }
         // Neutral input: the scout's player does nothing of its own, except
         // that the camera of some NES games (Mega Man 2) only follows a
         // player who walks.
@@ -1346,7 +1343,8 @@ impl Scout {
             input.ports[0] = u16::from(pad);
         }
         self.rule.defer_stall = sidestepping;
-        // The pokes again early in the frame (W37-00d): see `latch_and_advance_frame_poking`.
+        // The pokes go in early in the frame, not before it (W37-00d): see
+        // `latch_and_advance_frame_poking`.
         self.stepper
             .latch_and_advance_frame_poking(input, &mut self.sink, &pokes);
         self.frames_total += 1;
