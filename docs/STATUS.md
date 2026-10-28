@@ -5041,3 +5041,13 @@ stories, 10 decisions).
   logic plugin runs 60 Original-mode frames clean; with its mode check removed
   it diverges at frame 1 and is refused. App-shell wiring of the proof at
   enable time is not done. Workspace: **3767 passing**.
+- **W39-03 — Baked level geometry** (2026-10-28). `rf_enhance::baked`
+  bakes each screen into a cell grid (Unknown / Open / Solid / OneWay, with
+  source and height) plus merged extruded wall quads; collision-fact id
+  ranges decide first, painted heights fill screens without rules, unseen
+  cells stay Unknown. One rf-cache entry per ROM sha256 beside the scout
+  scene entries (zstd, CRC, bounded decode, ids and counts only). SMW: 3
+  rule ranges from the W38-03 finder, 39 solid/one-way cells, 48 quads,
+  368 bytes, reloads equal. Zelda bakes empty (no collision recipe or
+  painted heights yet) and the scout canvas is not yet wired into the ROM
+  runs: both are W39-03b. Workspace: **3771 passing**, gate green.
