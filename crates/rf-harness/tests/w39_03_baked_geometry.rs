@@ -2,8 +2,8 @@
 //! (ROM-gated, law 5: only offsets, ids and counts are printed or stored).
 //!
 //! * SMW: the W38-03 finder's collision facts (rows over the RAM Map16
-//!   buffer ids it found) become the solidity of a screen read from that
-//!   buffer; the stage set is baked, cached under the ROM's sha256 in an
+//!   buffer ids it found) become the solidity of the level read from that
+//!   buffer, over the footprint of the session's scouted map (W39-03b); the stage set is baked, cached under the ROM's sha256 in an
 //!   `rf-cache` root and reloaded.
 //! * Zelda: there is no collision recipe, so painted heights are the
 //!   solidity source. The repo carries no `[heights]` for it (checked), so
@@ -20,9 +20,10 @@ use rf_cache::Cache;
 use rf_core_api::coverage::CoverageLog;
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_enhance::baked::{
-    bake_screen, load_stage_set, save_stage_set, Kind, RuleClass, ScreenInput, Solidity, StageSet,
-    TileRule,
+    bake_canvas, bake_screen, load_stage_set, save_stage_set, visited_cells, Kind, RuleClass,
+    ScreenInput, Solidity, StageSet, TileRule,
 };
+use rf_enhance::stitcher::Canvas;
 use rf_harness::atlas::build_snes_atlas;
 use rf_harness::collision_tables::{painted_heights, run_snes, Watch};
 use rf_harness::data_regions::SnesDriver;
@@ -131,6 +132,70 @@ fn baseline(raw: &[u8]) -> CoverageLog {
     core.take_coverage().expect("armed")
 }
 
+/// Collects the last frame's background rows (sprites left out: a level scout only keeps
+/// the map).
+#[derive(Default)]
+struct RowSink {
+    rows: Vec<Vec<Option<PpuPixel>>>,
+}
+
+impl CoreSink for RowSink {
+    fn video_scanline(&mut self, y: u16, p: &[PpuPixel]) {
+        let y = usize::from(y);
+        if self.rows.len() <= y {
+            self.rows.resize(y + 1, Vec::new());
+        }
+        self.rows[y] = p
+            .iter()
+            .take(256)
+            .map(|q| (q.layer != rf_core_api::PixelLayer::Sprite).then_some(*q))
+            .collect();
+    }
+    fn audio(&mut self, _s: &[i16]) {}
+    fn event(&mut self, _e: CoreEvent) {}
+}
+
+/// The profile's observed `[[scout.addr]]` address for `role`.
+fn scout_addr(profile: &str, role: &str) -> u32 {
+    let v: toml::Value = toml::from_str(profile).expect("profile parses");
+    v["scout"]["addr"]
+        .as_array()
+        .expect("scout.addr")
+        .iter()
+        .find(|a| a["role"].as_str() == Some(role))
+        .and_then(|a| a["addr"].as_integer())
+        .map(|a| a as u32)
+        .expect("role present")
+}
+
+/// The scouted map of the session: each in-level frame's background rows placed at the
+/// camera the game reports (the profile's `camera_x` / `camera_y`), as the level scout
+/// stitches them. Returns the canvas and the in-level frame count.
+fn level_canvas(raw: &[u8], cam_x: u32, cam_y: u32) -> (Canvas, u32, (i64, i64)) {
+    let mut core = SnesCore::load(raw).expect("loads");
+    core.reset(ResetKind::Hard);
+    let mut canvas = Canvas::new();
+    let mut in_level = 0;
+    let mut cam_xs = (i64::MAX, i64::MIN);
+    for mask in session() {
+        // As `baseline` drives the session (the joypad latch, not the frame's input).
+        core.system_mut().bus.joypads.ports[0] = mask;
+        let mut sink = RowSink::default();
+        core.run_frame(&InputFrame::empty(), &mut sink);
+        if core.peek(MODE) != IN_LEVEL {
+            continue;
+        }
+        in_level += 1;
+        let word = |a: u32| i64::from(core.peek(a)) | (i64::from(core.peek(a + 1)) << 8);
+        let (cx, cy) = (word(cam_x), word(cam_y));
+        cam_xs = (cam_xs.0.min(cx), cam_xs.1.max(cx));
+        for (y, row) in sink.rows.iter().enumerate() {
+            canvas.blit_row(cx, cy + y as i64, row);
+        }
+    }
+    (canvas, in_level, cam_xs)
+}
+
 fn rom_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("RF_SCREENS_ROMS_DIR")
@@ -148,10 +213,11 @@ fn sha256(raw: &[u8]) -> String {
     rf_cart::hash::hash_all(raw).sha256
 }
 
-/// SMW's Map16 screen is 16 blocks wide (the buffer is stacked screens).
-const SCREEN_COLS: u32 = 16;
-/// Most buffer bytes read back as one stage screen.
-const MAX_BUFFER: u32 = 64 * 1024;
+/// Blocks per screen in the Map16 RAM buffer (screens are stored one after another, each
+/// `BUF_COLS` wide and `BUF_ROWS` tall). This lays the buffer's bytes out in world cells; how
+/// far the level reaches is the scout canvas's footprint, not this.
+const BUF_COLS: u32 = 16;
+const BUF_ROWS: u32 = 27;
 
 #[test]
 #[ignore = "needs Super Mario World (USA) (RF_SCREENS_ROMS_DIR)"]
@@ -207,44 +273,72 @@ fn smw_stage_set_bakes_caches_and_reloads() {
             }
         })
         .collect();
-    // The screen: the bytes of the buffer the finder found, read as they
-    // stand at the end of play; unread addresses are unobserved.
+    // The footprint: the scout's map of the session, placed at the camera the profile's
+    // observed rows name. The baked grid is that footprint (its origin and extent on the
+    // 16 px world grid), and a cell is baked only where the map has pixels. The buffer's
+    // bytes are read as they stand at the end of play, laid out as stacked screens.
+    let profile = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../profiles/snes/super-mario-world/profile.toml"),
+    )
+    .expect("profile");
+    let (canvas, in_level, _) = level_canvas(
+        &raw,
+        scout_addr(&profile, "camera_x"),
+        scout_addr(&profile, "camera_y"),
+    );
+    let fp = visited_cells(&canvas, 16).expect("the session scouted some map");
     let lo = *site.addrs.first().expect("addrs");
-    let hi = (*site.addrs.last().expect("addrs")).min(lo + MAX_BUFFER - 1);
-    let n = (hi - lo + 1).div_ceil(SCREEN_COLS) * SCREEN_COLS;
-    let ids: Vec<Option<u32>> = (0..n)
-        .map(|i| {
-            let a = lo + i;
-            site.addrs.contains(&a).then(|| u32::from(d.core.peek(a)))
-        })
-        .collect();
-    let input = ScreenInput {
-        id: 1,
-        origin: (0, 0),
-        cols: SCREEN_COLS,
-        rows: n / SCREEN_COLS,
-        cell_px: 16,
-        ids: &ids,
-        visited: None,
+    let id_at = |c: i64, r: i64| -> Option<u32> {
+        if c < 0 || !(0..i64::from(BUF_ROWS)).contains(&r) {
+            return None;
+        }
+        let (screen, col) = (c / i64::from(BUF_COLS), c % i64::from(BUF_COLS));
+        let a = lo + (screen as u32) * BUF_COLS * BUF_ROWS + (r as u32) * BUF_COLS + col as u32;
+        site.addrs.contains(&a).then(|| u32::from(d.core.peek(a)))
     };
-    let screen = bake_screen(
-        &input,
+    let screen = bake_canvas(
+        1,
+        &canvas,
+        16,
+        id_at,
         &Solidity {
             rules: &rules,
             painted: None,
         },
     )
     .expect("bakes");
-    let observed = ids.iter().flatten().count();
+    let known = screen
+        .cells
+        .iter()
+        .filter(|c| c.kind != Kind::Unknown)
+        .count();
     let bodies = screen.body_count();
     println!(
-        "SMW buffer {lo:#x}..={hi:#x}: {observed} ids observed of {n} cells, {} rule ranges, {bodies} solid/one-way cells, {} quads",
+        "SMW footprint after {in_level} level frames: {} x {} cells at {:?} ({} visited), {} rule ranges, {known} cells judged, {bodies} solid/one-way cells, {} quads",
+        fp.cols,
+        fp.rows,
+        fp.origin,
+        fp.visited.iter().filter(|v| **v).count(),
         rules.len(),
         screen.quads.len()
     );
-    assert!(observed > 0 && bodies > 0, "solid cells baked");
+    assert_eq!(
+        (screen.cols, screen.rows),
+        (fp.cols, fp.rows),
+        "the canvas footprint"
+    );
+    assert!(
+        screen.cols > BUF_COLS,
+        "the scouted level is wider than one screen ({} cols)",
+        screen.cols
+    );
+    assert!(known > 0 && bodies > 0, "solid cells baked");
     assert!(!screen.quads.is_empty(), "walls extruded");
-    assert!(screen.cells.iter().any(|c| c.kind == Kind::Unknown) || observed as u32 == n);
+    assert!(
+        screen.cells.iter().any(|c| c.kind == Kind::Unknown),
+        "cells the scout never reached or the buffer lacks stay unknown"
+    );
     let set = StageSet {
         screens: vec![screen],
     };
@@ -311,4 +405,38 @@ fn zelda_stage_set_uses_painted_heights_and_caches() {
     let mut again = Cache::open(&root, 256 << 20).expect("reopen");
     assert_eq!(load_stage_set(&mut again, &sha).expect("loads"), Some(set));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "needs Super Mario World (USA) (RF_SCREENS_ROMS_DIR)"]
+fn smw_footprint_is_the_scouted_camera_range() {
+    let path = rom_dir().join("snes").join(FILE);
+    let Some(raw) = load_rom(&path) else {
+        println!("SKIP: {FILE} not found");
+        return;
+    };
+    let profile = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../profiles/snes/super-mario-world/profile.toml"),
+    )
+    .expect("profile");
+    let (canvas, in_level, (lo, hi)) = level_canvas(
+        &raw,
+        scout_addr(&profile, "camera_x"),
+        scout_addr(&profile, "camera_y"),
+    );
+    let fp = visited_cells(&canvas, 16).expect("a scouted map");
+    // The picture is 256 px wide, so the map spans the camera's range plus one screen.
+    let want = (hi + 255).div_euclid(16) - lo.div_euclid(16) + 1;
+    println!(
+        "SMW: {in_level} level frames, camera x {lo}..={hi}, footprint {} x {} cells at {:?}",
+        fp.cols, fp.rows, fp.origin
+    );
+    assert!(in_level > 0);
+    assert_eq!(
+        i64::from(fp.cols),
+        want,
+        "footprint width follows the scouted range"
+    );
+    assert_eq!(fp.origin.0, lo.div_euclid(16) * 16);
 }
