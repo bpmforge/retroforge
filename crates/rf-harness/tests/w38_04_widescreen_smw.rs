@@ -25,8 +25,8 @@ use rf_harness::widescreen::{
 use rf_input::SnesButton;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
 use rf_rebuild::widescreen::{
-    camera_aliases, find_camera, find_x_hi, hud_watch, infer, oam_shadow, slots_from_rows,
-    static_sprites, widen_values, Candidate, Kind, View, Watch,
+    camera_aliases, find_camera, find_x_page, hud_watch, infer, oam_shadow, slots_from_rows,
+    static_sprites, widen_values, Candidate, Kind, View, Watch, XPage,
 };
 use rf_snes::core::SnesCore;
 
@@ -185,10 +185,14 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
     // The finder binds x low bytes to sprites; the page column is found against
     // the camera.
     let mut table = table;
-    if let Some(off) = find_x_hi(&table, &cam, &trace) {
-        table.x_hi = Some(off);
+    let page = find_x_page(&table, &cam, &trace);
+    let mut x_page_zero = false;
+    match page {
+        Some(XPage::Column(off)) => table.x_hi = Some(off),
+        Some(XPage::Zero) => x_page_zero = true,
+        None => {}
     }
-    println!("x page column offset {:?}", table.x_hi);
+    println!("x page {page:?}");
     println!(
         "camera lo {:#x} hi {:?} (recipe camera_x row is 0x7e001a)",
         RAM_BASE + cam.lo as u32,
@@ -261,6 +265,7 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
         table: table.clone(),
         cam_lo: cam.lo,
         cam_hi: cam.hi,
+        x_page_zero,
     };
     let trials: usize = std::env::var("TRIALS")
         .ok()

@@ -932,13 +932,24 @@ pub fn camera_aliases(t: &Trace, cam: &Camera) -> Vec<usize> {
     out
 }
 
+/// What the x page of a table is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XPage {
+    /// A column at this offset from the table's base.
+    Column(u32),
+    /// No column; a page of zero places the slots as the game does (every
+    /// slot stayed within the first 256 px of the level in the run).
+    Zero,
+}
+
 /// Find the page column of a table that has none: the offset (from the table's
 /// base) of `slots` bytes that, with the x column, put each live slot within
 /// `-512..1024` of the camera in nine slot-frames of ten, and do so clearly
-/// better than a zero page would. Needs the camera page. `None` when the table
-/// already has one, or nothing fits.
+/// better than a zero page would; else [`XPage::Zero`] when a zero page fits.
+/// Needs the camera page. `None` when the table already has a page column, or
+/// nothing fits.
 #[must_use]
-pub fn find_x_hi(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<u32> {
+pub fn find_x_page(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<XPage> {
     let (x_lo, cam_hi) = (table.x_lo?, cam.hi?);
     if table.x_hi.is_some() || table.stride == 0 {
         return None;
@@ -985,6 +996,10 @@ pub fn find_x_hi(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<u32> {
     if live < 50 {
         return None;
     }
+    // A zero page that explains the run needs no column; one that explains it
+    // only because the camera never got far is told from a real page by the
+    // columns below beating it.
+    let zero_fits = base_ok * 10 >= live * 9;
     let mut best: Option<(u32, u32)> = None;
     let span = r as u32;
     for a in 0..span {
@@ -1001,7 +1016,11 @@ pub fn find_x_hi(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<u32> {
             best = Some((o, ok));
         }
     }
-    best.map(|b| b.0)
+    match best {
+        Some((o, _)) => Some(XPage::Column(o)),
+        None if zero_fits => Some(XPage::Zero),
+        None => None,
+    }
 }
 
 /// A sprite that stands still on screen while the camera moves.
@@ -1104,6 +1123,9 @@ pub struct View {
     pub table: ObjectTable,
     pub cam_lo: usize,
     pub cam_hi: Option<usize>,
+    /// The table has no page column and a page of zero is right
+    /// ([`XPage::Zero`]).
+    pub x_page_zero: bool,
 }
 
 impl View {
@@ -1140,7 +1162,11 @@ impl View {
     /// Slot `i`'s x relative to the camera, `None` when either has no page.
     pub fn rel_x(&self, s: &Snap, i: u32) -> Option<i32> {
         let lo = *s.ram.get(self.field(self.table.x_lo, i)?)?;
-        let hi = *s.ram.get(self.field(self.table.x_hi, i)?)?;
+        let hi = match self.field(self.table.x_hi, i) {
+            Some(a) => *s.ram.get(a)?,
+            None if self.x_page_zero => 0,
+            None => return None,
+        };
         Some(i32::from(hi) * 256 + i32::from(lo) - self.cam(s)?)
     }
 
@@ -1601,6 +1627,7 @@ mod tests {
             },
             cam_lo: 0x40,
             cam_hi: Some(0x41),
+            x_page_zero: false,
         }
     }
 
@@ -1654,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_column_is_found_when_a_zero_page_puts_slots_off_the_camera() {
+    fn a_page_column_or_a_zero_page_is_found_when_a_zero_page_puts_slots_off_the_camera() {
         // Camera lo 0x40, page 0x41; slot x lo at 0x10+i, state at 0x20+i,
         // page at 0x30+i. The camera runs 0..1500; each slot sits 100 px
         // right of it.
@@ -1694,12 +1721,12 @@ mod tests {
             lo: 0x40,
             hi: Some(0x41),
         };
-        assert_eq!(find_x_hi(&table, &cam, &t), Some(0x20));
+        assert_eq!(find_x_page(&table, &cam, &t), Some(XPage::Column(0x20)));
         let with_hi = ObjectTable {
             x_hi: Some(0x20),
             ..table
         };
-        assert_eq!(find_x_hi(&with_hi, &cam, &t), None);
+        assert_eq!(find_x_page(&with_hi, &cam, &t), None);
     }
 
     #[test]

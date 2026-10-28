@@ -287,11 +287,13 @@ fn smb_widescreen_candidates_and_lockstep_trials() {
             );
         }
     }
+    let x_page_zero = false;
     let view = View {
         ram_base: 0,
         table: table.clone(),
         cam_lo: cam.lo,
         cam_hi: cam.hi,
+        x_page_zero,
     };
     let mut chosen: Vec<&Candidate> = cands
         .iter()
