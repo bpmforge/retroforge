@@ -5116,3 +5116,15 @@ stories, 10 decisions).
   +442 px. SMW: 60 candidates, 8 tried, no keeper yet (W38-04b, with HUD
   trials). Rows live in `profiles/*/recipe-widescreen.toml` overlays.
   Workspace: **3850 passing**, gate green.
+- **W39-05 — Temporal upscaling** (2026-10-28). The HD-2D / Diorama pass
+  renders at a lower internal size with Halton(2,3) jitter, and a G-buffer
+  pass writes depth and motion vectors. A temporal upscaler produces
+  5120x2880: MetalFX temporal on macOS (`--features metalfx`, via wgpu hal
+  interop) or a portable WGSL fallback (3x3 Gaussian sample, reprojected
+  history clamped to the colour box). From 1707x960, edge error against
+  native 5K is 12.66 (portable) and 11.0 (MetalFX) vs 13.22 bilinear; zero
+  black holes, stable static frames. Contact sheet (synthetic):
+  `docs/screens/w39/temporal-upscale-sheet.png`. Also fixed: the spatial
+  MetalFX scaler held two `as_hal` guards at once (debug panic). Settings
+  wiring of `MetalFxSetting::Temporal` is not done. Workspace: **3875
+  passing**, gate green.

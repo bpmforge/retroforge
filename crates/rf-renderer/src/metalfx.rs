@@ -73,21 +73,18 @@
 //! built-in limit rather than reimplementing a semaphore, since two textures
 //! at emulator-frame resolution is a fixed, small memory cost either way.
 //!
-//! ## Temporal mode (acceptance criterion 3)
+//! ## Temporal mode (W16-08 criterion 3, then W39-05)
 //!
-//! Attempted in `tests/metalfx_bench.rs`'s `metalfx_temporal_upscale_attempt`
-//! (macOS + `metalfx`, `#[ignore]`d, needs a real device): `MTLFXTemporalScaler`
-//! requires a motion-vector texture and a depth texture per frame. RetroForge
-//! is a 2D emulator core with no motion vectors or depth buffer, so the
-//! attempt supplies a zero-filled motion texture (`RG16Float`, "no motion")
-//! and a constant depth texture (`R32Float`, all `1.0`, "everything at the
-//! far plane") and records whether `MTLFXTemporalScalerDescriptor::
-//! supportsDevice` / `newTemporalScalerWithDevice` accept that and what the
-//! output looks like. **This module does not ship a production
-//! `MetalFxTemporalScaler` type** — see that test's doc comment for the
-//! measured outcome and the blocker (if any); `retroforge::settings::
-//! MetalFxSetting::Temporal` exists as a settings-file-compatible variant
-//! but the Settings > Video UI never offers it, for the same reason.
+//! W16-08 probed `MTLFXTemporalScaler` with a flat 2D frame (zero motion,
+//! constant depth) and shipped no temporal type: a 2D emulator frame has no
+//! motion vectors or depth. W39-05 supplies them: the HD-2D/Diorama 3D pass now
+//! renders at a lower internal resolution with a sub-pixel camera jitter and a
+//! depth + motion G-buffer (`crate::diorama_gbuffer`), and
+//! `MetalFxTemporalScaler` (this module, same `as_hal` interop and shared-queue
+//! ordering as the spatial scaler) upscales it to 5K. `crate::temporal` wraps it
+//! and the portable WGSL fallback behind one `TemporalUpscaler`.
+//! `retroforge::settings::MetalFxSetting::Temporal` and the Settings > Video
+//! choice are the shell's to wire (outside this crate).
 
 /// Why MetalFX spatial upscaling is or is not offered right now. Kept as
 /// plain data (no GPU/OS query inside this type) so [`availability_from`]
@@ -175,7 +172,9 @@ pub fn detect() -> MetalFxAvailability {
 }
 
 #[cfg(all(feature = "metalfx", target_os = "macos"))]
-pub use apple::{MetalFxError, MetalFxScaler};
+pub use apple::{
+    query_temporal_device_support, MetalFxError, MetalFxScaler, MetalFxTemporalScaler,
+};
 
 #[cfg(all(feature = "metalfx", target_os = "macos"))]
 mod apple {
@@ -185,6 +184,7 @@ mod apple {
     use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice, MTLPixelFormat};
     use objc2_metal_fx::{
         MTLFXSpatialScaler, MTLFXSpatialScalerBase, MTLFXSpatialScalerDescriptor,
+        MTLFXTemporalScaler, MTLFXTemporalScalerBase, MTLFXTemporalScalerDescriptor,
     };
 
     use crate::gpu::GpuContext;
@@ -501,31 +501,29 @@ mod apple {
             let input_tex = &self.input[self.current];
             let output_tex = &self.output[self.current];
 
-            // SAFETY: `as_hal`'s contract -- the guards are held only for
-            // the duration of this block, during which the textures are
-            // alive (owned by `self`) and not concurrently destroyed.
-            let input_hal =
-                unsafe { input_tex.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| {
-                    MetalFxError("input wgpu texture is not backed by the Metal API".to_string())
-                })?;
-            // SAFETY: same reasoning as `input_hal` above.
-            let output_hal =
-                unsafe { output_tex.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| {
-                    MetalFxError("output wgpu texture is not backed by the Metal API".to_string())
-                })?;
-            let input_raw = input_hal.raw_handle();
-            let output_raw = output_hal.raw_handle();
+            // One `as_hal` guard at a time (wgpu-core's snatch lock is not
+            // re-entrant in debug builds); retained handles outlive them.
+            let grab = |tex: &wgpu::Texture, what: &str| {
+                // SAFETY: the texture is owned by `self` and alive; the guard
+                // dies at the end of this closure body.
+                unsafe { tex.as_hal::<wgpu::hal::api::Metal>() }
+                    .map(|h| h.raw_handle().retain())
+                    .ok_or_else(|| {
+                        MetalFxError(format!(
+                            "{what} wgpu texture is not backed by the Metal API"
+                        ))
+                    })
+            };
+            let input_raw = grab(input_tex, "input")?;
+            let output_raw = grab(output_tex, "output")?;
 
-            // SAFETY: both textures are kept alive by `self` for the whole
-            // call (the setters' "must be kept alive while in use"
-            // contract); matching color/output formats and dimensions were
-            // fixed at construction time in `Self::new`.
+            // SAFETY: both textures are kept alive by `self` (and the
+            // retained handles) for the whole call; matching color/output
+            // formats and dimensions were fixed in `Self::new`.
             unsafe {
-                self.scaler.setColorTexture(Some(input_raw));
-                self.scaler.setOutputTexture(Some(output_raw));
+                self.scaler.setColorTexture(Some(&input_raw));
+                self.scaler.setOutputTexture(Some(&output_raw));
             }
-            drop(input_hal);
-            drop(output_hal);
 
             let cmd_buffer = self
                 .queue
@@ -554,6 +552,278 @@ mod apple {
         /// previews that need a real synchronisation point, since
         /// `wgpu::Device::poll` cannot observe a command buffer this
         /// module committed directly to the raw Metal queue.
+        pub fn wait_idle(&self) {
+            if let Some(buf) = &self.last_command_buffer {
+                buf.waitUntilCompleted();
+            }
+        }
+    }
+
+    /// `true` if a default Metal device reports
+    /// `MTLFXTemporalScalerDescriptor::supportsDevice` (W39-05).
+    #[allow(unsafe_code)]
+    #[must_use]
+    pub fn query_temporal_device_support() -> Option<bool> {
+        let device = objc2_metal::MTLCreateSystemDefaultDevice()?;
+        // SAFETY: pure capability query on a valid device.
+        Some(unsafe { MTLFXTemporalScalerDescriptor::supportsDevice(&device) })
+    }
+
+    /// MetalFX **temporal** upscaler sharing wgpu's Metal device and queue
+    /// (ticket W39-05). Same interop and ordering design as
+    /// [`MetalFxScaler`] (module doc): the colour, depth and motion textures
+    /// are ordinary wgpu textures written by wgpu render passes; MetalFX
+    /// reads their `MTLTexture`s and writes one of two output textures, all
+    /// on wgpu's own command queue, so queue order serialises the hazards and
+    /// nothing waits on the CPU ([`Self::wait_idle`] is for tests).
+    ///
+    /// MetalFX keeps the history itself. Per frame the caller supplies the
+    /// jittered colour (`Rgba8Unorm`), depth (`Depth32Float`, 0 near, not
+    /// reversed), motion (`Rg16Float`, input pixels, pixel to previous
+    /// position, scale 1: a point that moved 10 px down-right is `(-10,-10)`)
+    /// and the jitter the frame was drawn with; `reset` drops the history.
+    pub struct MetalFxTemporalScaler {
+        queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        scaler: Retained<ProtocolObject<dyn MTLFXTemporalScaler>>,
+        output: [wgpu::Texture; 2],
+        /// Slot the next [`Self::scale`] writes.
+        next: usize,
+        /// Slot [`Self::current_output_texture`] reads.
+        produced: usize,
+        input_size: (u32, u32),
+        output_size: (u32, u32),
+        last_command_buffer: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+        /// Multipliers applied to the jitter handed to MetalFX. The sign
+        /// convention of `jitterOffsetX/Y` cannot be read from the headers;
+        /// the W39-05 tests decide it by measurement (see `JITTER_SIGN`).
+        jitter_sign: (f32, f32),
+        /// `(min, max)` supported scale for this device, as MetalFX reports.
+        pub supported_scale: (f32, f32),
+    }
+
+    /// The sign the jitter is passed to MetalFX with, `(x, y)`. Chosen by the
+    /// static-camera stability test in `tests/w39_05_temporal.rs`.
+    pub const JITTER_SIGN: (f32, f32) = (1.0, 1.0);
+
+    #[allow(unsafe_code)]
+    impl MetalFxTemporalScaler {
+        /// Build a scaler for `input -> output` on wgpu's own Metal device.
+        ///
+        /// # Errors
+        /// [`MetalFxError`] if the device is not Metal, does not support
+        /// temporal scaling, the ratio is outside what it supports, or any
+        /// Metal object comes back nil.
+        pub fn new(
+            gpu: &GpuContext,
+            input: (u32, u32),
+            output: (u32, u32),
+        ) -> Result<Self, MetalFxError> {
+            // SAFETY: as in `MetalFxScaler::new` -- the `as_hal` guards are
+            // dropped right after an owned handle is copied out.
+            let device: Retained<ProtocolObject<dyn MTLDevice>> = unsafe {
+                gpu.device
+                    .as_hal::<wgpu::hal::api::Metal>()
+                    .ok_or_else(|| {
+                        MetalFxError("wgpu device is not backed by the Metal API".to_string())
+                    })?
+                    .raw_device()
+                    .clone()
+            };
+            // SAFETY: same contract; `retain` on a live object is sound.
+            let queue: Retained<ProtocolObject<dyn MTLCommandQueue>> = unsafe {
+                gpu.queue
+                    .as_hal::<wgpu::hal::api::Metal>()
+                    .ok_or_else(|| {
+                        MetalFxError("wgpu queue is not backed by the Metal API".to_string())
+                    })?
+                    .as_raw()
+                    .retain()
+            };
+            // SAFETY: capability queries with a valid device.
+            let (supported, lo, hi) = unsafe {
+                (
+                    MTLFXTemporalScalerDescriptor::supportsDevice(&device),
+                    MTLFXTemporalScalerDescriptor::supportedInputContentMinScaleForDevice(&device),
+                    MTLFXTemporalScalerDescriptor::supportedInputContentMaxScaleForDevice(&device),
+                )
+            };
+            if !supported {
+                return Err(MetalFxError(
+                    "MTLFXTemporalScalerDescriptor::supportsDevice returned false".to_string(),
+                ));
+            }
+            let ratio = output.0 as f32 / input.0.max(1) as f32;
+            let inverse = 1.0 / ratio.max(1e-6);
+            let within = |r: f32| r >= lo - 1e-3 && r <= hi + 1e-3;
+            if !(within(ratio) || within(inverse)) {
+                return Err(MetalFxError(format!(
+                    "ratio {ratio:.3} is outside the device's supported scale {lo:.3}..{hi:.3}"
+                )));
+            }
+            // SAFETY: setters take in-range values; formats are the ones the
+            // wgpu textures below are created with.
+            let descriptor = unsafe {
+                let d = MTLFXTemporalScalerDescriptor::new();
+                d.setColorTextureFormat(MTLPixelFormat::RGBA8Unorm);
+                d.setDepthTextureFormat(MTLPixelFormat::Depth32Float);
+                d.setMotionTextureFormat(MTLPixelFormat::RG16Float);
+                d.setOutputTextureFormat(MTLPixelFormat::RGBA8Unorm);
+                d.setInputWidth(input.0 as usize);
+                d.setInputHeight(input.1 as usize);
+                d.setOutputWidth(output.0 as usize);
+                d.setOutputHeight(output.1 as usize);
+                // Compile the fast upscaler now so the first frames are not
+                // the slow interim one (and a headless test is not racing a
+                // background compile).
+                d.setRequiresSynchronousInitialization(true);
+                d
+            };
+            // SAFETY: valid device, descriptor fully set above.
+            let scaler = unsafe { descriptor.newTemporalScalerWithDevice(&device) }
+                .ok_or_else(|| MetalFxError("newTemporalScalerWithDevice returned nil".into()))?;
+            // SAFETY: plain property reads/writes on the fresh scaler.
+            unsafe {
+                scaler.setInputContentWidth(input.0 as usize);
+                scaler.setInputContentHeight(input.1 as usize);
+                scaler.setMotionVectorScaleX(1.0);
+                scaler.setMotionVectorScaleY(1.0);
+                scaler.setDepthReversed(false);
+                scaler.setPreExposure(1.0);
+            }
+            let make_output = || {
+                gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("metalfx-temporal-output"),
+                    size: wgpu::Extent3d {
+                        width: output.0,
+                        height: output.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    // ShaderWrite | RenderTarget | ShaderRead (see the module
+                    // doc's `map_texture_usage` mapping); COPY_DST for the
+                    // one-time `mark_initialized`, COPY_SRC for readback.
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let output_tex = [make_output(), make_output()];
+            // The outputs are written through the raw handle, which wgpu-core
+            // cannot see: mark them initialised once (see `MetalFxScaler::new`).
+            for tex in &output_tex {
+                mark_initialized(&gpu.queue, tex, output.0, output.1);
+            }
+            Ok(Self {
+                queue,
+                scaler,
+                output: output_tex,
+                next: 0,
+                produced: 0,
+                input_size: input,
+                output_size: output,
+                last_command_buffer: None,
+                jitter_sign: JITTER_SIGN,
+                supported_scale: (lo, hi),
+            })
+        }
+
+        /// Input (internal) size.
+        #[must_use]
+        pub fn input_size(&self) -> (u32, u32) {
+            self.input_size
+        }
+
+        /// Output size.
+        #[must_use]
+        pub fn output_size(&self) -> (u32, u32) {
+            self.output_size
+        }
+
+        /// Override the jitter sign handed to MetalFX (tests of the sign
+        /// convention; production uses [`JITTER_SIGN`]).
+        pub fn set_jitter_sign(&mut self, sign: (f32, f32)) {
+            self.jitter_sign = sign;
+        }
+
+        /// The output [`Self::scale`] most recently produced; valid to sample
+        /// once the queue has run it (queue order, or [`Self::wait_idle`]).
+        #[must_use]
+        pub fn current_output_texture(&self) -> &wgpu::Texture {
+            &self.output[self.produced]
+        }
+
+        /// Encode and commit one temporal-scale pass on wgpu's queue. The
+        /// textures must be the sizes/formats given at construction; commit
+        /// this only after the `Queue::submit` that rendered them returned.
+        ///
+        /// # Errors
+        /// [`MetalFxError`] if a texture is not Metal-backed or the command
+        /// buffer cannot be created.
+        pub fn scale(
+            &mut self,
+            color: &wgpu::Texture,
+            depth: &wgpu::Texture,
+            motion: &wgpu::Texture,
+            jitter: (f32, f32),
+            reset: bool,
+        ) -> Result<(), MetalFxError> {
+            let not_metal = |what: &str| {
+                MetalFxError(format!(
+                    "{what} wgpu texture is not backed by the Metal API"
+                ))
+            };
+            // wgpu-core takes a snatch-lock read guard per `as_hal`; holding
+            // two at once trips its recursion check in debug builds. So each
+            // guard is dropped as soon as an owned (retained) handle is copied
+            // out of it.
+            let grab = |tex: &wgpu::Texture, what: &str| {
+                // SAFETY: the texture is alive (borrowed) for the call and
+                // the guard dies at the end of this closure body.
+                unsafe { tex.as_hal::<wgpu::hal::api::Metal>() }
+                    .map(|h| h.raw_handle().retain())
+                    .ok_or_else(|| not_metal(what))
+            };
+            let color_raw = grab(color, "colour")?;
+            let depth_raw = grab(depth, "depth")?;
+            let motion_raw = grab(motion, "motion")?;
+            let out_raw = grab(&self.output[self.next], "output")?;
+            // SAFETY: the retained handles keep all four textures alive past
+            // the encode below (the setters' keep-alive contract), with the
+            // formats/sizes fixed in `new`.
+            unsafe {
+                self.scaler.setColorTexture(Some(&color_raw));
+                self.scaler.setDepthTexture(Some(&depth_raw));
+                self.scaler.setMotionTexture(Some(&motion_raw));
+                self.scaler.setOutputTexture(Some(&out_raw));
+                self.scaler.setInputContentWidth(self.input_size.0 as usize);
+                self.scaler
+                    .setInputContentHeight(self.input_size.1 as usize);
+                self.scaler.setJitterOffsetX(jitter.0 * self.jitter_sign.0);
+                self.scaler.setJitterOffsetY(jitter.1 * self.jitter_sign.1);
+                self.scaler.setReset(reset);
+            }
+            let cmd_buffer = self
+                .queue
+                .commandBuffer()
+                .ok_or_else(|| MetalFxError("commandBuffer() returned nil".to_string()))?;
+            // SAFETY: an open, uncommitted command buffer and a scaler with
+            // every texture set just above.
+            unsafe { self.scaler.encodeToCommandBuffer(&cmd_buffer) };
+            cmd_buffer.commit();
+            self.last_command_buffer = Some(cmd_buffer);
+            self.produced = self.next;
+            self.next = 1 - self.next;
+            Ok(())
+        }
+
+        /// Block until the last committed pass has finished (tests; the
+        /// production path never waits, module doc).
         pub fn wait_idle(&self) {
             if let Some(buf) = &self.last_command_buffer {
                 buf.waitUntilCompleted();
