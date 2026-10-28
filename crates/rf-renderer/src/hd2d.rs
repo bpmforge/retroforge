@@ -139,11 +139,11 @@ impl Default for Hd2dLook {
     fn default() -> Self {
         Self {
             pitch_deg: 80.0,
-            yaw_deg: 10.0,
+            yaw_deg: 6.0,
             zoom: 1.0,
             sun_time: Some(0.4),
             dof: 0.8,
-            dof_band: 0.28,
+            dof_band: 0.12,
             out: (1280, 720),
         }
     }
