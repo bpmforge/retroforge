@@ -145,13 +145,6 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
         println!("SKIP: {FILE} not found");
         return;
     };
-    let t0 = Instant::now();
-    let atlas = build_snes_atlas(&raw, &baseline(&raw)).expect("atlas");
-    println!(
-        "atlas: {} functions in {:?}",
-        atlas.functions.len(),
-        t0.elapsed()
-    );
     let recipe = rf_profiles::load_recipe_file(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../profiles/snes/super-mario-world/recipe.toml"),
@@ -229,6 +222,13 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
             .map(|s| (s.index, s.x, s.y))
             .collect::<Vec<_>>(),
         shadow
+    );
+    let t0 = Instant::now();
+    let atlas = build_snes_atlas(&raw, &baseline(&raw)).expect("atlas");
+    println!(
+        "atlas: {} functions in {:?}",
+        atlas.functions.len(),
+        t0.elapsed()
     );
     let mut watch = Watch::default();
     for i in 0..table.slots {
