@@ -5205,8 +5205,8 @@ stories, 10 decisions).
   from the committed generator: 1513-function atlas, 477 rule-named rows (all
   match), player x/y words found by a 16-bit motion match against OAM, every
   NMI-entry row hooked (the NMI is entered in several decode modes), 93
-  candidate data regions. Lockstep over 27 182 frames (Ceres, the escape, two
-  Zebes rooms): zero divergence plain and with 477 hooks; tick fires 26 991
+  candidate data regions. Lockstep over 27 182 frames (Ceres only: the escape
+  fails and the script ends back at the Ceres start, corrected 2026-10-28): zero divergence plain and with 477 hooks; tick fires 26 991
   times; position at the tick equals end of frame in 99.79% of 15 402 play
   frames. No widescreen keepers and no enemy table: this stretch has no
   roaming enemies (0 state flips); one camera-clamp candidate tried. Margins
@@ -5233,3 +5233,13 @@ stories, 10 decisions).
   end of frame in 100% of 20 902 frames. Widescreen: 20 candidates and 18 HUD
   anchors tried, no keepers (about 305 state flips). Margins: approach pending
   Brad. Workspace: **3904 passing**, gate green.
+- **W40-01 — Recipe hub** (2026-10-28). Moderation rule written first and
+  approved by Brad (D-031): facts-only submissions, no ROM bytes, patches,
+  disassembly or community-map provenance, incoming rows clamped to
+  candidate, patch rows refereed by shadow lockstep on a maintainer-chosen
+  replay. `scripts/recipe-hub/validate-submission.py` (ACCEPT / REJECT /
+  HOLD for patch rows) and the referee checklist
+  `docs/design/RECIPE_HUB_REVIEW.md`; samples use a made-up engine. The
+  first real external acceptance waits for a submitter. W38-06b parked: the
+  Super Metroid script never leaves Ceres; D-032 (presentation margins)
+  makes its keeper search moot. Workspace: **3904 passing**, gate green.
