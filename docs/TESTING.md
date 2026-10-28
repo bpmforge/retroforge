@@ -1149,6 +1149,8 @@ First run, 2026-09-15, release build:
 | SNES, after W14-53/W19-03 | 1265 | **1180** | 60 | 25 | **0** | **0** |
 | SNES, after W19-04/W14-55/W14-56 | 1265 | **1182** | 59 | 24 | **0** | **0** |
 | SNES, after W14-57 | 1265 | **1192** | 60 | 13 | **0** | **0** |
+| SNES, main at 360bc87 (2026-10-28) | 1265 | **1234** | 20 | 11 | **0** | **0** |
+| SNES, after W37-00b (DRAM refresh, IPL echo) | 1265 | **1234** | 20 | 11 | **0** | **0** |
 
 **The NES row's zeros are one finding.** 1281 real commercial programs,
 none of which this emulator had ever seen, and not one crash or hang in
@@ -11690,3 +11692,15 @@ peak 5800; A Link to the Past RMS 717, peak 5320 — sound, not silence.
 Limits: stereo is downmixed (the host ring is mono); linear interpolation,
 not a band-limited resampler; the DSP's real ~32.04 kHz is treated as
 32 kHz (the host's rate controller absorbs the drift).
+
+### Reference-emulator oracle for movie desyncs (ticket W37-00b)
+
+`crates/rf-harness/tests/w37_00b_oracle.rs` (`#[ignore]`, ROM- and
+movie-gated) writes our per-frame RAM trace of a movie replay plus a Lua
+script that feeds a reference emulator's headless test runner the same pad
+words and prints the same facts. The reference is run as a black box only
+(GPL: run it, diff the traces, never read its source). Traps, each found
+the hard way, are in `docs/research/W37-00-movie-import.md` (W37-00b
+section): sample at the same raster point, give the runner a controller,
+and start every run from clean SRAM. Not a gate: it needs a third-party
+binary, commercial ROMs and movies, none of which are in the repo.

@@ -20,7 +20,9 @@
 //! Resets in later frames are.
 
 use rf_core_api::coverage::CoverageLog;
-use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
+use rf_core_api::{
+    CoreEvent, CoreSink, EmulatorCore, EventMask, InputFrame, PpuPixel, ResetKind, Step,
+};
 use rf_nes::core::NesCore;
 use rf_snes::core::SnesCore;
 
@@ -134,7 +136,35 @@ fn drive<C: EmulatorCore>(
     }
 }
 
+/// Notes the vblank edge as the core reports it.
+struct VblankWatch {
+    seen: bool,
+}
+
+impl CoreSink for VblankWatch {
+    fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
+    fn audio(&mut self, _s: &[i16]) {}
+    fn event(&mut self, e: CoreEvent) {
+        if matches!(e, CoreEvent::VblankStart) {
+            self.seen = true;
+        }
+    }
+}
+
 /// Replay on an iNES image. `record` arms the coverage recorder.
+///
+/// **A movie frame's buttons take effect at that frame's vblank, not at
+/// our frame boundary** (ticket W37-00b). FCEUX's movie frame runs from
+/// one vblank to the next, and a reference emulator run as a black box
+/// switches the buttons at scanline 241 too; our `run_frame` boundary is
+/// the end of the pre-render line, 20 lines later. Latching at our
+/// boundary handed a game that reads the pad before vblank (SMB, when its
+/// NMI work spills into the next frame) the NEXT frame's buttons, one
+/// frame early: the warpless movie jumped a frame early at frame 503 and
+/// lost a life at 1,180. So each frame runs instruction by instruction to
+/// the vblank edge (`CoreEvent::VblankStart`), the buttons switch there,
+/// and the rest of the frame runs as usual. A frame with no vblank in it
+/// (the first one after power-on ends before vblank) switches at its end.
 ///
 /// # Errors
 /// The image does not load.
@@ -142,10 +172,43 @@ pub fn replay_nes(
     raw: &[u8],
     plan: &Plan,
     record: bool,
-    observe: impl FnMut(u32, &NesCore) -> bool,
+    mut observe: impl FnMut(u32, &NesCore) -> bool,
 ) -> Result<Replay, String> {
     let mut core = NesCore::from_ines_bytes(raw).map_err(|e| format!("{e:?}"))?;
-    Ok(drive(&mut core, plan, record, |_, _| {}, observe))
+    core.set_coverage_recording(record);
+    core.reset(ResetKind::Hard);
+    core.bus_mut().set_event_mask(EventMask::VBLANK_START);
+    let mut frames_run = 0u32;
+    let mut stopped = false;
+    for (n, f) in (0u32..).zip(&plan.frames) {
+        if let Some(r) = f.reset {
+            core.reset(reset_kind(r));
+            core.bus_mut().set_event_mask(EventMask::VBLANK_START);
+        }
+        let mut watch = VblankWatch { seen: false };
+        let mut done = false;
+        // Instruction steps until the vblank edge or the frame boundary.
+        // Each step runs an instruction (the core's own budget bounds a
+        // halted CPU), and a frame holds one boundary, so this ends.
+        while !watch.seen && !done {
+            done = core.step(Step::Instruction, &mut watch).frame_complete;
+        }
+        core.bus_mut().set_controller_buttons(0, f.pads[0] as u8);
+        core.bus_mut().set_controller_buttons(1, f.pads[1] as u8);
+        if !done {
+            let _ = core.step(Step::Frame, &mut Null);
+        }
+        frames_run = n + 1;
+        if !observe(n, &core) {
+            stopped = true;
+            break;
+        }
+    }
+    Ok(Replay {
+        frames_run,
+        stopped,
+        coverage: if record { core.take_coverage() } else { None },
+    })
 }
 
 /// Replay on a SNES image. The core ignores `InputFrame` here, so the pad
@@ -206,6 +269,64 @@ mod tests {
         assert_eq!(p.frames[7].reset, Some(Reset::Soft), "later ones stay");
         assert_eq!(p.movie_frame_at(6), Some(1));
         assert_eq!(p.movie_frame_at(1), None);
+    }
+
+    /// An NROM whose main loop reads the pad over and over into `$00` and
+    /// whose NMI copies `$00` to `$01`: `$01` is what the pad said BEFORE
+    /// that frame's vblank.
+    fn pad_probe_nrom() -> Vec<u8> {
+        let mut rom = vec![0u8; 16 + 0x4000 + 0x2000];
+        rom[..6].copy_from_slice(&[b'N', b'E', b'S', 0x1A, 1, 1]);
+        #[rustfmt::skip]
+        let code: [u8; 51] = [
+            0x78,                   // $8000 SEI
+            0x2C, 0x02, 0x20,       // $8001 BIT $2002
+            0x10, 0xFB,             //       BPL $8001
+            0x2C, 0x02, 0x20,       // $8006 BIT $2002
+            0x10, 0xFB,             //       BPL $8006
+            0xA9, 0x80,             // $800B LDA #$80
+            0x8D, 0x00, 0x20,       //       STA $2000 (NMI on)
+            0xA9, 0x01,             // $8010 LDA #1
+            0x8D, 0x16, 0x40,       //       STA $4016
+            0xA9, 0x00,             //       LDA #0
+            0x8D, 0x16, 0x40,       //       STA $4016
+            0xA2, 0x08,             // $801A LDX #8
+            0xAD, 0x16, 0x40,       // $801C LDA $4016
+            0x4A,                   //       LSR A
+            0x26, 0x02,             //       ROL $02
+            0xCA,                   //       DEX
+            0xD0, 0xF7,             //       BNE $801C
+            0xA5, 0x02,             // $8025 LDA $02
+            0x85, 0x00,             //       STA $00
+            0x4C, 0x10, 0x80,       //       JMP $8010
+            0x48,                   // $802C PHA (NMI)
+            0xA5, 0x00,             //       LDA $00
+            0x85, 0x01,             //       STA $01
+            0x68,                   //       PLA
+            0x40,                   //       RTI
+        ];
+        rom[16..16 + code.len()].copy_from_slice(&code);
+        rom[16 + 0x3FFA..16 + 0x4000].copy_from_slice(&[0x2C, 0x80, 0x00, 0x80, 0x00, 0x80]);
+        rom
+    }
+
+    #[test]
+    fn nes_buttons_switch_at_the_movie_frames_vblank() {
+        let mut pads = vec![0u16; 10];
+        pads[6] = 0xFF;
+        let m = movie(&pads, &[]);
+        let mut seen = Vec::new();
+        replay_nes(&pad_probe_nrom(), &plan(&[], 0, 0, &m), false, |f, c| {
+            seen.push(c.peek(0x0001));
+            f < 9
+        })
+        .expect("loads");
+        assert_eq!(
+            seen[6], 0x00,
+            "before frame 6's vblank the pad still says frame 5's buttons"
+        );
+        assert_eq!(seen[7], 0xFF, "frame 6's buttons arrive with its vblank");
+        assert_eq!(seen[8], 0x00);
     }
 
     #[test]

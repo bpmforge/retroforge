@@ -213,3 +213,53 @@ impl Recorder {
         }
     }
 }
+
+/// A trace file for iterating on the finder without replaying the game
+/// (little-endian: console tag, then per frame the cam and the three
+/// length-prefixed blocks; sprites are rebuilt from the OAM on load).
+pub fn save_trace(t: &Trace, console: Console, path: &std::path::Path) -> std::io::Result<()> {
+    let mut b = vec![u8::from(console == Console::Snes)];
+    b.extend((t.frames.len() as u32).to_le_bytes());
+    for f in &t.frames {
+        b.extend(f.cam_x.to_le_bytes());
+        b.extend(f.cam_y.to_le_bytes());
+        for blk in [&f.ram, &f.oam] {
+            b.extend((blk.len() as u32).to_le_bytes());
+            b.extend(blk.iter());
+        }
+    }
+    std::fs::write(path, b)
+}
+
+/// Read a file [`save_trace`] wrote.
+pub fn load_trace(path: &std::path::Path) -> std::io::Result<Trace> {
+    let b = std::fs::read(path)?;
+    let bad = || std::io::Error::other("truncated trace file");
+    let mut at = 1usize;
+    let mut take = |n: usize| -> std::io::Result<&[u8]> {
+        let s = b.get(at..at + n).ok_or_else(bad)?;
+        at += n;
+        Ok(s)
+    };
+    let le32 = |s: &[u8]| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize;
+    let console = if *b.first().ok_or_else(bad)? == 1 {
+        Console::Snes
+    } else {
+        Console::Nes
+    };
+    let n = le32(take(4)?);
+    let mut rec = Recorder::new(console, false);
+    for _ in 0..n {
+        let c = take(4)?;
+        let cam = (
+            u16::from_le_bytes([c[0], c[1]]),
+            u16::from_le_bytes([c[2], c[3]]),
+        );
+        let l = le32(take(4)?);
+        let ram = take(l)?.to_vec();
+        let l = le32(take(4)?);
+        let oam = take(l)?.to_vec();
+        rec.push(Some(Capture { ram, oam }), cam);
+    }
+    Ok(rec.trace)
+}
