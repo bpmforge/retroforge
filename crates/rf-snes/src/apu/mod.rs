@@ -289,6 +289,13 @@ impl Apu {
         let lo = self.read(0xFFFE);
         let hi = self.read(0xFFFF);
         self.cpu.pc = u16::from(lo) | (u16::from(hi) << 8);
+        // Ticket W37-04b: the vector fetch above is part of reset, not of
+        // the first instruction. Left charged, its two I/O accesses ran that
+        // instruction's DSP clock two cycles short on a fresh core, while a
+        // loaded core (W37-07b clears these on load) did not.
+        self.ram_accesses = 0;
+        self.io_accesses = 0;
+        self.intra_ticks = 0;
     }
 
     /// Is this address currently served by the IPL region?
