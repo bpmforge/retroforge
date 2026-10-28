@@ -495,6 +495,80 @@ impl SnesCore {
         Ok(())
     }
 
+    /// Ticket W40-03: install (`Some`) or drop (`None`) a code atlas for the
+    /// SA-1's 65816, keyed apart from the S-CPU's ([`Self::set_rebuild`]).
+    /// Counters start from zero. The SA-1 executor dispatches, counts and
+    /// checks indirect landings; it carries no function hooks.
+    ///
+    /// # Errors
+    /// The cartridge has no SA-1, or the atlas is for a ROM of another size,
+    /// or for an ISA without the five 65816 decode modes.
+    pub fn set_sa1_rebuild(&mut self, atlas: Option<rf_rebuild::Atlas>) -> Result<(), CoreError> {
+        if let Some(a) = &atlas {
+            if self.system.bus.sa1.is_none() {
+                return Err(CoreError::Other("this cartridge has no SA-1".to_string()));
+            }
+            if a.prg_len as usize != self.system.bus.rom.len() {
+                return Err(CoreError::Other(format!(
+                    "SA-1 atlas is for a {}-byte ROM, this cartridge has {}",
+                    a.prg_len,
+                    self.system.bus.rom.len()
+                )));
+            }
+            if a.mode_count != 5 {
+                return Err(CoreError::Other(format!(
+                    "SA-1 atlas has {} decode modes, the 65816 has 5",
+                    a.mode_count
+                )));
+            }
+        }
+        self.system.sa1_obs.rebuild = atlas.map(|a| Box::new(rf_rebuild::RebuildExec::new(a)));
+        Ok(())
+    }
+
+    /// Ticket W40-03: the SA-1 executor's counters, `None` while no SA-1
+    /// atlas is installed.
+    #[must_use]
+    pub fn sa1_rebuild_stats(&self) -> Option<rf_core_api::RebuildStats> {
+        self.system
+            .sa1_obs
+            .rebuild
+            .as_deref()
+            .map(rf_rebuild::RebuildExec::stats)
+    }
+
+    /// Ticket W40-03: the SA-1 executor's dispatch misses, empty when off.
+    #[must_use]
+    pub fn sa1_rebuild_deltas(&self) -> &[rf_rebuild::Delta] {
+        self.system
+            .sa1_obs
+            .rebuild
+            .as_deref()
+            .map_or(&[], rf_rebuild::RebuildExec::deltas)
+    }
+
+    /// Ticket W40-03: arm or disarm the SA-1 coverage recorder (a fresh log
+    /// each time it is armed). Independent of [`EmulatorCore::set_coverage_recording`],
+    /// which records the S-CPU. No effect on a cartridge without an SA-1.
+    pub fn set_sa1_coverage_recording(&mut self, on: bool) {
+        let log = (on && self.system.bus.sa1.is_some())
+            .then(|| self.system.bus.sa1.as_ref().map(|s| s.board))
+            .flatten()
+            .map(|board| crate::rebuild::sa1::Sa1Obs::fresh_log(self.system.bus.rom.len(), board));
+        self.system.sa1_obs.coverage = log;
+    }
+
+    /// Ticket W40-03: hand over the SA-1 log so far and keep recording into
+    /// a fresh one; `None` while the SA-1 recorder is off.
+    pub fn take_sa1_coverage(&mut self) -> Option<rf_core_api::CoverageLog> {
+        let board = self.system.bus.sa1.as_ref()?.board;
+        let fresh =
+            self.system.sa1_obs.coverage.is_some().then(|| {
+                crate::rebuild::sa1::Sa1Obs::fresh_log(self.system.bus.rom.len(), board)
+            })?;
+        self.system.sa1_obs.coverage.replace(fresh).map(|b| *b)
+    }
+
     /// The installed atlas, for naming trace entries' functions.
     #[must_use]
     pub fn rebuild_atlas(&self) -> Option<&rf_rebuild::Atlas> {
@@ -559,6 +633,9 @@ impl SnesCore {
     /// frames itself and does not arm the resume rule.
     pub fn reset_hook_frames(&mut self) {
         if let Some(x) = self.system.rebuild.as_deref_mut() {
+            x.state_loaded();
+        }
+        if let Some(x) = self.system.sa1_obs.rebuild.as_deref_mut() {
             x.state_loaded();
         }
     }

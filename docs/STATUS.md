@@ -5081,3 +5081,13 @@ stories, 10 decisions).
   `[ai_naming] backend` setting and its UI are not wired into the shell yet.
   Workspace: **3800 passing** before main's W39-02/W39-06 merge; after it,
   the rf-ai lib conflict (module list) was resolved and rf-ai rerun 99/99.
+- **W40-03 — SA-1 lifting** (2026-10-28). The SA-1's 65816 is recorded and
+  executed as a second core: own coverage log and observed-only atlas
+  (`CACHE_ASSET_SA1`), fetches through the SA-1's live bank map, I-RAM and
+  BW-RAM code counted as RAM fallback, reset/NMI/IRQ entries noted. SNES
+  lockstep now compares SA-1 registers, I-RAM and BW-RAM. Kirby's Dream
+  Land 3 on the generic tier, both CPUs lifted: zero divergence over two
+  play scripts (3420 and 3452 frames; S-CPU ~39 M and SA-1 ~122 M
+  instructions observed). SA-1 interrupts covered only by a synthetic test
+  (Kirby 3 polls). Super Mario RPG not run: the menu script stalls on a
+  static screen. Workspace: **3823 passing**, gate green.

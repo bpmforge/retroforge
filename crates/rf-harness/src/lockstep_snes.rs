@@ -22,7 +22,9 @@
 //! a bug those share with the interpreter is invisible: the checker proves
 //! the *executor* (and, later, a JIT) did not change the machine, not that
 //! the machine is right. The coprocessors' own CPUs (SA-1, Super FX) are
-//! covered only through their serialised state in the `cart` chunk. The fine
+//! covered only through their serialised state in the `cart` chunk, except
+//! the SA-1's 65816, whose registers, I-RAM and BW-RAM are also compared by
+//! name (`sa1.cpu.*`, `sa1.iram`, `sa1.bwram`; ticket W40-03). The fine
 //! pass (the diverging frame re-run an instruction at a time) compares the
 //! registers, the cycle counter and work RAM after every instruction; a
 //! difference that appears only in VRAM/OAM/CGRAM/APU/PPU state or in the
@@ -167,6 +169,28 @@ impl LockstepMachine for SnesCore {
             &plain.system().bus.wram,
             &rebuilt.system().bus.wram,
         );
+        // Ticket W40-03: the SA-1's 65816, by name (it is also inside the
+        // `cart_state` bytes, but a register difference should say which).
+        if let (Some(p), Some(r)) = (&plain.system().bus.sa1, &rebuilt.system().bus.sa1) {
+            let (a, b) = (&p.cpu, &r.cpu);
+            scalar(&mut out, "sa1.cpu.a", a.a, b.a);
+            scalar(&mut out, "sa1.cpu.x", a.x, b.x);
+            scalar(&mut out, "sa1.cpu.y", a.y, b.y);
+            scalar(&mut out, "sa1.cpu.s", a.sp, b.sp);
+            scalar(&mut out, "sa1.cpu.d", a.d, b.d);
+            scalar(&mut out, "sa1.cpu.dbr", a.dbr, b.dbr);
+            scalar(&mut out, "sa1.cpu.pbr", a.pbr, b.pbr);
+            scalar(&mut out, "sa1.cpu.pc", a.pc, b.pc);
+            scalar(&mut out, "sa1.cpu.p", a.p, b.p);
+            scalar(&mut out, "sa1.cpu.e", u8::from(a.e), u8::from(b.e));
+            scalar(&mut out, "sa1.credit", p.credit, r.credit);
+            scalar(
+                &mut out,
+                "sa1.instructions",
+                p.instructions_executed,
+                r.instructions_executed,
+            );
+        }
         out
     }
 
@@ -191,6 +215,10 @@ impl LockstepMachine for SnesCore {
         };
         bytes(&mut out, "cgram", &cgram(p), &cgram(r));
         bytes(&mut out, "sram", &p.bus.sram, &r.bus.sram);
+        if let (Some(ps), Some(rs)) = (&p.bus.sa1, &r.bus.sa1) {
+            bytes(&mut out, "sa1.iram", &ps.iram, &rs.iram);
+            bytes(&mut out, "sa1.bwram", &ps.bwram, &rs.bwram);
+        }
         for (region, name) in SERIALISED {
             bytes(
                 &mut out,
