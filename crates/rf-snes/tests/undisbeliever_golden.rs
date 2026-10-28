@@ -197,6 +197,12 @@ const EXCLUDED: &[(&str, &str)] = &[
 /// re-pinned record still targets register `$2100` only (`regs=[2100]`
 /// under `survey_the_whole_set`), so what changed is timing, not which
 /// register this instrumentation sees:
+/// Re-pinned 2026-10-28 (ticket W37-00b): the per-scanline DRAM refresh
+/// stall delays every CPU write that straddles H=538 by 40 master cycles,
+/// so each line's write record gains one 84-master gap at dot ~134 where
+/// the hammer loop used to run evenly every ~42. A reference emulator run
+/// as a black box shows exactly that shape on `inidisp_hammer_0f` (42-
+/// master spacing, one 82 gap across hClock 538). Pixel hashes unchanged.
 const WRITE_GOLDENS: &[(&str, &str)] = &[
     // Re-pinned 2026-09-20 (ticket W14-47): still exactly ONE write on
     // one line (line 89), but the dot moved from 31 to 30 (n=97819 ->
@@ -227,11 +233,11 @@ const WRITE_GOLDENS: &[(&str, &str)] = &[
         // real ROMs (The Terminator, Super Black Bass, Magical Drop II)
         // proved it regresses commercial titles; this hash is back to
         // EXACTLY the value pinned before W14-47
-        // (`b28b53d`/`b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d`),
+        // (`b28b53d`/`ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5`),
         // which is the strongest available confirmation that reverting
         // the rule restored main's own timing rather than coincidentally
         // producing a third, different trace.
-        "b344422632b66c199157f96fbd32908caee491b18ea2b451940296436e8e4d4d",
+        "ec428d365cbc5603c529a1aed56e5397250e8b82bb5237a02c2d10efa14ee9d5",
     ),
     // 5,460 writes across all 224 lines (was 1,988 over 70) — now
     // identical to the record `inidisp_hammer_0f00.sfc` used to have,
@@ -239,7 +245,7 @@ const WRITE_GOLDENS: &[(&str, &str)] = &[
     // timing regimes, one shared record).
     (
         "inidisp_hammer_0f.sfc",
-        "55f75429ff5510f53978bef709a27267dd6921616cd77a5187465c0ef527b9fa",
+        "de73b868560273f96b86c2a47a4623b34dc8c6c7880f6aa63094f203c1e35fea",
     ),
     // 3,765 writes across 177 lines -- and now IDENTICAL to
     // `inidisp_hammer_0f0f`, `inidisp_hammer_0f8f_fast` (both still
@@ -248,24 +254,24 @@ const WRITE_GOLDENS: &[(&str, &str)] = &[
     // corrected pacing collapses all four into one record).
     (
         "inidisp_hammer_0f00.sfc",
-        "f67caf5b00b2a692486da6dca4a51505b03beb619a48a15d0436132488ec59a9",
+        "ebf0c610a4229424bf731f732d5eefdeee89c90d4d80ee56d173e363ef9e7759",
     ),
     // 2,225 writes across 146 lines (was 1,724 over 101).
     (
         "inidisp_hammer_0f8f.sfc",
-        "4bb02357884c435e0f4be56c4736bcc2fbef5658d8e2f7585a743fc1414b51c1",
+        "7e4794919c785409583b9960bf1c2da3fae391ad26f54be96074d4fa62e47a93",
     ),
     // 3,765 across 177 lines -- now identical to the 0f00 group above;
     // see that entry's note.
     (
         "inidisp_hammer_0f_long.sfc",
-        "e85eac4da4c4845fc5afa26dd95de9af708874216567ac51f1529638a8c3f6eb",
+        "147b125f924496ffd1ab3ab431b3af661c5949ad392d8ad10473d0bdc6068a5d",
     ),
     // 1,943 writes across 127 lines (was 1,844 over 108) -- and this one
     // still never leaves forced blank.
     (
         "inidisp_hammer_8f0f.sfc",
-        "8192ef1db5338b8e78d72b447af29af249126f351e64b317b9d2e7cdc7bd1341",
+        "abae3b19a4765eedf8fe1fb6d027daaf47b340f2a04995e64b4b586f4197c8f5",
     ),
 ];
 
