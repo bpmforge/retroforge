@@ -51,6 +51,7 @@ pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod gsu_poly;
+pub mod hd2d;
 pub mod hd_layer;
 pub mod hd_tiles;
 pub mod layers;
