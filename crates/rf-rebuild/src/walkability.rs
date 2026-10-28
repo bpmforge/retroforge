@@ -8,10 +8,14 @@
 //! pushes per tile id and turns the verdicts into [`TileSemantics`] rows. The
 //! driving (RAM pokes on a scratch machine) lives in the harness.
 //!
-//! A tile id is judged only on enough evidence ([`MIN_PROBES`]) and a clear
-//! majority ([`MIN_PRECISION_PCT`]); an id that is blocked in some cells and
-//! walkable in others (a shared edge tile, an enemy's knock-back) is left out
-//! of the rows and listed as ambiguous, never guessed.
+//! The game's solidity belongs to a cell (16 px on the NES Zelda), not to each
+//! 8 px tile in it, and tiles are shared between cells (grass beside a rock),
+//! so an id is judged by the cells that show it: solid when at least
+//! [`SOLID_PCT`] of them were blocked (a solid thing is drawn from a few tiles
+//! that are mostly in blocked cells, a filler tile is mostly in open ones),
+//! walkable when at least [`MIN_PRECISION_PCT`] were open, otherwise
+//! ambiguous and left out of the rows, never guessed. Every id needs
+//! [`MIN_PROBES`] cells first.
 //!
 //! Only ids and counts are held (law 5): no pixels, no ROM bytes.
 
@@ -19,28 +23,28 @@ use std::collections::BTreeMap;
 
 use crate::recipe::{Grade, TileClass, TileSemantics};
 
-/// Fewest pushes an id needs before it is judged.
+/// Fewest cells an id needs before it is judged.
 pub const MIN_PROBES: u32 = 4;
-/// The share (percent) of one outcome an id needs to be judged by it.
+/// The share (percent) of open cells an id needs to be called walkable.
 pub const MIN_PRECISION_PCT: u32 = 90;
+/// The share (percent) of blocked cells an id needs to be called solid.
+pub const SOLID_PCT: u32 = 60;
 
 /// What the pushes say about one tile id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Solid,
     Walkable,
-    /// Enough pushes, no clear majority.
+    /// Enough cells, no clear majority.
     Ambiguous,
-    /// Fewer than [`MIN_PROBES`] pushes.
+    /// Fewer than [`MIN_PROBES`] cells.
     Unseen,
 }
 
-/// Blocked and free push counts per tile id.
+/// Blocked and open cell counts per tile id.
 #[derive(Debug, Clone, Default)]
 pub struct WalkTally {
     counts: BTreeMap<u32, (u32, u32)>,
-    /// Ids of each blocked cell, settled against the free cells by [`Self::totals`].
-    blocked_cells: Vec<Vec<u32>>,
 }
 
 impl WalkTally {
@@ -49,8 +53,8 @@ impl WalkTally {
         Self::default()
     }
 
-    /// One push at a cell showing `id`: `blocked` is whether the player failed
-    /// to advance.
+    /// One cell showing `id`: `blocked` is whether the player failed to
+    /// advance into it.
     pub fn record(&mut self, id: u32, blocked: bool) {
         let e = self.counts.entry(id).or_default();
         if blocked {
@@ -60,57 +64,42 @@ impl WalkTally {
         }
     }
 
-    /// One judged cell showing `ids` (a cell is several tiles; the game's solidity belongs
-    /// to the cell, not to each tile). A walkable cell counts for every id it shows. A
-    /// blocked cell counts only for the ids never seen in a walkable cell: those are what can
-    /// have made it solid, while a tile that also stands in open ground (grass beside a rock)
-    /// is no evidence.
+    /// One judged cell showing `ids`: it counts once for each distinct id.
     pub fn record_cell(&mut self, ids: &[u32], blocked: bool) {
-        if blocked {
-            self.blocked_cells.push(ids.to_vec());
-        } else {
-            for &id in ids {
-                self.record(id, false);
+        let mut seen: Vec<u32> = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if !seen.contains(&id) {
+                seen.push(id);
+                self.record(id, blocked);
             }
         }
     }
 
-    /// The counts with blocked cells settled.
-    fn totals(&self) -> BTreeMap<u32, (u32, u32)> {
-        let mut t = self.counts.clone();
-        for cell in &self.blocked_cells {
-            for &id in cell {
-                let e = t.entry(id).or_default();
-                if e.1 == 0 {
-                    e.0 = e.0.saturating_add(1);
-                }
-            }
-        }
-        t
-    }
-
-    /// `(blocked, free)` for `id`.
+    /// `(blocked, open)` cells for `id`.
     #[must_use]
     pub fn counts(&self, id: u32) -> (u32, u32) {
-        self.totals().get(&id).copied().unwrap_or_default()
+        self.counts.get(&id).copied().unwrap_or_default()
     }
 
-    /// Distinct ids with at least one push.
+    /// Distinct ids seen.
     #[must_use]
     pub fn ids(&self) -> usize {
-        self.totals().len()
+        self.counts.len()
+    }
+
+    /// Every id seen, ascending.
+    #[must_use]
+    pub fn all_ids(&self) -> Vec<u32> {
+        self.counts.keys().copied().collect()
     }
 
     #[must_use]
     pub fn verdict(&self, id: u32) -> Verdict {
-        Self::judge(self.counts(id))
-    }
-
-    fn judge((b, f): (u32, u32)) -> Verdict {
+        let (b, f) = self.counts(id);
         let n = b + f;
         if n < MIN_PROBES {
             Verdict::Unseen
-        } else if b * 100 >= n * MIN_PRECISION_PCT {
+        } else if b * 100 >= n * SOLID_PCT {
             Verdict::Solid
         } else if f * 100 >= n * MIN_PRECISION_PCT {
             Verdict::Walkable
@@ -122,15 +111,16 @@ impl WalkTally {
     /// Ids with `verdict`, ascending.
     #[must_use]
     pub fn ids_with(&self, verdict: Verdict) -> Vec<u32> {
-        self.totals()
-            .into_iter()
-            .filter(|&(_, c)| Self::judge(c) == verdict)
-            .map(|(id, _)| id)
+        self.counts
+            .keys()
+            .copied()
+            .filter(|&id| self.verdict(id) == verdict)
             .collect()
     }
 
     /// The solid ids merged into consecutive ranges, as recipe rows. Walkable
-    /// ids need no row (an id with no row is open).
+    /// ids need no row (an id with no row is open). `experiment` goes in each
+    /// row's `source`.
     #[must_use]
     pub fn to_rows(&self, experiment: &str, grade: Grade) -> Vec<TileSemantics> {
         let mut rows: Vec<TileSemantics> = Vec::new();
@@ -185,13 +175,38 @@ mod tests {
 
     #[test]
     fn verdicts_need_evidence_and_a_clear_majority() {
-        let t = tally(&[(1, 9, 0), (2, 0, 9), (3, 5, 5), (4, 2, 0), (5, 19, 1)]);
+        let t = tally(&[
+            (1, 9, 0),
+            (2, 0, 9),
+            (3, 5, 7),
+            (4, 2, 0),
+            (5, 19, 1),
+            (6, 7, 5),
+            (7, 1, 9),
+        ]);
         assert_eq!(t.verdict(1), Verdict::Solid);
         assert_eq!(t.verdict(2), Verdict::Walkable);
-        assert_eq!(t.verdict(3), Verdict::Ambiguous);
+        assert_eq!(t.verdict(3), Verdict::Ambiguous, "5 of 12 blocked is 42%");
         assert_eq!(t.verdict(4), Verdict::Unseen);
-        assert_eq!(t.verdict(5), Verdict::Solid, "95% is enough");
+        assert_eq!(t.verdict(5), Verdict::Solid);
+        assert_eq!(t.verdict(6), Verdict::Ambiguous, "7 of 12 is 58%, under 60");
+        assert_eq!(t.verdict(7), Verdict::Walkable);
         assert_eq!(t.verdict(99), Verdict::Unseen);
+    }
+
+    #[test]
+    fn filler_tiles_in_blocked_cells_stay_open() {
+        let mut t = WalkTally::new();
+        // Grass (1) fills open ground and the corners of rocks; the rock (2) is only in blocked cells.
+        for _ in 0..60 {
+            t.record_cell(&[1, 1, 1, 1], false);
+        }
+        for _ in 0..5 {
+            t.record_cell(&[1, 2, 2, 2], true);
+        }
+        assert_eq!(t.counts(1), (5, 60), "a cell counts once per id");
+        assert_eq!(t.verdict(1), Verdict::Walkable);
+        assert_eq!(t.verdict(2), Verdict::Solid);
     }
 
     #[test]
@@ -202,19 +217,6 @@ mod tests {
         assert_eq!(spans, vec![(10, 11), (13, 13)]);
         assert!(rows.iter().all(|r| r.class == TileClass::Solid));
         assert_eq!(t.ids_with(Verdict::Ambiguous), vec![20]);
-    }
-
-    #[test]
-    fn a_blocked_cell_only_blames_ids_never_seen_in_open_ground() {
-        let mut t = WalkTally::new();
-        // Grass (1) is open everywhere; the rock (2) only ever appears with grass in blocked cells.
-        for _ in 0..5 {
-            t.record_cell(&[1, 1, 1, 1], false);
-            t.record_cell(&[1, 2, 2, 2], true);
-        }
-        assert_eq!(t.verdict(1), Verdict::Walkable);
-        assert_eq!(t.verdict(2), Verdict::Solid);
-        assert_eq!(t.counts(1), (0, 20));
     }
 
     #[test]

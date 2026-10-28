@@ -125,7 +125,12 @@ fn tile_grid(core: &NesCore) -> Tiles {
 /// Playfield: 16 x 11 cells of 16 px below the status band.
 const CELLS_W: usize = 16;
 const CELLS_H: usize = 11;
-const PUSH_FRAMES: usize = 8;
+const PUSH_FRAMES: usize = 14;
+/// Pushing 14 frames, the distribution of how far Link got is bimodal (observed, 7 screens):
+/// open ground gives 13..=21 px; a wall gives 0..=5, or about 8 where his body overlaps the
+/// wall's near half-tile before stopping. So: at least 13 is walkable, at most 10 is solid.
+const OPEN_PX: i32 = 13;
+const BLOCKED_PX: i32 = 10;
 /// Link rests on y = tile top + 5 (observed: his y is 5 mod 8 whenever he stands still).
 const LINK_Y_OFF: u32 = 5;
 
@@ -215,8 +220,8 @@ fn cell_ids(tiles: &Tiles, c: i32, r: i32) -> Option<[u32; 4]> {
 
 /// Flood-fill the cells Link can reach on the current screen (at rest), judging each cell
 /// beside a cell he stands on: Link is put on the known-free cell (test-side write of his x/y)
-/// and the pad held towards the neighbour for [`PUSH_FRAMES`]; he advanced (>= 4 px along the
-/// push) -> the neighbour is walkable and joins the fill, did not (<= 1 px) -> it is solid. A
+/// and the pad held towards the neighbour for [`PUSH_FRAMES`]; he advanced [`OPEN_PX`] along the
+/// push -> the neighbour is walkable and joins the fill, [`BLOCKED_PX`] or less -> it is solid. A
 /// cell in `avoid` is not pushed at. If a push changes the screen (a door), the fill stops
 /// and reports the cell in `door`.
 fn probe_screen(
@@ -302,13 +307,17 @@ fn probe_screen(
                 st.door = Some((nc, nr));
                 return st;
             }
+            if std::env::var("PROBE_HIST").is_ok() {
+                let ids = cell_ids(tiles, nc, nr);
+                println!("adv {pad} {} cell ({nc},{nr}) from ({c},{r}) start {start:?} end {end:?} ids {ids:x?}", advance(pad, start, end));
+            }
             match advance(pad, start, end) {
-                a if a >= 4 => {
+                a if a >= OPEN_PX => {
                     known.insert((nc, nr), true);
                     queue.push_back((nc, nr));
                     st.open += 1;
                 }
-                a if a <= 1 => {
+                a if a <= BLOCKED_PX => {
                     known.insert((nc, nr), false);
                     st.blocked += 1;
                 }
@@ -616,6 +625,15 @@ fn report(l: &Learned) {
         t.ids_with(Verdict::Ambiguous).len(),
         t.ids_with(Verdict::Unseen).len()
     );
+    if std::env::var("PROBE_DEBUG").is_ok() {
+        for id in t.all_ids() {
+            println!(
+                "  id {id:#04x}: blocked cells / free cells {:?} -> {:?}",
+                t.counts(id),
+                t.verdict(id)
+            );
+        }
+    }
     for id in t.ids_with(Verdict::Ambiguous) {
         println!("  ambiguous {id:#04x}: {:?}", t.counts(id));
     }
@@ -816,24 +834,6 @@ fn zelda_stage_set_from_observed_walking() {
 }
 
 #[test]
-#[ignore = "needs The Legend of Zelda (USA) (RF_SCREENS_ROMS_DIR)"]
-fn probe_the_base_screen_only() {
-    let Some(path) = rom_path() else {
-        return;
-    };
-    let raw = load_rom(&path);
-    let mut l = Learned {
-        atlas: ScreenAtlas::new(),
-        tiles: BTreeMap::new(),
-        tally: WalkTally::new(),
-        probed: Vec::new(),
-        routes: BTreeMap::from([(0x77, Vec::new())]),
-    };
-    probe_routes(&raw, &mut l, 1);
-    report(&l);
-}
-
-#[test]
 #[ignore = "debug: learn and save the routes"]
 fn learn_and_save_routes() {
     let Some(path) = rom_path() else {
@@ -868,10 +868,11 @@ fn probe_saved_route() {
         return;
     };
     let raw = load_rom(&path);
-    let want: u8 = std::env::var("SCREEN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(103);
+    let wants: Vec<u8> = std::env::var("SCREEN")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|v| v.parse().ok())
+        .collect();
     let text = std::fs::read_to_string(format!("{OUT_DIR}/routes.txt")).expect("routes");
     let mut l = Learned {
         atlas: ScreenAtlas::new(),
@@ -883,7 +884,7 @@ fn probe_saved_route() {
     for line in text.lines() {
         let (i, hops) = line.split_once(' ').unwrap_or((line, ""));
         let idx: u8 = i.parse().expect("idx");
-        if idx != want {
+        if !wants.contains(&idx) {
             continue;
         }
         let r = hops
@@ -898,6 +899,6 @@ fn probe_saved_route() {
         l.routes.insert(idx, r);
     }
     println!("routes {:?}", l.routes);
-    probe_routes(&raw, &mut l, 1);
+    probe_routes(&raw, &mut l, wants.len());
     report(&l);
 }
