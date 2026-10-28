@@ -90,6 +90,19 @@ pub struct SlotBinding {
     pub live_frames: u32,
     /// Of those, the frames a sprite matched.
     pub matched_frames: u32,
+    /// Frames of RAM history the slot's sprites were built from beyond the
+    /// table's `lag`: `1` for a slot whose object is drawn before the game
+    /// moves it that frame (its sprites show the position of the previous
+    /// capture), `0` for one drawn after. Chosen per slot by [`pick_back`].
+    pub back: u8,
+    /// The same test with the slot's position moved by [`CONTROL_SHIFT`]:
+    /// how often the picture would match a position that is *not* this
+    /// slot's. A real slot has this far below `matched_frames`.
+    pub control_frames: u32,
+    /// The sprite offsets `(dx, dy)` from the slot's position that this slot
+    /// was seen drawing at, learned from the run ([`learn_offsets`]). Empty
+    /// for a slot that borrowed the pooled set of the whole table.
+    pub offsets: Vec<(i8, i8)>,
 }
 
 /// How a found table lines up with the picture.
@@ -112,6 +125,21 @@ pub struct Binding {
     pub frames_clean: u32,
     /// How "live" was decided: from the state byte, or from the binding.
     pub live_from_state: bool,
+    /// Slot-frames left out of `expected` because the slot's state byte had a
+    /// value the game never draws (learned, see [`non_drawn_states`]).
+    pub excluded: u64,
+    /// Frames left out whole because every live object in them was undrawn.
+    pub blank_frames: u32,
+    /// The state-byte values learned as not drawn.
+    pub non_drawn: Vec<u8>,
+    /// Misses by cause. `undrawn`: no sprite anywhere near the slot's
+    /// position (flicker, clipping, a frame the game skipped). `off_set`:
+    /// sprites near it, none at an offset the slot is known to draw at (a
+    /// pose seen too rarely to learn).
+    pub undrawn: u64,
+    pub off_set: u64,
+    /// The `(frame, slot)` of every miss.
+    pub missed: Vec<(u32, u32)>,
 }
 
 impl Binding {
@@ -178,10 +206,58 @@ const MAX_STRIDE: usize = 64;
 /// Pixels a sprite column may sit from where the x byte puts it (see
 /// [`Cols::bound`]).
 pub const X_SLACK: i8 = 2;
+/// Pixels a sprite row may sit from a multiple of eight (see [`Cols::bound`]).
+pub const Y_SLACK: i8 = 2;
+/// Pixels two chain members' drawing offsets may differ and still agree.
+const DX_AGREE: u8 = 2;
 /// Empty slots tolerated between two members of a chain.
 const MAX_GAP: usize = 6;
 /// Share of its live frames a trailing slot must match to be claimed.
 const TRIM_BELOW: f64 = 0.7;
+/// Frames a trailing slot must match exactly to be claimed: a slot that is
+/// simply rarely live is kept on this much evidence, one that never matched
+/// is not.
+const MIN_SLOT_EVIDENCE: u32 = 3;
+/// Slots past the end of an x chain that are tried (a rarely live slot's x
+/// byte does not score, so the chain stops short of the table).
+const MAX_EXTEND: usize = 16;
+/// The window around a slot's position in which a sprite may belong to it:
+/// pixels left/right and up/down. Metasprites of 16..32 pixels, plus the
+/// drawing code's own nudges, fit; the next object's sprites mostly do not.
+const WIN_X: std::ops::RangeInclusive<i8> = -16..=24;
+const WIN_Y: std::ops::RangeInclusive<i8> = -24..=32;
+/// An offset is "drawn at" by a slot when it recurs in at least this many of
+/// the slot's live frames, and in at least [`OFFSET_SHARE`] of them. A stray
+/// sprite lands on one particular pixel offset in about 1 frame in 10^4, so
+/// 3 recurrences are never chance; and the share lets a pose seen in 2% of a
+/// slot's life (a turned or squashed enemy) count, which a one-offset rule
+/// would call a miss.
+const OFFSET_MIN_FRAMES: u32 = 3;
+const OFFSET_SHARE: f64 = 0.02;
+/// A slot with fewer live frames than this borrows the offsets of the whole
+/// table (it has not shown enough poses of its own).
+const OWN_MIN_LIVE: u32 = 20;
+/// A state value is "not drawn" when it covers at least this many live
+/// on-screen slot-frames and [`NON_DRAWN_SHARE`] of them had no sprite in the
+/// window.
+const NON_DRAWN_MIN: u32 = 5;
+const NON_DRAWN_SHARE: f64 = 0.9;
+/// The displacement `(x, y)` of the control position (see
+/// [`SlotBinding::control_frames`]): far enough to leave the window, odd enough
+/// not to land on another object's grid.
+pub const CONTROL_SHIFT: (u8, u8) = (83, 37);
+/// [`pick_back`] compares the share of a slot's frames covered by its
+/// [`CONC_TOP`] commonest offsets, and prefers the older RAM only when that
+/// share is higher by [`BACK_MARGIN`].
+const CONC_TOP: usize = 6;
+const BACK_MARGIN: f64 = 0.05;
+/// Share of the live slot-frames a fitted x high byte must explain over none.
+const HI_FIT_GAIN: f64 = 0.05;
+/// From this stride on a chain needs [`MIN_WIDE`] members: three bytes at a
+/// wide stride are always "dense" and fit by chance (about forty bytes of a
+/// work RAM follow some sprite's x; that is hundreds of three-byte chains).
+const WIDE_STRIDE: usize = 8;
+const MIN_WIDE: usize = 4;
 /// Fewest slots in a table.
 const MIN_SLOTS: usize = 3;
 /// Rows of frames sampled when searching the other columns.
@@ -379,23 +455,39 @@ pub fn chains(addrs: &[usize]) -> Vec<Chain> {
     chains_weighted(&weighted)
 }
 
+/// Whether two x offsets (mod 256) are within [`DX_AGREE`] of each other.
+fn agree(a: u8, b: u8) -> bool {
+    (a.wrapping_sub(b) as i8).unsigned_abs() <= DX_AGREE
+}
+
 /// [`chains`] with a weight per address (its z-score): the heaviest chain wins
 /// its addresses. A table is rarely full in a short run, so up to
 /// [`MAX_GAP`] empty slots may sit between two members.
 #[must_use]
 pub fn chains_weighted(addrs: &[(usize, f64)]) -> Vec<Chain> {
-    let mut sorted: Vec<usize> = addrs.iter().map(|&(a, _)| a).collect();
+    let scored: Vec<(usize, f64, u8)> = addrs.iter().map(|&(a, z)| (a, z, 0)).collect();
+    chains_scored(&scored)
+}
+
+/// [`chains_weighted`] with the x offset each address was found at: the
+/// members of a table share the game's drawing offset, so a chain's weight
+/// counts only the members within [`DX_AGREE`] pixels of its commonest
+/// offset (a long sparse chain of unrelated bytes, each with its own offset,
+/// does not take bytes from a short dense one that agrees).
+#[must_use]
+pub fn chains_scored(addrs: &[(usize, f64, u8)]) -> Vec<Chain> {
+    let mut sorted: Vec<usize> = addrs.iter().map(|&(a, _, _)| a).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    sorted.sort_unstable();
-    sorted.dedup();
-    let weight = |a: usize| {
-        addrs
-            .iter()
-            .filter(|x| x.0 == a)
-            .map(|x| x.1)
-            .fold(0.0, f64::max)
-    };
+    let by_addr: std::collections::BTreeMap<usize, (f64, u8)> =
+        addrs.iter().fold(Default::default(), |mut m, &(a, z, dx)| {
+            let e = m.entry(a).or_insert((z, dx));
+            if z > e.0 {
+                *e = (z, dx);
+            }
+            m
+        });
+    let weight = |a: usize| by_addr.get(&a).map_or(0.0, |e| e.0);
     let has = |a: usize| sorted.binary_search(&a).is_ok();
     let mut all: Vec<(Chain, f64, Vec<usize>)> = Vec::new();
     for g in 1..=MAX_STRIDE {
@@ -417,9 +509,34 @@ pub fn chains_weighted(addrs: &[(usize, f64)]) -> Vec<Chain> {
                     }
                 }
             }
-            if mem.len() >= MIN_SLOTS {
+            if mem.len()
+                >= if g >= WIDE_STRIDE {
+                    MIN_WIDE
+                } else {
+                    MIN_SLOTS
+                }
+            {
                 let last = mem[mem.len() - 1];
-                let w: f64 = mem.iter().map(|&m| weight(m)).sum();
+                // A table is dense: members over the slots it spans scale the
+                // weight, so a long sparse chain of every other byte does not
+                // take bytes that belong to a shorter dense one.
+                let slots = (last - a) / g + 1;
+                let modal = mem
+                    .iter()
+                    .map(|m| by_addr.get(m).map_or(0, |e| e.1))
+                    .max_by_key(|&d| {
+                        mem.iter()
+                            .filter(|m| by_addr.get(m).is_some_and(|e| agree(e.1, d)))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let w: f64 = mem
+                    .iter()
+                    .filter(|m| by_addr.get(m).is_some_and(|e| agree(e.1, modal)))
+                    .map(|&m| weight(m))
+                    .sum::<f64>()
+                    * mem.len() as f64
+                    / slots as f64;
                 all.push((
                     Chain {
                         base: a,
@@ -579,9 +696,65 @@ fn find_hi(pre: &Pre<'_>, c: &Chain, xs: &[usize], lag: usize, skip: &[usize]) -
     best.map(|(b, _)| b)
 }
 
+/// The x high byte when the wrap events [`find_hi`] needs are too few (a slow
+/// object never carries the low byte over): the column whose use as the high
+/// byte best tells apart the slot-frames where a sprite is near the slot's
+/// position from those where none is. With no high byte every live slot is
+/// "on screen" and an object in the next page counts as missing; with the
+/// right one it is off screen and left out. Accepted only when it explains at
+/// least [`HI_FIT_GAIN`] more of the live slot-frames than having none.
+fn find_hi_fit(pre: &Pre<'_>, cols: &Cols, state: usize, skip: &[usize]) -> Option<usize> {
+    let c = &cols.c;
+    // (frame, slot, a sprite is near the low-byte position)
+    let mut live: Vec<(usize, usize, bool)> = Vec::new();
+    for f in (cols.lag + 1)..pre.n() {
+        for i in 0..c.slots {
+            if pre.ram(f - cols.lag, col(c, state, i)) == 0 {
+                continue;
+            }
+            let (x, y, on) = cols.screen(pre, f, i);
+            if on {
+                live.push((f, i, !window(&pre.t.frames[f].sprites, x, y).is_empty()));
+            }
+        }
+    }
+    if live.len() < 30 {
+        return None;
+    }
+    let drawn = live.iter().filter(|l| l.2).count();
+    let mut best: Option<(usize, usize)> = None;
+    for b in bases(pre, c) {
+        if pre.masked[b] || skip.contains(&b) {
+            continue;
+        }
+        let mut seen = [false; 256];
+        for &(f, i, _) in &live {
+            seen[usize::from(pre.ram(f - cols.lag, col(c, b, i)))] = true;
+        }
+        if !(2..=16).contains(&seen.iter().filter(|&&s| s).count()) {
+            continue;
+        }
+        let with = Cols {
+            hi: Some(b),
+            ..cols.clone()
+        };
+        let agree = live
+            .iter()
+            .filter(|&&(f, i, d)| with.screen(pre, f, i).2 == d)
+            .count();
+        if best.is_none_or(|(_, a)| agree > a) {
+            best = Some((b, agree));
+        }
+    }
+    let (b, agree) = best?;
+    let gain = agree.saturating_sub(drawn);
+    (gain as f64 >= HI_FIT_GAIN * live.len() as f64 && gain >= 10).then_some(b)
+}
+
 // ---------------------------------------------------------------------------
 // stage 4: binding
 
+#[derive(Clone)]
 struct Cols {
     c: Chain,
     x: usize,
@@ -610,7 +783,13 @@ impl Cols {
             Some(h) => lo + 256 * i64::from(pre.ram(f - rl, col(&self.c, h, i))),
             None => lo,
         };
-        let wrap = i64::from(pre.t.wrap.max(1));
+        // Without a high byte the position is eight bits: only its low eight
+        // bits can be compared with a sprite's x.
+        let wrap = if self.hi.is_some() {
+            i64::from(pre.t.wrap.max(1))
+        } else {
+            256
+        };
         let mut sx = (world - i64::from(fr.cam_x) + i64::from(self.dx)).rem_euclid(wrap);
         if sx >= wrap / 2 {
             sx -= wrap;
@@ -624,24 +803,29 @@ impl Cols {
         (sx.rem_euclid(256) as u8, sy as u8, on)
     }
 
-    /// The lowest-numbered sprite drawn at the slot's position. An object is
-    /// several 8x8 or 16x16 sprites on an 8-pixel grid, and which of them the
-    /// game's own coordinate names depends on the object's size and pose (a
-    /// small and a big Mario differ in rows), so a sprite counts when it is in
-    /// the object's first or second column and in one of the rows from one
-    /// above to three below the coordinate. Rows are exact to the pixel; x
-    /// allows [`X_SLACK`] pixels because a game may nudge a sprite pair by a
-    /// pixel or two with the facing direction.
+    /// The lowest-numbered sprite drawn near the slot's position, loosely: the
+    /// view the *discovery* stages (state byte, type byte) work from, before
+    /// the exact per-slot offsets are known ([`exact`] is the acceptance
+    /// measure). An object is several 8x8 or 16x16 sprites on an 8-pixel grid,
+    /// and which of them the game's own coordinate names depends on the
+    /// object's size and pose, so a sprite counts when it is in the object's
+    /// first or second column (within [`X_SLACK`] pixels, a game may nudge a
+    /// pair by the facing direction) and in one of the rows from one above to
+    /// three below the coordinate (within [`Y_SLACK`]: a hero's sprite may
+    /// sit a pixel or two off the other objects', as on the NES where it is
+    /// two below its RAM y).
     fn bound(&self, pre: &Pre<'_>, f: usize, i: usize) -> Option<u16> {
         let (x, y, _) = self.screen(pre, f, i);
         pre.t.frames[f]
             .sprites
             .iter()
             .filter(|s| {
-                let (dx, dy) = (s.x.wrapping_sub(x) as i8, s.y.wrapping_sub(y));
+                let (dx, dy) = (s.x.wrapping_sub(x) as i8, s.y.wrapping_sub(y) as i8);
                 (dx.unsigned_abs() <= X_SLACK.unsigned_abs()
                     || dx.wrapping_sub(8).unsigned_abs() <= X_SLACK.unsigned_abs())
-                    && matches!(dy, 0 | 8 | 16 | 24 | 248)
+                    && [-8i8, 0, 8, 16, 24]
+                        .iter()
+                        .any(|r| dy.abs_diff(*r) <= Y_SLACK.unsigned_abs())
             })
             .map(|s| s.index)
             .min()
@@ -736,6 +920,298 @@ fn find_kind(
 }
 
 // ---------------------------------------------------------------------------
+// stage 4b: the exact match
+
+/// One live, on-screen slot-frame and the sprites around its position.
+struct Obs {
+    f: usize,
+    slot: usize,
+    /// The slot's state byte (`0` when the table has none).
+    state: u8,
+    /// `(dx, dy, OAM index)` of every sprite in the window ([`WIN_X`],
+    /// [`WIN_Y`]), relative to the slot's position.
+    win: Vec<(i8, i8, u16)>,
+    /// The same window around the control position.
+    ctl: Vec<(i8, i8)>,
+}
+
+/// The sprites of `sprites` inside the window around `(x, y)`, as offsets.
+fn window(sprites: &[Sprite], x: u8, y: u8) -> Vec<(i8, i8, u16)> {
+    let mut win: Vec<(i8, i8, u16)> = sprites
+        .iter()
+        .map(|s| {
+            (
+                s.x.wrapping_sub(x) as i8,
+                s.y.wrapping_sub(y) as i8,
+                s.index,
+            )
+        })
+        .filter(|(ox, oy, _)| WIN_X.contains(ox) && WIN_Y.contains(oy))
+        .collect();
+    win.sort_unstable();
+    win
+}
+
+/// The offsets that recur in at least [`OFFSET_MIN_FRAMES`] frames and
+/// [`OFFSET_SHARE`] of `live` ones. Sorted.
+fn learn_offsets(counts: &std::collections::BTreeMap<(i8, i8), u32>, live: u32) -> Vec<(i8, i8)> {
+    let need = OFFSET_MIN_FRAMES.max((OFFSET_SHARE * f64::from(live)).ceil() as u32);
+    counts
+        .iter()
+        .filter(|&(_, &c)| c >= need)
+        .map(|(&o, _)| o)
+        .collect()
+}
+
+/// The state-byte values the game never draws: a value that covers at least
+/// [`NON_DRAWN_MIN`] live on-screen slot-frames of which [`NON_DRAWN_SHARE`]
+/// had no sprite anywhere in the window (a dying, hidden or off-stage object).
+/// Learned from the run; nothing about any game is assumed.
+fn non_drawn_states(obs: &[Obs]) -> Vec<u8> {
+    let mut by = [(0u32, 0u32); 256];
+    for o in obs {
+        let e = &mut by[usize::from(o.state)];
+        e.0 += 1;
+        e.1 += u32::from(o.win.is_empty());
+    }
+    (0..=255u8)
+        .filter(|&v| {
+            let (n, u) = by[usize::from(v)];
+            n >= NON_DRAWN_MIN && f64::from(u) >= NON_DRAWN_SHARE * f64::from(n)
+        })
+        .collect()
+}
+
+/// Every live, on-screen slot-frame with the slot's position taken from the
+/// RAM `back` captures before the one the sprites were built from.
+fn observe(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    n_slots: usize,
+    state: Option<usize>,
+    bound: &[Vec<Option<u16>>],
+    back: usize,
+) -> Vec<Obs> {
+    let (lag, n, c) = (cols.lag, pre.n(), &cols.c);
+    let mut obs = Vec::new();
+    for f in (lag + 1)..n {
+        for i in 0..n_slots {
+            let st = state.map_or(1, |s| pre.ram(f - lag, col(c, s, i)));
+            let live = match state {
+                Some(_) => st != 0,
+                None => bound[f].get(i).is_some_and(Option::is_some),
+            };
+            if !live {
+                continue;
+            }
+            let (x, y, on) = cols.screen_v(pre, f, i, lag + back, 0);
+            if !on {
+                continue;
+            }
+            let sprites = &pre.t.frames[f].sprites;
+            obs.push(Obs {
+                f,
+                slot: i,
+                state: st,
+                win: window(sprites, x, y),
+                ctl: window(
+                    sprites,
+                    x.wrapping_add(CONTROL_SHIFT.0),
+                    y.wrapping_add(CONTROL_SHIFT.1),
+                )
+                .into_iter()
+                .map(|(a, b, _)| (a, b))
+                .collect(),
+            });
+        }
+    }
+    obs
+}
+
+/// How many frames of RAM history a slot's sprites show: the slot's offsets
+/// are far more concentrated (a metasprite is a handful of exact offsets) when
+/// the position is the right one, while a position one capture off smears them
+/// by the object's velocity. `1` only when that is clearly tighter
+/// ([`BACK_MARGIN`]) and the slot was seen often enough ([`OWN_MIN_LIVE`]).
+fn pick_back(by_back: &[Vec<Obs>; 2], slot: usize) -> u8 {
+    let conc = |obs: &[Obs]| -> Option<f64> {
+        let mut counts: std::collections::BTreeMap<(i8, i8), u32> = Default::default();
+        let mut n = 0u32;
+        for o in obs.iter().filter(|o| o.slot == slot && !o.win.is_empty()) {
+            n += 1;
+            let mut seen: Vec<(i8, i8)> = o.win.iter().map(|&(x, y, _)| (x, y)).collect();
+            seen.dedup();
+            for k in seen {
+                *counts.entry(k).or_insert(0) += 1;
+            }
+        }
+        if n < OWN_MIN_LIVE {
+            return None;
+        }
+        let mut v: Vec<u32> = counts.into_values().collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        Some(f64::from(v.iter().take(CONC_TOP).sum::<u32>()) / (f64::from(n) * CONC_TOP as f64))
+    };
+    match (conc(&by_back[0]), conc(&by_back[1])) {
+        (Some(a), Some(b)) if b > a + BACK_MARGIN => 1,
+        _ => 0,
+    }
+}
+
+/// The acceptance measure: for every live, on-screen slot-frame, is there a
+/// sprite whose x and y sit **exactly** at an offset from the slot's position
+/// that this slot is seen to draw at ([`learn_offsets`])? There is no pixel
+/// slack: a slot has a handful of exact offsets (a metasprite's tiles, one set
+/// per facing or pose), learned per slot because a game may draw one object
+/// (a hero) a pixel or two off the others. A slot with fewer than
+/// [`OWN_MIN_LIVE`] live frames has not shown its poses and uses the whole
+/// table's offsets. Frames whose state byte holds a value the game never draws
+/// ([`non_drawn_states`]) are left out of `expected` and counted in `excluded`.
+fn exact(
+    pre: &Pre<'_>,
+    cols: &Cols,
+    n_slots: usize,
+    state: Option<usize>,
+    bound: &[Vec<Option<u16>>],
+) -> Binding {
+    use std::collections::BTreeMap;
+    let (lag, n) = (cols.lag, pre.n());
+    let mut b = Binding {
+        lag,
+        dx: cols.dx,
+        dy: cols.dy,
+        live_from_state: state.is_some(),
+        ..Binding::default()
+    };
+    let mut per: Vec<SlotBinding> = (0..n_slots)
+        .map(|i| SlotBinding {
+            slot: i as u32,
+            ..SlotBinding::default()
+        })
+        .collect();
+    for f in (lag + 1)..n {
+        for (i, p) in per.iter_mut().enumerate() {
+            p.bound_frames += u32::from(bound[f].get(i).is_some_and(Option::is_some));
+        }
+    }
+    let by_back = [
+        observe(pre, cols, n_slots, state, bound, 0),
+        observe(pre, cols, n_slots, state, bound, 1),
+    ];
+    for (i, p) in per.iter_mut().enumerate() {
+        p.back = pick_back(&by_back, i);
+    }
+    let [obs0, obs1] = by_back;
+    let mut obs: Vec<Obs> = obs0
+        .into_iter()
+        .filter(|o| per[o.slot].back == 0)
+        .chain(obs1.into_iter().filter(|o| per[o.slot].back == 1))
+        .collect();
+    obs.sort_by_key(|o| (o.f, o.slot));
+    b.non_drawn = if state.is_some() {
+        non_drawn_states(&obs)
+    } else {
+        Vec::new()
+    };
+    let (kept, dropped): (Vec<Obs>, Vec<Obs>) = obs
+        .into_iter()
+        .partition(|o| state.is_none() || !b.non_drawn.contains(&o.state));
+    b.excluded = dropped.len() as u64;
+    // Blank frames: two or more live objects and not one sprite near any of
+    // them. That is the game hiding the whole picture (a transition, a fade, a
+    // pause), not an object that is missing, so the frame says nothing about
+    // the table.
+    let mut kept = kept;
+    let (mut live_n, mut drawn_n) = (vec![0u32; n], vec![0u32; n]);
+    for o in &kept {
+        live_n[o.f] += 1;
+        drawn_n[o.f] += u32::from(!o.win.is_empty());
+    }
+    let blank: Vec<bool> = (0..n).map(|f| live_n[f] >= 2 && drawn_n[f] == 0).collect();
+    b.blank_frames = blank.iter().filter(|&&x| x).count() as u32;
+    b.excluded += kept.iter().filter(|o| blank[o.f]).count() as u64;
+    kept.retain(|o| !blank[o.f]);
+
+    // Offsets per slot, and pooled over the table.
+    let mut own: Vec<BTreeMap<(i8, i8), u32>> = vec![BTreeMap::new(); n_slots];
+    let mut pool: BTreeMap<(i8, i8), u32> = BTreeMap::new();
+    for o in &kept {
+        per[o.slot].live_frames += 1;
+        let mut seen: Vec<(i8, i8)> = o.win.iter().map(|&(x, y, _)| (x, y)).collect();
+        seen.dedup();
+        for k in seen {
+            *own[o.slot].entry(k).or_insert(0) += 1;
+            *pool.entry(k).or_insert(0) += 1;
+        }
+    }
+    let live_all: u32 = per.iter().map(|p| p.live_frames).sum();
+    let pooled = learn_offsets(&pool, live_all);
+    let accepted: Vec<Vec<(i8, i8)>> = per
+        .iter()
+        .zip(&own)
+        .map(|(p, m)| {
+            if p.live_frames >= OWN_MIN_LIVE {
+                learn_offsets(m, p.live_frames)
+            } else {
+                pooled.clone()
+            }
+        })
+        .collect();
+    for (p, a) in per.iter_mut().zip(&accepted) {
+        if p.live_frames >= OWN_MIN_LIVE {
+            p.offsets.clone_from(a);
+        }
+    }
+
+    let mut idx_count: Vec<BTreeMap<u16, u32>> = vec![BTreeMap::new(); n_slots];
+    let (mut exp_f, mut ok_f, mut last_f) = (0u32, 0u32, usize::MAX);
+    let close = |b: &mut Binding, exp_f: u32, ok_f: u32| {
+        if exp_f > 0 {
+            b.frames_checked += 1;
+            b.frames_clean += u32::from(ok_f == exp_f);
+        }
+    };
+    for o in &kept {
+        if o.f != last_f {
+            close(&mut b, exp_f, ok_f);
+            (exp_f, ok_f, last_f) = (0, 0, o.f);
+        }
+        b.expected += 1;
+        exp_f += 1;
+        let hit = o
+            .win
+            .iter()
+            .filter(|&&(x, y, _)| accepted[o.slot].binary_search(&(x, y)).is_ok())
+            .map(|&(_, _, i)| i)
+            .min();
+        per[o.slot].control_frames += u32::from(
+            o.ctl
+                .iter()
+                .any(|k| accepted[o.slot].binary_search(k).is_ok()),
+        );
+        if let Some(ix) = hit {
+            b.matched += 1;
+            ok_f += 1;
+            per[o.slot].matched_frames += 1;
+            *idx_count[o.slot].entry(ix).or_insert(0) += 1;
+        } else {
+            if o.win.is_empty() {
+                b.undrawn += 1;
+            } else {
+                b.off_set += 1;
+            }
+            b.missed.push((o.f as u32, o.slot as u32));
+        }
+    }
+    close(&mut b, exp_f, ok_f);
+    for (p, m) in per.iter_mut().zip(&idx_count) {
+        p.oam_index = m.iter().max_by_key(|&(_, &c)| c).map(|(&k, _)| k);
+    }
+    b.slots = per;
+    b
+}
+
+// ---------------------------------------------------------------------------
 // the driver of the stages
 
 /// Find the object tables a trace shows. Best first.
@@ -750,9 +1226,9 @@ pub fn infer(t: &Trace) -> Vec<Found> {
     let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
     let lag = usize::from(strength(1) > strength(0));
     let cands = &by_lag[lag];
-    let addrs: Vec<(usize, f64)> = cands.iter().map(|c| (c.addr, c.z)).collect();
+    let addrs: Vec<(usize, f64, u8)> = cands.iter().map(|c| (c.addr, c.z, c.dx)).collect();
     let mut out = Vec::new();
-    for ch in chains_weighted(&addrs) {
+    for ch in chains_scored(&addrs) {
         if let Some(f) = build(&pre, &ch, cands, lag) {
             out.push(f);
         }
@@ -770,7 +1246,7 @@ pub fn infer(t: &Trace) -> Vec<Found> {
 /// the binding itself (no state byte found).
 fn quality(f: &Found) -> f64 {
     let gate = if f.binding.live_from_state { 1.0 } else { 0.5 };
-    f.binding.matched as f64 * f.binding.rate() * gate
+    f.binding.matched as f64 * f.binding.rate().powi(3) * gate
 }
 
 fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found> {
@@ -786,7 +1262,7 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
     let dx = dx as u8;
     let yy = find_y(pre, ch, &xs, lag, dx);
     let (yb, dy, _, _) = yy?;
-    let hi = find_hi(pre, ch, &xs, lag, &[yb]);
+    let mut hi = find_hi(pre, ch, &xs, lag, &[yb]);
     let ys: Vec<usize> = (0..ch.slots).map(|i| col(ch, yb, i)).collect();
     let mut skip_hi = vec![ch.base];
     skip_hi.extend(hi);
@@ -827,64 +1303,46 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
     skip.extend(yhi);
     let state = find_state(pre, &cols, &bound, &skip);
     skip.extend(state);
+    if let (None, Some(st)) = (hi, state) {
+        hi = find_hi_fit(pre, &cols, st, &skip);
+        cols.hi = hi;
+        skip.extend(hi);
+    }
     let kind = find_kind(pre, &cols, &bound, &skip);
 
-    // Count the match, per slot and per frame.
-    let mut b = Binding {
-        lag,
-        dx: cols.dx,
-        dy: cols.dy,
-        live_from_state: state.is_some(),
-        ..Binding::default()
-    };
-    let mut per: Vec<SlotBinding> = (0..ch.slots)
-        .map(|i| SlotBinding {
-            slot: i as u32,
-            ..SlotBinding::default()
-        })
+    // Count the match, per slot and per frame: exactly, at offsets learned
+    // from the run ([`exact`]). Slots past the chain are tried too: a rarely
+    // live slot's x byte does not score, so the chain stops short of it.
+    let used: Vec<usize> = [Some(ch.base), Some(yb), hi, yhi, state, kind]
+        .into_iter()
+        .flatten()
         .collect();
-    let mut idx_count: Vec<std::collections::BTreeMap<u16, u32>> =
-        vec![std::collections::BTreeMap::new(); ch.slots];
-    for f in (lag + 1)..n {
-        let (mut exp_f, mut ok_f) = (0u32, 0u32);
-        for i in 0..ch.slots {
-            if let Some(ix) = bound[f][i] {
-                per[i].bound_frames += 1;
-                *idx_count[i].entry(ix).or_insert(0) += 1;
-            }
-            let live = match state {
-                Some(s) => pre.ram(f - lag, col(ch, s, i)) != 0,
-                None => bound[f][i].is_some(),
-            };
-            let (_, _, on) = cols.screen(pre, f, i);
-            if live && on {
-                per[i].live_frames += 1;
-                b.expected += 1;
-                exp_f += 1;
-                if bound[f][i].is_some() {
-                    per[i].matched_frames += 1;
-                    b.matched += 1;
-                    ok_f += 1;
-                }
-            }
-        }
-        if exp_f > 0 {
-            b.frames_checked += 1;
-            b.frames_clean += u32::from(ok_f == exp_f);
-        }
-    }
-    for (p, m) in per.iter_mut().zip(&idx_count) {
-        p.oam_index = m.iter().max_by_key(|&(_, &c)| c).map(|(&k, _)| k);
-    }
-    // A table claims only the slots that verifiably follow the picture: cut
-    // trailing slots that were never live, or matched under `TRIM_BELOW`.
-    // (A chain with gaps can run on into a neighbouring array.)
+    let widest = used.iter().copied().max().unwrap_or(0);
+    let room = if ch.stride == 0 {
+        ch.slots
+    } else {
+        (pre.r.saturating_sub(widest + 1)) / ch.stride + 1
+    };
+    let n_eval = if state.is_some() {
+        (ch.slots + MAX_EXTEND).min(room).max(ch.slots)
+    } else {
+        ch.slots
+    };
+    let mut b = exact(pre, &cols, n_eval, state, &bound);
+
+    // A table claims only the slots with evidence: it ends at the last slot
+    // that matched [`MIN_SLOT_EVIDENCE`] frames and at least [`TRIM_BELOW`] of
+    // its live ones (a rarely live slot is kept; a neighbouring array that the
+    // chain ran on into, or one that never matched, is not).
+    let mut slots = ch.slots;
     if state.is_some() {
-        let keep = per
+        let keep = b
+            .slots
             .iter()
             .rposition(|p| {
-                p.live_frames >= 20
+                p.matched_frames >= MIN_SLOT_EVIDENCE
                     && f64::from(p.matched_frames) >= TRIM_BELOW * f64::from(p.live_frames)
+                    && 2 * p.control_frames <= p.matched_frames
             })
             .map_or(0, |i| i + 1);
         if keep >= MIN_SLOTS && keep < ch.slots {
@@ -895,8 +1353,15 @@ fn build(pre: &Pre<'_>, ch: &Chain, cands: &[XCand], lag: usize) -> Option<Found
             };
             return build(pre, &shorter, cands, lag);
         }
+        slots = keep.max(ch.slots);
     }
-    b.slots = per;
+    if slots != n_eval {
+        b = exact(pre, &cols, slots, state, &bound);
+    }
+    let ch = &Chain {
+        slots,
+        ..ch.clone()
+    };
 
     let fields = [Some(ch.base), Some(yb), hi, yhi, state, kind];
     let lowest = fields.iter().flatten().copied().min()?;
@@ -1140,4 +1605,25 @@ mod tests {
         assert!(row.source.starts_with("finder: 6 slots stride 1"));
         assert_eq!(row.grade, Grade::Observed);
     }
+}
+
+#[doc(hidden)]
+pub fn dbg_x(t: &Trace) -> Vec<(usize, f64, u8, u32, usize)> {
+    let pre = Pre::new(t);
+    let by_lag: Vec<Vec<XCand>> = (0..=1).map(|l| score_all_x(&pre, l)).collect();
+    let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
+    let lag = usize::from(strength(1) > strength(0));
+    by_lag[lag]
+        .iter()
+        .map(|c| (c.addr, c.z, c.dx, c.matches, lag))
+        .collect()
+}
+#[doc(hidden)]
+pub fn dbg_chains(t: &Trace) -> Vec<Chain> {
+    let pre = Pre::new(t);
+    let by_lag: Vec<Vec<XCand>> = (0..=1).map(|l| score_all_x(&pre, l)).collect();
+    let strength = |l: usize| by_lag[l].iter().map(|c| c.z).sum::<f64>();
+    let lag = usize::from(strength(1) > strength(0));
+    let addrs: Vec<(usize, f64, u8)> = by_lag[lag].iter().map(|c| (c.addr, c.z, c.dx)).collect();
+    chains_scored(&addrs)
 }

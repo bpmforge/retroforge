@@ -26,9 +26,9 @@ const A: u8 = 1 << 0;
 const RIGHT: u8 = 1 << 7;
 /// 500 frames to get through both title screens plus the intro, then play.
 const LEAD_IN: u32 = 500;
-const PLAY: u32 = 1200;
+const PLAY: u32 = 4500;
 /// Last frame sampled.
-const DEATH: u32 = 1700;
+const DEATH: u32 = 5000;
 const FRAMES: u32 = LEAD_IN + PLAY;
 
 fn rom_path() -> Option<PathBuf> {
@@ -101,6 +101,10 @@ fn smb_object_table_matches_oam() {
         }
     }
     let trace = rec.trace;
+    if let Ok(p) = std::env::var("RF_OBJ_TRACE_OUT") {
+        rf_harness::object_tables::save_trace(&trace, Console::Nes, std::path::Path::new(&p))
+            .expect("saves");
+    }
     println!("sampled {} frames in {:?}", trace.frames.len(), t.elapsed());
     if std::env::var("OBJDUMP").is_ok() {
         for (k, fr) in trace
@@ -141,11 +145,25 @@ fn smb_object_table_matches_oam() {
             "  lag {} dx {} dy {} expected {} matched {} rate {:.4} frames {} clean {} from_state {} grade {:?}",
             b.lag, b.dx, b.dy, b.expected, b.matched, b.rate(), b.frames_checked, b.frames_clean, b.live_from_state, row.grade
         );
+        println!(
+            "  misses: undrawn {} off_set {} excluded {} (blank frames {}) non_drawn {:?}",
+            b.undrawn, b.off_set, b.excluded, b.blank_frames, b.non_drawn
+        );
         for s in &b.slots {
             println!(
-                "  slot {} oam {:?} bound {} live {}",
-                s.slot, s.oam_index, s.bound_frames, s.live_frames
+                "  slot {} oam {:?} bound {} live {} matched {} control {} back {} offsets {}",
+                s.slot,
+                s.oam_index,
+                s.bound_frames,
+                s.live_frames,
+                s.matched_frames,
+                s.control_frames,
+                s.back,
+                s.offsets.len()
             );
+        }
+        if std::env::var("MISSES").is_ok() {
+            println!("  missed {:?}", &b.missed[..b.missed.len().min(60)]);
         }
     }
     let best = found.first().expect("a table");
