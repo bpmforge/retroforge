@@ -135,6 +135,21 @@ pub const BYTE_HANDSHAKE_CYCLES: u16 = 25;
 /// cycles after `$2140` still has its byte stored.
 pub const BYTE_DATA_FETCH_CYCLES: u16 = 5;
 
+/// SPC cycles from the boot ROM's observation of the new counter on `$F4`
+/// to its echo of that counter landing on `$F4` (ticket W37-00b).
+///
+/// fullsnes "Boot ROM Disassembly": after the matching `$FFDA cmp Y,$F4`
+/// samples `$F4` on its last cycle come `$FFDC jnz` (2), `$FFDE mov A,$F5`
+/// (3) and `$FFE0 mov $F4,Y` (4, the write on its last cycle): 9 cycles.
+/// The store, `inc Y` and the branch back (the other 13 of
+/// [`BYTE_HANDSHAKE_CYCLES`]) run AFTER the echo, overlapping the CPU's
+/// own work on the next byte. Echoing at the end of the whole loop instead
+/// cost every upload byte about 5 SPC cycles (30.6 against 25.5 per byte,
+/// measured against a reference emulator as a black box), so Super Mario
+/// World's 11,974-byte upload finished four frames late and every input
+/// movie recorded from power-on ran four frames out of step.
+pub const BYTE_ECHO_CYCLES: u16 = 9;
+
 /// The HLE boot handshake.
 #[derive(Debug, Clone)]
 pub struct IplBoot {
@@ -292,11 +307,26 @@ impl IplBoot {
                     }
                     other => other,
                 };
+                // The echo lands mid-loop ([`BYTE_ECHO_CYCLES`]); the rest
+                // of the loop is a quiet tail (`None`) during which the
+                // ports are still not re-examined.
+                if matches!(action, BootAction::Store { .. })
+                    && left == BYTE_HANDSHAKE_CYCLES - BYTE_ECHO_CYCLES
+                {
+                    self.pending = Some((left, BootAction::None));
+                    return action;
+                }
                 self.pending = Some((left, action));
                 return BootAction::None;
             }
             self.pending = None;
-            return action;
+            if action != BootAction::None {
+                return action;
+            }
+            // The byte loop's tail ends on the very cycle its compare
+            // samples `$F4` again, so the loop's period is
+            // [`BYTE_HANDSHAKE_CYCLES`], not one more (W37-00b): fall
+            // through and look at the ports now.
         }
         if let BootState::Initialising(left) = self.state {
             // One poll per SPC cycle while the HLE owns the machine —
@@ -482,8 +512,13 @@ impl IplBoot {
                 o.u8(value)?;
                 o.u8(echo)
             }
+            Some((left, BootAction::None)) => {
+                o.bool(true)?;
+                o.u8(2)?; // pending action kind: the byte loop's tail
+                o.u16(left)
+            }
             Some((_, other)) => Err(rf_core_api::StateError::Corrupt(format!(
-                "IPL boot has an unexpected pending action {other:?} — only Run/Store are ever queued"
+                "IPL boot has an unexpected pending action {other:?} — only Run/Store/tail are ever queued"
             ))),
         }
     }
@@ -524,9 +559,10 @@ impl IplBoot {
                         value: i.u8()?,
                         echo: i.u8()?,
                     },
+                    2 => BootAction::None,
                     other => {
                         return Err(rf_core_api::StateError::Corrupt(format!(
-                            "IPL boot pending-action kind {other} is not one of Run(0)/Store(1)"
+                            "IPL boot pending-action kind {other} is not one of Run(0)/Store(1)/tail(2)"
                         )))
                     }
                 },

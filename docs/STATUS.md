@@ -5116,3 +5116,87 @@ stories, 10 decisions).
   +442 px. SMW: 60 candidates, 8 tried, no keeper yet (W38-04b, with HUD
   trials). Rows live in `profiles/*/recipe-widescreen.toml` overlays.
   Workspace: **3850 passing**, gate green.
+- **W39-05 — Temporal upscaling** (2026-10-28). The HD-2D / Diorama pass
+  renders at a lower internal size with Halton(2,3) jitter, and a G-buffer
+  pass writes depth and motion vectors. A temporal upscaler produces
+  5120x2880: MetalFX temporal on macOS (`--features metalfx`, via wgpu hal
+  interop) or a portable WGSL fallback (3x3 Gaussian sample, reprojected
+  history clamped to the colour box). From 1707x960, edge error against
+  native 5K is 12.66 (portable) and 11.0 (MetalFX) vs 13.22 bilinear; zero
+  black holes, stable static frames. Contact sheet (synthetic):
+  `docs/screens/w39/temporal-upscale-sheet.png`. Also fixed: the spatial
+  MetalFX scaler held two `as_hal` guards at once (debug panic). Settings
+  wiring of `MetalFxSetting::Temporal` is not done. Workspace: **3875
+  passing**, gate green.
+- **W38-05 — Engine recipe: Zelda 1** (2026-10-28).
+  `profiles/nes/legend-of-zelda/recipe.toml`, every row sourced `observed:`
+  or `rule:` (a rows test rejects community-map provenance): the NMI as the
+  per-frame tick (13 926 of 13 930 watched writes inside it), player and
+  actor movers, scroll step, screen-index writers, 23 rule-named functions
+  (29 rows, all match the atlas), RAM player x/y, screen index, scroll x,
+  a 5-slot actor table (graded observed) and 61 candidate data regions.
+  Lockstep: 2800 frames (registration, first cave, four directions), zero
+  divergence on the interpreter and IR tiers with all 29 hooks live; at the
+  NMI exit Link's position equals end-of-frame position in 99.95% of 2070
+  frames. Widescreen: 14 candidates tried, no keepers; Zelda screen-flips,
+  so constant-widening cannot measure reach. Neighbour-screen margins are
+  W38-05b. Workspace: **3865 passing**, gate green.
+- **W38-09 — ROM-hack gate** (2026-10-28). `w38_09_hack_gate` applies 20
+  Lunar Magic SMW hacks in memory to Brad's own SMW (nothing written), boots
+  each on the rebuilt tier from a generic drive and runs lockstep: 20/20
+  boot with zero divergence, 19 reach a level (hack 03 stays at its title,
+  22.5% interpreter fallback; others 0.01-1.5%). The SMW recipe matches 9
+  to 23 of its 29 functions per hack, almost all exact, with no per-hack
+  work. Live margins not applied: SMW has no keeper widescreen rows yet
+  (W38-04b); 7 or 2 of the 11 candidate rows match exactly per hack and
+  would go live once promoted. Workspace: **3875 passing**, gate green.
+- **W37-00b — TAS movie desync** (2026-10-28, movie-desync thread; merged by
+  the Rebuild lab thread after a merge test on current main). Diffed
+  against a black-box reference emulator (run only, never read) and fixed
+  three timing faults: the HLE SPC IPL echoed uploaded bytes a loop late
+  (SMW now boots on the reference's frame), the S-CPU lacked WRAM refresh
+  (40 master cycles per line; it ran ~2.9% fast), and NES movie buttons
+  switched at our frame boundary instead of vblank. The SMB warps movie now
+  reaches the 8-4 ending; warpless reaches 4-2. Open: SMW diverges at
+  frame 1 326 (overworld load one frame early; lead is the SPC clock, 21 vs
+  ~20.95 master cycles per SPC cycle, unchecked) and SMB warpless gains a
+  lag frame at plan frame 28 322. Details: `docs/research/W37-00-movie-import.md`.
+  Workspace: **3879 passing** on the merge with main, gate green.
+- **W38-02b — Object-table finder, exact match** (2026-10-28). A slot-frame
+  now matches only at an exact offset the slot is seen to draw at (learned
+  per slot; rare slots borrow the table's), each slot picks this or the
+  previous capture's RAM, slots are claimed on match evidence with a
+  displaced-position control, an x high byte is fitted when wraps are rare,
+  and never-drawn states and transition frames are excluded and counted.
+  SMB: 7221 of 7239 live slot-frames (99.75%), 7 slots, Observed. SMW: 784
+  of 791 (99.12%), 8 slots, Observed. Zelda: actor table x $70 / y $84,
+  97.18%, 5 slots, Candidate (no state byte). Not every frame: the remaining
+  misses are itemised in the tests (SMB's 18 all in one slot). Full slot
+  counts were not reached: SMW slots 1-4, 8, 10, 11 are never live in these
+  runs. Workspace: **3884 passing**, gate green.
+- **W38-04b — Widescreen keepers on SMW, HUD trials** (2026-10-28). SMW was
+  observed over 30 309 frames in three power-on runs (two movies plus a
+  patrol script; 33 level entries), with 190 object state flips up and 183
+  down (W38-04 had 5 and 5). 16 single candidates, a group and 4 adc/cmp
+  window pairs were trialed under lockstep in parallel. One keeper: the
+  16-bit window pair at 0xa459 / 0xa45c widened by 0x80, first divergence an
+  off-screen state byte at frame 2260 with OAM and camera identical. It is
+  marginal (19 px more left reach; the picture differs from frame 2267). The
+  other 40 trial lines print their reason (16 changed the picture or camera,
+  13 never diverged, 10 kept nothing farther out, 2 touched an on-screen
+  object). HUD anchors: SMB's sprite-0 x table byte 0xfce kept on a state
+  check (no patch row: it is a table byte outside any function); SMW's HUD is
+  BG3 tiles, so there is no sprite anchor to trial. Workspace: **3888
+  passing**, gate green.
+- **W38-05b — Zelda margins from neighbouring screens** (2026-10-28).
+  `rf_enhance::screen_margins` holds a learned atlas of overworld screens
+  (grid index = row*16 + col; +-1 sideways, +-16 vertically) and lays the
+  +-1 and +-2 neighbours beside the live screen at 32:9; an agreement check
+  gates out caves, which reuse the overworld index. The atlas is learned by
+  observation on a scratch core (never the live one): a test-side RAM write
+  puts Link at an edge, the game's own loader brings in the next screen, and
+  a frontier explorer walks the hops that work. 33 of 128 screens learned
+  (85 of 334 hops; walled edges need items); unknown neighbours fall back to
+  the VRAM margin. Live-frame agreement 1.000 over 121 frames; frame and RAM
+  hashes identical with margins on and off. The shell does not hold an atlas
+  yet. Workspace: **3894 passing**, gate green.
