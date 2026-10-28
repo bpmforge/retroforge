@@ -480,3 +480,200 @@ fn observe_z1() {
 fn discover_z1() {
     let _ = discover_game(ZELDA1, Z1_TO_PLAY, Z1_PLAY, false);
 }
+
+/// Explore (W37-00d): the session frame by frame, a line whenever the game-mode byte `$7E0010`
+/// or the submode `$7E0011` changes, and at each token's end. `RF_SCRIPT` replaces the session
+/// after free play (default: the walk, the Start pause, the tail).
+#[test]
+#[ignore = "explore"]
+fn explore_modes() {
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    let script = std::env::var("RF_SCRIPT").unwrap_or_else(|_| {
+        format!(
+            "{} {} {} {}",
+            alttp_to_free_play(),
+            alttp_play_walk(),
+            alttp_play_start(),
+            alttp_play_tail()
+        )
+    });
+    let mut last = (0xFFu8, 0xFFu8);
+    for tok in script.split_whitespace() {
+        let (word, n) = match tok.strip_prefix('w') {
+            Some(n) => ("w1".to_string(), n.parse::<u32>().unwrap()),
+            None => {
+                let at = tok.find(|c: char| c.is_ascii_digit()).unwrap();
+                (format!("{}1", &tok[..at]), tok[at..].parse().unwrap())
+            }
+        };
+        for i in 0..n {
+            rig.script(&word);
+            let r = |a: u32| rig.st.peek_bus(0x7E_0000 + a);
+            let now = (r(0x10), r(0x11));
+            if now != last {
+                println!(
+                    "MODE f{} {tok}+{i}: 10:{:02x} 11:{:02x} (was {:02x}/{:02x}) link x {:02x}{:02x} y {:02x}{:02x}",
+                    rig.st.frame_count(), now.0, now.1, last.0, last.1, r(0x23), r(0x22), r(0x21), r(0x20)
+                );
+                last = now;
+            }
+        }
+        let r = |a: u32| rig.st.peek_bus(0x7E_0000 + a);
+        println!(
+            "TOK f{} {tok} 10:{:02x} 11:{:02x} link x {:02x}{:02x} y {:02x}{:02x}",
+            rig.st.frame_count(),
+            r(0x10),
+            r(0x11),
+            r(0x23),
+            r(0x22),
+            r(0x21),
+            r(0x20)
+        );
+    }
+}
+
+/// Explore (W37-00d): the finder's trials by hand. The session after free play, token by token;
+/// after each token whose index is in `RF_CUTS` (comma list), 20 idle frames and then
+/// `discover` on a snapshot, the verdict and (`RF_TRACE_TRIALS=1`) every trial printed.
+#[test]
+#[ignore = "explore"]
+fn explore_cuts() {
+    use retroforge::scout_discovery::{discover, Context};
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    rig.script(&alttp_to_free_play());
+    let session = format!(
+        "{} {} {}",
+        alttp_play_walk(),
+        alttp_play_start(),
+        alttp_play_tail()
+    );
+    let cuts: Vec<usize> = std::env::var("RF_CUTS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|c| c.parse().ok())
+        .collect();
+    let last = cuts.iter().copied().max().unwrap_or(0);
+    for (i, tok) in session.split_whitespace().enumerate().take(last + 1) {
+        rig.script(tok);
+        if !cuts.contains(&i) {
+            continue;
+        }
+        rig.script("w20");
+        let obs = rig.finder.observed();
+        let r = |a: u32| rig.st.peek_bus(0x7E_0000 + a);
+        println!(
+            "CUT {i} after {tok} f{} mode {:02x}/{:02x} link x {:02x}{:02x} y {:02x}{:02x} ready {}",
+            rig.st.frame_count(), r(0x10), r(0x11), r(0x23), r(0x22), r(0x21), r(0x20), obs.ready()
+        );
+        let snapshot = rig.st.snapshot().expect("snapshot");
+        let ctx = Context {
+            rom: &rig.rom,
+            live: &rig.live.fork_for_scout(),
+            scene: rf_enhance::scene_identity::SceneId(rig.last_scene.unwrap_or(0)),
+            size: (256, 224),
+            snes: true,
+            scrolls: retroforge::core_thread::snes_layer_scrolls,
+            scene_key: rig.scene_key.clone(),
+            vertical: None,
+        };
+        match discover(snapshot, ctx, &obs) {
+            Ok((_, report)) => println!("VERDICT {i}: table ({} trials)", report.trials.len()),
+            Err(e) => println!("VERDICT {i}: {e}"),
+        }
+    }
+}
+
+/// Explore (W37-00d): is a snapshot restored on a fresh machine the same machine? After the first
+/// `RF_CUT` tokens of the session, snapshot; hold Right for 60 frames on the original and on a
+/// freshly opened machine restored from it, a line per 10 frames from each (Link's x, BG1 scroll).
+#[test]
+#[ignore = "explore"]
+fn explore_restore() {
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    rig.script(&alttp_to_free_play());
+    let session = format!(
+        "{} {} {}",
+        alttp_play_walk(),
+        alttp_play_start(),
+        alttp_play_tail()
+    );
+    let cut: usize = std::env::var("RF_CUT")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(60);
+    for tok in session.split_whitespace().take(cut + 1) {
+        rig.script(tok);
+    }
+    rig.script("w20");
+    let snap = rig.st.snapshot().expect("snapshot");
+    let mut fresh = Rig::open(ALTTP.0, ALTTP.1, None).expect("rig");
+    fresh.st.restore(&snap).expect("restore");
+    let line = |tag: &str, r: &Rig| {
+        let p = |a: u32| {
+            u16::from(r.st.peek_bus(0x7E_0000 + a)) | u16::from(r.st.peek_bus(0x7E_0001 + a)) << 8
+        };
+        let v = r.st.bg_layer_views().expect("snes");
+        println!(
+            "{tag} f{} mode {:02x}/{:02x} link {:04x},{:04x} cam11e {:04x} bg1 {:04x},{:04x} bg2 {:04x}",
+            r.st.frame_count(), r.st.peek_bus(0x7E_0010), r.st.peek_bus(0x7E_0011), p(0x22), p(0x20), p(0x11E), v[0].hofs, v[0].vofs, v[1].hofs
+        );
+    };
+    for _ in 0..8 {
+        line("ORIG ", &rig);
+        line("FRESH", &fresh);
+        rig.script("R10");
+        fresh.script("R10");
+    }
+}
+
+/// Explore (W37-00d): as `explore_poke_cuts` over the whole script from power-on (boot included),
+/// a probe after every token from index `RF_FROM` (default 0) to `RF_TO`, on a copy that has the
+/// snapshot's pad released.
+#[test]
+#[ignore = "explore"]
+fn explore_poke_all() {
+    let Some(mut rig) = Rig::open(ALTTP.0, ALTTP.1, None) else {
+        return;
+    };
+    let session = format!(
+        "{} {} {} {}",
+        alttp_to_free_play(),
+        alttp_play_walk(),
+        alttp_play_start(),
+        alttp_play_tail()
+    );
+    let env = |k: &str, d: usize| {
+        std::env::var(k)
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(d)
+    };
+    let (from, to) = (env("RF_FROM", 0), env("RF_TO", 10_000));
+    let p = |r: &Rig, a: u32| {
+        u16::from(r.st.peek_bus(0x7E_0000 + a)) | u16::from(r.st.peek_bus(0x7E_0001 + a)) << 8
+    };
+    for (i, tok) in session.split_whitespace().enumerate().take(to + 1) {
+        rig.script(tok);
+        if i < from {
+            continue;
+        }
+        let snap = rig.st.snapshot().expect("snapshot");
+        let mut c = Rig::open(ALTTP.0, ALTTP.1, None).expect("rig");
+        c.st.restore(&snap).expect("restore");
+        let (x0, cam0) = (p(&c, 0x22), p(&c, 0x11E));
+        let x = x0.wrapping_add(0x40);
+        c.st.poke_ram(0x7E_0022, (x & 0xFF) as u8);
+        c.st.poke_ram(0x7E_0023, (x >> 8) as u8);
+        c.script("w20");
+        println!(
+            "PALL {i} after {tok} f{} mode {:02x}/{:02x} link {x0:04x} cam {cam0:04x} -> cam {:04x} (followed {})",
+            rig.st.frame_count(), rig.st.peek_bus(0x7E_0010), rig.st.peek_bus(0x7E_0011), p(&c, 0x11E), p(&c, 0x11E) != cam0
+        );
+    }
+}
