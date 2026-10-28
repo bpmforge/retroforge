@@ -127,7 +127,8 @@ fn measure_fps_with_frame_bundle_assembly_enabled() {
                 | CoreEvent::Achievement(_)
                 | CoreEvent::RaRefused(_)
                 | CoreEvent::RaHardcore(_)
-                | CoreEvent::RaPaused,
+                | CoreEvent::RaPaused
+                | CoreEvent::RaList(_),
             ) => {
                 // This test never sends `RequestCanvasSnapshot` or turns
                 // widescreen on; an unrelated event landing here would not

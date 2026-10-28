@@ -684,6 +684,10 @@ pub enum CoreEvent {
     /// Ticket W41-05: the core paused because the player asked and
     /// `rc_client_can_pause` allowed it.
     RaPaused,
+    /// Ticket W41-06: the loaded game's achievements as they stand now, for
+    /// the Achievements panel. Sent when the game loads and after each
+    /// unlock, progress change or completion; the UI never reads the session.
+    RaList(Vec<rf_achievements::AchievementInfo>),
 }
 
 /// Which bytes the full-level view needs read each frame (ticket W11-02).
@@ -1865,6 +1869,7 @@ fn core_thread_main(
         ($drained:expr) => {{
             let drained: crate::ra::Drained = $drained;
             let reset = drained.reset;
+            let refresh = crate::ra::wants_list_refresh(&drained.events);
             if !crate::ra::deliver(drained, &frame_tx) {
                 return LoopControl::Stop; // UI thread hung up.
             }
@@ -1877,6 +1882,13 @@ fn core_thread_main(
                 clocks.resync();
                 if let Some(session) = ra.as_mut() {
                     session.after_reset(&|a| stepper.peek_bus(a));
+                }
+            }
+            if refresh {
+                if let Some(session) = ra.as_ref() {
+                    if frame_tx.send(CoreEvent::RaList(session.list())).is_err() {
+                        return LoopControl::Stop; // UI thread hung up.
+                    }
                 }
             }
         }};
@@ -3804,7 +3816,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         }
 
         // The spawned thread's own top-level closure must return
@@ -4103,7 +4116,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4153,7 +4167,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4232,7 +4247,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4285,7 +4301,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         }
 
         let _ = core.cmd_tx.send(CoreCommand::Shutdown);
@@ -4332,7 +4349,8 @@ mod tests {
             CoreEvent::Achievement(_)
             | CoreEvent::RaRefused(_)
             | CoreEvent::RaHardcore(_)
-            | CoreEvent::RaPaused => panic!("unexpected RetroAchievements event"),
+            | CoreEvent::RaPaused
+            | CoreEvent::RaList(_) => panic!("unexpected RetroAchievements event"),
         };
 
         let bundle = core.frame_bundle.latest();

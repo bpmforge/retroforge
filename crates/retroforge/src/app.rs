@@ -1343,6 +1343,11 @@ pub struct RetroForgeApp {
     ra_form_password: String,
     /// Unlocks seen this session (W41-06 will show them).
     ra_unlocks: u32,
+    /// Ticket W41-06: the Achievements panel's data, all from the core thread.
+    ra_list: Vec<rf_achievements::AchievementInfo>,
+    ra_game_title: Option<String>,
+    ra_load_failed: bool,
+    ra_offline: bool,
     /// Tests only: where a new core sends RetroAchievements requests instead of
     /// starting the `ureq` worker (no test may reach the real server).
     ra_transport_override: Option<std::sync::mpsc::Sender<crate::ra::OutboundRequest>>,
@@ -2174,6 +2179,10 @@ impl RetroForgeApp {
             ra_form_user: String::new(),
             ra_form_password: String::new(),
             ra_unlocks: 0,
+            ra_list: Vec::new(),
+            ra_game_title: None,
+            ra_load_failed: false,
+            ra_offline: false,
             ra_transport_override: None,
             peek_key_held: false,
             sprite_overlay: false,
@@ -4818,7 +4827,7 @@ impl RetroForgeApp {
     /// session if the player turned them on, and sign in with the stored token.
     /// With them off nothing is sent and nothing runs (NON_GOALS 6).
     fn sync_ra_on_new_core(&mut self) {
-        self.ra_game_loaded = false;
+        self.clear_ra_list();
         self.ra_hardcore_on = false;
         if !self.settings.achievements.enabled {
             return;
@@ -4833,6 +4842,15 @@ impl RetroForgeApp {
                 token: login.token,
             });
         }
+    }
+
+    /// Ticket W41-06: forget the previous game's achievements.
+    fn clear_ra_list(&mut self) {
+        self.ra_game_loaded = false;
+        self.ra_list.clear();
+        self.ra_game_title = None;
+        self.ra_load_failed = false;
+        self.ra_offline = false;
     }
 
     fn send_ra_enable(&mut self) {
@@ -4857,7 +4875,7 @@ impl RetroForgeApp {
             (false, true) => self.sync_ra_on_new_core(),
             (true, false) => {
                 self.send_command(CoreCommand::RaDisable);
-                self.ra_game_loaded = false;
+                self.clear_ra_list();
                 self.ra_hardcore_on = false;
                 self.sync_rewind();
                 self.cheats_sent = false;
@@ -4891,7 +4909,7 @@ impl RetroForgeApp {
         }
         self.ra_login = None;
         self.ra_user = None;
-        self.ra_game_loaded = false;
+        self.clear_ra_list();
         self.ra_status = "Signed out".into();
     }
 
@@ -4914,6 +4932,7 @@ impl RetroForgeApp {
                     }
                 }
                 CoreEvent::RaPaused => self.running = false,
+                CoreEvent::RaList(list) => self.ra_list = list,
                 CoreEvent::Achievement(ev) => match ev {
                     Ev::LoginSucceeded {
                         username, token, ..
@@ -4949,15 +4968,46 @@ impl RetroForgeApp {
                     }
                     Ev::GameLoaded { title, .. } => {
                         self.ra_game_loaded = true;
+                        self.ra_load_failed = false;
+                        self.ra_game_title = Some(title.clone());
                         self.ra_status = format!("Playing {title} with RetroAchievements");
                     }
                     Ev::GameLoadFailed { message, .. } => {
                         self.ra_game_loaded = false;
+                        self.ra_load_failed = true;
                         self.ra_status = format!("RetroAchievements: {message}");
                     }
-                    Ev::Unlocked { .. } => self.ra_unlocks += 1,
-                    // Toasts and the list are W41-06.
-                    _ => {}
+                    Ev::Unlocked {
+                        title,
+                        description,
+                        points,
+                        ..
+                    } => {
+                        self.ra_unlocks += 1;
+                        self.toasts.push(
+                            crate::toast::ToastKind::Success,
+                            crate::ra::unlock_toast(&title, points, &description),
+                            ctx,
+                        );
+                    }
+                    Ev::GameCompleted => {
+                        let text = crate::ra::mastered_toast(self.ra_game_title.as_deref());
+                        self.toasts
+                            .push(crate::toast::ToastKind::Success, text, ctx);
+                    }
+                    Ev::Disconnected => {
+                        self.ra_offline = true;
+                        self.status = crate::ra::OFFLINE_NOTICE.to_string();
+                    }
+                    Ev::Reconnected => {
+                        if std::mem::take(&mut self.ra_offline) {
+                            self.status = crate::ra::ONLINE_NOTICE.to_string();
+                        }
+                    }
+                    Ev::ServerError { message, .. } => {
+                        self.status = format!("RetroAchievements: {message}");
+                    }
+                    Ev::Progress { .. } | Ev::ResetRequested => {}
                 },
                 _ => {}
             }
@@ -4990,6 +5040,32 @@ impl RetroForgeApp {
         self.settings.achievements.enabled = enabled;
         self.settings.achievements.hardcore = hardcore;
         self.apply_ra_settings(was);
+    }
+
+    /// Ticket W41-06 test hook: the live toast texts, oldest first.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn toast_texts_for_test(&self) -> Vec<String> {
+        self.toasts.texts()
+    }
+
+    /// Ticket W41-06 test hook: the achievement list the panel is drawing.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn ra_list_for_test(&self) -> Vec<rf_achievements::AchievementInfo> {
+        self.ra_list.clone()
+    }
+
+    /// Ticket W41-06 test hook: send the core any command.
+    #[doc(hidden)]
+    pub fn core_command_for_test(&self, cmd: CoreCommand) {
+        self.send_command(cmd);
+    }
+
+    /// Ticket W41-06 test hook: open the Quick Menu on `section`.
+    #[doc(hidden)]
+    pub fn open_quick_menu_for_test(&mut self, section: crate::quick_menu::Section) {
+        self.open_quick_menu_at(section);
     }
 
     /// Ticket W41-05 test hook: the status line.
@@ -5096,7 +5172,8 @@ impl RetroForgeApp {
                 ev @ (CoreEvent::Achievement(_)
                 | CoreEvent::RaRefused(_)
                 | CoreEvent::RaHardcore(_)
-                | CoreEvent::RaPaused) => self.ra_inbox.push(ev),
+                | CoreEvent::RaPaused
+                | CoreEvent::RaList(_)) => self.ra_inbox.push(ev),
                 CoreEvent::Crashed(report) => {
                     self.crash = Some(report);
                     self.running = false;
@@ -10269,6 +10346,23 @@ impl RetroForgeApp {
                     self.show_controls = true;
                     leave_paused = true;
                 }
+            }
+            Section::Achievements => {
+                let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+                crate::ra_panel::show(
+                    ui,
+                    &tokens,
+                    &crate::ra_panel::RaView {
+                        enabled: self.settings.achievements.enabled,
+                        user: self.ra_user.as_deref(),
+                        game: self.ra_game_title.as_deref(),
+                        loaded: self.ra_game_loaded,
+                        load_failed: self.ra_load_failed,
+                        hardcore: self.ra_hardcore_on,
+                        offline: self.ra_offline,
+                        items: &self.ra_list,
+                    },
+                );
             }
             Section::Settings => {
                 if ui.button("Open Settings\u{2026}").clicked() {

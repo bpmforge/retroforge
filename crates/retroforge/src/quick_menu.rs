@@ -27,6 +27,7 @@ pub enum Section {
     Enhancements,
     GameInfo,
     Controls,
+    Achievements,
     Settings,
     Reset,
     Quit,
@@ -34,7 +35,7 @@ pub enum Section {
 
 impl Section {
     /// Rail order.
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::Resume,
         Section::Save,
         Section::Load,
@@ -43,6 +44,7 @@ impl Section {
         Section::Enhancements,
         Section::GameInfo,
         Section::Controls,
+        Section::Achievements,
         Section::Settings,
         Section::Reset,
         Section::Quit,
@@ -59,6 +61,7 @@ impl Section {
             Section::Enhancements => "Enhancements",
             Section::GameInfo => "Game info",
             Section::Controls => "Controls",
+            Section::Achievements => "Achievements",
             Section::Settings => "Settings",
             Section::Reset => "Reset game",
             Section::Quit => "Quit to library",
@@ -76,6 +79,7 @@ impl Section {
             Section::Enhancements => ph::SPARKLE,
             Section::GameInfo => ph::LIST_CHECKS,
             Section::Controls => ph::GAME_CONTROLLER,
+            Section::Achievements => ph::TROPHY,
             Section::Settings => ph::GEAR,
             Section::Reset => ph::ARROW_COUNTER_CLOCKWISE,
             Section::Quit => ph::SIGN_OUT,

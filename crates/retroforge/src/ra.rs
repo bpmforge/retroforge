@@ -504,6 +504,13 @@ impl RaSession {
         })
     }
 
+    /// The loaded game's achievements as they stand now (empty before the
+    /// game data arrives).
+    #[must_use]
+    pub fn list(&self) -> Vec<rf_achievements::AchievementInfo> {
+        self.ach.achievements()
+    }
+
     /// Unload with the flush rcheevos needs, before the session is dropped.
     pub fn close(&mut self) {
         self.ach.unload_game();
@@ -576,6 +583,72 @@ pub fn badge_suffix(game_loaded: bool, hardcore: bool) -> Option<&'static str> {
     } else {
         " \u{b7} RA: softcore"
     })
+}
+
+/// Ticket W41-06: the quiet status line while unlocks cannot be delivered.
+pub const OFFLINE_NOTICE: &str = "RetroAchievements offline, unlocks queued";
+/// Ticket W41-06: the status line once the queue was delivered.
+pub const ONLINE_NOTICE: &str = "RetroAchievements back online";
+
+/// Whether these events change what the achievement list shows, so the core
+/// should send a fresh [`CoreEvent::RaList`].
+#[must_use]
+pub fn wants_list_refresh(events: &[AchievementEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            AchievementEvent::GameLoaded { .. }
+                | AchievementEvent::Unlocked { .. }
+                | AchievementEvent::Progress { .. }
+                | AchievementEvent::GameCompleted
+        )
+    })
+}
+
+/// Whether `a` counts as unlocked in the mode being played: hardcore counts
+/// only hardcore unlocks, softcore counts either.
+#[must_use]
+pub fn is_unlocked(a: &rf_achievements::AchievementInfo, hardcore: bool) -> bool {
+    if hardcore {
+        a.unlocked_hardcore
+    } else {
+        a.unlocked_softcore || a.unlocked_hardcore
+    }
+}
+
+/// "N of M unlocked, P of Q points".
+#[must_use]
+pub fn progress_line(items: &[rf_achievements::AchievementInfo], hardcore: bool) -> String {
+    let (mut n, mut p) = (0u32, 0u32);
+    let mut q = 0u32;
+    for a in items {
+        q = q.saturating_add(a.points);
+        if is_unlocked(a, hardcore) {
+            n += 1;
+            p = p.saturating_add(a.points);
+        }
+    }
+    format!("{n} of {} unlocked, {p} of {q} points", items.len())
+}
+
+/// The toast for an unlock: title and points, then the description.
+#[must_use]
+pub fn unlock_toast(title: &str, points: u32, description: &str) -> String {
+    let head = format!("Achievement unlocked: {title} ({points} pts)");
+    if description.is_empty() {
+        head
+    } else {
+        format!("{head}\n{description}")
+    }
+}
+
+/// The toast when every achievement of the game is unlocked.
+#[must_use]
+pub fn mastered_toast(game: Option<&str>) -> String {
+    match game {
+        Some(g) if !g.is_empty() => format!("Game mastered: {g}"),
+        _ => "Game mastered".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +937,63 @@ mod tests {
         assert_eq!(badge_suffix(false, true), None);
         assert_eq!(badge_suffix(true, false), Some(" \u{b7} RA: softcore"));
         assert_eq!(badge_suffix(true, true), Some(" \u{b7} RA: hardcore"));
+    }
+    fn info(points: u32, soft: bool, hard: bool) -> rf_achievements::AchievementInfo {
+        rf_achievements::AchievementInfo {
+            id: 1,
+            title: "t".into(),
+            description: String::new(),
+            points,
+            unlocked_softcore: soft,
+            unlocked_hardcore: hard,
+            state: 0,
+            measured_progress: String::new(),
+            badge_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn progress_line_counts_unlocks_and_points() {
+        let items = [
+            info(5, false, false),
+            info(10, true, false),
+            info(25, true, true),
+        ];
+        assert_eq!(
+            progress_line(&items, false),
+            "2 of 3 unlocked, 35 of 40 points"
+        );
+        // Hardcore counts only hardcore unlocks.
+        assert_eq!(
+            progress_line(&items, true),
+            "1 of 3 unlocked, 25 of 40 points"
+        );
+        assert_eq!(progress_line(&[], false), "0 of 0 unlocked, 0 of 0 points");
+    }
+
+    #[test]
+    fn toasts_name_the_title_points_and_description() {
+        assert_eq!(
+            unlock_toast("Five Alive", 5, "Reach 5"),
+            "Achievement unlocked: Five Alive (5 pts)\nReach 5"
+        );
+        assert_eq!(
+            unlock_toast("Five Alive", 5, ""),
+            "Achievement unlocked: Five Alive (5 pts)"
+        );
+        assert_eq!(
+            mastered_toast(Some("Test Game")),
+            "Game mastered: Test Game"
+        );
+        assert_eq!(mastered_toast(None), "Game mastered");
+    }
+
+    #[test]
+    fn only_list_changing_events_ask_for_a_refresh() {
+        assert!(wants_list_refresh(&[AchievementEvent::GameCompleted]));
+        assert!(!wants_list_refresh(&[
+            AchievementEvent::Disconnected,
+            AchievementEvent::Reconnected
+        ]));
     }
 }
