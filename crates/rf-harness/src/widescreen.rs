@@ -208,23 +208,42 @@ fn reach_sum(t: &Trial) -> i32 {
     t.gain_right.max(0) + t.gain_left.max(0)
 }
 
+/// Writes bytes into a copy of an image: `(image, rom offset, bytes)`.
+pub type PatchFn<'a> = &'a dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String>;
+/// Plays an image from power-on and returns its per-frame snaps.
+pub type RunFn<'a> = &'a dyn Fn(&[u8]) -> Result<Vec<Snap>, String>;
+
+/// What [`try_candidates`] trials against.
+#[derive(Clone, Copy)]
+pub struct TrialSetup<'a> {
+    pub raw: &'a [u8],
+    pub view: &'a View,
+    /// The unmodified image's run.
+    pub plain: &'a [Snap],
+    pub patch: PatchFn<'a>,
+    pub run: RunFn<'a>,
+    /// Wider constants tried per candidate (the widest ones).
+    pub values: usize,
+}
+
 /// Try each candidate with each wider constant on a copy of `raw`, then try the
-/// harmless ones together (see the group stage below). `run` plays an image and returns its snaps; `patch` writes
-/// bytes into an image copy. At most `values` wider constants (the widest) are
-/// tried per candidate. `log` receives one line per trial.
+/// harmless ones together (see the group stage below). /// bytes into an image copy. `log` receives one line per trial.
 ///
 /// # Errors
 /// A patch or a run fails.
 pub fn try_candidates(
-    raw: &[u8],
+    setup: &TrialSetup<'_>,
     cands: &[&Candidate],
-    view: &View,
-    plain: &[Snap],
-    patch: &dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String>,
-    run: &dyn Fn(&[u8]) -> Result<Vec<Snap>, String>,
-    values: usize,
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<Tried>, String> {
+    let TrialSetup {
+        raw,
+        view,
+        plain,
+        patch,
+        run,
+        values,
+    } = *setup;
     let mut out: Vec<Tried> = Vec::new();
     for &c in cands {
         let mut t = Tried {

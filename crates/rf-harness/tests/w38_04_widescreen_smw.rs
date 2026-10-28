@@ -19,12 +19,14 @@ use rf_core_api::coverage::CoverageLog;
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_harness::atlas::build_snes_atlas;
 use rf_harness::object_tables::{snes_cam, snes_step_frame, Console, Recorder};
-use rf_harness::widescreen::{observe_snes, rows_toml, snes_patch, snes_snaps, try_candidates};
+use rf_harness::widescreen::{
+    observe_snes, rows_toml, snes_patch, snes_snaps, try_candidates, TrialSetup,
+};
 use rf_input::SnesButton;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
 use rf_rebuild::widescreen::{
-    camera_aliases, find_camera, hud_watch, infer, oam_shadow, slots_from_rows, static_sprites,
-    widen_values, Candidate, Kind, View, Watch,
+    camera_aliases, find_camera, find_x_hi, hud_watch, infer, oam_shadow, slots_from_rows,
+    static_sprites, widen_values, Candidate, Kind, View, Watch,
 };
 use rf_snes::core::SnesCore;
 
@@ -180,6 +182,13 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
         table.base, table.slots, table.stride, table.x_lo, table.x_hi, table.state
     );
     let cam = find_camera(&trace).expect("a camera");
+    // The finder binds x low bytes to sprites; the page column is found against
+    // the camera.
+    let mut table = table;
+    if let Some(off) = find_x_hi(&table, &cam, &trace) {
+        table.x_hi = Some(off);
+    }
+    println!("x page column offset {:?}", table.x_hi);
     println!(
         "camera lo {:#x} hi {:?} (recipe camera_x row is 0x7e001a)",
         RAM_BASE + cam.lo as u32,
@@ -264,13 +273,15 @@ fn smw_widescreen_candidates_and_lockstep_trials() {
         .collect();
     let t = Instant::now();
     let tried = try_candidates(
-        &raw,
+        &TrialSetup {
+            raw: &raw,
+            view: &view,
+            plain: &plain,
+            patch: &|r, at, b| snes_patch(r, at, b),
+            run: &|image| snes_snaps(image, &ins, |_, _| {}),
+            values: 1,
+        },
         &chosen,
-        &view,
-        &plain,
-        &|r, at, b| snes_patch(r, at, b),
-        &|image| snes_snaps(image, &ins, |_, _| {}),
-        1,
         &mut |l| println!("{l}"),
     )
     .expect("trials");

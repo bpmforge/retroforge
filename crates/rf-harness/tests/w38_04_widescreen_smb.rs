@@ -24,7 +24,9 @@ use rf_core_api::coverage::CoverageLog;
 use rf_core_api::{CoreEvent, CoreSink, EmulatorCore, InputFrame, PpuPixel, ResetKind};
 use rf_harness::atlas::build_nes_atlas;
 use rf_harness::object_tables::{nes_cam, nes_prepare, nes_step_frame, Console, Recorder};
-use rf_harness::widescreen::{nes_patch, nes_snaps, observe_nes, rows_toml, try_candidates};
+use rf_harness::widescreen::{
+    nes_patch, nes_snaps, observe_nes, rows_toml, try_candidates, TrialSetup,
+};
 use rf_nes::core::NesCore;
 use rf_nes::CpuBus as _;
 use rf_rebuild::objtable::{infer as infer_tables, to_row};
@@ -308,13 +310,15 @@ fn smb_widescreen_candidates_and_lockstep_trials() {
     }
     let t = Instant::now();
     let tried = try_candidates(
-        &raw,
+        &TrialSetup {
+            raw: &raw,
+            view: &view,
+            plain: &plain,
+            patch: &|r, at, b| nes_patch(r, at, b),
+            run: &|image| nes_snaps(image, &ins, poke),
+            values: 2,
+        },
         &chosen,
-        &view,
-        &plain,
-        &|r, at, b| nes_patch(r, at, b),
-        &|image| nes_snaps(image, &ins, poke),
-        2,
         &mut |l| println!("{l}"),
     )
     .expect("trials");

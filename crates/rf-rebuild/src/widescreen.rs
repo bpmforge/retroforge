@@ -932,6 +932,78 @@ pub fn camera_aliases(t: &Trace, cam: &Camera) -> Vec<usize> {
     out
 }
 
+/// Find the page column of a table that has none: the offset (from the table's
+/// base) of `slots` bytes that, with the x column, put each live slot within
+/// `-512..1024` of the camera in nine slot-frames of ten, and do so clearly
+/// better than a zero page would. Needs the camera page. `None` when the table
+/// already has one, or nothing fits.
+#[must_use]
+pub fn find_x_hi(table: &ObjectTable, cam: &Camera, t: &Trace) -> Option<u32> {
+    let (x_lo, cam_hi) = (table.x_lo?, cam.hi?);
+    if table.x_hi.is_some() || table.stride == 0 {
+        return None;
+    }
+    let r = t.frames.iter().map(|f| f.ram.len()).min()?;
+    let at = |off: u32, i: u32| {
+        // Wrapping: `off` ranges over every RAM byte, some of them below the base.
+        table
+            .base
+            .wrapping_add(off)
+            .wrapping_add(i.wrapping_mul(table.stride))
+            .wrapping_sub(t.ram_base) as usize
+    };
+    // Live slot-frames and how many a page column places near the camera.
+    let score = |page: Option<u32>| -> (u32, u32) {
+        let (mut live, mut ok) = (0u32, 0u32);
+        for f in &t.frames {
+            let cam_x = i32::from(f.ram[cam_hi]) * 256 + i32::from(f.ram[cam.lo]);
+            for i in 0..table.slots {
+                let lo = at(x_lo, i);
+                if lo >= r {
+                    continue;
+                }
+                let alive = match table.state {
+                    Some(st) => at(st, i) < r && f.ram[at(st, i)] != 0,
+                    None => true,
+                };
+                if !alive {
+                    continue;
+                }
+                let hi = match page {
+                    Some(o) if at(o, i) < r => i32::from(f.ram[at(o, i)]),
+                    Some(_) => continue,
+                    None => 0,
+                };
+                live += 1;
+                let rel = hi * 256 + i32::from(f.ram[lo]) - cam_x;
+                ok += u32::from((-512..1024).contains(&rel));
+            }
+        }
+        (live, ok)
+    };
+    let (live, base_ok) = score(None);
+    if live < 50 {
+        return None;
+    }
+    let mut best: Option<(u32, u32)> = None;
+    let span = r as u32;
+    for a in 0..span {
+        let o = t.ram_base.wrapping_add(a).wrapping_sub(table.base);
+        if o == x_lo || at(o, table.slots.saturating_sub(1)) >= r {
+            continue;
+        }
+        let (n, ok) = score(Some(o));
+        if n == live
+            && ok * 10 >= n * 9
+            && ok > base_ok + n / 10
+            && best.is_none_or(|(_, b)| ok > b)
+        {
+            best = Some((o, ok));
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// A sprite that stands still on screen while the camera moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaticSprite {
@@ -1040,7 +1112,14 @@ impl View {
     }
 
     fn field(&self, off: Option<u32>, slot: u32) -> Option<usize> {
-        off.map(|o| self.idx(self.table.base + o + slot * self.table.stride))
+        off.map(|o| {
+            self.idx(
+                self.table
+                    .base
+                    .wrapping_add(o)
+                    .wrapping_add(slot.wrapping_mul(self.table.stride)),
+            )
+        })
     }
 
     /// The camera position, `None` without a page byte.
@@ -1141,7 +1220,7 @@ pub fn slots_from_rows(table: &ObjectTable, rows: &[crate::recipe::RamMeaning]) 
     for off in [table.state, table.x_lo].into_iter().flatten() {
         let start = table.base + off;
         for r in rows {
-            let end = r.addr + u32::from(r.width);
+            let end = r.addr.saturating_add(u32::from(r.width));
             if r.addr >= start && r.addr - start <= table.slots && table.stride > 0 {
                 out.slots = out.slots.max((end - start).div_ceil(table.stride));
             }
@@ -1572,6 +1651,55 @@ mod tests {
         let (plain, patched) = runs();
         let t = compare_trial(&view(), &plain, &patched);
         assert_eq!(t.reach_kind(), Some(Kind::Activation));
+    }
+
+    #[test]
+    fn a_page_column_is_found_when_a_zero_page_puts_slots_off_the_camera() {
+        // Camera lo 0x40, page 0x41; slot x lo at 0x10+i, state at 0x20+i,
+        // page at 0x30+i. The camera runs 0..1500; each slot sits 100 px
+        // right of it.
+        let frames: Vec<Frame> = (0..120u32)
+            .map(|k| {
+                let cam = k * 12;
+                let mut ram = vec![0u8; 0x60];
+                ram[0x40] = (cam & 0xFF) as u8;
+                ram[0x41] = (cam >> 8) as u8;
+                for i in 0..4u32 {
+                    let x = cam + 100 + i * 8;
+                    ram[0x10 + i as usize] = (x & 0xFF) as u8;
+                    ram[0x30 + i as usize] = (x >> 8) as u8;
+                    ram[0x20 + i as usize] = 1;
+                }
+                Frame {
+                    ram,
+                    cam_x: cam as u16,
+                    ..Frame::default()
+                }
+            })
+            .collect();
+        let t = Trace {
+            ram_base: 0,
+            wrap: 65536,
+            frames,
+        };
+        let table = ObjectTable {
+            base: 0x10,
+            slots: 4,
+            stride: 1,
+            x_lo: Some(0),
+            state: Some(0x10),
+            ..ObjectTable::default()
+        };
+        let cam = Camera {
+            lo: 0x40,
+            hi: Some(0x41),
+        };
+        assert_eq!(find_x_hi(&table, &cam, &t), Some(0x20));
+        let with_hi = ObjectTable {
+            x_hi: Some(0x20),
+            ..table
+        };
+        assert_eq!(find_x_hi(&with_hi, &cam, &t), None);
     }
 
     #[test]
