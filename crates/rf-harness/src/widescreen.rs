@@ -192,6 +192,40 @@ use rf_rebuild::widescreen::{
 };
 use rf_rebuild::{Grade, Recipe};
 
+/// Trials in flight at once (each is a full replay on its own core).
+fn trial_threads() -> usize {
+    std::env::var("TRIAL_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+        .max(1)
+}
+
+/// `f` over `items` on up to [`trial_threads`] scoped threads, results in item
+/// order. Every worker takes the next unclaimed index, so each index is run
+/// exactly once and the loop ends when the counter passes the end (law 8).
+fn par_map<T: Sync, R: Send>(items: &[T], f: &(dyn Fn(&T) -> R + Sync)) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|sc| {
+        for _ in 0..trial_threads().min(items.len().max(1)) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                out.lock().expect("lock")[i] = Some(r);
+            });
+        }
+    });
+    out.into_inner()
+        .expect("lock")
+        .into_iter()
+        .map(|r| r.expect("every item ran"))
+        .collect()
+}
+
 /// One candidate and what its trials said.
 #[derive(Debug, Clone)]
 pub struct Tried {
@@ -226,9 +260,9 @@ fn reach_sum(t: &Trial) -> i32 {
 }
 
 /// Writes bytes into a copy of an image: `(image, rom offset, bytes)`.
-pub type PatchFn<'a> = &'a dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String>;
+pub type PatchFn<'a> = &'a (dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String> + Sync);
 /// Plays an image from power-on and returns its per-frame snaps.
-pub type RunFn<'a> = &'a dyn Fn(&[u8]) -> Result<Vec<Snap>, String>;
+pub type RunFn<'a> = &'a (dyn Fn(&[u8]) -> Result<Vec<Snap>, String> + Sync);
 
 /// What [`try_candidates`] trials against.
 #[derive(Clone, Copy)]
@@ -261,29 +295,45 @@ pub fn try_candidates(
         run,
         values,
     } = *setup;
-    let mut out: Vec<Tried> = Vec::new();
-    for &c in cands {
-        let mut t = Tried {
+    // One job per (candidate, wider value): independent replays, run in
+    // parallel; the log lines come out in job order.
+    let jobs: Vec<(usize, u16)> = cands
+        .iter()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            let all = widen_values(c);
+            all[all.len().saturating_sub(values)..]
+                .iter()
+                .map(|&v| (i, v))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let done = par_map(&jobs, &|&(i, v)| -> Result<Trial, String> {
+        let c = cands[i];
+        let image = patch(raw, c.operand, &operand_bytes(c.width, v))?;
+        Ok(compare_trial(view, plain, &run(&image)?))
+    });
+    let mut out: Vec<Tried> = cands
+        .iter()
+        .map(|&c| Tried {
             cand: c.clone(),
             alone: Vec::new(),
             best: None,
             partners: Vec::new(),
-        };
-        let all = widen_values(c);
-        for &v in &all[all.len().saturating_sub(values)..] {
-            let image = patch(raw, c.operand, &operand_bytes(c.width, v))?;
-            let tr = compare_trial(view, plain, &run(&image)?);
-            log(&trial_line("alone", c, v, &tr));
-            if tr.keeper()
-                && t.best
-                    .as_ref()
-                    .is_none_or(|b| reach_sum(&tr) > reach_sum(&b.1))
-            {
-                t.best = Some((v, tr.clone()));
-            }
-            t.alone.push((v, tr));
+        })
+        .collect();
+    for (&(i, v), tr) in jobs.iter().zip(done) {
+        let tr = tr?;
+        log(&trial_line("alone", cands[i], v, &tr));
+        let t = &mut out[i];
+        if tr.keeper()
+            && t.best
+                .as_ref()
+                .is_none_or(|b| reach_sum(&tr) > reach_sum(&b.1))
+        {
+            t.best = Some((v, tr.clone()));
         }
-        out.push(t);
+        t.alone.push((v, tr));
     }
     // Groups. Some constants only act together: an activation window wider
     // than the cull distance is removed again at once. So the candidates that
@@ -331,8 +381,10 @@ pub fn try_candidates(
         ));
         if full.keeper() {
             let mut essential: Vec<usize> = Vec::new();
-            for &(i, _) in &members {
-                let without = play(Some(i))?;
+            let idx: Vec<usize> = members.iter().map(|m| m.0).collect();
+            let withouts = par_map(&idx, &|&i| play(Some(i)));
+            for (&i, without) in idx.iter().zip(withouts) {
+                let without = without?;
                 let need = !without.keeper() || reach_sum(&without) + MIN_GAIN <= reach_sum(&full);
                 log(&format!(
                     "TRIAL leave-out    rom {:#07x} reach R{} L{} keeper {} essential {need}",
@@ -697,8 +749,19 @@ pub fn try_windows(
         run,
         ..
     } = *setup;
+    let jobs: Vec<(usize, u16)> = (0..pairs.len())
+        .flat_map(|i| widths.iter().map(move |&w| (i, w)))
+        .filter(|&(i, w)| pairs[i].widened(w).is_some())
+        .collect();
+    let done = par_map(&jobs, &|&(i, w)| -> Result<Trial, String> {
+        let pair = &pairs[i];
+        let (lo, hi) = pair.widened(w).ok_or("past 16 bits")?;
+        let image = patch(raw, pair.adc.operand, &operand_bytes(2, lo))?;
+        let image = patch(&image, pair.cmp.operand, &operand_bytes(2, hi))?;
+        Ok(compare_trial(view, plain, &run(&image)?))
+    });
     let mut out = Vec::new();
-    for pair in pairs {
+    for (pi, pair) in pairs.iter().enumerate() {
         let mut adc = Tried {
             cand: pair.adc.clone(),
             alone: Vec::new(),
@@ -711,13 +774,12 @@ pub fn try_windows(
             best: None,
             partners: Vec::new(),
         };
-        for &w in widths {
-            let Some((lo, hi)) = pair.widened(w) else {
+        for (&(i, w), tr) in jobs.iter().zip(&done) {
+            if i != pi {
                 continue;
-            };
-            let image = patch(raw, pair.adc.operand, &operand_bytes(2, lo))?;
-            let image = patch(&image, pair.cmp.operand, &operand_bytes(2, hi))?;
-            let tr = compare_trial(view, plain, &run(&image)?);
+            }
+            let tr = tr.clone()?;
+            let (lo, hi) = pair.widened(w).ok_or("past 16 bits")?;
             log(&format!(
                 "TRIAL window       adc rom {:#07x} {:#06x}->{lo:#06x} + cmp rom {:#07x} {:#06x}->{hi:#06x} (+{w:#x} each side) first {:?} off {} on {} other {} oam {} cam {} visible {:?} reach R{} L{} keeper {} {}",
                 pair.adc.operand,

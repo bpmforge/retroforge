@@ -503,7 +503,7 @@ fn smw_long_widescreen_candidates_and_lockstep_trials() {
             plain: &plain,
             patch: &|r, at, b| snes_patch(r, at, b),
             run: &|image| snaps_of(image, &segs),
-            values: 1,
+            values: 2,
         },
         &chosen,
         &mut |l| println!("{l}"),
