@@ -57,7 +57,10 @@ fn the_super_metroid_recipe_has_the_facts_interpolation_needs() {
         let row = r.ram.iter().find(|x| x.name == name).expect(name);
         assert_eq!(row.grade, Grade::Observed, "{name}");
     }
-    assert_eq!(r.ram.iter().find(|x| x.name == "player_x").unwrap().width, 2);
+    assert_eq!(
+        r.ram.iter().find(|x| x.name == "player_x").unwrap().width,
+        2
+    );
 }
 
 #[test]
@@ -90,7 +93,11 @@ fn every_super_metroid_row_is_observed_and_graded_honestly() {
         }
     }
     for p in &after.patches {
-        assert!(p.source.starts_with("observed:") && clean(&p.source), "{}", p.name);
+        assert!(
+            p.source.starts_with("observed:") && clean(&p.source),
+            "{}",
+            p.name
+        );
         assert!(
             after.functions.iter().any(|f| f.name == p.function),
             "{}",

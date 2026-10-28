@@ -177,7 +177,8 @@ fn super_metroid_recipe_hooks_fire_each_frame_and_keep_lockstep() {
     let frame_now: Rc<Cell<u32>> = Rc::default();
     let hook_frame = Rc::clone(&frame_now);
     let eof = Rc::clone(&end_of_frame);
-    let word_at = |core: &SnesCore, a: u32| u16::from(core.peek(a)) | u16::from(core.peek(a + 1)) << 8;
+    let word_at =
+        |core: &SnesCore, a: u32| u16::from(core.peek(a)) | u16::from(core.peek(a + 1)) << 8;
     let mut hook = |frame: u32, side: Side, core: &mut SnesCore| {
         if side != Side::Rebuilt {
             return;

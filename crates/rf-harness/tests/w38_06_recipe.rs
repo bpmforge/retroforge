@@ -162,9 +162,9 @@ fn position_words(
             pairs += 1;
             steps.insert(dw);
             let moved_same = w[1].sprites.iter().any(|s1| {
-                w[0].sprites
-                    .iter()
-                    .any(|s0| s0.index == s1.index && i16::from(coord(s1).wrapping_sub(coord(s0)) as i8) == dw)
+                w[0].sprites.iter().any(|s0| {
+                    s0.index == s1.index && i16::from(coord(s1).wrapping_sub(coord(s0)) as i8) == dw
+                })
             });
             hit += u32::from(moved_same);
         }
@@ -230,7 +230,11 @@ fn room_words(t: &Trace) -> Vec<(usize, Vec<(usize, u16)>)> {
             }
         }
         if std::env::var("DBG_ADDR").is_ok_and(|v| usize::from_str_radix(&v, 16) == Ok(a)) {
-            println!("DBG {a:#x}: {} changes {:x?}", changes.len(), &changes[..changes.len().min(40)]);
+            println!(
+                "DBG {a:#x}: {} changes {:x?}",
+                changes.len(),
+                &changes[..changes.len().min(40)]
+            );
         }
         // Few changes, each value held for a while, several distinct values.
         let pointer_like = changes.iter().all(|c| c.1 >= 0x8000);
@@ -520,11 +524,13 @@ fn super_metroid_finders_and_recipe() {
         // the next one starts so the passes never overlap.
         let mut windows: Vec<(u32, usize, usize)> = settled
             .iter()
-            .map(|&(f, v)| (
+            .map(|&(f, v)| {
+                (
                     u32::from(v),
                     frame_of[f.saturating_sub(1)].saturating_sub(60),
                     (frame_of[f] + 200).min(ins.len()),
-                ))
+                )
+            })
             .collect();
         for i in 1..windows.len() {
             windows[i - 1].2 = windows[i - 1].2.min(windows[i].1);
@@ -604,24 +610,24 @@ fn super_metroid_finders_and_recipe() {
         .iter()
         .find(|f| rf_rebuild::objtable::grade_of(f) == Grade::Observed)
         .map_or_else(
-        || ObjectTable {
-            name: "samus".into(),
-            base: px,
-            slots: 1,
-            stride: 2,
-            x_lo: Some(0),
-            y: Some(py.wrapping_sub(px)),
-            grade: Grade::Candidate,
-            ..ObjectTable::default()
-        },
-        |f| {
-            to_row(
-                f,
-                rf_rebuild::objtable::grade_of(f),
-                "; Super Metroid first rooms",
-            )
-        },
-    );
+            || ObjectTable {
+                name: "samus".into(),
+                base: px,
+                slots: 1,
+                stride: 2,
+                x_lo: Some(0),
+                y: Some(py.wrapping_sub(px)),
+                grade: Grade::Candidate,
+                ..ObjectTable::default()
+            },
+            |f| {
+                to_row(
+                    f,
+                    rf_rebuild::objtable::grade_of(f),
+                    "; Super Metroid first rooms",
+                )
+            },
+        );
     let mut table = table;
     let page = find_x_page(&table, &cam, &trace);
     let mut x_page_zero = false;
@@ -822,7 +828,7 @@ fn super_metroid_finders_and_recipe() {
     if let Some(h) = cam.hi {
         recipe.ram.push(ram(h as u32, 1, "camera_x_hi", "observed: with the low byte it makes a 16-bit position that moves smoothly with the scroll".into()));
     }
-    recipe.ram.push(ram(*rw as u32, 2, "room", format!("observed: a word that changed {} times in the play, each value held until the next door; the data windows are keyed by it", changes.len())));
+    recipe.ram.push(ram(*rw as u32, 2, "room_state", format!("observed: a pointer-like word (every value at least $8000) that changed {} times in the play, each value held until the next door, taking the most distinct values of any such word; the data windows are keyed by it (the value differed on a return visit, so it is per visit, not per room)", changes.len())));
     if let Some(f) = found
         .iter()
         .find(|f| rf_rebuild::objtable::grade_of(f) == Grade::Observed)
