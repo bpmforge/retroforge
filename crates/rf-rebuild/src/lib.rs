@@ -28,7 +28,7 @@ pub mod windows;
 pub use atlas::{
     entry, Atlas, AtlasError, Block, Edge, EdgeKind, Function, IndirectSite, InsnRec, Provenance,
     SiteKind, Stats, Target, VolatileRegion, Why, ATLAS_FORMAT_VERSION, CACHE_ASSET,
-    CACHE_PRODUCER, CACHE_SETTINGS,
+    CACHE_ASSET_SA1, CACHE_PRODUCER, CACHE_SETTINGS,
 };
 pub use build::build_atlas;
 pub use covio::{decode_coverage, encode_coverage, COVERAGE_ASSET, COVERAGE_SETTINGS};
