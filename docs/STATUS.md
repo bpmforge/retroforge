@@ -5141,3 +5141,12 @@ stories, 10 decisions).
   frames. Widescreen: 14 candidates tried, no keepers; Zelda screen-flips,
   so constant-widening cannot measure reach. Neighbour-screen margins are
   W38-05b. Workspace: **3865 passing**, gate green.
+- **W38-09 — ROM-hack gate** (2026-10-28). `w38_09_hack_gate` applies 20
+  Lunar Magic SMW hacks in memory to Brad's own SMW (nothing written), boots
+  each on the rebuilt tier from a generic drive and runs lockstep: 20/20
+  boot with zero divergence, 19 reach a level (hack 03 stays at its title,
+  22.5% interpreter fallback; others 0.01-1.5%). The SMW recipe matches 9
+  to 23 of its 29 functions per hack, almost all exact, with no per-hack
+  work. Live margins not applied: SMW has no keeper widescreen rows yet
+  (W38-04b); 7 or 2 of the 11 candidate rows match exactly per hack and
+  would go live once promoted. Workspace: **3875 passing**, gate green.
