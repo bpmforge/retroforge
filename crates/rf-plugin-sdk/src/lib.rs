@@ -19,11 +19,16 @@ pub mod hooks;
 pub mod host;
 pub mod manifest;
 pub mod sandbox;
+pub mod surface;
 
 pub use hooks::{HookHost, HookKey, HookRefusal, ModCtx, Resolution};
 pub use host::{Budget, LedgerEntry, PathRefusal, ScriptHost, ScriptState, WriteLedger};
 pub use manifest::{Capabilities, FilesystemCap, Manifest, ManifestError};
 pub use sandbox::ScriptLog;
+pub use surface::{
+    enable, FactPlugin, OriginalModeProof, PlayMode, PluginKind, RenderPlugin, SurfaceError,
+    SurfaceManifest, SurfaceRefusal,
+};
 
 /// The SDK documentation names example files; these assert they exist.
 ///
