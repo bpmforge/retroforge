@@ -127,8 +127,8 @@ fn castlevania_finders_and_recipe() {
         return;
     };
     let raw = load_rom(&path);
-    let ins = inputs();
     let pad = pad();
+    let ins = inputs();
     println!("play: {} frames, trace from {PLAY_FROM}", frames());
     let t0 = std::time::Instant::now();
     let atlas = build_nes_atlas(&raw, &coverage(&raw)).expect("atlas");
@@ -163,30 +163,9 @@ fn castlevania_finders_and_recipe() {
             f.z, b.rate(), b.frames_checked, b.frames_clean
         );
     }
-    let best = found
-        .iter()
-        .max_by(|a, b| {
-            (a.binding.rate() * f64::from(a.table.slots))
-                .total_cmp(&(b.binding.rate() * f64::from(b.table.slots)))
-        })
-        .expect("a table");
-    let table = to_row(best, Grade::Observed, "; Castlevania stage 1 patrol");
-    let table = slots_from_rows(&table, &[]);
-    println!(
-        "table base {:#x} slots {} stride {} x_lo {:?} x_hi {:?} y {:?} state {:?}",
-        table.base, table.slots, table.stride, table.x_lo, table.x_hi, table.y, table.state
-    );
+    // The camera first (the observed run below needs it for every choice).
     let cam = find_camera(&trace).expect("a camera");
     println!("camera lo {:#x} hi {:?}", cam.lo, cam.hi);
-    let mut table = table;
-    let page = find_x_page(&table, &cam, &trace);
-    println!("x page {page:?}");
-    let mut x_page_zero = false;
-    match page {
-        Some(XPage::Column(off)) => table.x_hi = Some(off),
-        Some(XPage::Zero) => x_page_zero = true,
-        None => {}
-    }
     let statics = static_sprites(&trace);
     let shadow = oam_shadow(&trace);
     println!(
@@ -197,49 +176,146 @@ fn castlevania_finders_and_recipe() {
             .collect::<Vec<_>>(),
         shadow
     );
-
-    // The player's slot: the slot whose x byte moves most under Left/Right.
-    let xs = table.x_lo.expect("x column");
-    let slot_x = |i: u32| (table.base + xs + i * table.stride) as usize;
-    let pad_at = |t: usize| pad[PLAY_FROM as usize + t];
-    let mut best_slot = (0u32, 0usize);
-    for i in 0..table.slots {
-        let a = slot_x(i);
-        let n = trace
-            .frames
-            .windows(2)
-            .enumerate()
-            .filter(|(t, w)| w[0].ram[a] != w[1].ram[a] && pad_at(*t) & (LEFT | RIGHT) != 0)
-            .count();
-        println!("slot {i}: x byte {a:#x} moved with the pad in {n} frames");
-        if n > best_slot.1 {
-            best_slot = (i, n);
+    let make_watch = |table: &rf_rebuild::ObjectTable| {
+        let mut watch = Watch::default();
+        for i in 0..table.slots {
+            for off in [table.x_lo, table.x_hi].into_iter().flatten() {
+                watch.obj_x.insert(table.base + off + i * table.stride);
+            }
+            if let Some(off) = table.state {
+                watch.obj_state.insert(table.base + off + i * table.stride);
+            }
+        }
+        watch.cam.insert(cam.lo as u32);
+        watch.cam.extend(cam.hi.map(|h| h as u32));
+        watch
+            .cam
+            .extend(camera_aliases(&trace, &cam).iter().map(|&a| a as u32));
+        if let Some(sh) = shadow {
+            watch.hud = hud_watch(&trace, sh, &statics);
+        }
+        watch
+    };
+    // The table: only tables with a state column can have their flips counted;
+    // keep the one whose observed play flips the most (W38-04 lesson).
+    let mut best: Option<(u64, rf_rebuild::ObjectTable)> = None;
+    for f in found.iter().filter(|f| f.table.state.is_some()) {
+        let t = slots_from_rows(&to_row(f, Grade::Observed, "; Castlevania patrol"), &[]);
+        let facts = observe_nes(
+            &raw,
+            &atlas,
+            &ins,
+            PLAY_FROM as usize,
+            make_watch(&t),
+            |_, _| {},
+        )
+        .expect("observed run");
+        println!(
+            "STATE TABLE base {:#x} slots {} stride {} x@{:x?} state@{:x?}: {} flips up / {} down, {} sites",
+            t.base, t.slots, t.stride,
+            t.x_lo.map(|o| t.base + o), t.state.map(|o| t.base + o),
+            facts.flips_up, facts.flips_down, facts.sites.len()
+        );
+        let n = facts.flips_up + facts.flips_down;
+        // A state byte that flips every few frames is a timer or counter, not a live flag.
+        let plausible = n * 20 <= u64::from(facts.frames);
+        if plausible && best.as_ref().is_none_or(|b| n > b.0) {
+            best = Some((n, t));
         }
     }
-    let player = best_slot.0;
-    let px = slot_x(player) as u32;
-    let py = (table.base + table.y.expect("y column") + player * table.stride) as u32;
-    println!("player slot {player}: x {px:#x} y {py:#x}");
+    let mut table = best.expect("a table with a state column").1;
+    println!(
+        "table base {:#x} slots {} stride {} x_lo {:?} x_hi {:?} y {:?} state {:?}",
+        table.base, table.slots, table.stride, table.x_lo, table.x_hi, table.y, table.state
+    );
+    let page = find_x_page(&table, &cam, &trace);
+    println!("x page {page:?}");
+    let mut x_page_zero = false;
+    match page {
+        Some(XPage::Column(off)) => table.x_hi = Some(off),
+        Some(XPage::Zero) => x_page_zero = true,
+        None => {}
+    }
+
+    // The player: the byte that equals the sprite x minus the scroll most
+    // often and whose changes follow Left/Right; the y byte that follows A.
+    let n_tr = trace.frames.len();
+    let ram_len = trace.frames[0].ram.len();
+    let mut xr: Vec<(f64, usize, usize, usize)> = Vec::new();
+    let mut yr: Vec<(usize, usize, usize)> = Vec::new();
+    for a in (0..ram_len).filter(|a| !(0x200..0x300).contains(a)) {
+        let share = trace
+            .frames
+            .iter()
+            .filter(|f| {
+                let v = f.ram[a].wrapping_sub((f.cam_x & 0xFF) as u8);
+                f.sprites.iter().any(|s| s.x == v)
+            })
+            .count() as f64
+            / n_tr as f64;
+        let (mut right, mut left) = (0, 0);
+        let mut with_a = 0;
+        let mut other = 0;
+        for (t, w) in trace.frames.windows(2).enumerate() {
+            let d = w[1].ram[a].wrapping_sub(w[0].ram[a]) as i8;
+            let p = pad[PLAY_FROM as usize + t];
+            if d > 0 && p & RIGHT != 0 {
+                right += 1;
+            }
+            if d < 0 && p & LEFT != 0 {
+                left += 1;
+            }
+            if d != 0 {
+                if p & 1 != 0 {
+                    with_a += 1
+                } else {
+                    other += 1
+                }
+            }
+        }
+        if share >= 0.3 {
+            xr.push((share, a, right, left));
+        }
+        let ys = (-3i32..=3)
+            .map(|dd| {
+                trace
+                    .frames
+                    .iter()
+                    .filter(|f| {
+                        f.sprites
+                            .iter()
+                            .any(|s| i32::from(s.y) == i32::from(f.ram[a]) + dd)
+                    })
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        if ys * 10 >= n_tr * 3 && with_a > 40 {
+            yr.push((with_a * 1000 / (with_a + other + 1), a, with_a));
+        }
+    }
+    xr.sort_by(|a, b| (b.2 + b.3).cmp(&(a.2 + a.3)));
+    for r in xr.iter().take(4) {
+        println!(
+            "PLAYER-X candidate {:#x} cam-rel share {:.2} right-moves {} left-moves {}",
+            r.1, r.0, r.2, r.3
+        );
+    }
+    yr.sort_by(|a, b| b.0.cmp(&a.0));
+    for r in yr.iter().take(4) {
+        println!(
+            "PLAYER-Y candidate {:#x} A-share {} with-A changes {}",
+            r.1, r.0, r.2
+        );
+    }
+    let px = xr.first().expect("a player x").1 as u32;
+    let py = yr.first().expect("a player y").1 as u32;
+    let best_slot = (0u32, xr[0].2 + xr[0].3);
+    println!("player: x {px:#x} y {py:#x}");
 
     // 2. The observed run.
     let plain = nes_snaps(&raw, &ins, |_, _| {}).expect("plain run");
-    let mut watch = Watch::default();
-    for i in 0..table.slots {
-        for off in [table.x_lo, table.x_hi].into_iter().flatten() {
-            watch.obj_x.insert(table.base + off + i * table.stride);
-        }
-        if let Some(off) = table.state {
-            watch.obj_state.insert(table.base + off + i * table.stride);
-        }
-    }
-    watch.cam.insert(cam.lo as u32);
-    watch.cam.extend(cam.hi.map(|h| h as u32));
-    let aliases = camera_aliases(&trace, &cam);
-    println!("camera aliases {aliases:x?}");
-    watch.cam.extend(aliases.iter().map(|&a| a as u32));
-    if let Some(sh) = shadow {
-        watch.hud = hud_watch(&trace, sh, &statics);
-    }
+    let watch = make_watch(&table);
     let t = std::time::Instant::now();
     let facts = observe_nes(&raw, &atlas, &ins, PLAY_FROM as usize, watch, |_, _| {})
         .expect("observed run");
@@ -465,19 +541,20 @@ fn castlevania_finders_and_recipe() {
         source,
         grade: Grade::Observed,
     };
-    recipe.ram.push(ram(px, "player_x", format!("observed: slot {player}'s x byte of the object table; moved by Left and Right in {} frames of the play", best_slot.1)));
-    recipe.ram.push(ram(
-        py,
-        "player_y",
-        format!("observed: slot {player}'s y byte of the object table"),
-    ));
+    recipe.ram.push(ram(px, "player_x", format!("observed: equals a sprite's x plus the scroll byte's value in {:.0}% of the play's frames (camera-relative, so a level x) and rises in {} frames with Right held (Left was never pressed by the script, so the direction is one-sided)", xr[0].0 * 100.0, best_slot.1)));
+    // The y byte is only a weak guess: it follows A (jump) but no byte matched the sprite y exactly.
+    recipe.ram.push(RamMeaning {
+        grade: Grade::Candidate,
+        ..ram(py, "player_y", format!("observed: the byte with the most changes while A is held among those within three of some sprite's y in 30% of frames (A-change share {}/1000); a candidate, not confirmed", yr[0].0))
+    });
     recipe.ram.push(ram(cam.lo as u32, "scroll_x", "observed: equals the low byte of the PPU's horizontal scroll while the screen scrolled (camera finder)".into()));
     if let Some(h) = cam.hi {
         recipe.ram.push(ram(h as u32, "scroll_page", "observed: the byte that makes a smooth 16-bit camera with the low byte (camera finder)".into()));
     }
     recipe.object_tables.push(rf_rebuild::ObjectTable {
+        grade: Grade::Candidate,
         name: "actors".into(),
-        source: format!("observed: object-table finder (W38-02/02b) over {} frames of stage 1 patrol; player is slot {player}", trace.frames.len()),
+        source: format!("observed: object-table finder (W38-02/02b) over {} frames of stage 1 patrol; player is not in it (the player's x is camera-relative)", trace.frames.len()),
         ..table.clone()
     });
     let text = rf_profiles::recipe::recipe_to_toml(&recipe);
