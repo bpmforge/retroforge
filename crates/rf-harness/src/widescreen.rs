@@ -70,10 +70,27 @@ pub fn observe_snes(
     from: usize,
     watch: Watch,
 ) -> Result<WideFacts, String> {
+    observe_snes_hooked(raw, atlas, inputs, from, watch, |_, _| {})
+}
+
+/// [`observe_snes`] with a per-frame `before` hook on the core (W38-04b: a
+/// movie's resets, applied identically to every run).
+///
+/// # Errors
+/// As [`observe_nes`].
+pub fn observe_snes_hooked(
+    raw: &[u8],
+    atlas: &Atlas,
+    inputs: &[InputFrame],
+    from: usize,
+    watch: Watch,
+    mut before: impl FnMut(usize, &mut SnesCore),
+) -> Result<WideFacts, String> {
     let mut d = SnesDriver::new(raw, atlas)?;
     let mut reader = WideReader::new(Platform::Snes, watch);
     reader.set_resolver(d.resolver());
     for (f, input) in inputs.iter().enumerate() {
+        before(f, &mut d.core);
         if f < from {
             d.frame(input, false)?;
             continue;
@@ -175,6 +192,40 @@ use rf_rebuild::widescreen::{
 };
 use rf_rebuild::{Grade, Recipe};
 
+/// Trials in flight at once (each is a full replay on its own core).
+fn trial_threads() -> usize {
+    std::env::var("TRIAL_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+        .max(1)
+}
+
+/// `f` over `items` on up to [`trial_threads`] scoped threads, results in item
+/// order. Every worker takes the next unclaimed index, so each index is run
+/// exactly once and the loop ends when the counter passes the end (law 8).
+fn par_map<T: Sync, R: Send>(items: &[T], f: &(dyn Fn(&T) -> R + Sync)) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|sc| {
+        for _ in 0..trial_threads().min(items.len().max(1)) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                out.lock().expect("lock")[i] = Some(r);
+            });
+        }
+    });
+    out.into_inner()
+        .expect("lock")
+        .into_iter()
+        .map(|r| r.expect("every item ran"))
+        .collect()
+}
+
 /// One candidate and what its trials said.
 #[derive(Debug, Clone)]
 pub struct Tried {
@@ -209,9 +260,9 @@ fn reach_sum(t: &Trial) -> i32 {
 }
 
 /// Writes bytes into a copy of an image: `(image, rom offset, bytes)`.
-pub type PatchFn<'a> = &'a dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String>;
+pub type PatchFn<'a> = &'a (dyn Fn(&[u8], u32, &[u8]) -> Result<Vec<u8>, String> + Sync);
 /// Plays an image from power-on and returns its per-frame snaps.
-pub type RunFn<'a> = &'a dyn Fn(&[u8]) -> Result<Vec<Snap>, String>;
+pub type RunFn<'a> = &'a (dyn Fn(&[u8]) -> Result<Vec<Snap>, String> + Sync);
 
 /// What [`try_candidates`] trials against.
 #[derive(Clone, Copy)]
@@ -244,29 +295,45 @@ pub fn try_candidates(
         run,
         values,
     } = *setup;
-    let mut out: Vec<Tried> = Vec::new();
-    for &c in cands {
-        let mut t = Tried {
+    // One job per (candidate, wider value): independent replays, run in
+    // parallel; the log lines come out in job order.
+    let jobs: Vec<(usize, u16)> = cands
+        .iter()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            let all = widen_values(c);
+            all[all.len().saturating_sub(values)..]
+                .iter()
+                .map(|&v| (i, v))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let done = par_map(&jobs, &|&(i, v)| -> Result<Trial, String> {
+        let c = cands[i];
+        let image = patch(raw, c.operand, &operand_bytes(c.width, v))?;
+        Ok(compare_trial(view, plain, &run(&image)?))
+    });
+    let mut out: Vec<Tried> = cands
+        .iter()
+        .map(|&c| Tried {
             cand: c.clone(),
             alone: Vec::new(),
             best: None,
             partners: Vec::new(),
-        };
-        let all = widen_values(c);
-        for &v in &all[all.len().saturating_sub(values)..] {
-            let image = patch(raw, c.operand, &operand_bytes(c.width, v))?;
-            let tr = compare_trial(view, plain, &run(&image)?);
-            log(&trial_line("alone", c, v, &tr));
-            if tr.keeper()
-                && t.best
-                    .as_ref()
-                    .is_none_or(|b| reach_sum(&tr) > reach_sum(&b.1))
-            {
-                t.best = Some((v, tr.clone()));
-            }
-            t.alone.push((v, tr));
+        })
+        .collect();
+    for (&(i, v), tr) in jobs.iter().zip(done) {
+        let tr = tr?;
+        log(&trial_line("alone", cands[i], v, &tr));
+        let t = &mut out[i];
+        if tr.keeper()
+            && t.best
+                .as_ref()
+                .is_none_or(|b| reach_sum(&tr) > reach_sum(&b.1))
+        {
+            t.best = Some((v, tr.clone()));
         }
-        out.push(t);
+        t.alone.push((v, tr));
     }
     // Groups. Some constants only act together: an activation window wider
     // than the cull distance is removed again at once. So the candidates that
@@ -314,8 +381,10 @@ pub fn try_candidates(
         ));
         if full.keeper() {
             let mut essential: Vec<usize> = Vec::new();
-            for &(i, _) in &members {
-                let without = play(Some(i))?;
+            let idx: Vec<usize> = members.iter().map(|m| m.0).collect();
+            let withouts = par_map(&idx, &|&i| play(Some(i)));
+            for (&i, without) in idx.iter().zip(withouts) {
+                let without = without?;
                 let need = !without.keeper() || reach_sum(&without) + MIN_GAIN <= reach_sum(&full);
                 log(&format!(
                     "TRIAL leave-out    rom {:#07x} reach R{} L{} keeper {} essential {need}",
@@ -403,21 +472,7 @@ pub fn rows_toml(
         else {
             continue;
         };
-        let name = recipe
-            .functions
-            .iter()
-            .find(|r| r.shape_hash == f.shape_hash && r.exact_hash == Some(f.byte_hash))
-            .map(|r| r.name.clone())
-            .or_else(|| named.iter().find(|n| n.0 == fi).map(|n| n.1.clone()))
-            .unwrap_or_else(|| {
-                let n = format!("wide_fn_{:x}", f.entry_cpu);
-                fns.push_str(&format!(
-                    "[[function]]\nname = \"{n}\"\nshape_hash = \"{:#x}\"\nexact_hash = \"{:#x}\"\naddress_hint = {:#x}\nhooks = []\ngrade = \"observed\"\nsource = \"observed: the atlas function holding a widescreen finder site ({what}); W38-04\"\n\n",
-                    f.shape_hash, f.byte_hash, f.entry_cpu
-                ));
-                named.push((fi, n.clone()));
-                n
-            });
+        let name = function_name(atlas, recipe, fi, f, &mut fns, &mut named, what);
         let grade = t.grade();
         let (mod_name, how) = if grade == Grade::Confirmed {
             (
@@ -452,4 +507,315 @@ pub fn rows_toml(
         }
     }
     format!("{fns}{rows}")
+}
+
+/// The recipe's name for atlas function `f` (`fi`), or a new `[[function]]`
+/// block appended to `fns` named by its entry address.
+fn function_name(
+    atlas: &Atlas,
+    recipe: &Recipe,
+    fi: u32,
+    f: &rf_rebuild::Function,
+    fns: &mut String,
+    named: &mut Vec<(u32, String)>,
+    what: &str,
+) -> String {
+    let _ = atlas;
+    recipe
+        .functions
+        .iter()
+        .find(|r| r.shape_hash == f.shape_hash && r.exact_hash == Some(f.byte_hash))
+        .map(|r| r.name.clone())
+        .or_else(|| named.iter().find(|n| n.0 == fi).map(|n| n.1.clone()))
+        .unwrap_or_else(|| {
+            let n = format!("wide_fn_{:x}", f.entry_cpu);
+            fns.push_str(&format!(
+                "[[function]]\nname = \"{n}\"\nshape_hash = \"{:#x}\"\nexact_hash = \"{:#x}\"\naddress_hint = {:#x}\nhooks = []\ngrade = \"observed\"\nsource = \"observed: the atlas function holding a widescreen finder site ({what}); W38-04\"\n\n",
+                f.shape_hash, f.byte_hash, f.entry_cpu
+            ));
+            named.push((fi, n.clone()));
+            n
+        })
+}
+
+// ---------------------------------------------------------------------------
+// HUD anchors (W38-04b).
+// ---------------------------------------------------------------------------
+
+use rf_rebuild::widescreen::{compare_hud, HudTrial};
+
+/// One HUD-anchor candidate and what moving its byte did.
+#[derive(Debug, Clone)]
+pub struct HudTried {
+    pub cand: Candidate,
+    /// The byte's value in the image (found by patching, not by reading a
+    /// header layout).
+    pub original: Option<u8>,
+    /// Index of the sprite byte (offset in the shadow buffer).
+    pub sprite_byte: Option<usize>,
+    /// The byte is the sprite's x coordinate (the only one widescreen moves).
+    pub is_x: bool,
+    pub trials: Vec<(u8, HudTrial)>,
+}
+
+impl HudTried {
+    /// Kept: an x coordinate whose move is a lockstep keeper.
+    #[must_use]
+    pub fn kept(&self) -> Option<&(u8, HudTrial)> {
+        if self.is_x {
+            self.trials.iter().find(|t| t.1.keeper())
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn grade(&self) -> Grade {
+        if self.kept().is_some() {
+            Grade::Confirmed
+        } else {
+            Grade::Candidate
+        }
+    }
+
+    /// Why this is not a keeper (empty for a keeper).
+    #[must_use]
+    pub fn why_not(&self) -> String {
+        if self.kept().is_some() {
+            return String::new();
+        }
+        if !self.is_x {
+            return "a vertical coordinate: widescreen does not move it".to_string();
+        }
+        match self.trials.first() {
+            Some(t) => t.1.why_not().to_string(),
+            None => "no wider value could be written".to_string(),
+        }
+    }
+}
+
+/// The image byte at `at`, read through `patch` (two probe writes differ
+/// exactly where the byte sits in the image).
+fn image_byte(raw: &[u8], at: u32, patch: PatchFn<'_>) -> Result<Option<u8>, String> {
+    let a = patch(raw, at, &[0x00])?;
+    let b = patch(raw, at, &[0xFF])?;
+    Ok(a.iter()
+        .zip(&b)
+        .position(|(x, y)| x != y)
+        .and_then(|i| raw.get(i).copied()))
+}
+
+/// Move each HUD-anchor candidate's byte by 16 pixels (up, or down when it
+/// would pass 255) and compare the run with the unmodified one.
+///
+/// `shadow` is the OAM-shadow RAM index, `ram_base` what a watch address
+/// subtracts to, `x_at` the byte of a 4-byte sprite entry that is x (NES 3,
+/// SNES 0).
+///
+/// # Errors
+/// A patch or a run fails.
+pub fn try_hud(
+    setup: &TrialSetup<'_>,
+    cands: &[&Candidate],
+    shadow: usize,
+    x_at: usize,
+    log: &mut dyn FnMut(&str),
+) -> Result<Vec<HudTried>, String> {
+    let TrialSetup {
+        raw,
+        view,
+        plain,
+        patch,
+        run,
+        ..
+    } = *setup;
+    let mut out = Vec::new();
+    for &c in cands.iter().filter(|c| c.kind == Kind::HudAnchor) {
+        let target = c
+            .hud_ram
+            .map(|a| a.wrapping_sub(view.ram_base) as usize)
+            .filter(|&t| t >= shadow);
+        let original = image_byte(raw, c.operand, patch)?;
+        let mut t = HudTried {
+            cand: c.clone(),
+            original,
+            sprite_byte: target.map(|t| t - shadow),
+            is_x: target.is_some_and(|t| (t - shadow) % 4 == x_at),
+            trials: Vec::new(),
+        };
+        if let (Some(target), Some(o)) = (target, original) {
+            let v = if o <= 0xEF { o + 16 } else { o - 16 };
+            let tr = compare_hud(plain, &run(&patch(raw, c.operand, &[v])?)?, target, shadow);
+            log(&format!(
+                "TRIAL hud          rom {:#07x} byte of sprite entry +{} {o:#04x}->{v:#04x} x {} moved {} first {:?} delta {:?} consistent {} other ram {} first other {:?} oam {} cam {} keeper {} {}",
+                c.operand,
+                (target - shadow) % 4,
+                t.is_x,
+                tr.moved,
+                tr.first_moved,
+                tr.delta,
+                tr.consistent,
+                tr.other_ram,
+                tr.first_other,
+                tr.other_oam,
+                tr.camera,
+                tr.keeper(),
+                tr.why_not()
+            ));
+            t.trials.push((v, tr));
+        }
+        out.push(t);
+    }
+    Ok(out)
+}
+
+/// `[[patch]]` rows for the HUD candidates whose source is an instruction
+/// operand (a table byte is not inside any atlas function, so no row can place
+/// it). A keeper goes in `keep_mod` as `confirmed`; the rest in `cand_mod` as
+/// `candidate`.
+#[must_use]
+pub fn hud_rows_toml(
+    atlas: &Atlas,
+    recipe: &Recipe,
+    tried: &[HudTried],
+    keep_mod: &str,
+    cand_mod: &str,
+    skip: &[u32],
+    what: &str,
+) -> String {
+    let mut fns = String::new();
+    let mut rows = String::new();
+    let mut named: Vec<(u32, String)> = Vec::new();
+    for t in tried.iter().filter(|t| !skip.contains(&t.cand.operand)) {
+        let Some((fi, idx)) = locate(atlas, t.cand.operand) else {
+            continue;
+        };
+        let (Some(f), Some(o)) = (atlas.functions.get(fi as usize), t.original) else {
+            continue;
+        };
+        let name = function_name(atlas, recipe, fi, f, &mut fns, &mut named, what);
+        let (grade, v, mod_name, how) = match t.kept() {
+            Some((v, _)) => (
+                Grade::Confirmed,
+                *v,
+                keep_mod,
+                "lockstep keeper: only the sprite's own coordinate changes".to_string(),
+            ),
+            None => (
+                Grade::Candidate,
+                t.trials.first().map_or(o, |x| x.0),
+                cand_mod,
+                format!(
+                    "finder candidate, not kept by a lockstep trial: {}",
+                    t.why_not()
+                ),
+            ),
+        };
+        rows.push_str(&format!(
+            "[[patch]]\nname = \"wide-hud-anchor-{:x}\"\nmod = \"{mod_name}\"\nfunction = \"{name}\"\noffset = {idx}\nvalue = {v:#04x}\ngrade = \"{}\"\nsource = \"observed: HUD sprite coordinate stored from an immediate (was {o:#x}), confidence {} {}; {how}\"\n\n",
+            t.cand.operand,
+            grade.as_str(),
+            t.cand.band.name(),
+            t.cand.score,
+        ));
+    }
+    format!("{fns}{rows}")
+}
+
+// ---------------------------------------------------------------------------
+// Window pairs (W38-04b).
+// ---------------------------------------------------------------------------
+
+use rf_rebuild::widescreen::WindowPair;
+
+/// Try each `adc #lo` / `cmp #hi` window pair widened by each of `widths`
+/// (both constants together), and return the pair as two [`Tried`]s (adc,
+/// then cmp). A width whose trial is a keeper keeps both constants, each
+/// naming the other as its partner; the widest keeper wins.
+///
+/// # Errors
+/// A patch or a run fails.
+pub fn try_windows(
+    setup: &TrialSetup<'_>,
+    pairs: &[WindowPair],
+    widths: &[u16],
+    log: &mut dyn FnMut(&str),
+) -> Result<Vec<Tried>, String> {
+    let TrialSetup {
+        raw,
+        view,
+        plain,
+        patch,
+        run,
+        ..
+    } = *setup;
+    let jobs: Vec<(usize, u16)> = (0..pairs.len())
+        .flat_map(|i| widths.iter().map(move |&w| (i, w)))
+        .filter(|&(i, w)| pairs[i].widened(w).is_some())
+        .collect();
+    let done = par_map(&jobs, &|&(i, w)| -> Result<Trial, String> {
+        let pair = &pairs[i];
+        let (lo, hi) = pair.widened(w).ok_or("past 16 bits")?;
+        let image = patch(raw, pair.adc.operand, &operand_bytes(2, lo))?;
+        let image = patch(&image, pair.cmp.operand, &operand_bytes(2, hi))?;
+        Ok(compare_trial(view, plain, &run(&image)?))
+    });
+    let mut out = Vec::new();
+    for (pi, pair) in pairs.iter().enumerate() {
+        let mut adc = Tried {
+            cand: pair.adc.clone(),
+            alone: Vec::new(),
+            best: None,
+            partners: Vec::new(),
+        };
+        let mut cmp = Tried {
+            cand: pair.cmp.clone(),
+            alone: Vec::new(),
+            best: None,
+            partners: Vec::new(),
+        };
+        for (&(i, w), tr) in jobs.iter().zip(&done) {
+            if i != pi {
+                continue;
+            }
+            let tr = tr.clone()?;
+            let (lo, hi) = pair.widened(w).ok_or("past 16 bits")?;
+            log(&format!(
+                "TRIAL window       adc rom {:#07x} {:#06x}->{lo:#06x} + cmp rom {:#07x} {:#06x}->{hi:#06x} (+{w:#x} each side) first {:?} off {} on {} other {} oam {} cam {} visible {:?} reach R{} L{} keeper {} {}",
+                pair.adc.operand,
+                pair.adc.imm,
+                pair.cmp.operand,
+                pair.cmp.imm,
+                tr.first.as_ref().map(|d| d.frame),
+                tr.first.as_ref().map_or(0, |d| d.off_screen.len()),
+                tr.first.as_ref().map_or(0, |d| d.on_screen.len()),
+                tr.first.as_ref().map_or(0, |d| d.bookkeeping.len()),
+                tr.first.as_ref().is_some_and(|d| d.oam),
+                tr.first.as_ref().is_some_and(|d| d.camera),
+                tr.visible_at,
+                tr.gain_right,
+                tr.gain_left,
+                tr.keeper(),
+                tr.why_not()
+            ));
+            if tr.keeper()
+                && adc
+                    .best
+                    .as_ref()
+                    .is_none_or(|b| reach_sum(&tr) > reach_sum(&b.1))
+            {
+                adc.best = Some((lo, tr.clone()));
+                cmp.best = Some((hi, tr.clone()));
+            }
+            adc.alone.push((lo, tr.clone()));
+            cmp.alone.push((hi, tr));
+        }
+        if adc.best.is_some() {
+            adc.partners = vec![pair.cmp.operand];
+            cmp.partners = vec![pair.adc.operand];
+        }
+        out.push(adc);
+        out.push(cmp);
+    }
+    Ok(out)
 }
