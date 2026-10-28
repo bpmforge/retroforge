@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use rf_core_api::{CoreEvent, CoreSink, InputFrame, PpuPixel};
 use rf_input::SnesButton;
+use rf_snes::core::SnesCore;
 
 pub const FILE: &str = "Super Metroid (Japan, USA) (En,Ja).zip";
 pub const RAM_BASE: u32 = 0x7E_0000;
@@ -214,4 +215,48 @@ pub fn write_bmp(path: &std::path::Path, shot: &Shot, cgram: &[u8]) {
         out.resize(start + row, 0);
     }
     std::fs::write(path, out).expect("writes the dump");
+}
+
+/// The escape countdown (W38-06b). The pinned script of W38-06 never got off
+/// the space station: its countdown ran out (the screen showed the game-over
+/// text; the finders had watched the station's first rooms, not the planet).
+/// Two bytes of work RAM hold the countdown as BCD (hundredths and seconds,
+/// found by watching which words only ever decrease while the timer is on
+/// screen: $945 and $946); while it runs, the seconds byte is held at its
+/// start value, identically in every run (a per-frame hook on the core, as the
+/// SMW movie resets were). Only the play before the planet is helped; nothing
+/// is written after [`Freeze::UNTIL`].
+pub struct Freeze {
+    armed: bool,
+}
+
+impl Freeze {
+    pub const SECONDS: usize = 0x946;
+    /// Window of the script in which the countdown is held: from the earliest
+    /// frame it could start to when the escape scene has played out.
+    pub const FROM: usize = 16_000;
+    pub const UNTIL: usize = 21_000 + 9_000;
+
+    pub fn new() -> Self {
+        Self { armed: false }
+    }
+
+    /// A hold that is already running (a machine restored mid-countdown).
+    pub fn running() -> Self {
+        Self { armed: true }
+    }
+
+    /// Call before running script frame `f`.
+    pub fn before(&mut self, f: usize, core: &mut SnesCore) {
+        if !(Self::FROM..Self::UNTIL).contains(&f) {
+            return;
+        }
+        let w = &mut core.system_mut().bus.wram;
+        if !self.armed && w[Self::SECONDS] == 0x59 {
+            self.armed = true;
+        }
+        if self.armed && w[Self::SECONDS] < 0x40 {
+            w[Self::SECONDS] = 0x59;
+        }
+    }
 }
