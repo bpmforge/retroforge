@@ -1,0 +1,36 @@
+# SAMPLE ONLY. A made-up engine ("blocksy") for exercising the recipe-hub
+# validator. Not a real game, not a real submission, no game content.
+# The hashes are arbitrary numbers.
+
+[recipe]
+format = 1
+id = "sample-blocksy"
+engine = "blocksy"
+
+[[function]]
+name = "frame_tick"
+shape_hash = "0x1111222233334444"
+exact_hash = "0x5555666677778888"
+address_hint = 0x8100
+entry = "nmi"
+insn_count = 12
+hooks = ["entry", "exit"]
+grade = "observed"
+source = "observed: the atlas function the NMI vector targets in a sample run"
+
+[[ram]]
+addr = 0x0010
+width = 1
+name = "lives"
+grade = "candidate"
+source = "observed: value fell by one at each sample failure"
+
+[[object_table]]
+name = "blocks"
+base = 0x0200
+slots = 8
+stride = 4
+x_lo = 0
+y = 1
+grade = "candidate"
+source = "finder: object-table finder, 8 slots"
