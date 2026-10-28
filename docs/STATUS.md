@@ -4992,3 +4992,13 @@ stories, 10 decisions).
   the per-frame glyph uploads go to $7E80+ (tile $1D0+). So the GSU program
   that builds the text-box tilemap is the suspect. No reference emulator
   runs headless here (Mesen needs a window server). Workspace: **3728 passing**; `scout::tests::an_accepted_scout_remembers_its_rung_...` (NES, 30 s bound) failed under load twice and passes alone.
+- **W39-07 — Shader presets** (2026-10-28). Named presets are chains of
+  first-party shader stages with clamped values (`shader_preset.rs`): five
+  first-party ones (Consumer CRT, PVM, Sharp LCD, Smooth upscaler, Smoothed
+  CRT) and player presets saved from the current tuning. Saved through the
+  existing shader setting as `preset:<id>`, so per-game layering is
+  unchanged; presentation only, the same with Rebuild on or off. By-eye pass
+  over a synthetic test card recorded (all five). Quick Menu preview tiles
+  still list single shaders only. Workspace: **3734 passing**;
+  `ui_smoke` (load-time budget) and `w36_05_hooks` failed under load in
+  the gate and pass alone.
