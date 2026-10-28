@@ -455,7 +455,7 @@ mod tests {
         assert_eq!((rep.objects_composed, rep.lone_tiles), (1, 0));
         // The stub tints by whole-image content, so a tile upscaled with
         // its neighbour differs from the same tile upscaled alone.
-        let (alone, _) = build(&[a.clone()], &[], &Stub::new()).unwrap();
+        let (alone, _) = build(std::slice::from_ref(&a), &[], &Stub::new()).unwrap();
         assert_ne!(set.get(&a.asset_hash), alone.get(&a.asset_hash));
         // Both tiles of the object share the one tint (seams match).
         let ta = set.get(&a.asset_hash).unwrap();
@@ -498,7 +498,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            build(&[a.clone()], &[unknown], &Stub::new()),
+            build(std::slice::from_ref(&a), &[unknown], &Stub::new()),
             Err(HdPassError::UnknownCell { .. })
         ));
         let huge = ObjectGroup {
