@@ -30,11 +30,13 @@
 //! LoROM/HiROM cartridge map, which is fixed, so no bank-switch recording is
 //! needed; boards that switch ROM banks (SA-1, S-DD1) are outside this map and place nothing statically in their switched banks (W37-02).
 
+pub mod sa1;
+
 use rf_cart::SnesMapMode;
 use rf_core_api::coverage::CoverageLog;
 pub use rf_rebuild::{
-    build_atlas as build_generic_atlas, entry, Atlas, Provenance, CACHE_ASSET, CACHE_PRODUCER,
-    CACHE_SETTINGS,
+    build_atlas as build_generic_atlas, entry, Atlas, Provenance, CACHE_ASSET, CACHE_ASSET_SA1,
+    CACHE_PRODUCER, CACHE_SETTINGS,
 };
 use rf_rebuild::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 
@@ -89,6 +91,22 @@ pub fn build_atlas_from_image(raw: &[u8], log: &CoverageLog) -> Result<Atlas, rf
         header.coprocessor,
         log,
     ))
+}
+
+/// The atlas of the SA-1's 65816 from a recording of it
+/// (`SnesCore::take_sa1_coverage`; ticket W40-03). The same builder and ISA
+/// as [`build_atlas_from_image`], a separate value: it is cached under
+/// [`CACHE_ASSET_SA1`], not the S-CPU's key. The vectors are not seeded (the
+/// SA-1's live in `$2203-$2208`, not `$FFxx`) and the SA-1's bank windows
+/// are not placed statically, so the atlas holds what the recording saw.
+///
+/// # Errors
+/// Whatever `rf-cart` rejects.
+pub fn build_sa1_atlas_from_image(
+    raw: &[u8],
+    log: &CoverageLog,
+) -> Result<Atlas, rf_cart::CartError> {
+    build_atlas_from_image(raw, log)
 }
 
 /// [`build_atlas_from_image`] with the hardware vectors added as seeds

@@ -1,0 +1,9 @@
+# Sample FACT plugin (ticket W39-00): adds recipe rows, changes nothing at run
+# time. A fact plugin may not hold any acting capability.
+[plugin]
+id = "sample-fact-actor-names"
+version = "0.1.0"
+api = "0.1"
+kind = "fact"
+license = "MIT OR Apache-2.0"
+provenance = "first-party sample, authored for RetroForge ticket W39-00"

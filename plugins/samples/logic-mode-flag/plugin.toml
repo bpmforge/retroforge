@@ -1,0 +1,15 @@
+# Sample LOGIC plugin (ticket W39-00). It changes game state, so it is enabled
+# only after shadow lockstep has run the game with it loaded in Original mode
+# and found no divergence (docs/design/REBUILD_LAB.md section 9).
+[plugin]
+id = "sample-logic-mode-flag"
+version = "0.1.0"
+api = "0.1"
+kind = "logic"
+license = "MIT OR Apache-2.0"
+provenance = "first-party sample, authored for RetroForge ticket W39-00"
+
+[capabilities]
+function_hooks = true
+read_memory = true
+write_memory = true

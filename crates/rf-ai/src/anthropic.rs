@@ -58,7 +58,8 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
-const SYSTEM: &str = "You name functions of a retro game's machine code from how they behave. \
+pub(crate) const SYSTEM: &str =
+    "You name functions of a retro game's machine code from how they behave. \
 You are given only measurements taken while the game ran: how often each function is called, \
 which hardware registers it touches, which RAM it reads and writes, who calls it. You are not \
 given any code. For each function id propose a short snake_case name (3 to 48 characters, \
@@ -228,7 +229,7 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    fn delay(&self, attempt: u32, retry_after: Option<u64>) -> Duration {
+    pub(crate) fn delay(&self, attempt: u32, retry_after: Option<u64>) -> Duration {
         let exp = self.base.saturating_mul(1u32 << attempt.min(16));
         retry_after.map_or(exp, Duration::from_secs).min(self.cap)
     }

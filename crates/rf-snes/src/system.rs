@@ -136,6 +136,9 @@ pub struct SnesSystem {
     /// restored, and it only ever peeks, so an installed atlas runs
     /// bit-identically. See [`crate::executor`].
     pub(crate) rebuild: Option<Box<rf_rebuild::RebuildExec>>,
+    /// Ticket W40-03: the same two for the SA-1's 65816, each keyed apart
+    /// from the S-CPU's. See [`crate::rebuild::sa1`].
+    pub(crate) sa1_obs: crate::rebuild::sa1::Sa1Obs,
 }
 
 impl SnesSystem {
@@ -198,6 +201,7 @@ impl SnesSystem {
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
             rebuild: None,
+            sa1_obs: crate::rebuild::sa1::Sa1Obs::default(),
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -335,6 +339,7 @@ impl SnesSystem {
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
             rebuild: None,
+            sa1_obs: crate::rebuild::sa1::Sa1Obs::default(),
         };
         system.reset();
         system
@@ -803,7 +808,7 @@ impl SnesSystem {
                 // GSU's below; the timer above stays on the real master clock.
                 sa1.credit += master_this_step * self.sa1_clock_multiplier;
                 while sa1.credit > 0 {
-                    match sa1.step(&bus.rom, rom_contended, bwram_contended) {
+                    match sa1.step(&bus.rom, rom_contended, bwram_contended, &mut self.sa1_obs) {
                         Ok(cost) => sa1.credit = sa1.credit.saturating_sub(cost),
                         Err(_opcode) => break,
                     }
