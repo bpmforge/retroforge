@@ -2143,7 +2143,10 @@ impl EmuStepper {
         if !pokes.is_empty() {
             // Bounded: a fixed instruction count.
             for _ in 0..POKE_AFTER {
-                if self.advance(rf_core_api::Step::Instruction, sink).frame_complete {
+                if self
+                    .advance(rf_core_api::Step::Instruction, sink)
+                    .frame_complete
+                {
                     // A frame boundary inside the first instructions: nothing more to slice.
                     return 1;
                 }
