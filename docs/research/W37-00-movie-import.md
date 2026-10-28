@@ -178,12 +178,30 @@ did, on the same multicart with the same plan.
   difference is left in loads. Candidates, unverified: the SPC700 clock
   (we use 21 master cycles per SPC cycle, the nominal 1.024 MHz; the
   reference's own state reports ~1.0253 MHz, the commonly measured
-  32,040 Hz DSP rate), DMA/HDMA cost, or the refresh position. From there
+  32,040 Hz DSP rate, which the audio path already notes it treats as
+  32 kHz), DMA/HDMA cost, or the refresh position. From there
   the run takes a different route (translevel `$28` vs `$2A`), so the
   heuristic's "first life lost at 4,616" is downstream of this frame.
 - **SMB warpless, plan frame 28,322** (in 4-2): ours has a lag frame the
   reference does not (frame counter `$09` stalls one frame). An NES CPU,
   OAM/DMC DMA or NMI-timing difference in a busy frame; not traced yet.
+
+### The W37-00 test, rerun with the three fixes
+
+| Movie | Before (W37-00) | After (W37-00b) | PRG coverage, movie alone | Atlas functions with the movie |
+|---|---|---|---|---|
+| SMB warpless | lives dropped at 1,016, 1-1 only | lives dropped at 29,009; 17 levels entered (1-1 to 4-2) | 16.5% to 32.1% | 389 to 466 |
+| SMB with warps | lives dropped at 4,955 | **reached the ending** (17,867 of 17,868 frames, 8-4 won) | 21.7% to 28.0% | 412 to 432 |
+| SMW warps (lsmv) | no progress at 5,980; first life lost 4,618 | unchanged: same frames, same 3 translevels | 4.9% | 791 |
+| SMW 96 exits (smv) | title range at 17,978; first life lost 5,209 | unchanged | 5.6% | 813 |
+
+Both SMB alignments still win at offset -1 after the menu Start. The SMW
+heuristic numbers did not move: the sweep still picks idle offset 3 (lsmv)
+and 4 (smv), and the run still leaves the movie on the same route. The SMW
+movies were made on other emulators that the reference does not replay to
+the end either, so the SMW acceptance is met by the pinned divergence
+above (frame 1,326, after two named and fixed SNES timing behaviours), not
+by a longer replay.
 
 ### The multicart question (acceptance line 2)
 
