@@ -75,22 +75,28 @@ fn coverage(raw: &[u8]) -> rf_core_api::coverage::CoverageLog {
     core.take_coverage().expect("armed")
 }
 
-fn trace_of(raw: &[u8]) -> Trace {
+/// The trace, and the script frame each of its frames is (a frame in which the
+/// OAM never changed leaves no entry).
+fn trace_of(raw: &[u8]) -> (Trace, Vec<usize>) {
     let ins = inputs_of(&script());
     let from = play_from();
     let mut core = SnesCore::load(raw).expect("loads");
     core.reset(ResetKind::Hard);
     let mut rec = Recorder::new(Console::Snes, false);
+    let mut frame_of = Vec::new();
     for (f, input) in ins.iter().enumerate() {
         if f >= from {
             let cap = snes_step_frame(&mut core, input);
+            if cap.is_some() {
+                frame_of.push(f);
+            }
             rec.push(cap, snes_cam(&core));
         } else {
             core.system_mut().bus.joypads.ports[0] = input.ports[0];
             core.run_frame(input, &mut NullSink);
         }
     }
-    rec.trace
+    (rec.trace, frame_of)
 }
 
 /// A 16-bit word of work RAM that lines up with the picture.
@@ -108,12 +114,19 @@ struct Word {
 /// Words that follow the picture: for each candidate address the constant that
 /// puts the word's on-screen position on some sprite in the most frames. Words
 /// that never move, or move in nearly every frame (counters), are skipped.
-fn position_words(t: &Trace, y: bool) -> Vec<Word> {
+fn position_words(
+    t: &Trace,
+    frame_of: &[usize],
+    y: bool,
+    skip: std::ops::Range<usize>,
+) -> Vec<Word> {
     let n = t.frames.len();
     let r = t.frames[0].ram.len();
     let word = |f: &Frame, a: usize| u16::from(f.ram[a]) | u16::from(f.ram[a + 1]) << 8;
+    let cam_of = |f: &Frame| if y { f.cam_y } else { f.cam_x };
+    let coord = |s: &rf_rebuild::objtable::Sprite| if y { s.y } else { s.x };
     let mut out = Vec::new();
-    for a in 0..r - 1 {
+    for a in (0..r - 1).filter(|a| !skip.contains(a) && !skip.contains(&(a + 1))) {
         let moved = t
             .frames
             .windows(2)
@@ -122,40 +135,85 @@ fn position_words(t: &Trace, y: bool) -> Vec<Word> {
         if moved < 100 || moved * 10 > n * 6 {
             continue;
         }
-        // votes[d]: frames in which some sprite sits d above the word's
-        // screen position.
+        // The scroll itself (or a copy of it) is not a position on the screen:
+        // the word minus the scroll must take several values.
+        let rel: BTreeSet<u16> = t
+            .frames
+            .iter()
+            .map(|f| word(f, a).wrapping_sub(cam_of(f)))
+            .collect();
+        if rel.len() < 8 {
+            continue;
+        }
+        // Motion match: in consecutive frames in which the word moved a few
+        // pixels and the scroll did not, a sprite (the same OAM entry) moved by
+        // the same amount. A pose change moves the sprite entries about, so
+        // this is a share, not all.
+        let (mut pairs, mut hit) = (0u32, 0u32);
+        let mut steps: BTreeSet<i16> = BTreeSet::new();
+        for (i, w) in t.frames.windows(2).enumerate() {
+            if frame_of[i + 1] != frame_of[i] + 1 || cam_of(&w[0]) != cam_of(&w[1]) {
+                continue;
+            }
+            let dw = word(&w[1], a).wrapping_sub(word(&w[0], a)) as i16;
+            if dw == 0 || dw.abs() > 8 {
+                continue;
+            }
+            pairs += 1;
+            steps.insert(dw);
+            let moved_same = w[1].sprites.iter().any(|s1| {
+                w[0].sprites
+                    .iter()
+                    .any(|s0| s0.index == s1.index && i16::from(coord(s1).wrapping_sub(coord(s0)) as i8) == dw)
+            });
+            hit += u32::from(moved_same);
+        }
+        if pairs < 100 || steps.len() < 3 {
+            continue;
+        }
+        let share = f64::from(hit) / f64::from(pairs);
+        if share < 0.6 {
+            continue;
+        }
+        // The constant that puts the word's screen position on a sprite most.
         let mut votes = [0u32; 256];
         for f in &t.frames {
-            let cam = if y { f.cam_y } else { f.cam_x };
-            let screen = word(f, a).wrapping_sub(cam) as u8;
+            let screen = word(f, a).wrapping_sub(cam_of(f)) as u8;
             let mut seen = [false; 256];
             for s in &f.sprites {
-                let c = if y { s.y } else { s.x };
-                seen[usize::from(c.wrapping_sub(screen))] = true;
+                seen[usize::from(coord(s).wrapping_sub(screen))] = true;
             }
             for (v, s) in votes.iter_mut().zip(seen) {
                 *v += u32::from(s);
             }
         }
-        let (d, best) = votes
+        let d = votes
             .iter()
             .enumerate()
             .max_by_key(|(_, v)| **v)
-            .map(|(d, v)| (d, *v))
-            .unwrap_or((0, 0));
-        let share = f64::from(best) / n as f64;
-        if share >= 0.5 {
-            let delta = i32::from(d as u8 as i8);
-            out.push(Word {
-                addr: a,
-                share,
-                delta,
-                moved,
-            });
-        }
+            .map_or(0, |(d, _)| d);
+        out.push(Word {
+            addr: a,
+            share,
+            delta: i32::from(d as u8 as i8),
+            moved,
+        });
     }
     out.sort_by(|a, b| b.share.total_cmp(&a.share).then(b.moved.cmp(&a.moved)));
     out
+}
+
+/// The player's word: of the words whose motion matches a sprite's in at least
+/// 65% of the pairs, the one that moves in the most frames (the player moves
+/// whenever the pad is held; a copy or another object does not), the lowest
+/// address within 1% of the most.
+fn pick(ws: &[Word]) -> Word {
+    let ok: Vec<&Word> = ws.iter().filter(|w| w.share >= 0.65).collect();
+    let most = ok.iter().map(|w| w.moved).max().expect("a position word");
+    **ok.iter()
+        .filter(|w| w.moved * 100 >= most * 99)
+        .min_by_key(|w| w.addr)
+        .expect("one")
 }
 
 /// 16-bit words that change a few times, each time to a value that then stays:
@@ -171,12 +229,16 @@ fn room_words(t: &Trace) -> Vec<(usize, Vec<(usize, u16)>)> {
                 changes.push((i + 1, word(&w[1], a)));
             }
         }
+        if std::env::var("DBG_ADDR").is_ok_and(|v| usize::from_str_radix(&v, 16) == Ok(a)) {
+            println!("DBG {a:#x}: {} changes {:x?}", changes.len(), &changes[..changes.len().min(40)]);
+        }
         // Few changes, each value held for a while, several distinct values.
+        let pointer_like = changes.iter().all(|c| c.1 >= 0x8000);
         let held = changes
             .windows(2)
             .all(|c| c[1].0 - c[0].0 >= 60 || c[1].0 - c[0].0 <= 4);
         let distinct: BTreeSet<u16> = changes.iter().map(|c| c.1).collect();
-        if (6..=80).contains(&changes.len()) && distinct.len() >= 5 && held {
+        if (6..=80).contains(&changes.len()) && distinct.len() >= 5 && held && pointer_like {
             out.push((a, changes));
         }
     }
@@ -300,12 +362,24 @@ fn writers(raw: &[u8], atlas: &Atlas, from: usize, addrs: &[u32]) -> WriteWatch 
     w
 }
 
-fn observe_data(raw: &[u8], atlas: &Atlas, from: usize, to: usize) -> DataFacts {
+/// One observed pass; `windows` are (key, from, to) frame ranges, in order and
+/// not overlapping. The facts of each are taken when its range ends.
+fn observe_windows(
+    raw: &[u8],
+    atlas: &Atlas,
+    windows: &[(u32, usize, usize)],
+) -> Vec<(u32, DataFacts)> {
     let mut d = SnesDriver::new(raw, atlas).expect("loads");
-    for (f, input) in inputs_of(&script()).iter().enumerate().take(to) {
-        d.frame(input, f >= from).expect("frame");
+    let mut out = Vec::new();
+    let last = windows.last().map_or(0, |w| w.2);
+    for (f, input) in inputs_of(&script()).iter().enumerate().take(last) {
+        let open = windows.iter().find(|w| (w.1..w.2).contains(&f));
+        d.frame(input, open.is_some()).expect("frame");
+        if let Some(w) = windows.iter().find(|w| w.2 == f + 1) {
+            out.push((w.0, d.take_facts()));
+        }
     }
-    d.take_facts()
+    out
 }
 
 fn function_row(
@@ -342,13 +416,7 @@ fn super_metroid_finders_and_recipe() {
     let ins = inputs_of(&script());
     let from = play_from();
     let t0 = std::time::Instant::now();
-    let atlas = build_snes_atlas(&raw, &coverage(&raw)).expect("atlas");
-    println!(
-        "atlas: {} functions in {:?}",
-        atlas.functions.len(),
-        t0.elapsed()
-    );
-    let trace = trace_of(&raw);
+    let (trace, frame_of) = trace_of(&raw);
     println!("trace: {} frames in {:?}", trace.frames.len(), t0.elapsed());
 
     // Stage 2: table, camera, position words.
@@ -362,21 +430,30 @@ fn super_metroid_finders_and_recipe() {
     }
     let cam = find_camera(&trace).expect("a camera");
     println!("camera lo {:#x} hi {:?}", cam.lo, cam.hi);
-    let xs = position_words(&trace, false);
-    let ys = position_words(&trace, true);
-    for w in xs.iter().take(6) {
+    // The sprite buffer (a RAM copy of the OAM) is not a position either.
+    let shadow_at = oam_shadow(&trace).unwrap_or(0);
+    let shadow = shadow_at..shadow_at + 544;
+    let xs = position_words(&trace, &frame_of, false, shadow.clone());
+    let ys = position_words(&trace, &frame_of, true, shadow);
+    for w in xs.iter().take(10) {
         println!(
-            "XWORD {:#x} share {:.2} delta {} moved {}",
+            "XWORD {:#x} motion share {:.2} delta {} moved {}",
             w.addr, w.share, w.delta, w.moved
         );
     }
-    for w in ys.iter().take(6) {
+    for w in ys.iter().take(10) {
         println!(
-            "YWORD {:#x} share {:.2} delta {} moved {}",
+            "YWORD {:#x} motion share {:.2} delta {} moved {}",
             w.addr, w.share, w.delta, w.moved
         );
     }
-    let rooms = room_words(&trace);
+    let mut rooms = room_words(&trace);
+    rooms.sort_by_key(|(a, ch)| {
+        (
+            std::cmp::Reverse(ch.iter().map(|c| c.1).collect::<BTreeSet<_>>().len()),
+            *a,
+        )
+    });
     for (a, ch) in rooms.iter().take(12) {
         println!(
             "ROOM-WORD candidate {a:#x}: {} changes, e.g. {:x?}",
@@ -384,7 +461,19 @@ fn super_metroid_finders_and_recipe() {
             &ch[..4.min(ch.len())]
         );
     }
-    let (px, py) = (xs[0].addr as u32, ys[0].addr as u32);
+    if skip("ATLAS") {
+        return;
+    }
+    let t1 = std::time::Instant::now();
+    let atlas = build_snes_atlas(&raw, &coverage(&raw)).expect("atlas");
+    println!(
+        "atlas: {} functions in {:?}",
+        atlas.functions.len(),
+        t1.elapsed()
+    );
+    let (xw, yw) = (pick(&xs), pick(&ys));
+    println!("PICK x {:#x} y {:#x}", xw.addr, yw.addr);
+    let (px, py) = (xw.addr as u32, yw.addr as u32);
     let cam_lo = cam.lo as u32;
     let mut watched: Vec<u32> = vec![px, px + 1, py, py + 1, cam_lo];
     watched.extend(cam.hi.map(|h| h as u32));
@@ -427,16 +516,30 @@ fn super_metroid_finders_and_recipe() {
     }
     let mut runs: Vec<(u32, DataFacts)> = Vec::new();
     if !skip("DATA") {
-        for &(f, v) in &settled {
-            let (a, b) = (from + f.saturating_sub(60), from + f + 200);
-            let facts = observe_data(&raw, &atlas, a, b.min(ins.len()));
-            println!(
-                "window room {v:#06x} frames {a}..{b}: {} sites, {} data reads",
-                facts.sites.len(),
-                facts.stats.data_reads
-            );
-            runs.push((u32::from(v), facts));
+        // Windows from 60 frames before each change to 200 after, cut where
+        // the next one starts so the passes never overlap.
+        let mut windows: Vec<(u32, usize, usize)> = settled
+            .iter()
+            .map(|&(f, v)| (
+                    u32::from(v),
+                    frame_of[f.saturating_sub(1)].saturating_sub(60),
+                    (frame_of[f] + 200).min(ins.len()),
+                ))
+            .collect();
+        for i in 1..windows.len() {
+            windows[i - 1].2 = windows[i - 1].2.min(windows[i].1);
         }
+        windows.retain(|w| w.2 > w.1);
+        let t = std::time::Instant::now();
+        runs = observe_windows(&raw, &atlas, &windows);
+        for (k, f) in &runs {
+            println!(
+                "window room {k:#06x}: {} sites, {} data reads",
+                f.sites.len(),
+                f.stats.data_reads
+            );
+        }
+        println!("observed {} windows in {:?}", runs.len(), t.elapsed());
     }
     let mut merged = DataFacts::default();
     for (_, f) in &runs {
@@ -497,7 +600,10 @@ fn super_metroid_finders_and_recipe() {
     }
 
     // Stage 5c: widescreen candidates and trials.
-    let table = found.first().map_or_else(
+    let table = found
+        .iter()
+        .find(|f| rf_rebuild::objtable::grade_of(f) == Grade::Observed)
+        .map_or_else(
         || ObjectTable {
             name: "samus".into(),
             base: px,
@@ -710,14 +816,17 @@ fn super_metroid_finders_and_recipe() {
         source,
         grade: Grade::Observed,
     };
-    recipe.ram.push(ram(px, 2, "player_x", format!("observed: minus the scroll and {} it equals a sprite's x in {:.0}% of the play's frames (the 16-bit position-word search of this test); {} frames in which it changed", xs[0].delta, xs[0].share * 100.0, xs[0].moved)));
-    recipe.ram.push(ram(py, 2, "player_y", format!("observed: minus the scroll and {} it equals a sprite's y in {:.0}% of the play's frames; {} frames in which it changed", ys[0].delta, ys[0].share * 100.0, ys[0].moved)));
+    recipe.ram.push(ram(px, 2, "player_x", format!("observed: in {:.0}% of the consecutive frames in which it moved a few pixels and the scroll stood still, a sprite entry moved by the same amount (the 16-bit position-word search of this test); word minus scroll is {} below a sprite x; it changed in {} frames", xw.share * 100.0, -xw.delta, xw.moved)));
+    recipe.ram.push(ram(py, 2, "player_y", format!("observed: a sprite entry moved by the same amount in {:.0}% of the frames in which it moved a few pixels and the scroll stood still; word minus scroll is {} below a sprite y; it changed in {} frames", yw.share * 100.0, -yw.delta, yw.moved)));
     recipe.ram.push(ram(cam.lo as u32, 1, "camera_x_lo", "observed: equals the low byte of the BG1 horizontal scroll in nine frames of ten (W38-04 camera finder)".into()));
     if let Some(h) = cam.hi {
         recipe.ram.push(ram(h as u32, 1, "camera_x_hi", "observed: with the low byte it makes a 16-bit position that moves smoothly with the scroll".into()));
     }
     recipe.ram.push(ram(*rw as u32, 2, "room", format!("observed: a word that changed {} times in the play, each value held until the next door; the data windows are keyed by it", changes.len())));
-    if let Some(f) = found.first() {
+    if let Some(f) = found
+        .iter()
+        .find(|f| rf_rebuild::objtable::grade_of(f) == Grade::Observed)
+    {
         recipe.object_tables.push(to_row(
             f,
             rf_rebuild::objtable::grade_of(f),
