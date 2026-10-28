@@ -5259,3 +5259,17 @@ stories, 10 decisions).
   recipe (last-seen sprites only), Castlevania's candidate table does not line
   up with sprites, Mega Man 2's is read camera-relative. No recipe has a
   vertical camera row yet. Workspace: **3924 passing**, gate green.
+- **W39-01 — No-latency interpolation for recipe games** (2026-10-28).
+  When a recipe is loaded, each SNES frame carries a tick verdict from the
+  recipe's camera and player rows (`rf_enhance::extrapolation`): the newest
+  frame is shown at once and the in-between display frame is extrapolated
+  forward from it at the velocity just observed, instead of interpolating
+  between the last two frames. A scene cut, teleport or sharp velocity change
+  refuses extrapolation for that tick (the frame repeats). SMW: the first
+  changed Mario sprite after a Right press shows one arrival earlier than
+  W37-06's delayed path; pictures, all 128 KiB of WRAM and the frame count
+  are identical with it on or off over 900 frames; extrapolated frames have
+  36.5% of the wrong dots of repeating the current frame (3000 frames). Tick
+  facts are read at the frame boundary, not at the NMI hook (plain-core
+  sessions have no hook host). NES keeps the delayed path; SMW's recipe has no
+  object table yet. Workspace: **3943 passing**, gate green.

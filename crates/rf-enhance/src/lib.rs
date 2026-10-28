@@ -18,6 +18,7 @@ pub mod canvas;
 pub mod decode;
 pub mod distribution;
 pub mod experiments;
+pub mod extrapolation;
 pub mod hd_render;
 pub mod hdpack;
 pub mod heights;
