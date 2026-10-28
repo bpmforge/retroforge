@@ -5128,3 +5128,16 @@ stories, 10 decisions).
   MetalFX scaler held two `as_hal` guards at once (debug panic). Settings
   wiring of `MetalFxSetting::Temporal` is not done. Workspace: **3875
   passing**, gate green.
+- **W38-05 — Engine recipe: Zelda 1** (2026-10-28).
+  `profiles/nes/legend-of-zelda/recipe.toml`, every row sourced `observed:`
+  or `rule:` (a rows test rejects community-map provenance): the NMI as the
+  per-frame tick (13 926 of 13 930 watched writes inside it), player and
+  actor movers, scroll step, screen-index writers, 23 rule-named functions
+  (29 rows, all match the atlas), RAM player x/y, screen index, scroll x,
+  a 5-slot actor table (graded observed) and 61 candidate data regions.
+  Lockstep: 2800 frames (registration, first cave, four directions), zero
+  divergence on the interpreter and IR tiers with all 29 hooks live; at the
+  NMI exit Link's position equals end-of-frame position in 99.95% of 2070
+  frames. Widescreen: 14 candidates tried, no keepers; Zelda screen-flips,
+  so constant-widening cannot measure reach. Neighbour-screen margins are
+  W38-05b. Workspace: **3865 passing**, gate green.

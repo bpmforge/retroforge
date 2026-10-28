@@ -1,0 +1,157 @@
+# W38-05: widescreen finder rows for The Legend of Zelda, an OVERLAY on
+# recipe.toml (append this file's text to the recipe to load it, as for SMB).
+# Finder: crates/rf-rebuild/src/widescreen.rs; trials: w38_05_zelda_recipe.rs.
+# Every row is a candidate unless a lockstep trial kept it (see the grades).
+[[function]]
+name = "wide_fn_8506"
+shape_hash = "0x36b63d9a5f578428"
+exact_hash = "0xe722805d04765eba"
+address_hint = 0x8506
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[function]]
+name = "wide_fn_841e"
+shape_hash = "0x8c3ec8330d6ecd64"
+exact_hash = "0x97274246cf3b2be"
+address_hint = 0x841e
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[function]]
+name = "wide_fn_b000"
+shape_hash = "0x2ae85574c6deb804"
+exact_hash = "0xe3e975be00661337"
+address_hint = 0xb000
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[function]]
+name = "wide_fn_edf4"
+shape_hash = "0xc700093a1a1eaa70"
+exact_hash = "0x2dfb437fdcaa9dbb"
+address_hint = 0xedf4
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[function]]
+name = "wide_fn_fa3c"
+shape_hash = "0xae8fb565bcc1f510"
+exact_hash = "0x61bda6bb9c7cc049"
+address_hint = 0xfa3c
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[function]]
+name = "wide_fn_80d7"
+shape_hash = "0x25a9ba121dce650c"
+exact_hash = "0x28555012201399bd"
+address_hint = 0x80d7
+hooks = []
+grade = "observed"
+source = "observed: the atlas function holding a widescreen finder site (Zelda overworld play); W38-04"
+
+[[patch]]
+name = "wide-edge-test-14509"
+mod = "widescreen-candidates"
+function = "wide_fn_8506"
+offset = 3
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x16), confidence medium 65; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1451a"
+mod = "widescreen-candidates"
+function = "wide_fn_8506"
+offset = 20
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x21), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1f245"
+mod = "widescreen-candidates"
+function = "wide_fn_841e"
+offset = 20
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x6), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-edge-test-1f249"
+mod = "widescreen-candidates"
+function = "wide_fn_841e"
+offset = 24
+value = 0xff
+grade = "candidate"
+source = "observed: edge-test operand of an immediate cmp (was 0x5), confidence medium 60; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-position-trigger-1f268"
+mod = "widescreen-candidates"
+function = "wide_fn_841e"
+offset = 55
+value = 0xff
+grade = "candidate"
+source = "observed: position-trigger operand of an immediate cmp (was 0x5), confidence medium 50; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-position-trigger-1b418"
+mod = "widescreen-candidates"
+function = "wide_fn_b000"
+offset = 1048
+value = 0xff
+grade = "candidate"
+source = "observed: position-trigger operand of an immediate cmp (was 0xd), confidence low 40; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-camera-clamp-1e4fb"
+mod = "widescreen-candidates"
+function = "nmi"
+offset = 119
+value = 0xff
+grade = "candidate"
+source = "observed: camera-clamp operand of an immediate cmp (was 0xb), confidence low 40; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-position-trigger-1ee40"
+mod = "widescreen-candidates"
+function = "wide_fn_edf4"
+offset = 76
+value = 0xff
+grade = "candidate"
+source = "observed: position-trigger operand of an immediate cpy (was 0x10), confidence low 40; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-position-trigger-1fa47"
+mod = "widescreen-candidates"
+function = "wide_fn_fa3c"
+offset = 11
+value = 0xff
+grade = "candidate"
+source = "observed: position-trigger operand of an immediate cmp (was 0x10), confidence low 40; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-position-trigger-180e9"
+mod = "widescreen-candidates"
+function = "wide_fn_80d7"
+offset = 18
+value = 0xff
+grade = "candidate"
+source = "observed: position-trigger operand of an immediate cmp (was 0x9), confidence low 35; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-camera-clamp-1e4f3"
+mod = "widescreen-candidates"
+function = "nmi"
+offset = 111
+value = 0xff
+grade = "candidate"
+source = "observed: camera-clamp operand of an immediate cmp (was 0x5), confidence low 35; finder candidate, not kept by a lockstep trial"
+
