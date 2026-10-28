@@ -5091,3 +5091,17 @@ stories, 10 decisions).
   instructions observed). SA-1 interrupts covered only by a synthetic test
   (Kirby 3 polls). Super Mario RPG not run: the menu script stalls on a
   static screen. Workspace: **3823 passing**, gate green.
+- **W39-04 — HD-2D render plugin** (2026-10-28). `rf_renderer::hd2d` composes
+  the Diorama pieces from plain data: extruded walls from a baked depth
+  lattice, sprite clusters as billboards classed by plugin markers (per-class
+  lift and shadow), tilted and yawed camera with optional sun shadows, and a
+  screen-space tilt-shift depth-of-field band centred on the player's feet.
+  `plugins/hd2d` (kind render; read_memory and draw_overlay only) marks the
+  player and object-table slots from recipe rows. SMW Yoshi's Island 1 demo
+  (ROM-gated) bakes 16x175 cells and 78 wall quads and renders frames
+  (kept out of git); Original mode identical over 5069 frames with HD-2D on
+  vs off, and over 180 frames on the synthetic fixture. Tour screenshots
+  (synthetic): `docs/screens/w39/hd2d-*.png`. Known rough edges: SMW wall
+  layout is a heuristic fit of the level buffer, slopes render as blocks,
+  only the player is classed (SMW recipe has no object table yet).
+  Workspace: **3841 passing**, gate green.
