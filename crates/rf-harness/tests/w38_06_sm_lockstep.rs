@@ -89,7 +89,7 @@ struct Seen {
 
 struct Sink {
     seen: Rc<RefCell<Seen>>,
-    tick: u32,
+    ticks: Vec<u32>,
     pos: (u32, u32),
     frame: Rc<Cell<u32>>,
 }
@@ -109,7 +109,7 @@ impl CoreSink for Sink {
             FunctionEvent::Exit { function } => (function, false),
         };
         *s.events.entry((f, enter)).or_default() += 1;
-        if f == self.tick {
+        if self.ticks.contains(&f) {
             let at = (word(ctx, self.pos.0), word(ctx, self.pos.1));
             let fr = self.frame.get();
             if enter {
@@ -146,12 +146,21 @@ fn super_metroid_recipe_hooks_fire_each_frame_and_keep_lockstep() {
             .addr
     };
     let pos = (ram("player_x"), ram("player_y"));
-    let tick = report
-        .matched
+    // The NMI is entered in whichever decode mode the interrupted code was in,
+    // and each mode is its own atlas function: the tick is all of them.
+    let ticks: Vec<u32> = recipe
+        .functions
         .iter()
-        .find(|m| m.name == "nmi")
-        .expect("matched")
-        .function;
+        .filter(|f| f.entry == Some(rf_rebuild::EntryKind::Nmi))
+        .filter_map(|f| {
+            report
+                .matched
+                .iter()
+                .find(|m| m.name == f.name)
+                .map(|m| m.function)
+        })
+        .collect();
+    assert!(!ticks.is_empty());
     let mut ids: Vec<u32> = recipe
         .functions
         .iter()
@@ -167,7 +176,7 @@ fn super_metroid_recipe_hooks_fire_each_frame_and_keep_lockstep() {
     ids.sort_unstable();
     ids.dedup();
     println!(
-        "{} hooked functions, tick = atlas function {tick}",
+        "{} hooked functions, tick = atlas functions {ticks:?}",
         ids.len()
     );
 
@@ -197,7 +206,7 @@ fn super_metroid_recipe_hooks_fire_each_frame_and_keep_lockstep() {
             *factory_seen.borrow_mut() = Seen::default();
             Box::new(Sink {
                 seen: Rc::clone(&factory_seen),
-                tick,
+                ticks: ticks.clone(),
                 pos,
                 frame: Rc::clone(&frame_now),
             })
@@ -238,15 +247,16 @@ fn super_metroid_recipe_hooks_fire_each_frame_and_keep_lockstep() {
     println!(
         "position at the tick's entry equals the end of that frame in {enter_same:.4} of {n_enter} frames; at its exit in {exit_same:.4} of {n_exit}"
     );
-    assert!(
-        seen.tick_enter.len() * 100 >= frames * 95 && seen.tick_enter.len() <= frames + 4,
-        "the tick hook fires about once per frame: {}",
-        seen.tick_enter.len()
-    );
     for ((f, enter), n) in &seen.events {
         println!(
             "function {f} {} x{n}",
             if *enter { "enter" } else { "exit" }
         );
     }
+
+    assert!(
+        seen.tick_enter.len() * 100 >= frames * 95 && seen.tick_enter.len() <= frames + 4,
+        "the tick hook fires about once per frame: {}",
+        seen.tick_enter.len()
+    );
 }

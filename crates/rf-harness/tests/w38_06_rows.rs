@@ -53,6 +53,15 @@ fn the_super_metroid_recipe_has_the_facts_interpolation_needs() {
         "the tick has both hook points"
     );
     assert!(nmi.exact_hash.is_some() && nmi.mode.is_some());
+    // The NMI is entered in whichever decode mode the interrupted code was in,
+    // and each mode is its own function: every one of them carries both hooks.
+    let ticks: Vec<_> = r
+        .functions
+        .iter()
+        .filter(|f| f.entry == Some(EntryKind::Nmi))
+        .collect();
+    assert!(ticks.len() >= 2, "one row per mode the NMI was entered in");
+    assert!(ticks.iter().all(|f| f.hooks.entry && f.hooks.exit));
     for name in ["player_x", "player_y", "camera_x_lo"] {
         let row = r.ram.iter().find(|x| x.name == name).expect(name);
         assert_eq!(row.grade, Grade::Observed, "{name}");
