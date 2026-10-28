@@ -462,3 +462,65 @@ fn io_accesses_pay_the_io_field_and_ram_accesses_do_not() {
          if these agree, every access is being counted as one kind"
     );
 }
+
+struct VecState {
+    buf: Vec<u8>,
+    at: usize,
+}
+
+impl rf_core_api::StateWriter for VecState {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), rf_core_api::StateError> {
+        self.buf.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+impl rf_core_api::StateReader for VecState {
+    fn read_exact(&mut self, out: &mut [u8]) -> Result<(), rf_core_api::StateError> {
+        let end = self.at + out.len();
+        out.copy_from_slice(&self.buf[self.at..end]);
+        self.at = end;
+        Ok(())
+    }
+}
+
+fn saved(apu: &Apu) -> Vec<u8> {
+    let mut s = VecState {
+        buf: Vec::new(),
+        at: 0,
+    };
+    apu.save(&mut crate::state::StateOut::new(&mut s))
+        .expect("saves");
+    s.buf
+}
+
+/// Ticket W37-07b: loading a state must clear the per-instruction access
+/// tallies, which are not saved. A fresh core's power-on leaves I/O accesses
+/// charged; before the fix the first instruction after a load subtracted
+/// them from its cost and ran the DSP two cycles short (found on SMW).
+#[test]
+fn a_load_clears_the_access_tallies_left_by_the_apu_it_replaces() {
+    let mut original = Apu::new();
+    original.ipl_enabled = false;
+    original.aram[0x01FF] = 0x00; // NOP, which settles power-on's tallies
+    original.aram[0x0200] = 0xCF; // MUL YA: 9 cycles, one access
+    original.cpu.pc = 0x01FF;
+    original.step_counted().expect("steps");
+    let state = saved(&original);
+
+    // Two I/O accesses outside any instruction, as power-on leaves them.
+    let mut restored = Apu::new();
+    restored.write(0x00F2, 0);
+    restored.write(0x00F2, 0);
+    let mut s = VecState { buf: state, at: 0 };
+    restored
+        .load(&mut crate::state::StateIn::new(&mut s))
+        .expect("loads");
+
+    original.step_counted().expect("steps");
+    restored.step_counted().expect("steps");
+    assert!(
+        saved(&original) == saved(&restored),
+        "the restored APU must run the same DSP cycles as the original"
+    );
+}
