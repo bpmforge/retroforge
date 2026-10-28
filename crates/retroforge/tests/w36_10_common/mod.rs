@@ -66,7 +66,7 @@ pub fn button_mask(buttons: &str) -> u16 {
 /// The W36-08/09 session: menus to the level, the play script, then
 /// jump-and-run to `PLAY_FRAMES` level frames.
 pub fn smw_session() -> Vec<u16> {
-    let mut pad = frames_of(discovery::SMW_TO_LEVEL);
+    let mut pad = discovery::smw_level_pad();
     let level_start = pad.len();
     pad.extend(frames_of(discovery::SMW_PLAY));
     let more = frames_of("R+B14 R22");
