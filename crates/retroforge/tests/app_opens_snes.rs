@@ -23,6 +23,25 @@ use retroforge::app::{RetroForgeApp, WINDOW_SIZE};
 const SNES: &str = "../../fixtures/snes/rf-scroller-s/build/rf-scroller-s.sfc";
 const NES: &str = "../../fixtures/nes/rf-scroller/build/rf-scroller.nes";
 
+/// Every app in this binary reads one throwaway config dir, never the developer's own: with the
+/// real one an app opens on a library scan of their ROM folders, whose spinner keeps repainting
+/// and fails `Harness::run`'s step limit. Set once, before the first app is built (`set_var` is
+/// process-global; the tests that build an app all call this first).
+fn isolate_config() {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("retroforge_snes_cfg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("config scratch");
+        // SAFETY: runs once, before any app in this binary reads the variable.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
+        }
+        dir
+    });
+}
+
 fn run_frames(h: &mut Harness<'_, RetroForgeApp>, target: u64, deadline: Duration) {
     let start = Instant::now();
     while h.state().frame_count_for_test() < target && start.elapsed() < deadline {
@@ -36,17 +55,14 @@ fn a_snes_rom_starts_and_reaches_the_screen() {
     let dir = std::env::temp_dir().join(format!("retroforge_snes_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
-    // SAFETY: first statement of the only test in this binary.
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
-    }
+    isolate_config();
 
     let snes = Path::new(env!("CARGO_MANIFEST_DIR")).join(SNES);
     assert!(snes.exists(), "SNES fixture missing: {}", snes.display());
     let rom: PathBuf = dir.join("rf-scroller-s.sfc");
     std::fs::copy(&snes, &rom).expect("copy fixture");
 
+    isolate_config();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
         .build_eframe(|cc| RetroForgeApp::new(cc));
@@ -150,6 +166,7 @@ fn a_snes_session_feeds_the_event_timeline() {
     let rom: PathBuf = dir.join("rf-scroller-s.sfc");
     std::fs::copy(&snes, &rom).expect("copy fixture");
 
+    isolate_config();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
         .build_eframe(|cc| RetroForgeApp::new(cc));
@@ -230,6 +247,7 @@ fn every_snes_viewer_has_something_to_draw() {
     let rom: PathBuf = dir.join("rf-scroller-s.sfc");
     std::fs::copy(&snes, &rom).expect("copy fixture");
 
+    isolate_config();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
         .build_eframe(|cc| RetroForgeApp::new(cc));
@@ -302,6 +320,7 @@ fn the_mode7_hdma_and_dsp_views_are_fed() {
     let rom: PathBuf = dir.join("rf-scroller-s.sfc");
     std::fs::copy(&snes, &rom).expect("copy fixture");
 
+    isolate_config();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
         .build_eframe(|cc| RetroForgeApp::new(cc));
