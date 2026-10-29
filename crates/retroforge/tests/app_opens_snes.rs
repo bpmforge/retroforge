@@ -62,7 +62,6 @@ fn a_snes_rom_starts_and_reaches_the_screen() {
     let rom: PathBuf = dir.join("rf-scroller-s.sfc");
     std::fs::copy(&snes, &rom).expect("copy fixture");
 
-    isolate_config();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
         .build_eframe(|cc| RetroForgeApp::new(cc));
