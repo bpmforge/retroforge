@@ -99,17 +99,29 @@ fn regenerating_the_smw_recipe_reproduces_the_committed_rows() {
 
     let committed_path = recipe_path();
     if std::env::var("RF_W36_10_WRITE_RECIPE").is_ok() {
-        let text = format!(
+        let mut text = format!(
             "{HEADER}{}",
             rf_profiles::recipe::recipe_to_toml(&generated)
         );
+        // The data-region block belongs to the W38-01 finder; carry it over.
+        if let Ok(old) = std::fs::read_to_string(&committed_path) {
+            if let Some(block) = region_block_text(&old) {
+                text.push('\n');
+                text.push_str(&block);
+            }
+        }
         std::fs::write(&committed_path, text).expect("writes the recipe");
         println!("wrote {}", committed_path.display());
     }
     let committed = rf_profiles::load_recipe_file(&committed_path)
         .expect("the committed recipe (run once with RF_W36_10_WRITE_RECIPE=1)");
+    // `[[data_region]]` rows are owned by the W38-01 finder test
+    // (rf-harness w38_01_data_regions_smw), which asserts them; this test owns
+    // every other section.
+    let mut committed_own = committed.clone();
+    committed_own.data_regions.clear();
     assert_eq!(
-        committed, generated,
+        committed_own, generated,
         "regenerating reproduces the committed recipe"
     );
 
@@ -127,4 +139,24 @@ fn regenerating_the_smw_recipe_reproduces_the_committed_rows() {
         assert_eq!(Some(f.entry_mode), row.mode, "{}", m.name);
     }
     println!("all {} rows exact on their own atlas", report.matched.len());
+}
+
+/// The W38-01 data-region block (markers included) of `text`, if present.
+fn region_block_text(text: &str) -> Option<String> {
+    use rf_profiles::recipe::{REGION_BLOCK_BEGIN, REGION_BLOCK_END};
+    let mut out = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_end() == REGION_BLOCK_BEGIN {
+            inside = true;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+            if line.trim_end() == REGION_BLOCK_END {
+                return Some(out);
+            }
+        }
+    }
+    None
 }
