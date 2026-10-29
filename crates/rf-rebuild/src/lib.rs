@@ -42,9 +42,10 @@ pub use facts::{merge_facts, FactMerge, FactRefusal};
 pub use hw::{HwClass, Platform};
 pub use isa::{DecodeMode, Decoded, Flow, Isa, ModeAfter};
 pub use recipe::{
-    classify_unmatched, match_recipe, resolve_patches, Confidence, DataRegion, EntryKind, Grade,
-    HookPoints, Match, MatchReport, ObjectTable, PatchRefusal, PatchRow, RamMeaning, Recipe,
-    RecipeFunction, ResolvedPatch, TileClass, TileSemantics, UnmatchedReason,
+    classify_unmatched, match_recipe, resolve_patches, source_is_hub_eligible, Confidence,
+    DataRegion, EntryKind, Grade, HookPoints, Match, MatchReport, ObjectTable, PatchRefusal,
+    PatchRow, RamMeaning, Recipe, RecipeFunction, ResolvedPatch, TileClass, TileSemantics,
+    UnmatchedReason,
 };
 pub use superset::{superset_decode, Superset};
 pub use verify::{
