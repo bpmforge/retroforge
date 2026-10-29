@@ -89,6 +89,11 @@ use rf_nes::{Cpu, NesBus, NesLoadError};
 /// here is cycle-bounded".
 const CYCLE_BUDGET: u64 = 4 * 29_781;
 
+/// Instructions into a frame at which [`EmuStepper::latch_and_advance_frame_poking`] writes its
+/// pokes (W37-00d): past a game's early "previous position" copy (about 40 on A Link to the Past)
+/// and before its camera update (700 there).
+const POKE_AFTER: u32 = 128;
+
 /// `CoreEvent` subscriptions the enhanced-camera pipeline
 /// (`rf_enhance::canvas`) needs on every frame, unconditionally — turned
 /// on once by [`EmuStepper::from_ines_bytes`] below and re-asserted by
@@ -2127,6 +2132,42 @@ impl EmuStepper {
     /// `run_until_next_frame`'s doc).
     pub fn latch_and_advance_frame(&mut self, frame: InputFrame, sink: &mut dyn CoreSink) -> u64 {
         self.latch_input(frame);
+        self.run_until_next_frame(sink)
+    }
+
+    /// [`Self::latch_and_advance_frame`], with `pokes` (bus address, value) written
+    /// [`POKE_AFTER`] instructions into the frame instead of before it.
+    ///
+    /// W37-00d: a poke made at the frame boundary lands in one fixed phase of the game's main loop.
+    /// A game that copies the player's word to a "previous" word early in its frame and scrolls the
+    /// camera by the difference takes the poked value into the copy and sees no move (A Link to the
+    /// Past, once the W37-00b refresh stall moved that phase: the copy is about 40 instructions
+    /// after the boundary, the difference is read by instruction 700). A poke a little later in the
+    /// frame lands after such a copy, and a game that reads the word once per frame sees the
+    /// poke a frame later, which no stop rule of the scout can tell. Which game, which address and
+    /// which instruction the copy is at are not known here.
+    pub fn latch_and_advance_frame_poking(
+        &mut self,
+        frame: InputFrame,
+        sink: &mut dyn CoreSink,
+        pokes: &[(u32, u8)],
+    ) -> u64 {
+        self.latch_input(frame);
+        if !pokes.is_empty() {
+            // Bounded: a fixed instruction count.
+            for _ in 0..POKE_AFTER {
+                if self
+                    .advance(rf_core_api::Step::Instruction, sink)
+                    .frame_complete
+                {
+                    // A frame boundary inside the first instructions: nothing more to slice.
+                    return 1;
+                }
+            }
+            for &(addr, value) in pokes {
+                self.poke_ram(addr, value);
+            }
+        }
         self.run_until_next_frame(sink)
     }
 
