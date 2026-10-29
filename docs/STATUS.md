@@ -5364,3 +5364,11 @@ stories, 10 decisions).
   sprite recognition shows the plant. The bare `expect` now says Mario died or
   the level ended. `w32_09_scout_nes` 14/14; walk agreement 99.886% over 853
   frames. Workspace: **3951 passing**, gate green.
+- **W38-12 — SMW recipe regeneration agrees again** (2026-10-29). W38-01
+  spliced 167 `[[data_region]]` rows into the SMW recipe's marked block; the
+  W36-10 generator never writes data regions, so its compare failed and its
+  write path would have dropped them. The W36-10 test now compares only the
+  sections its generator owns (W38-01's test owns the region rows), and its
+  write path copies the marker block back. Checked: running the write path
+  against the ROM leaves `recipe.toml` byte-identical. `w36_10_smw_recipe`
+  and `w38_01_data_regions_smw` pass. Workspace: **3951 passing**, gate green.
