@@ -131,6 +131,50 @@ pub fn paste(console: Console, existing: &[CheatEntry], text: &str) -> Pasted {
     out
 }
 
+/// Recipe RAM rows as cheat entries, one per byte, switched off (ticket
+/// W38-10). Rows no RAM cheat can reach come back in the second list as
+/// `(row index, reason)`.
+#[must_use]
+pub fn entries_from_rows(
+    console: Console,
+    rows: &[rf_debugger::ram_exchange::RamRow],
+) -> (Vec<CheatEntry>, Vec<(usize, String)>) {
+    let ex = rf_debugger::ram_exchange::export_cheat_lines(console, rows);
+    let entries = ex
+        .items
+        .into_iter()
+        .map(|l| CheatEntry {
+            code: l.code,
+            label: l.label,
+            enabled: false,
+        })
+        .collect();
+    (
+        entries,
+        ex.skipped
+            .into_iter()
+            .map(|s| (s.index, s.reason))
+            .collect(),
+    )
+}
+
+/// The player's stored cheats as candidate recipe RAM rows (source
+/// `imported: user cheat`, never hub-eligible). ROM codes are skipped.
+#[must_use]
+pub fn rows_from_entries(
+    console: Console,
+    entries: &[CheatEntry],
+) -> rf_debugger::ram_exchange::Import {
+    let lines: Vec<_> = entries
+        .iter()
+        .map(|e| rf_debugger::ram_exchange::CheatLine {
+            code: e.code.clone(),
+            label: e.label.clone(),
+        })
+        .collect();
+    rf_debugger::ram_exchange::import_cheat_lines(console, &lines)
+}
+
 /// One RAM write and the cheat it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RamCheat {
@@ -271,6 +315,34 @@ impl CheatLedger {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recipe_rows_round_trip_through_cheat_entries() {
+        use rf_debugger::ram_exchange::RamRow;
+        // Synthetic addresses only.
+        let rows = vec![
+            RamRow::candidate(0x7E_0100, 2, "synthetic_a", "observed: test", Some(0x0102)),
+            RamRow::candidate(0x7F_0001, 1, "synthetic_b", "observed: test", Some(9)),
+        ];
+        let (entries, skipped) = entries_from_rows(Console::Snes, &rows);
+        assert!(skipped.is_empty());
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|e| !e.enabled));
+        let back = rows_from_entries(Console::Snes, &entries);
+        let key = |r: &RamRow| {
+            (
+                r.meaning.addr,
+                r.meaning.width,
+                r.meaning.name.clone(),
+                r.value,
+            )
+        };
+        assert_eq!(
+            rows.iter().map(key).collect::<Vec<_>>(),
+            back.rows.iter().map(key).collect::<Vec<_>>()
+        );
+        assert!(back.rows.iter().all(|r| !r.meaning.is_hub_eligible()));
+    }
+
     use super::*;
 
     fn entry(code: &str, enabled: bool) -> CheatEntry {
