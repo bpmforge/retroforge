@@ -50,6 +50,7 @@
 pub mod annotation;
 pub mod audio_scope;
 pub mod breakpoint;
+pub mod cheat_search;
 pub mod coverage_view;
 pub mod datacrystal;
 pub mod event_timeline;
@@ -60,6 +61,7 @@ pub mod oam;
 pub mod palette;
 pub mod pattern;
 pub mod profile_export;
+pub mod ram_exchange;
 pub mod trace;
 
 /// Crate marker used by the test harness to confirm workspace wiring.

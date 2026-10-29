@@ -57,7 +57,7 @@
 mod ffi;
 mod memmap;
 
-pub use memmap::{translate, translate_with, CartMap, Console};
+pub use memmap::{ra_address, translate, translate_with, CartMap, Console};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

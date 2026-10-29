@@ -4022,8 +4022,11 @@ version = "0.9.1"
 name = "rf-debugger"
 version = "0.9.1"
 dependencies = [
+ "rf-achievements",
+ "rf-cheats",
  "rf-core-api",
  "rf-profiles",
+ "rf-rebuild",
  "rf-renderer",
  "serde",
  "serde_json",
