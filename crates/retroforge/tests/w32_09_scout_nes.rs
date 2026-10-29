@@ -184,6 +184,14 @@ fn hop(f: u32) -> u16 {
     BTN_RIGHT | BTN_B | if (f + phase) % 64 < 40 { BTN_A } else { 0 }
 }
 
+/// Where in its 64-frame hop cycle the walker starts. The first pipe of 1-1
+/// has a piranha plant that kills Mario if a jump meets it, and the walker has
+/// no sight of the plant, so the cycle's phase decides whether the walk lives
+/// (observed 2026-10-29: after the W37-00b timing fix phase 0 dies at the
+/// pipe, ending the level and every band frame after it; phase 6 clears it
+/// and walks the full 900 frames; 10 of 11 other phases sampled die there).
+const WALK_PHASE: u32 = 6;
+
 /// Closed-loop walker for SMB3 1-1: run right, hop; if Mario's X ($0090 lo,
 /// $0075 hi) has not moved for 6 frames, hold a full jump for 45 frames.
 #[derive(Default)]
@@ -205,7 +213,7 @@ impl Walker {
             self.jump_left -= 1;
             true
         } else {
-            f % 64 < 30
+            (f + WALK_PHASE) % 64 < 30
         };
         BTN_RIGHT | BTN_B | if jump { BTN_A } else { 0 }
     }
@@ -1055,7 +1063,12 @@ fn walk_confidence() {
         let mask = walker.input(f, &st);
         let b = frame(&mut st, &mut sink, mask);
         m.observe_frame(&b, &FrameFeed::bands());
-        let c = m.frames().expect("band").confidence[0];
+        let c = m
+            .frames()
+            .unwrap_or_else(|| {
+                panic!("no band frame at walk frame {f}: Mario died or the level ended")
+            })
+            .confidence[0];
         min_level = min_level.min(c.level());
         below += u32::from(c.level() < 3);
         if c.last.disagrees() {

@@ -5355,3 +5355,12 @@ stories, 10 decisions).
   Scout regression set (SMW, SMB3, MM2, MMX, Super Metroid, Castlevania,
   ALttP, Zelda 1) identical before and after. Movie-route scouting not done
   (docs/design/REBUILD_LAB.md, W37-03b).
+- **W37-00e — SMB3 walk_confidence after the W37-00b timing shift** (2026-10-29).
+  `SMB3_TO_LEVEL` still reaches 1-1 (screenshots); the walker's open-loop hop
+  cycle now lands Mario on the first pipe's piranha plant, the scroll freezes,
+  and at the level exit `m.frames()` is `None`. The hop cycle gets a
+  documented offset (`WALK_PHASE = 6`; phases 0..60 swept, only 6 survives 900
+  frames). A tuned constant, not closed-loop: nothing observable short of
+  sprite recognition shows the plant. The bare `expect` now says Mario died or
+  the level ended. `w32_09_scout_nes` 14/14; walk agreement 99.886% over 853
+  frames. Workspace: **3951 passing**, gate green.
