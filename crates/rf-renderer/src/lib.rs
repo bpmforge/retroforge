@@ -43,14 +43,19 @@
 pub mod compare;
 pub mod composite;
 pub mod diorama;
+pub mod diorama_gbuffer;
 pub mod diorama_mesh;
+pub mod diorama_objects;
 pub mod diorama_side;
 pub mod fallback;
 pub mod fog;
 pub mod frame;
 pub mod gpu;
 pub mod gsu_poly;
+pub mod hd2d;
+pub mod hd2d_temporal;
 pub mod hd_layer;
+pub mod hd_tiles;
 pub mod layers;
 pub mod lens;
 pub mod lighting;
@@ -64,10 +69,11 @@ pub mod scale;
 pub mod shader_chain;
 pub mod superfx_gpu;
 pub mod superfx_hd;
+pub mod temporal;
 
 pub use compare::{
     blink_shows_original, compose_split, original_rgba_from_indexed,
-    original_rgba_from_indexed_with, CompareMode,
+    original_rgba_from_indexed_with, original_rgba_with_math, CompareMode,
 };
 pub use composite::{CompositeLayer, CompositeOutcome, EnhancedCompositor, TargetReduction};
 pub use fallback::{render_with_fallback, RenderOutcome, RenderPath, FALLBACK_BUDGET};

@@ -105,6 +105,9 @@ pub struct SnesLayers {
     pub ranks: Vec<[[u8; 4]; 5]>,
     /// Completed-frame count.
     pub index: u64,
+    /// W39-01: what the game's tick hook made of this frame's tick ([`crate::extrapolation::Tracker`]);
+    /// `None` when no recipe supplies the facts, which keeps the delayed interpolation.
+    pub tick: Option<crate::extrapolation::Verdict>,
 }
 
 /// A (layer, priority) the mode's order does not contain.
@@ -158,6 +161,7 @@ impl SnesLayers {
             lines: self.lines[..rows].to_vec(),
             ranks: self.ranks.clone(),
             index: self.index,
+            tick: self.tick.clone(),
         })
     }
 }
@@ -192,8 +196,8 @@ fn wrap_delta(a: u16, b: u16, period: i32) -> i32 {
 }
 
 /// `delta * alpha / 256`, rounded to nearest.
-fn scaled(delta: i32, alpha: u8) -> i32 {
-    (delta * i32::from(alpha) + 128).div_euclid(256)
+fn scaled(delta: i32, alpha: i32) -> i32 {
+    (delta * alpha + 128).div_euclid(256)
 }
 
 fn layer_of(code: u8) -> u8 {
@@ -246,15 +250,61 @@ pub fn compose_snes(
     alpha: u8,
     out: &mut Vec<u8>,
 ) -> Result<SnesStats, Refusal> {
+    if next.index != prev.index.wrapping_add(1) {
+        return check_pair(prev, next, Err(Refusal::NotConsecutive));
+    }
+    compose_between(prev, next, i32::from(alpha), out)
+}
+
+/// W39-01: the frame `alpha`/256 of one step PAST `cur`, in the direction `cur` moved since `older`
+/// (the frame before it), built from `cur`'s own pixels: the frame is `cur` moved forward, so nothing
+/// waits for a later frame and no latency is added. `alpha == 0` is `cur.rgba` exactly.
+///
+/// It is [`compose_snes`] run backwards: `cur` is the base, `older` plays the "other" frame, so every
+/// per-layer and per-entry step it measures is `older - cur` (minus the real velocity) and a negative
+/// alpha turns it into `+alpha` of the real velocity. What it cannot know (a dot that scrolls in from
+/// beyond both frames' edges) falls back as it does for interpolation: the frame's own dot.
+///
+/// # Errors
+/// [`Refusal`] as for [`compose_snes`]; `older` must be the frame immediately before `cur`.
+pub fn extrapolate_snes(
+    older: &SnesLayers,
+    cur: &SnesLayers,
+    alpha: u8,
+    out: &mut Vec<u8>,
+) -> Result<SnesStats, Refusal> {
+    if cur.index != older.index.wrapping_add(1) {
+        return check_pair(cur, older, Err(Refusal::NotConsecutive));
+    }
+    compose_between(cur, older, -i32::from(alpha), out)
+}
+
+/// The shape check that outranks "not consecutive": a malformed pair is `Malformed` either way.
+fn check_pair(
+    a: &SnesLayers,
+    b: &SnesLayers,
+    otherwise: Result<SnesStats, Refusal>,
+) -> Result<SnesStats, Refusal> {
+    if !a.is_well_formed() || !b.is_well_formed() || a.width != b.width || a.height != b.height {
+        return Err(Refusal::Malformed);
+    }
+    otherwise
+}
+
+/// The composer: `prev` is the base the output is gathered from, `next` the other frame, `alpha` how
+/// far (in 256ths, signed) along `next - prev` the output sits. The caller has checked the indices.
+fn compose_between(
+    prev: &SnesLayers,
+    next: &SnesLayers,
+    alpha: i32,
+    out: &mut Vec<u8>,
+) -> Result<SnesStats, Refusal> {
     if !prev.is_well_formed()
         || !next.is_well_formed()
         || prev.width != next.width
         || prev.height != next.height
     {
         return Err(Refusal::Malformed);
-    }
-    if next.index != prev.index + 1 {
-        return Err(Refusal::NotConsecutive);
     }
     let (w, h) = (prev.width, prev.height);
 
@@ -620,6 +670,7 @@ mod tests {
             lines: vec![line; H],
             ranks: r,
             index,
+            tick: None,
         }
     }
 
@@ -631,6 +682,86 @@ mod tests {
     fn px(out: &[u8], x: usize, y: usize) -> [u8; 3] {
         let at = (y * W + x) * 4;
         [out[at], out[at + 1], out[at + 2]]
+    }
+
+    /// W39-01: extrapolating from the last two frames agrees, away from the edge the scroll uncovers, with
+    /// interpolating towards the frame that would have followed (a steady run: BG1 4, BG2 2, sprite 4).
+    #[test]
+    fn extrapolation_continues_a_steady_run_like_the_next_frame_would() {
+        let older = scene(1, 8, 20, Some((3, 5, 6)));
+        let cur = scene(2, 12, 22, Some((3, 9, 6)));
+        let next = scene(3, 16, 24, Some((3, 13, 6)));
+        for alpha in [1u8, 64, 128, 200, 255] {
+            let mut ex = Vec::new();
+            let stats = extrapolate_snes(&older, &cur, alpha, &mut ex).expect("extrapolates");
+            let (want, _) = run(&cur, &next, alpha).expect("composes");
+            let differ = |rows: &dyn Fn(usize) -> bool| {
+                (0..H)
+                    .filter(|&y| rows(y))
+                    .flat_map(|y| (0..W - 6).map(move |x| (x, y)))
+                    .filter(|&(x, y)| px(&ex, x, y) != px(&want, x, y))
+                    .count()
+            };
+            // Rows with no front layer moving over another (the bar, the back layer, the sprite): exact.
+            assert_eq!(differ(&|y| !(2..6).contains(&y)), 0, "alpha {alpha}");
+            // The comb rows: what the moving front layer UNCOVERS was hidden in the current frame and
+            // cannot be known (the next frame would show it); only a sliver at its edges may differ.
+            assert!(differ(&|y| (2..6).contains(&y)) <= 16, "alpha {alpha}");
+            assert!(stats.sprites_moved >= 1, "the sprite moves on");
+        }
+        // alpha 0 is the current frame, not the older one.
+        let mut ex = Vec::new();
+        extrapolate_snes(&older, &cur, 0, &mut ex).expect("composes");
+        assert_eq!(ex, cur.rgba);
+    }
+
+    /// The sprite is drawn AHEAD of the current frame's position: the first extrapolated frame already
+    /// shows where input just sent it, which the delayed interpolation does not.
+    #[test]
+    fn the_extrapolated_sprite_is_ahead_of_the_current_frame() {
+        let older = scene(1, 8, 20, Some((3, 5, 6)));
+        let cur = scene(2, 8, 20, Some((3, 9, 6)));
+        let mut ex = Vec::new();
+        extrapolate_snes(&older, &cur, 128, &mut ex).expect("extrapolates");
+        assert_eq!(px(&ex, 11, 6), [200, 1, 2], "half a step (2 dots) past x 9");
+        assert_ne!(px(&ex, 9, 6), [200, 1, 2]);
+        // Interpolating older -> cur at the same alpha is BEHIND the current frame.
+        let (mid, _) = run(&older, &cur, 128).expect("composes");
+        assert_eq!(px(&mid, 7, 6), [200, 1, 2]);
+        assert_ne!(px(&mid, 11, 6), [200, 1, 2]);
+    }
+
+    #[test]
+    fn extrapolation_refuses_what_interpolation_refuses_and_a_wrong_order() {
+        let older = scene(1, 8, 20, None);
+        let cur = scene(2, 12, 22, None);
+        let mut out = Vec::new();
+        assert_eq!(
+            extrapolate_snes(&cur, &older, 64, &mut out).err(),
+            Some(Refusal::NotConsecutive)
+        );
+        let jump = scene(2, 8 + 100, 20, None);
+        assert_eq!(
+            extrapolate_snes(&older, &jump, 64, &mut out).err(),
+            Some(Refusal::LargeMotion)
+        );
+        let mut bad = scene(2, 12, 22, None);
+        bad.rgba.pop();
+        assert_eq!(
+            extrapolate_snes(&older, &bad, 64, &mut out).err(),
+            Some(Refusal::Malformed)
+        );
+    }
+
+    /// Every alpha, both orders, odd pairs: terminates.
+    #[test]
+    fn extrapolation_terminates_for_every_alpha() {
+        let (a, b) = (scene(1, 0, 0, Some((0, 0, 0))), scene(2, 1023, 1020, None));
+        for alpha in 0..=255u8 {
+            let mut out = Vec::new();
+            let _ = extrapolate_snes(&a, &b, alpha, &mut out);
+            let _ = extrapolate_snes(&b, &a, alpha, &mut out);
+        }
     }
 
     #[test]

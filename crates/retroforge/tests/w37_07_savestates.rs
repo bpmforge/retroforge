@@ -56,8 +56,6 @@ struct Rig {
     m: usize,
     /// The save must land while a hooked call is in flight.
     in_flight: bool,
-    /// Leave the SNES APU region out of the comparison (see `real::rig`).
-    skip_apu: bool,
 }
 
 enum Mach {
@@ -159,15 +157,6 @@ impl Mach {
     }
 
     /// Registers plus every savestate region, one hash each.
-    fn digest(&self, rig: &Rig) -> Vec<u64> {
-        let mut d = self.digest_all();
-        if rig.skip_apu {
-            // Index 0 is pc, then CPU, PPU, APU.
-            d[3] = 0;
-        }
-        d
-    }
-
     fn digest_all(&self) -> Vec<u64> {
         match self {
             Mach::Nes(c) => rf_nes::StateRegion::ALL
@@ -431,7 +420,6 @@ fn synthetic(console: Console) -> Rig {
         n: 0,
         m: 0,
         in_flight: true,
-        skip_apu: false,
     };
     let mut m = Mach::power_on(console, &rig.rom);
     m.configure(&rig, Tier::Hooked);
@@ -456,15 +444,15 @@ fn references(rig: &Rig) -> (Vec<Vec<u64>>, Vec<Vec<FunctionEvent>>) {
     let mut plain = Mach::power_on(rig.console, &rig.rom);
     let mut hooked = Mach::power_on(rig.console, &rig.rom);
     hooked.configure(rig, Tier::Hooked);
-    let mut digests = vec![plain.digest(rig)];
+    let mut digests = vec![plain.digest_all()];
     let mut events = Vec::new();
     for f in 0..rig.m {
         let mut sink = Sink::default();
         plain.frame(rig.pad[f], &mut Sink::default());
-        digests.push(plain.digest(rig));
+        digests.push(plain.digest_all());
         hooked.frame(rig.pad[f], &mut sink);
         assert_eq!(
-            hooked.digest(rig),
+            hooked.digest_all(),
             digests[f + 1],
             "{}: hooked tier, frame {f}",
             rig.name
@@ -552,7 +540,7 @@ fn matrix(rig: &Rig) {
         }
         let label = format!("{} save {save_tier:?}", rig.name);
         assert_eq!(
-            a.digest(rig),
+            a.digest_all(),
             digests[rig.n],
             "{label}: the save-side machine"
         );
@@ -571,11 +559,11 @@ fn matrix(rig: &Rig) {
             let before = b.stats();
             b.load(&snap);
             assert_eq!(b.depth(), 0, "{label}: a load drops the in-flight frames");
-            assert_eq!(b.digest(rig), digests[rig.n], "{label}: loaded machine");
+            assert_eq!(b.digest_all(), digests[rig.n], "{label}: loaded machine");
             let mut sink = Sink::default();
             for f in rig.n..rig.m {
                 b.frame(rig.pad[f], &mut sink);
-                assert_eq!(b.digest(rig), digests[f + 1], "{label}: replay frame {f}");
+                assert_eq!(b.digest_all(), digests[f + 1], "{label}: replay frame {f}");
             }
             assert!(well_formed(&sink.events), "{label}: {:?}", sink.events);
             if load_tier == Tier::Hooked {
@@ -604,12 +592,12 @@ fn matrix(rig: &Rig) {
                 for f in rig.n..rig.n + 3 {
                     a.frame(rig.pad[f], &mut Sink::default());
                 }
-                assert_eq!(a.digest(rig), digests[rig.n + 3], "{label}: ahead");
+                assert_eq!(a.digest_all(), digests[rig.n + 3], "{label}: ahead");
                 a.load(&snap);
                 let mut sink = Sink::default();
                 for f in rig.n..rig.m {
                     a.frame(rig.pad[f], &mut sink);
-                    assert_eq!(a.digest(rig), digests[f + 1], "{label}: rewound frame {f}");
+                    assert_eq!(a.digest_all(), digests[f + 1], "{label}: rewound frame {f}");
                 }
                 assert!(well_formed(&sink.events), "{label}: {:?}", sink.events);
                 if load_tier == Tier::Hooked {
@@ -777,11 +765,6 @@ mod real {
     }
 
     /// Hook every called function; demote every fifth function.
-    ///
-    /// `skip_apu` on SNES: a pre-existing gap, found by this test and not
-    /// tier-related (Off -> Off shows it): after a load on SMW the SPC700/DSP
-    /// region differs in one byte (offset 66237 of 66481, in the DSP's voice
-    /// records) after the first replayed frame; every other region matches.
     fn rig(console: Console, name: &'static str, rom: Vec<u8>, pad: Vec<u16>, n: usize) -> Rig {
         let m = n + 30;
         assert!(pad.len() >= m, "{name}: script too short");
@@ -811,7 +794,6 @@ mod real {
             n,
             m,
             in_flight: false,
-            skip_apu: console == Console::Snes,
         }
     }
 

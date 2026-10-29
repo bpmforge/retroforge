@@ -31,6 +31,7 @@ mod accuracy;
 pub mod atlas;
 mod blargg;
 pub mod blargg_evidence;
+pub mod collision_tables;
 pub mod data_regions;
 mod fetch;
 pub mod fuzz;
@@ -45,10 +46,12 @@ pub mod movie;
 pub mod movie_replay;
 pub mod nes6502_evidence;
 pub mod nestest_evidence;
+pub mod object_tables;
 pub mod shadow;
 mod tolerance;
 pub mod understand;
 mod vector_json;
+pub mod widescreen;
 
 pub use accuracy::{
     build_report, AccuracyRow, Counts, Report, ReportError, ReportRow, RowStatus, Waiver,

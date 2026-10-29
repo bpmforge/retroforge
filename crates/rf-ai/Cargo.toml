@@ -36,6 +36,9 @@ onnx-coreml = ["onnx", "ort?/coreml"]
 # a workspace dependency in five crates and already in TECH_STACK.
 sha2 = "0.11"
 
+# Offline HD asset pass (ticket W39-06): results are stored as an HdAssetSet.
+rf-cache = { path = "../rf-cache" }
+
 # Opt-in naming pass (ticket W36-09, D-026). rf-rebuild: the behaviour
 # profile the request facts are derived from (a host-layer crate may depend
 # on the core-layer one; the reverse is what validate-arch forbids). serde +

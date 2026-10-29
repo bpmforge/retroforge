@@ -18,6 +18,9 @@ use retroforge::stepper::EmuStepper;
 use rf_core_api::{CoreSink, FrameBundleBuilder, InputFrame, PpuPixel};
 use rf_input::SnesButton;
 
+#[path = "../../rf-harness/tests/smw_drive/mod.rs"]
+mod smw_drive;
+
 const W: u16 = 256;
 const H: u16 = 224;
 
@@ -83,27 +86,14 @@ fn tap(st: &mut EmuStepper, sink: &mut Sink, b: SnesButton, hold: u32) {
 /// and wait for the fade-in: the same script `w30_screens::shot_widescreen`
 /// runs through the GUI (Enter = Start, X = the A button).
 pub fn reach_yi1(st: &mut EmuStepper, sink: &mut Sink) {
-    run(st, sink, &[], 200);
-    for i in 0..10 {
-        tap(
-            st,
-            sink,
-            if i % 2 == 0 {
-                SnesButton::Start
-            } else {
-                SnesButton::A
-            },
-            6,
-        );
-        run(st, sink, &[], 100);
-    }
-    run(st, sink, &[], 300);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 400);
-    tap(st, sink, SnesButton::Left, 8);
-    run(st, sink, &[], 150);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 150);
+    // W37-00c: closed-loop, waits on the game mode (`smw_drive::to_yi1_direct`).
+    smw_drive::to_yi1_direct(&mut |mask| {
+        let mut input = InputFrame::empty();
+        input.ports[0] = mask;
+        st.latch_and_advance_frame(input, sink);
+        drop(sink.bundle.take(st.frame_count()));
+        st.peek_bus(smw_drive::MODE)
+    });
 }
 
 fn open() -> Option<(EmuStepper, Sink)> {

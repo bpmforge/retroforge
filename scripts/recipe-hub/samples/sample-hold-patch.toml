@@ -1,0 +1,16 @@
+# SAMPLE ONLY: made-up engine; shows the HOLD verdict for a [[patch]] row.
+[recipe]
+format=1
+id="p"
+[[function]]
+name="f"
+shape_hash="0x1111222233334444"
+exact_hash="0x1111222233334444"
+source="observed: x"
+[[patch]]
+name="a"
+mod="m"
+function="f"
+offset=3
+value=240
+source="observed: x"

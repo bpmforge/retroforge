@@ -1,0 +1,22 @@
+# W38-06: widescreen finder rows for Super Metroid, an OVERLAY on
+# recipe.toml (append this file's text to the recipe to load it, as for SMW).
+# Finder: crates/rf-rebuild/src/widescreen.rs; trials: w38_06_recipe.rs.
+# Every row is a candidate unless a lockstep trial kept it (see the grades).
+[[patch]]
+name = "wide-camera-clamp-100706"
+mod = "widescreen-candidates"
+function = "scroll_update_a08687"
+offset = 127
+value = 0x92
+grade = "candidate"
+source = "observed: camera-clamp operand of an immediate cmp (was 0x12), confidence low 25; finder candidate, not kept by a lockstep trial"
+
+[[patch]]
+name = "wide-camera-clamp-100707"
+mod = "widescreen-candidates"
+function = "scroll_update_a08687"
+offset = 128
+value = 0x01
+grade = "candidate"
+source = "observed: camera-clamp operand of an immediate cmp (was 0x12), confidence low 25; finder candidate, not kept by a lockstep trial"
+

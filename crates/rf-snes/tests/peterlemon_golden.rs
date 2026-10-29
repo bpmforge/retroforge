@@ -138,9 +138,13 @@ const GOLDENS: &[(&str, &str)] = &[
     // later than before. Dumped with `RF_GOLDEN_DUMP` and looked at: the
     // castle is intact and identical in content to the previous pin —
     // same picture, different capture instant.
+    // Re-pinned again 2026-10-28 (ticket W37-00b): the capture now waits
+    // for the next frame start after the settle (see `render_and_hash`),
+    // so CPU-speed changes such as the DRAM refresh stall no longer move
+    // the capture instant. Dumped and looked at: the castle, intact.
     (
         "8x8BGMap8BPP32x32.sfc",
-        "38e22548e5f2f03565c43c0138977a85c4cd3924faf587006cf3016d35f63c9c",
+        "371b59c994ea1aa5a840bd91a6412c90468265ab35d81bfe1d9df9675a57e08c",
     ),
     (
         "8x8BGMap8BPP32x64.sfc",
@@ -212,9 +216,12 @@ const GOLDENS: &[(&str, &str)] = &[
     // changes the exact ripple phase captured. Dumped and looked at: the
     // water ripple pattern is present and correct, same as before —
     // a different animation frame, not a broken one.
+    // Re-pinned 2026-10-28 (ticket W37-00b), same reason as
+    // 8x8BGMap8BPP32x32.sfc: captured at a frame start now. Dumped and
+    // looked at: the ripple, correct.
     (
         "WaveHDMA.sfc",
-        "ee2dbeab401e937acc05cd1262cb17ec753e1ed5c0b2060c98704e56ee1f92c8",
+        "2869a315a978a7f9568d830ace0457a9c68e6dcf063d8786848ef1b21a1b408a",
     ),
     // Mode7HDMA switches BG mode mid-frame: sky and a sun and a row of
     // trees above, a mode-7 ground plane receding below. It needs both
@@ -469,8 +476,17 @@ fn render_and_hash(path: &std::path::Path) -> (String, u8) {
     );
     match plan {
         // Settle into the terminal loop; the frame is stable there.
+        // Then run on to the next frame start, so the capture never lands
+        // mid-frame (ticket W37-00b): the HDMA demos rewrite registers per
+        // line, and a capture whose raster phase moved with the CPU's speed
+        // re-rendered the whole frame from one mid-frame register state.
         None => {
             for _ in 0..200_000 {
+                s.step().expect("implemented");
+            }
+            let frame = s.bus.timing.frame;
+            while s.bus.timing.frame == frame {
+                // Every step spends master cycles, so the frame ends.
                 s.step().expect("implemented");
             }
         }

@@ -136,6 +136,9 @@ pub struct SnesSystem {
     /// restored, and it only ever peeks, so an installed atlas runs
     /// bit-identically. See [`crate::executor`].
     pub(crate) rebuild: Option<Box<rf_rebuild::RebuildExec>>,
+    /// Ticket W40-03: the same two for the SA-1's 65816, each keyed apart
+    /// from the S-CPU's. See [`crate::rebuild::sa1`].
+    pub(crate) sa1_obs: crate::rebuild::sa1::Sa1Obs,
 }
 
 impl SnesSystem {
@@ -198,6 +201,7 @@ impl SnesSystem {
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
             rebuild: None,
+            sa1_obs: crate::rebuild::sa1::Sa1Obs::default(),
         };
         system.bus.fast_rom = header.fast_rom;
         // DSP-1 HLE (ticket W14-19; D-010, FR-CORE-038): `rf-cart`
@@ -335,6 +339,7 @@ impl SnesSystem {
             idle: crate::idle::IdleTracker::default(),
             coverage: None,
             rebuild: None,
+            sa1_obs: crate::rebuild::sa1::Sa1Obs::default(),
         };
         system.reset();
         system
@@ -516,6 +521,16 @@ impl SnesSystem {
         let dma_cycles = self.bus.service_dma();
         self.master_cycles += dma_cycles;
         self.bus.apu_debt += dma_cycles;
+        // Ticket W37-00b: the per-scanline WRAM refresh stalls the bus (the
+        // CPU and DMA) for `REFRESH_CYCLES` at `REFRESH_AT` of every line;
+        // charged to whatever instruction or transfer spans that point.
+        // Without it the S-CPU ran about 2.9% fast (40 of 1364 master
+        // cycles per line), enough that a multi-frame load finished a frame
+        // early against a reference emulator and input movies drifted.
+        let refresh =
+            crate::timing::refresh_stall(self.bus.timing.line_cycles, scaled + dma_cycles);
+        self.master_cycles += refresh;
+        self.bus.apu_debt += refresh;
         self.bus.catch_up_apu();
 
         // Advance the frame clock by everything this instruction spent,
@@ -533,12 +548,12 @@ impl SnesSystem {
             let overscan = self.bus.ppu.setini.overscan;
             self.bus.timing.set_overscan(overscan);
         }
-        let events = self
-            .bus
-            .timing
-            .advance(scaled + dma_cycles, auto_joypad, |dot, line| {
-                timer.matches(irq_mode, dot, line)
-            });
+        let events =
+            self.bus
+                .timing
+                .advance(scaled + dma_cycles + refresh, auto_joypad, |dot, line| {
+                    timer.matches(irq_mode, dot, line)
+                });
 
         if events.irq {
             self.bus.irq.fired = true;
@@ -803,7 +818,7 @@ impl SnesSystem {
                 // GSU's below; the timer above stays on the real master clock.
                 sa1.credit += master_this_step * self.sa1_clock_multiplier;
                 while sa1.credit > 0 {
-                    match sa1.step(&bus.rom, rom_contended, bwram_contended) {
+                    match sa1.step(&bus.rom, rom_contended, bwram_contended, &mut self.sa1_obs) {
                         Ok(cost) => sa1.credit = sa1.credit.saturating_sub(cost),
                         Err(_opcode) => break,
                     }

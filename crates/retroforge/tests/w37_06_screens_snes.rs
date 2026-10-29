@@ -47,8 +47,25 @@ fn tap(h: &mut Harness<'_, RetroForgeApp>, key: egui::Key, frames: u64) {
     h.key_up(key);
 }
 
+/// Wait until the game-mode byte (`$7E0100`, in the app's per-frame work-RAM snapshot) is `want`, at most `cap`
+/// console frames (W37-00c: the script waits on the game, not on a frame count).
+fn wait_mode(h: &mut Harness<'_, RetroForgeApp>, want: u8, cap: u64, stage: &str) {
+    let start = h.state().frame_count_for_test();
+    let wall = Instant::now();
+    while h.state().wram_for_test()[0x100] != want {
+        assert!(
+            h.state().frame_count_for_test() < start + cap && wall.elapsed() < Duration::from_secs(240),
+            "SMW drive stuck at '{stage}': game mode never reached {want:#04x} within {cap} frames (mode {:#04x})",
+            h.state().wram_for_test()[0x100]
+        );
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
 /// Boot, menus, the map, left to Yoshi's Island 1, in (the script of `w30_screens::smw_enter_yi1`; Enter is
-/// Start and X the SNES A button).
+/// Start and X the SNES A button). The map and the level are waited for on the game mode; the margins
+/// after them are those of the frame-timed script.
 fn enter_yi1(h: &mut Harness<'_, RetroForgeApp>) {
     use egui::Key as K;
     wait_frames(h, 200);
@@ -58,11 +75,13 @@ fn enter_yi1(h: &mut Harness<'_, RetroForgeApp>) {
     }
     wait_frames(h, 300);
     tap(h, K::X, 8);
-    wait_frames(h, 400);
+    wait_mode(h, 0x0E, 1500, "map after the introduction level");
+    wait_frames(h, 286);
     tap(h, K::ArrowLeft, 8);
     wait_frames(h, 150);
     tap(h, K::X, 8);
-    wait_frames(h, 150);
+    wait_mode(h, 0x14, 1500, "Yoshi's Island 1");
+    wait_frames(h, 4);
 }
 
 fn run_n(h: &mut Harness<'_, RetroForgeApp>, n: usize) {
@@ -150,9 +169,14 @@ fn three_presented_frames_of_smw_at_120_hz() {
     h.state_mut().resume_for_test();
     enter_yi1(&mut h);
     h.state_mut().log_presented_for_test();
+    // W37-00c: right with a hop every 36 frames (the W33-07 oracle's `R+B14 R22`, which clears the level's
+    // first obstacle) for 14 s; holding right and run alone stood at it.
     h.key_down(egui::Key::ArrowRight);
-    h.key_down(egui::Key::A);
-    run_for(&mut h, 14);
+    let hopping = Instant::now();
+    while hopping.elapsed() < Duration::from_secs(14) {
+        tap(&mut h, egui::Key::Z, 14);
+        wait_frames(&mut h, 22);
+    }
     println!("{}", h.state().frame_interp_debug_for_test());
     let tally = h.state().frame_interp_tally_for_test();
     println!("gaps between console frames: {tally:?}");
@@ -173,9 +197,12 @@ fn three_presented_frames_of_smw_at_120_hz() {
     // The best triple: console a, intermediate from a, console a + 1, with the picture moving.
     let mut best: Option<(usize, usize)> = None;
     for i in 12..log.len().saturating_sub(2) {
+        // W39-01: Super Mario World has a recipe (a tick counter), so the Presenter extrapolates from
+        // the frame on screen rather than interpolating back to the one before; the picture between
+        // console frame a and a + 1 is `Extrapolated { from: a }` and the shape of the triple is the same.
         let (
             (Shown::Console(a), pa),
-            (Shown::Intermediate { from, .. }, pm),
+            (Shown::Intermediate { from, .. } | Shown::Extrapolated { from, .. }, pm),
             (Shown::Console(b), pb),
         ) = (&log[i], &log[i + 1], &log[i + 2])
         else {

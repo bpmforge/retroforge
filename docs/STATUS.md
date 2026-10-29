@@ -4959,6 +4959,373 @@ stories, 10 decisions).
   S-DSP voice byte the savestate misses with Rebuild off too: ticketed as
   W37-07b. Workspace: **3726 passing**; `memory_editor_writes_the_machine`
   failed once under load (pre-existing flake) and passes alone 3/3.
+- **W37-07b — SNES APU access tallies leak across a load** (2026-10-27).
+  The suspected missing S-DSP byte was not a savestate gap: the APU's
+  per-instruction tallies (`ram_accesses`, `io_accesses`, `intra_ticks`)
+  are not saved, and a fresh core's power-on leaves two I/O accesses
+  charged, so the first instruction after a load ran the DSP two cycles
+  short. `Apu::load` now clears them. Regression test in
+  `tests/apu.rs`; the W37-07 SMW matrix now compares the APU region too.
+  Workspace: **3728 passing**, gate green.
+- **Small known bugs** (2026-10-27, Brad: "work through everything left").
+  **SNES colour math on hires lines**: hires and pseudo-hires lines sent no
+  sub-screen, so math never reached a 512-dot line; each half-dot now gets
+  its own entry (`Ppu::hires_sub_pixels`, fullsnes "Hires and Pseudo 3-Layer
+  Math"; the sub half-dot's one-dot flag lag is not modelled). The app's
+  frame buffer is 256 wide and keeps only the first 256 half-dots of a hires
+  line, so hires games are not shown whole in the app (open, not changed
+  here). **Compare/peek "original" keeps colour math**: the bundle keeps the
+  sub-screen while the original may be shown (`SetCompareCapture`) and
+  `original_rgba_with_math` blends it (the de-flicker rebuild path still
+  resolves without math). **Esc in Settings**: not reproducible on main
+  (fixed by W21-13); regression cases added for Quick Menu › Settings and a
+  focused search box. **RF-Scroller**: the profile's loading wait at $C000 is
+  empty ROM (CODE ends at $91D6), so it never runs; noted in the profile.
+  **Windows/Linux**: `cargo clippy --workspace --all-targets -D warnings`
+  clean in a Linux container (aarch64 Debian, rust 1.94) and for
+  `x86_64-pc-windows-gnu` (mingw) after gating rf-cache's Unix-symlink tests;
+  built, not run. **Yoshi's Island text box (open)**: not a stall, the story
+  pages advance ($0118 = 7, sub-state $11B8 cycles). The box's BG3 tilemap is
+  DMA'd from GSU RAM $70:5800 (frame 297, 00:B570) and holds tiles
+  $1A1-$1A9 / $1B1-$1B9 repeated three times across 24 columns, and those
+  tiles hold the $0130 fill that $7C00-$7FFF is cleared with, not glyphs;
+  the per-frame glyph uploads go to $7E80+ (tile $1D0+). So the GSU program
+  that builds the text-box tilemap is the suspect. No reference emulator
+  runs headless here (Mesen needs a window server). Workspace: **3728 passing**; `scout::tests::an_accepted_scout_remembers_its_rung_...` (NES, 30 s bound) failed under load twice and passes alone.
+- **W39-07 — Shader presets** (2026-10-28). Named presets are chains of
+  first-party shader stages with clamped values (`shader_preset.rs`): five
+  first-party ones (Consumer CRT, PVM, Sharp LCD, Smooth upscaler, Smoothed
+  CRT) and player presets saved from the current tuning. Saved through the
+  existing shader setting as `preset:<id>`, so per-game layering is
+  unchanged; presentation only, the same with Rebuild on or off. By-eye pass
+  over a synthetic test card recorded (all five). Quick Menu preview tiles
+  still list single shaders only. Workspace: **3734 passing**;
+  `ui_smoke` (load-time budget) and `w36_05_hooks` failed under load in
+  the gate and pass alone.
+- **W38-03 — Collision-table finder** (2026-10-28). `rf_rebuild::collision`
+  watches RAM loads that walk the level buffer near the player and classifies
+  tile ids by what the player did on the frames they were read (stopped
+  falling = solid; stops a fall but read while rising = one-way; slow-swim
+  run = water). SMB: one collision site (ROM 0x641b) over the $0502-$068F
+  buffer; solid ids 0x12-0x13 (floor) and 0x1f (wall), still thin (6 of 384
+  cells mid-1-1). SMW: the Map16 reader at 0x74d3; solid ids 0x00, 0x74,
+  0x79; lower-ranked sites noisy. Water and real one-way cases not exercised
+  in either run. The hand-painted height-map comparison was dropped at
+  Brad's call (2026-10-28): no painted map exists for SMB or SMW; the
+  comparator is unit-tested and picks up a profile's `[heights]` if one
+  appears. Workspace: **3737 passing**; `ui_smoke` (load-time budget), a
+  scout test and `w36_05_hooks` failed under load and pass alone
+  (`w36_05_hooks` also failed once alone with the Mac loaded: Lua NMI count
+  52 vs 59, worth a look).
+- **W38-02 — Object-table finder** (2026-10-28). `rf_rebuild::objtable`
+  scores RAM bytes as sprite x positions (with a constant offset, evidence
+  only when the implied position moves), groups them into strided chains,
+  derives y / x_hi / y_hi / state / kind, masks the OAM-mirror page and
+  measures the sprite-to-RAM lag; the harness samples RAM right after the
+  OAM upload ($4014 DMA / SNES DMA to $2104). SMB: base $0E, 3 slots, 1700
+  of 1856 live slot-frames match OAM (91.6%), lag 0. SMW: base $7E003E,
+  8 of 12 slots, 272 of 289 (94.1%), lag 1. Both graded Candidate; matching
+  allows +-2 px. Not every frame as the ticket asked: misses are mostly
+  flipped / star-killed enemies drawn at other offsets; exact match and full
+  slot counts are W38-02b. The gate caught an i8 overflow in the binding
+  check (debug panic, false match in release), fixed in e80070a; rf-rebuild
+  and rf-harness rerun 292/292 after it. Workspace: **3755 passing**.
+- **W39-00 — Plugin surface** (2026-10-28). `plugin.toml` declares
+  `kind = "logic" | "fact" | "render"` (`rf_plugin_sdk::surface`), with
+  capabilities limited per kind. Logic plugins see `rf.mode()` and must do
+  nothing unless Enhanced; `enable` refuses one without an Original-mode
+  proof from shadow lockstep (>= 30 frames, no divergence). Fact plugins merge
+  rows through `rf_rebuild::merge_facts` (clamped to Candidate, never demote
+  trusted rows, `[[patch]]` refused); render plugins turn recipe facts into
+  overlay draws. Samples in `plugins/samples/` (made-up engine). The sample
+  logic plugin runs 60 Original-mode frames clean; with its mode check removed
+  it diverges at frame 1 and is refused. App-shell wiring of the proof at
+  enable time is not done. Workspace: **3767 passing**.
+- **W39-03 — Baked level geometry** (2026-10-28). `rf_enhance::baked`
+  bakes each screen into a cell grid (Unknown / Open / Solid / OneWay, with
+  source and height) plus merged extruded wall quads; collision-fact id
+  ranges decide first, painted heights fill screens without rules, unseen
+  cells stay Unknown. One rf-cache entry per ROM sha256 beside the scout
+  scene entries (zstd, CRC, bounded decode, ids and counts only). SMW: 3
+  rule ranges from the W38-03 finder, 39 solid/one-way cells, 48 quads,
+  368 bytes, reloads equal. Zelda bakes empty (no collision recipe or
+  painted heights yet) and the scout canvas is not yet wired into the ROM
+  runs: both are W39-03b. Workspace: **3771 passing**, gate green.
+- **W39-02 — Object-aware Diorama** (2026-10-28). `rf_renderer::diorama_objects`
+  gives each object class (player, enemy, projectile, pickup, scenery) its
+  own lift, depth bias and shadow; Unknown and Enemy keep the W34 numbers, so
+  with no recipe the output is bit-identical (tested for the top-down,
+  oriented and side builders). `rf_enhance::object_roles` maps recipe object
+  slots to roles as plain data. Original mode unchanged (palette pass bytes
+  identical before and after a classed render). Contact sheet:
+  `docs/screens/w39/contact-sheet.png` (synthetic scene). The app shell does
+  not yet feed recipe classes in. Workspace: **3787 passing**, gate green.
+- **W39-06 — Local AI HD asset pass** (2026-10-28). `rf_ai::hd_pass` upscales
+  each unique tile once (keyed by indexed pixels plus palette); tiles of one
+  recipe object are composed and upscaled together so seams match, and a
+  shared tile takes the lowest object id. The set is one rf-cache entry per
+  ROM + model + settings (`rf_cache::hd_assets`). `rf_renderer::hd_tiles`
+  draws by hash lookup only; per-ROM toggle, off by default, and off means no
+  lookup and no model call. Tests use a stub upscaler; no model is wired in
+  and the app shell does not yet run the pass. Note: `rf_ai::pack::settings_hash`
+  hashes keys but not values (pre-existing). Workspace: **3803 passing**,
+  gate green.
+- **W40-02 — Local naming model** (2026-10-28). `rf_ai::local::LocalProvider`
+  talks to an OpenAI-compatible server on loopback only (default LM Studio
+  at `http://localhost:1234/v1`, `qwen/qwen3-8b`) with the cloud backend's
+  prompt, schema and output filtering; `localhttp.rs` is a std-only client
+  that refuses non-loopback hosts. Proposals are sourced `ai:local:<model>`
+  and graded candidate. Names stay labels: the atlas bytes and recipe
+  resolution are identical with naming off, cloud or local. A real run
+  against LM Studio named three synthetic functions offline in 2.45 s. The
+  `[ai_naming] backend` setting and its UI are not wired into the shell yet.
+  Workspace: **3800 passing** before main's W39-02/W39-06 merge; after it,
+  the rf-ai lib conflict (module list) was resolved and rf-ai rerun 99/99.
+- **W40-03 — SA-1 lifting** (2026-10-28). The SA-1's 65816 is recorded and
+  executed as a second core: own coverage log and observed-only atlas
+  (`CACHE_ASSET_SA1`), fetches through the SA-1's live bank map, I-RAM and
+  BW-RAM code counted as RAM fallback, reset/NMI/IRQ entries noted. SNES
+  lockstep now compares SA-1 registers, I-RAM and BW-RAM. Kirby's Dream
+  Land 3 on the generic tier, both CPUs lifted: zero divergence over two
+  play scripts (3420 and 3452 frames; S-CPU ~39 M and SA-1 ~122 M
+  instructions observed). SA-1 interrupts covered only by a synthetic test
+  (Kirby 3 polls). Super Mario RPG not run: the menu script stalls on a
+  static screen. Workspace: **3823 passing**, gate green.
+- **W39-04 — HD-2D render plugin** (2026-10-28). `rf_renderer::hd2d` composes
+  the Diorama pieces from plain data: extruded walls from a baked depth
+  lattice, sprite clusters as billboards classed by plugin markers (per-class
+  lift and shadow), tilted and yawed camera with optional sun shadows, and a
+  screen-space tilt-shift depth-of-field band centred on the player's feet.
+  `plugins/hd2d` (kind render; read_memory and draw_overlay only) marks the
+  player and object-table slots from recipe rows. SMW Yoshi's Island 1 demo
+  (ROM-gated) bakes 16x175 cells and 78 wall quads and renders frames
+  (kept out of git); Original mode identical over 5069 frames with HD-2D on
+  vs off, and over 180 frames on the synthetic fixture. Tour screenshots
+  (synthetic): `docs/screens/w39/hd2d-*.png`. Known rough edges: SMW wall
+  layout is a heuristic fit of the level buffer, slopes render as blocks,
+  only the player is classed (SMW recipe has no object table yet).
+  Workspace: **3841 passing**, gate green.
+- **W38-04 — Widescreen checklist finders** (2026-10-28).
+  `rf_rebuild::widescreen` watches immediate-operand compares/adds near
+  object-x and camera reads and ranks candidates (activation, despawn,
+  edge test, camera clamp, position trigger, HUD anchor) with a 0-100 score;
+  the harness tries each with a wider constant under lockstep, then a group
+  trial with leave-one-out, and keeps only those whose first divergence is
+  off-screen object state. SMB: 60 candidates; the three W36-06 bytes found
+  without hints plus a new keeper (0x41e2); group reach right +205 px, left
+  +442 px. SMW: 60 candidates, 8 tried, no keeper yet (W38-04b, with HUD
+  trials). Rows live in `profiles/*/recipe-widescreen.toml` overlays.
+  Workspace: **3850 passing**, gate green.
+- **W39-05 — Temporal upscaling** (2026-10-28). The HD-2D / Diorama pass
+  renders at a lower internal size with Halton(2,3) jitter, and a G-buffer
+  pass writes depth and motion vectors. A temporal upscaler produces
+  5120x2880: MetalFX temporal on macOS (`--features metalfx`, via wgpu hal
+  interop) or a portable WGSL fallback (3x3 Gaussian sample, reprojected
+  history clamped to the colour box). From 1707x960, edge error against
+  native 5K is 12.66 (portable) and 11.0 (MetalFX) vs 13.22 bilinear; zero
+  black holes, stable static frames. Contact sheet (synthetic):
+  `docs/screens/w39/temporal-upscale-sheet.png`. Also fixed: the spatial
+  MetalFX scaler held two `as_hal` guards at once (debug panic). Settings
+  wiring of `MetalFxSetting::Temporal` is not done. Workspace: **3875
+  passing**, gate green.
+- **W38-05 — Engine recipe: Zelda 1** (2026-10-28).
+  `profiles/nes/legend-of-zelda/recipe.toml`, every row sourced `observed:`
+  or `rule:` (a rows test rejects community-map provenance): the NMI as the
+  per-frame tick (13 926 of 13 930 watched writes inside it), player and
+  actor movers, scroll step, screen-index writers, 23 rule-named functions
+  (29 rows, all match the atlas), RAM player x/y, screen index, scroll x,
+  a 5-slot actor table (graded observed) and 61 candidate data regions.
+  Lockstep: 2800 frames (registration, first cave, four directions), zero
+  divergence on the interpreter and IR tiers with all 29 hooks live; at the
+  NMI exit Link's position equals end-of-frame position in 99.95% of 2070
+  frames. Widescreen: 14 candidates tried, no keepers; Zelda screen-flips,
+  so constant-widening cannot measure reach. Neighbour-screen margins are
+  W38-05b. Workspace: **3865 passing**, gate green.
+- **W38-09 — ROM-hack gate** (2026-10-28). `w38_09_hack_gate` applies 20
+  Lunar Magic SMW hacks in memory to Brad's own SMW (nothing written), boots
+  each on the rebuilt tier from a generic drive and runs lockstep: 20/20
+  boot with zero divergence, 19 reach a level (hack 03 stays at its title,
+  22.5% interpreter fallback; others 0.01-1.5%). The SMW recipe matches 9
+  to 23 of its 29 functions per hack, almost all exact, with no per-hack
+  work. Live margins not applied: SMW has no keeper widescreen rows yet
+  (W38-04b); 7 or 2 of the 11 candidate rows match exactly per hack and
+  would go live once promoted. Workspace: **3875 passing**, gate green.
+- **W37-00b — TAS movie desync** (2026-10-28, movie-desync thread; merged by
+  the Rebuild lab thread after a merge test on current main). Diffed
+  against a black-box reference emulator (run only, never read) and fixed
+  three timing faults: the HLE SPC IPL echoed uploaded bytes a loop late
+  (SMW now boots on the reference's frame), the S-CPU lacked WRAM refresh
+  (40 master cycles per line; it ran ~2.9% fast), and NES movie buttons
+  switched at our frame boundary instead of vblank. The SMB warps movie now
+  reaches the 8-4 ending; warpless reaches 4-2. Open: SMW diverges at
+  frame 1 326 (overworld load one frame early; lead is the SPC clock, 21 vs
+  ~20.95 master cycles per SPC cycle, unchecked) and SMB warpless gains a
+  lag frame at plan frame 28 322. Details: `docs/research/W37-00-movie-import.md`.
+  Workspace: **3879 passing** on the merge with main, gate green.
+- **W38-02b — Object-table finder, exact match** (2026-10-28). A slot-frame
+  now matches only at an exact offset the slot is seen to draw at (learned
+  per slot; rare slots borrow the table's), each slot picks this or the
+  previous capture's RAM, slots are claimed on match evidence with a
+  displaced-position control, an x high byte is fitted when wraps are rare,
+  and never-drawn states and transition frames are excluded and counted.
+  SMB: 7221 of 7239 live slot-frames (99.75%), 7 slots, Observed. SMW: 784
+  of 791 (99.12%), 8 slots, Observed. Zelda: actor table x $70 / y $84,
+  97.18%, 5 slots, Candidate (no state byte). Not every frame: the remaining
+  misses are itemised in the tests (SMB's 18 all in one slot). Full slot
+  counts were not reached: SMW slots 1-4, 8, 10, 11 are never live in these
+  runs. Workspace: **3884 passing**, gate green.
+- **W38-04b — Widescreen keepers on SMW, HUD trials** (2026-10-28). SMW was
+  observed over 30 309 frames in three power-on runs (two movies plus a
+  patrol script; 33 level entries), with 190 object state flips up and 183
+  down (W38-04 had 5 and 5). 16 single candidates, a group and 4 adc/cmp
+  window pairs were trialed under lockstep in parallel. One keeper: the
+  16-bit window pair at 0xa459 / 0xa45c widened by 0x80, first divergence an
+  off-screen state byte at frame 2260 with OAM and camera identical. It is
+  marginal (19 px more left reach; the picture differs from frame 2267). The
+  other 40 trial lines print their reason (16 changed the picture or camera,
+  13 never diverged, 10 kept nothing farther out, 2 touched an on-screen
+  object). HUD anchors: SMB's sprite-0 x table byte 0xfce kept on a state
+  check (no patch row: it is a table byte outside any function); SMW's HUD is
+  BG3 tiles, so there is no sprite anchor to trial. Workspace: **3888
+  passing**, gate green.
+- **W38-05b — Zelda margins from neighbouring screens** (2026-10-28).
+  `rf_enhance::screen_margins` holds a learned atlas of overworld screens
+  (grid index = row*16 + col; +-1 sideways, +-16 vertically) and lays the
+  +-1 and +-2 neighbours beside the live screen at 32:9; an agreement check
+  gates out caves, which reuse the overworld index. The atlas is learned by
+  observation on a scratch core (never the live one): a test-side RAM write
+  puts Link at an edge, the game's own loader brings in the next screen, and
+  a frontier explorer walks the hops that work. 33 of 128 screens learned
+  (85 of 334 hops; walled edges need items); unknown neighbours fall back to
+  the VRAM margin. Live-frame agreement 1.000 over 121 frames; frame and RAM
+  hashes identical with margins on and off. The shell does not hold an atlas
+  yet. Workspace: **3894 passing**, gate green.
+- **W38-06 — Engine recipe: Super Metroid** (2026-10-28).
+  `profiles/snes/super-metroid/recipe.toml`, regenerated byte-identically
+  from the committed generator: 1513-function atlas, 477 rule-named rows (all
+  match), player x/y words found by a 16-bit motion match against OAM, every
+  NMI-entry row hooked (the NMI is entered in several decode modes), 93
+  candidate data regions. Lockstep over 27 182 frames (Ceres only: the escape
+  fails and the script ends back at the Ceres start, corrected 2026-10-28): zero divergence plain and with 477 hooks; tick fires 26 991
+  times; position at the tick equals end of frame in 99.79% of 15 402 play
+  frames. No widescreen keepers and no enemy table: this stretch has no
+  roaming enemies (0 state flips); one camera-clamp candidate tried. Margins
+  are W38-06b (enemy-rich rooms). Workspace: **3898 passing**, gate green.
+- **W38-08 — Engine recipes: Mega Man 2 and Mega Man X** (2026-10-28).
+  Mega Man 2: `profiles/nes/mega-man-2/recipe.toml` by observation over
+  19 203 frames (forest and conveyor stages): a 32-slot object table (x lo
+  $0460 with the player in slot 0, x hi $0440, y $04A0, state $0400) found
+  by a walker plus period finder, camera $1F/$20, and NMI entry as the
+  no-latency tick (final player position there in 99.99% of 8045 frames).
+  Lockstep zero divergence over 10 311 frames plain and hooked. 16 widescreen
+  candidates tried, 0 keepers (31 state flips). Mega Man X: hooks (NMI rows
+  told apart by decode mode; 9867 of 9868 NMIs hooked) and lockstep only
+  (9868 frames, zero divergence); no object table was found, so no
+  widescreen trials and no verified tick point. Margins for both: approach
+  pending Brad. Workspace: **3902 passing**, gate green.
+- **W38-07 — Engine recipe: Castlevania** (2026-10-28).
+  `profiles/nes/castlevania/recipe.toml`, regenerated from the committed
+  generator: NMI as the per-frame tick (36 567 of 36 569 watched writes inside
+  it, entry and exit hooks), player x $40 and scroll $FD/$FF observed, player y
+  and the actor table candidate (the object-table finder assumes world-space x;
+  Castlevania stores positions relative to the camera). Lockstep over 21 312
+  frames: zero divergence plain and hooked; position at the tick exit equals
+  end of frame in 100% of 20 902 frames. Widescreen: 20 candidates and 18 HUD
+  anchors tried, no keepers (about 305 state flips). Margins: approach pending
+  Brad. Workspace: **3904 passing**, gate green.
+- **W40-01 — Recipe hub** (2026-10-28). Moderation rule written first and
+  approved by Brad (D-031): facts-only submissions, no ROM bytes, patches,
+  disassembly or community-map provenance, incoming rows clamped to
+  candidate, patch rows refereed by shadow lockstep on a maintainer-chosen
+  replay. `scripts/recipe-hub/validate-submission.py` (ACCEPT / REJECT /
+  HOLD for patch rows) and the referee checklist
+  `docs/design/RECIPE_HUB_REVIEW.md`; samples use a made-up engine. The
+  first real external acceptance waits for a submitter. W38-06b parked: the
+  Super Metroid script never leaves Ceres; D-032 (presentation margins)
+  makes its keeper search moot. Workspace: **3904 passing**, gate green.
+- **W38-11 — Presentation margins, learned from play** (2026-10-28, D-032).
+  `rf_enhance::presentation_margins` stitches the background seen so far at
+  the recipe camera (`LearnedWorld`, reset on scene change), remembers each
+  object-table slot's last-seen sprite (`ObjectMemory`, with a check of
+  whether the table's x is world or camera-relative) and falls back to
+  sprites last seen leaving the view. The middle 256 columns are the core's
+  picture exactly. In the app: a "Margins: learned from play" option with an
+  aspect picker, available for games with a recipe, in Enhanced or Game-Aware
+  mode only; the core is only peeked. ROM-gated runs on SMW (7856 frames),
+  Super Metroid (15 791, Ceres only, level only), Castlevania (2960) and
+  Mega Man 2 (3641): accuracy frames and WRAM identical on every frame with
+  margins on. The margin behind the player fills with the level; the side not
+  yet reached stays black. Objects are weak: SMW has no object table in its
+  recipe (last-seen sprites only), Castlevania's candidate table does not line
+  up with sprites, Mega Man 2's is read camera-relative. No recipe has a
+  vertical camera row yet. Workspace: **3924 passing**, gate green.
+- **W39-01 — No-latency interpolation for recipe games** (2026-10-28).
+  When a recipe is loaded, each SNES frame carries a tick verdict from the
+  recipe's camera and player rows (`rf_enhance::extrapolation`): the newest
+  frame is shown at once and the in-between display frame is extrapolated
+  forward from it at the velocity just observed, instead of interpolating
+  between the last two frames. A scene cut, teleport or sharp velocity change
+  refuses extrapolation for that tick (the frame repeats). SMW: the first
+  changed Mario sprite after a Right press shows one arrival earlier than
+  W37-06's delayed path; pictures, all 128 KiB of WRAM and the frame count
+  are identical with it on or off over 900 frames; extrapolated frames have
+  36.5% of the wrong dots of repeating the current frame (3000 frames). Tick
+  facts are read at the frame boundary, not at the NMI hook (plain-core
+  sessions have no hook host). NES keeps the delayed path; SMW's recipe has no
+  object table yet. Workspace: **3943 passing**, gate green.
+- **W39-03b — Zelda stage set and canvas footprint** (2026-10-28).
+  `rf_rebuild::walkability` classifies tile ids by a walk probe on a scratch
+  core: Link is placed beside a cell and pushed; no advance means solid. Zelda
+  gives 6 candidate solid rows (added to its recipe; the tree border is solid
+  in ~67% of its cells, grass and bushes ambiguous). Over the W38-05b learned
+  screens the Zelda stage set bakes 33 screens, 7982 body cells and 504 wall
+  quads, 3009 bytes cached and reloaded equal. `baked::bake_canvas` takes the
+  grid from the canvas footprint (`visited_cells`) instead of an assumed
+  screen width. The SMW ROM bake is untested end to end: its menu script no
+  longer reaches a level after the W37-00b timing fixes (W37-00c).
+  Workspace: **3948 passing**, gate green.
+- **W37-00c — SMW test scripts after the timing fixes** (2026-10-28). The
+  W37-00b SNES timing fixes moved SMW's state changes by 1-3 frames, so
+  frame-timed menu scripts in the ROM-gated tests stopped reaching a level
+  (bisected: w38_03_collision_smw passes at a3d332c^1, fails at a3d332c). A
+  shared closed-loop drive (`crates/rf-harness/tests/smw_drive`, and the
+  `@smw-to-level` script token in the app tests) now waits on the observed
+  game mode ($7E0100) with a frame cap. Every SMW ROM test the shift broke
+  passes again (collision, object tables, widescreen, baked geometry, HD-2D,
+  atlas, lockstep, mode gate, interpolation and others). Still red and not
+  caused by the shift: `w30_screens` (ALttP scout shot, W37-00d),
+  `w37_04_shadow_cost` (W37-04b), `w36_10_smw_recipe` (generator vs W38-01
+  rows). Running the SMW bake end to end exposed W39-03c (0 solid cells).
+  Workspace: **3948 passing**, gate green.
+- **W39-03c — SMW baked geometry** (2026-10-28). The SMW bake took the level
+  buffer's base from a stray run of reads far below the buffer, so no rule id
+  landed on a footprint cell. It now picks the base by an observed alignment
+  search (the cell under Mario's feet is a rule-solid body; 0x7ec800 wins with
+  1962 of 2613 in-level frames). Over the 53x14-cell canvas footprint: 188
+  cells judged, 39 solid or one-way, 40 wall quads, cached and reloaded equal.
+  Workspace: **3948 passing**, gate green.
+- **W37-04b — Shadow lockstep divergence on SMW** (2026-10-28). The live
+  shadow reported one SMW divergence at frame 17: only the S-DSP `cycle`
+  counter differed, so the rebuilt tier was not at fault. `Apu::reset` fetched
+  the SPC700 reset vector through the counted bus, leaving two I/O accesses
+  charged to the first instruction; a fresh core ran the DSP two cycles short
+  while the shadow (built by a state restore, which W37-07b clears) did not.
+  Reset now clears the tallies; a regression test that fails without the fix
+  steps a fresh APU and its save/load round trip alike. `w37_04_shadow_cost`
+  passes (SMW shadow on 15.92 ms/frame vs 7.90 off). Workspace: **3949
+  passing**, gate green.
+- **W37-00d — ALttP scout shot after the W37-00b timing shift** (2026-10-28).
+  The scout's PlayerMove trials poked the player word at the frame boundary.
+  After W37-00b's refresh stall, ALttP copies Link's x to a previous-position
+  word about 40 instructions after that boundary and scrolls by the
+  difference, so a boundary poke was taken into the copy and the camera never
+  moved (confirmed by poking at instruction K: 50..600 follows, 0..32 and
+  800+ do not; the game never restores the word). New
+  `EmuStepper::latch_and_advance_frame_poking` writes the pokes 128
+  instructions into the frame; `Scout::step` uses it. Generic, no game
+  address. `w30_screens` passes in full; SMW/NES/vertical scout suites pass.
+  `w32_09_scout_nes::walk_confidence` fails on main too (no `Scout::step`
+  involved). Workspace: **3949 passing**, gate green.
 
 2026-10-28 W37-03b done — scout reach past the first SMB pipe. Cause: the walker
   gave up at the first pipe because its margin (measured from where the pass

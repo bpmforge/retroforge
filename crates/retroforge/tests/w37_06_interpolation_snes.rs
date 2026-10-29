@@ -19,6 +19,9 @@ use rf_enhance::interpolate_snes::{compose_snes, SnesLayers};
 use rf_input::SnesButton;
 use rf_renderer::FrameBuffer;
 
+#[path = "../../rf-harness/tests/smw_drive/mod.rs"]
+mod smw_drive;
+
 const W: usize = 256;
 const H: usize = 224;
 
@@ -60,31 +63,16 @@ fn run(st: &mut EmuStepper, sink: &mut FrameBuffer, buttons: &[SnesButton], n: u
     }
 }
 
-fn tap(st: &mut EmuStepper, sink: &mut FrameBuffer, b: SnesButton, hold: u32) {
-    run(st, sink, &[b], hold);
-    run(st, sink, &[], 8);
-}
-
 /// Boot, menus, the map at Yoshi's House, left to Yoshi's Island 1, enter, wait for the fade-in (the script
 /// of `w32_07_scout_smw`).
 fn reach_yi1(st: &mut EmuStepper, sink: &mut FrameBuffer) {
-    run(st, sink, &[], 200);
-    for i in 0..10 {
-        let b = if i % 2 == 0 {
-            SnesButton::Start
-        } else {
-            SnesButton::A
-        };
-        tap(st, sink, b, 6);
-        run(st, sink, &[], 100);
-    }
-    run(st, sink, &[], 300);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 400);
-    tap(st, sink, SnesButton::Left, 8);
-    run(st, sink, &[], 150);
-    tap(st, sink, SnesButton::A, 8);
-    run(st, sink, &[], 150);
+    // W37-00c: closed-loop, waits on the game mode (`smw_drive::to_yi1_direct`).
+    smw_drive::to_yi1_direct(&mut |mask| {
+        let mut input = InputFrame::empty();
+        input.ports[0] = mask;
+        st.latch_and_advance_frame(input, sink);
+        st.peek_bus(smw_drive::MODE)
+    });
 }
 
 fn game_mode(st: &EmuStepper) -> u8 {
@@ -95,10 +83,22 @@ fn bg1_hofs(st: &EmuStepper) -> u16 {
     st.bg_layer_views().expect("snes")[0].hofs
 }
 
-/// The play script: run right, hop every so often.
-fn play(f: u32) -> Vec<SnesButton> {
-    let mut keys = vec![SnesButton::Right, SnesButton::Y];
-    if (f / 20).is_multiple_of(3) {
+/// The play: the W33-07 oracle's walk right with a hop (`R+B14 R22`, which clears the level's first
+/// obstacle), and on the map (game mode `0x0E`) Right to walk on and A to enter the next level.
+/// W37-00c: the earlier "run right with Y, hop every 60 frames" script stood at the first obstacle
+/// of this level and got its scrolling frames from dying and starting over, which the W37-00b
+/// timing fixes shifted (289 pairs became 131 against the 200 the assertion wants); this one reads
+/// the game, so the session keeps scrolling through whatever the levels do.
+fn play(st: &EmuStepper, f: u32) -> Vec<SnesButton> {
+    if game_mode(st) == 0x0E {
+        return vec![if (f / 30).is_multiple_of(2) {
+            SnesButton::Right
+        } else {
+            SnesButton::A
+        }];
+    }
+    let mut keys = vec![SnesButton::Right];
+    if f % 36 < 14 {
         keys.push(SnesButton::B);
     }
     keys
@@ -138,7 +138,8 @@ fn the_snes_captures_change_nothing_the_machine_does() {
             reach_yi1(&mut st, &mut sink);
             let mut frames = Vec::new();
             for f in 0..900u32 {
-                run(&mut st, &mut sink, &play(f), 1);
+                let keys = play(&st, f);
+                run(&mut st, &mut sink, &keys, 1);
                 frames.push(fnv(sink.rgba()));
             }
             let ram: Vec<u8> = (0..0x2000u32).map(|a| st.peek_bus(0x7E_0000 + a)).collect();
@@ -189,7 +190,8 @@ fn smw_yi1_at_120_hz_how_many_frames_are_interpolated() {
     let mut captures = 0u32;
 
     for f in 0..2400u32 {
-        run(&mut st, &mut sink, &play(f), 1);
+        let keys = play(&st, f);
+        run(&mut st, &mut sink, &keys, 1);
         let t = Instant::now();
         let Some(l) = grab(&st, &sink) else {
             prev = None;
@@ -246,7 +248,7 @@ fn smw_yi1_at_120_hz_how_many_frames_are_interpolated() {
                     }
                     // The sample for the cost and the pictures: the fastest scroll with sprites moving too.
                     let speed = u32::from(hofs.abs_diff(phofs));
-                    if steady && stats.sprites_moved >= 2 && f > 600 && speed >= sample_speed {
+                    if steady && stats.sprites_moved >= 2 && f > 300 && speed >= sample_speed {
                         sample_speed = speed;
                         sample = Some((p.clone(), l.clone()));
                     }

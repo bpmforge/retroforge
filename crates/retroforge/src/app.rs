@@ -714,6 +714,8 @@ pub struct RetroForgeApp {
     shader_chain: Option<rf_renderer::ShaderChain>,
     shader_budget: rf_renderer::fog::BudgetGate,
     shader_note: Option<String>,
+    /// Ticket W39-07: the name typed for "Save as preset".
+    preset_name_draft: String,
     /// Ticket W20-17: the fog pass over the live picture — the plane the
     /// matched profile's `[atmosphere]` names, the pass (built on first
     /// use), its own budget gate, whether it failed, when it started
@@ -781,6 +783,13 @@ pub struct RetroForgeApp {
     gsu_clock_sent: Option<crate::clock_governor::ClockPolicy>,
     /// Ticket W30-07: the run-ahead frames last sent to the core.
     run_ahead_sent: Option<u8>,
+    /// Ticket W38-11 (D-032): the recipe's camera/object reading for the presentation margins, the
+    /// state they learn, and whether the core was told to read.
+    presentation_spec: Option<crate::presentation::Spec>,
+    presentation: rf_enhance::presentation_margins::Presentation,
+    presentation_sent: Option<bool>,
+    /// Ticket W38-11: the last frame's margins drew from the learned world (tests, the badge).
+    presentation_drew: bool,
     /// Ticket W36-07 (D-028): the interpolated presentation. The Presenter holds back one console
     /// frame and composes the pictures between; `frame_interp_sent` is what the core was last told.
     frame_interp: crate::frame_interp::Presenter,
@@ -1580,6 +1589,8 @@ pub struct RetroForgeApp {
     snes_capture_active: bool,
     /// Ticket W34-01: whether `SetTileGridCapture(true)` was last sent.
     tile_grid_capture_active: bool,
+    /// Whether `SetCompareCapture(true)` was last sent.
+    compare_capture_active: bool,
     /// Ticket W4-10a: the UI-thread half of the trace transport, present
     /// only while a capture is armed.
     trace_drain: Option<crate::trace_capture::TraceDrain>,
@@ -1921,6 +1932,10 @@ impl RetroForgeApp {
             loading_sent: None,
             gsu_clock_sent: None,
             run_ahead_sent: None,
+            presentation_spec: None,
+            presentation: rf_enhance::presentation_margins::Presentation::new(),
+            presentation_sent: None,
+            presentation_drew: false,
             frame_interp: crate::frame_interp::Presenter::new(),
             frame_interp_sent: None,
             rebuild_sent: None,
@@ -1973,6 +1988,7 @@ impl RetroForgeApp {
             shader_chain: None,
             shader_budget: rf_renderer::fog::BudgetGate::new(),
             shader_note: None,
+            preset_name_draft: String::new(),
             atmosphere_pin: None,
             fog_pass: None,
             fog_budget: rf_renderer::fog::BudgetGate::new(),
@@ -2173,6 +2189,7 @@ impl RetroForgeApp {
             event_subscription_active: false,
             snes_capture_active: false,
             tile_grid_capture_active: false,
+            compare_capture_active: false,
             trace_drain: None,
             trace_writer: None,
             show_states: false,
@@ -4288,6 +4305,7 @@ impl RetroForgeApp {
         };
         self.mod_choices = recipe.mods().iter().map(|m| (*m).to_owned()).collect();
         self.mod_recipe = Some(recipe.clone());
+        self.presentation_spec = crate::presentation::Spec::from_recipe(&recipe);
         let enabled = match &self.config_root {
             Some(root) => crate::game_settings::load(root, &hashes.sha256).mods_enabled,
             None => Vec::new(),
@@ -4358,6 +4376,7 @@ impl RetroForgeApp {
         self.mod_choices.clear();
         self.mod_messages.clear();
         self.mod_recipe = None;
+        self.presentation_spec = None;
         self.mod_session_sent = false;
         let bytes = if let Some(base_sha) = &base_sha {
             self.patch_discovery =
@@ -4451,6 +4470,8 @@ impl RetroForgeApp {
         self.loading_sent = None;
         self.gsu_clock_sent = None;
         self.run_ahead_sent = None;
+        self.presentation_sent = None;
+        self.presentation = rf_enhance::presentation_margins::Presentation::new();
         self.frame_interp_sent = None;
         self.rebuild_sent = None;
         self.rebuild_status = crate::rebuild::RebuildStatus::Off;
@@ -4594,6 +4615,7 @@ impl RetroForgeApp {
                 self.debug_panels.data.cpu_regs = rf_core_api::CpuRegs::None;
                 self.snes_capture_active = false;
                 self.tile_grid_capture_active = false;
+                self.compare_capture_active = false;
                 self.debug_panels.data.wram = [0u8; 0x0800];
                 self.debug_panels.data.prg_ram = [0u8; 0x2000];
                 // A fresh `EmuStepper` (inside `core_thread::spawn` below)
@@ -4841,6 +4863,18 @@ impl RetroForgeApp {
         } else {
             None
         };
+        // The "original" keeps colour math: the bundle's sub-screen, kept while it may be shown.
+        let latest_bundle_sub = if want_compare_buffers {
+            core.frame_bundle.latest().sub.clone()
+        } else {
+            Vec::new()
+        };
+        // Only an SNES core has a sub-screen to keep.
+        let want_compare_capture = want_compare_buffers && self.console_label == "SNES";
+        if want_compare_capture != self.compare_capture_active {
+            self.compare_capture_active = want_compare_capture;
+            self.send_command(CoreCommand::SetCompareCapture(want_compare_capture));
+        }
         if crashed {
             // FM-01's recovery row is "Reload ROM / load last state" — the
             // core thread has already halted for good (`run_guarded_loop`
@@ -4922,11 +4956,12 @@ impl RetroForgeApp {
                 Some(CompareBuffers {
                     // Ticket W7-20: in the frame's own palette, so an
                     // SNES "original" is not in NES colours.
-                    original: rf_renderer::original_rgba_from_indexed_with(
+                    original: rf_renderer::original_rgba_with_math(
                         &video,
                         w,
                         h,
                         &msg.line_palettes,
+                        &latest_bundle_sub,
                     ),
                     enhanced: msg.rgba.clone(),
                     width: w,
@@ -4981,7 +5016,9 @@ impl RetroForgeApp {
                         // Ticket W30-03: margins of a native-scale frame
                         // (an HD pack or HD Mode 7 frame is already at a
                         // different scale, so it is left alone).
-                        if self.widescreen_on {
+                        if let Some(done) = self.presentation_margins_for_frame(&msg, &native) {
+                            done
+                        } else if self.widescreen_on {
                             self.widen_margins_for_frame(&msg, native.0, native.1)
                         } else {
                             native
@@ -5376,10 +5413,14 @@ impl RetroForgeApp {
             // the player sees — never over the compare pair (a research
             // view of the accuracy-exact frame) and never into a capture.
             let shader = if compare_rgba.is_none() {
-                self.video
-                    .shader
-                    .as_deref()
-                    .and_then(crate::shader_select::kind_from_id)
+                match crate::shader_preset::resolve(
+                    self.video.shader.as_deref(),
+                    &self.settings.shaders,
+                ) {
+                    crate::shader_preset::Selection::Unknown
+                    | crate::shader_preset::Selection::None => None,
+                    sel => Some(sel),
+                }
             } else {
                 None
             };
@@ -5388,8 +5429,8 @@ impl RetroForgeApp {
                     self.shader_chain = Some(rf_renderer::ShaderChain::new(gpu));
                 }
             }
-            let shaded = match (shader, &self.shader_chain, &self.gpu) {
-                (Some(kind), Some(chain), Some(gpu)) if self.shader_budget.is_enabled() => {
+            let shaded = match (&shader, &self.shader_chain, &self.gpu) {
+                (Some(sel), Some(chain), Some(gpu)) if self.shader_budget.is_enabled() => {
                     // Relative to the frame actually being shaded (an HD
                     // pack's is already larger), so the shader draws at
                     // about the size it will be shown.
@@ -5401,11 +5442,18 @@ impl RetroForgeApp {
                         u32::try_from(dw).unwrap_or(0),
                         u32::try_from(dh).unwrap_or(0),
                     );
-                    let stage =
-                        crate::shader_select::stage(kind, &self.settings.shaders.values(kind))
-                            .with_out_size(w32 * n, h32 * n);
+                    // Ticket W39-07: a single shader or a preset's chain;
+                    // either way it runs over the displayed frame only.
+                    let stages = crate::shader_preset::chain_stages(
+                        sel,
+                        &self.settings.shaders,
+                        w32,
+                        h32,
+                        n,
+                    )
+                    .unwrap_or_default();
                     let started = std::time::Instant::now();
-                    let result = chain.render(gpu, displayed, w32, h32, &[stage]);
+                    let result = chain.render(gpu, displayed, w32, h32, &stages);
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
                     match result {
                         Ok(out) => {
@@ -6493,6 +6541,44 @@ impl RetroForgeApp {
         self.store_diorama_result(result, msg.frame_count);
     }
 
+    /// Ticket W38-11 (D-032): the 32:9-style picture from the learned world and remembered objects,
+    /// presentation only (the core's frame is the middle of it, byte for byte). `None` when the mode
+    /// is off or the frame carries no readings (the caller then widens as before).
+    fn presentation_margins_for_frame(
+        &mut self,
+        msg: &core_thread::FrameMsg,
+        native: &(Vec<u8>, (usize, usize)),
+    ) -> Option<(Vec<u8>, (usize, usize))> {
+        self.presentation_drew = false;
+        if !self.presentation_active() {
+            return None;
+        }
+        let p = msg.presentation.as_deref()?;
+        let (w, h) = native.1;
+        let out_w = self.widescreen_out_width(h);
+        if w != usize::from(rf_enhance::widescreen::NARROW_WIDTH) || out_w <= w {
+            return None;
+        }
+        let hud = self.declared_hud;
+        let skip =
+            move |y: usize| hud.is_some_and(|r| u16::try_from(y).is_ok_and(|y| r.contains(y)));
+        let frame = rf_enhance::presentation_margins::Frame {
+            rgba: &native.0,
+            w,
+            h,
+            scene: p.facts.scene,
+            cam: p.facts.cam,
+            objects: p.facts.objects.as_deref(),
+            sprite: &p.sprite,
+            frame: msg.frame_count,
+            trail: p.facts.full_camera,
+        };
+        self.presentation.observe(&frame, &skip);
+        let picture = self.presentation.compose(&frame, out_w, &skip);
+        self.presentation_drew = true;
+        Some((picture, (out_w, h)))
+    }
+
     /// [`Self::widen_margins_layered`] for a frame the core sent. While a layered
     /// Diorama is wanted it also keeps the wide picture and its layer map
     /// (`Self::wide_ground` stands the Diorama on them: the margins are
@@ -6655,7 +6741,7 @@ impl RetroForgeApp {
     /// capped at the PPU's 512 dots, so at 21:9 and 32:9 it is not the
     /// picture's width; ticket W34-09).
     fn display_frame_size(&self) -> Option<(usize, usize)> {
-        if self.widescreen_on {
+        if self.widescreen_on || self.presentation_active() {
             self.last_frame_size.or(self.core_frame_size)
         } else {
             self.core_frame_size
@@ -6667,7 +6753,7 @@ impl RetroForgeApp {
     /// ([`crate::play_view::DisplayGrid::for_frame`]).
     fn display_grid(&self, width: f32, height: f32) -> crate::play_view::DisplayGrid {
         // 512 exactly is the PPU's hires width, not an aspect's.
-        if self.widescreen_on && width > 512.0 {
+        if (self.widescreen_on || self.presentation_active()) && width > 512.0 {
             crate::play_view::DisplayGrid::for_widened_frame(width, height)
         } else {
             crate::play_view::DisplayGrid::for_frame(width, height)
@@ -8835,18 +8921,52 @@ impl RetroForgeApp {
         // that exist, each with the sliders its own
         // manifest declares — not a free-text box.
         ui.label("Shader");
-        let selected = self
-            .video
-            .shader
-            .as_deref()
-            .and_then(crate::shader_select::kind_from_id);
+        let selection =
+            crate::shader_preset::resolve(self.video.shader.as_deref(), &self.settings.shaders);
+        let selected = match &selection {
+            crate::shader_preset::Selection::Kind(k) => Some(*k),
+            _ => None,
+        };
+        let selected_text = match &selection {
+            crate::shader_preset::Selection::Kind(k) => {
+                crate::shader_select::player_name(*k).to_string()
+            }
+            crate::shader_preset::Selection::Preset(p) => format!("Preset: {}", p.name),
+            _ => "None".to_string(),
+        };
         egui::ComboBox::from_id_salt("shader-picker")
-            .selected_text(selected.map_or("None", crate::shader_select::player_name))
+            .selected_text(selected_text)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(selected.is_none(), "None").clicked() {
+                if ui
+                    .selectable_label(
+                        matches!(selection, crate::shader_preset::Selection::None),
+                        "None",
+                    )
+                    .clicked()
+                {
                     self.video.shader = None;
                     changed = true;
                 }
+                // Ticket W39-07: presets first (first-party, then the
+                // player's), then the single shaders.
+                let mut presets = crate::shader_preset::first_party();
+                presets.extend(self.settings.shaders.presets.values().cloned());
+                for p in presets {
+                    let saved = crate::shader_preset::saved_id(&p.id);
+                    if ui
+                        .selectable_label(
+                            self.video.shader.as_deref() == Some(saved.as_str()),
+                            format!("Preset: {}", p.name),
+                        )
+                        .clicked()
+                    {
+                        self.video.shader = Some(saved);
+                        self.shader_budget = rf_renderer::fog::BudgetGate::new();
+                        self.shader_note = None;
+                        changed = true;
+                    }
+                }
+                ui.separator();
                 for kind in crate::shader_select::KINDS {
                     let m = kind.manifest();
                     if ui
@@ -8883,11 +9003,46 @@ impl RetroForgeApp {
                 self.settings.shaders.reset(kind);
                 changed = true;
             }
-            if self.gpu.is_none() {
-                ui.small("No GPU available to this window, so shaders cannot run.");
+        }
+        match &selection {
+            crate::shader_preset::Selection::Unknown => {
+                ui.small("The saved shader is not in this version; showing the plain picture.");
             }
-        } else if self.video.shader.is_some() {
-            ui.small("The saved shader is not in this version; showing the plain picture.");
+            crate::shader_preset::Selection::None => {}
+            _ => {
+                // Ticket W39-07: save the current look (a tuned shader or a
+                // preset) under a name of the player's choosing.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.preset_name_draft)
+                            .hint_text("Preset name")
+                            .desired_width(140.0),
+                    );
+                    if ui.button("Save as preset").clicked() {
+                        if let Some(id) = self
+                            .settings
+                            .shaders
+                            .save_preset(&self.preset_name_draft, &selection)
+                        {
+                            self.video.shader = Some(crate::shader_preset::saved_id(&id));
+                            self.preset_name_draft.clear();
+                            changed = true;
+                        }
+                    }
+                });
+                if let crate::shader_preset::Selection::Preset(p) = &selection {
+                    if self.settings.shaders.presets.contains_key(&p.id)
+                        && ui.small_button("Delete this preset").clicked()
+                    {
+                        self.settings.shaders.delete_preset(&p.id);
+                        self.video.shader = None;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if selection != crate::shader_preset::Selection::None && self.gpu.is_none() {
+            ui.small("No GPU available to this window, so shaders cannot run.");
         }
         if let Some(note) = &self.shader_note {
             ui.small(note);
@@ -10060,7 +10215,12 @@ impl RetroForgeApp {
                 // Ticket W30-07: how many frames ahead.
                 // Ticket W36-07: the honesty label's claim under the switch.
                 if row.id == "frame_interpolation" && row.enabled {
-                    ui.weak(rf_enhance::interpolation::label().claim);
+                    // Ticket W39-01: with the recipe's tick hook nothing is held back.
+                    ui.weak(if self.frame_interp.is_no_latency() {
+                        rf_enhance::interpolation::extrapolation_label().claim
+                    } else {
+                        rf_enhance::interpolation::label().claim
+                    });
                 }
                 if row.id == "run_ahead"
                     && row.enabled
@@ -10081,6 +10241,20 @@ impl RetroForgeApp {
                 {
                     actions.settings_changed = true;
                     actions.widescreen_aspect_changed = true;
+                }
+                // Ticket W38-11 (D-032): learned-from-play margins, for a game with a recipe.
+                if row.id == "widescreen_decoded" {
+                    let blurb = self.presentation_blurb();
+                    let (toggled, aspect) = crate::enhance_dock::presentation_controls(
+                        ui,
+                        blurb,
+                        &mut self.current_game_settings.presentation_margins,
+                        &mut self.current_game_settings.widescreen_aspect,
+                    );
+                    if toggled || aspect {
+                        actions.settings_changed = true;
+                        actions.presentation_changed = true;
+                    }
                 }
                 // Ticket W35-16: the game's own objects past the picture's edge.
                 if row.id == "widescreen_decoded"
@@ -15289,6 +15463,7 @@ impl RetroForgeApp {
             bg_rgba: Vec::new(),
             sprite_rgba,
             margin_sprites: Vec::new(),
+            presentation: None,
             margin_draw: None,
             interp: None,
             copies_refused_by_hooks: false,
@@ -17555,6 +17730,7 @@ impl RetroForgeApp {
                     hd_report: self.hd_report,
                     superfx_hd_readout: self.superfx_hd_readout.clone(),
                     margin_readout: self.margin_readout.clone(),
+                    presentation: self.presentation_blurb(),
                     level_texture: level_texture.as_ref(),
                     profile_title: self
                         .level_session
@@ -17637,6 +17813,9 @@ impl RetroForgeApp {
         }
         if actions.margin_sprites_changed {
             self.sync_margin_sprites();
+        }
+        if actions.presentation_changed {
+            self.sync_presentation();
         }
         if actions.settings_changed {
             self.save_current_game_settings();
@@ -17754,6 +17933,66 @@ impl RetroForgeApp {
             self.send_command(CoreCommand::SetNesExtraLines(lines));
             self.nes_lines_sent = Some(lines);
         }
+    }
+
+    /// Ticket W38-11 (D-032): the presentation margins are in force: the game has a recipe with a
+    /// camera, the per-game option is on, and the mode is an enhancement one. Accuracy Mode never.
+    #[must_use]
+    pub fn presentation_active(&self) -> bool {
+        self.presentation_spec.is_some()
+            && self.current_game_settings.presentation_margins
+            && self.current_game_settings.mode.enhancement_active()
+    }
+
+    /// What the presentation margins would show for this game (`None`: the game has no usable recipe).
+    #[must_use]
+    pub fn presentation_blurb(&self) -> Option<&'static str> {
+        self.presentation_spec
+            .as_ref()
+            .map(crate::presentation::Spec::describe)
+    }
+
+    /// Ticket W38-11: tell the core to read (or stop reading) the recipe's rows; sends only on a
+    /// change. Turning it off forgets what was learned.
+    fn sync_presentation(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        let want = self.presentation_active();
+        if self.presentation_sent == Some(want) {
+            return;
+        }
+        self.presentation_sent = Some(want);
+        self.presentation = rf_enhance::presentation_margins::Presentation::new();
+        let spec = self
+            .presentation_spec
+            .clone()
+            .filter(|_| want)
+            .map(Box::new);
+        self.send_command(CoreCommand::SetPresentation(spec));
+    }
+
+    /// Ticket W38-11 test hook: give the loaded game a recipe reading (a real one comes from its
+    /// `recipe.toml`, found by ROM hash).
+    #[doc(hidden)]
+    pub fn set_presentation_spec_for_test(&mut self, spec: Option<crate::presentation::Spec>) {
+        self.presentation_spec = spec;
+        self.presentation_sent = None;
+        self.sync_presentation();
+    }
+
+    /// Ticket W38-11 test hook: select the margins for the loaded game.
+    #[doc(hidden)]
+    pub fn set_presentation_for_test(&mut self, on: bool) {
+        self.current_game_settings.presentation_margins = on;
+        self.sync_presentation();
+    }
+
+    /// Ticket W38-11 test hook: the last frame's margins drew from the learned world.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn presentation_drew_for_test(&self) -> bool {
+        self.presentation_drew
     }
 
     /// Ticket W30-07: keep the core's run-ahead matching the row's
@@ -17996,6 +18235,10 @@ impl RetroForgeApp {
             _ => None,
         };
         self.send_command(CoreCommand::SetModSession(session));
+        // Ticket W39-01: the recipe's rows are what the tick hook of no-latency interpolation reads.
+        self.send_command(CoreCommand::SetInterpRecipe(
+            self.mod_recipe.clone().map(Box::new),
+        ));
     }
 
     /// Ticket W30-09: keep the core's S-DSP interpolation matching the
@@ -19035,6 +19278,7 @@ impl eframe::App for RetroForgeApp {
         self.sync_superfx_hd();
         self.sync_snes_interpolation();
         self.sync_run_ahead();
+        self.sync_presentation();
         self.sync_frame_interpolation();
         self.sync_rebuild();
         self.sync_mod_session();

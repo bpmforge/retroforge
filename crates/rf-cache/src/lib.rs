@@ -15,11 +15,13 @@ mod canvas_chunk;
 mod entry;
 mod error;
 mod fsutil;
+mod hd_assets;
 mod index;
 mod key;
 mod store;
 
 pub use error::CacheError;
+pub use hd_assets::{hd_assets_key, HdAssetSet, HdTile};
 pub use key::CacheKey;
 pub use store::Cache;
 

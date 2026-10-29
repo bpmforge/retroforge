@@ -289,6 +289,13 @@ impl Apu {
         let lo = self.read(0xFFFE);
         let hi = self.read(0xFFFF);
         self.cpu.pc = u16::from(lo) | (u16::from(hi) << 8);
+        // Ticket W37-04b: the vector fetch above is part of reset, not of
+        // the first instruction. Left charged, its two I/O accesses ran that
+        // instruction's DSP clock two cycles short on a fresh core, while a
+        // loaded core (W37-07b clears these on load) did not.
+        self.ram_accesses = 0;
+        self.io_accesses = 0;
+        self.intra_ticks = 0;
     }
 
     /// Is this address currently served by the IPL region?
@@ -822,6 +829,15 @@ impl Apu {
         i: &mut crate::state::StateIn,
     ) -> Result<(), rf_core_api::StateError> {
         self.cpu.load(i)?;
+        // Ticket W37-07b: the per-instruction tallies are not saved, because
+        // a save is always taken between instructions where they are zero.
+        // They are cleared here so whatever this APU held before the load
+        // cannot leak into the restored one: a fresh core's power-on leaves
+        // two I/O accesses charged, and the first instruction after a load
+        // then ran the DSP two cycles short.
+        self.ram_accesses = 0;
+        self.io_accesses = 0;
+        self.intra_ticks = 0;
         i.fill(&mut self.aram)?;
         for t in &mut self.timers {
             t.divisor = i.u32()?;

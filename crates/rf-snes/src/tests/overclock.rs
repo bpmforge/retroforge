@@ -193,17 +193,23 @@ fn core_with(program: &[u8], configure: impl FnOnce(&mut SnesCore)) -> SnesCore 
 /// byte: it hashes the save regions, and the PPU region is one byte longer.
 /// Video, audio, NMI count, work done and master cycles are the original
 /// pre-overclock values, unchanged.
+///
+/// Re-pinned for ticket W37-00b (the per-scanline DRAM refresh stall): the
+/// state hash and the master-cycle count move (the last instruction of a
+/// frame ends a few master cycles later), while video, audio, NMI count and
+/// work done stay exactly the pre-overclock values. Still a comparison
+/// against the build before the overclock plumbing, not a self-comparison.
 #[test]
 fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
     const PINNED: [(u64, u64, u64, usize, u8, u8, u64); 4] = [
         (
-            2451760302275872460,
+            2900243004634852721,
             17085499001889628965,
             3322592713610917373,
             23931,
             30,
             15,
-            10721070,
+            10721050,
         ),
         (
             5708542737912139829,
@@ -215,16 +221,16 @@ fn default_machine_is_byte_identical_to_the_pre_overclock_build() {
             10721040,
         ),
         (
-            1073815201929143042,
+            7061622125700991210,
             17085499001889628965,
             3322592713610917373,
             23931,
             0,
             0,
-            10721060,
+            10721046,
         ),
         (
-            7211123268812950589,
+            221239786516649221,
             17085499001889628965,
             3322592713610917373,
             23931,

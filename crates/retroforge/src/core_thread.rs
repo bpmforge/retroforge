@@ -267,6 +267,14 @@ pub struct HdMode7Frame {
     pub scale: usize,
 }
 
+/// Ticket W38-11: what the presentation margins read from one frame.
+#[derive(Debug, Clone)]
+pub struct PresentationFrame {
+    pub facts: crate::presentation::Facts,
+    /// One flag per dot of the frame: 1 = a sprite drew it.
+    pub sprite: Vec<u8>,
+}
+
 pub struct FrameMsg {
     /// Ticket W30-08: each governed chip's status, for the overclock rows'
     /// live status line.
@@ -346,6 +354,9 @@ pub struct FrameMsg {
     /// game placed past the picture's edge), only while "Sprites past the edge" is on and widescreen
     /// is; empty otherwise (the UI then paints nothing). `rf_enhance::margin_sprites`.
     pub margin_sprites: Vec<u8>,
+    /// Ticket W38-11: this frame's camera, scene key and object slots plus the per-dot sprite mask, for
+    /// the presentation margins (`crate::presentation`). `None` while the mode is off.
+    pub presentation: Option<Box<PresentationFrame>>,
     /// Ticket W36-06b: the objects a recipe mod keeps alive past the picture's edge, drawn for this
     /// frame from the game's own sprite data (`crate::margin_draw`): the strips for the pad and the
     /// dots of the real picture that were a wrapped copy of one. `None` when nothing needs drawing,
@@ -945,6 +956,10 @@ pub enum CoreCommand {
     /// stamps into a state's `PROF` chunk, and, while widescreen is on, what the margin redraw draws
     /// objects for (`crate::margin_draw`, needs the recipe's object-table RAM meanings).
     SetModSession(Option<Box<crate::mod_chunk::ModSession>>),
+    /// Ticket W39-01: the game's recipe (`None` for none), for the tick hook of no-latency
+    /// interpolation: its camera, player and object rows are read at the end of every tick
+    /// (`crate::frame_interp::Ticks`). Without one, interpolation keeps its one frame of delay.
+    SetInterpRecipe(Option<Box<rf_rebuild::Recipe>>),
     /// Ticket W11-01 (FR-ENH-002): temporal de-flicker on/off.
     ///
     /// A SECOND enhancement command, and until W11-01 there was exactly
@@ -996,6 +1011,10 @@ pub enum CoreCommand {
     /// writing the machine. Independent of `SetTileCapture` (an HD pack) and
     /// `SetStudioCapture`, which it shares the PPU's recording with.
     SetTileGridCapture(bool),
+    /// Keep each line's colour-math sub-screen in the bundle while the compare view or hold-to-peek may
+    /// show the "original" (`FrameBundle::sub`), so that picture keeps the game's translucency and fades.
+    /// Metadata only: the machine and `FrameBundle::video` are untouched.
+    SetCompareCapture(bool),
     /// Ticket W34-04: the profile's `[camera].mode` as an orientation (or
     /// `None`), which settles what the player detector would otherwise have
     /// to work out from play. Sent once per ROM.
@@ -1044,6 +1063,10 @@ pub enum CoreCommand {
     /// ones the game placed past the picture's edge (`FrameMsg::margin_sprites`). SNES only; off (the
     /// default) allocates and computes nothing.
     SetMarginSprites(bool),
+    /// Ticket W38-11 (D-032): read the recipe's camera and object table each frame (a side-effect-free
+    /// peek) and send them with the sprite mask on `FrameMsg::presentation`. `None` (the default) reads
+    /// nothing.
+    SetPresentation(Option<Box<crate::presentation::Spec>>),
     /// Ticket W36-07 (D-028): capture the layers of each real frame for interpolated presentation and
     /// send them on `FrameMsg::interp`. NES only for now; a no-op while run-ahead, de-flicker, the
     /// sprite overlay or an HD capture is on (their pictures are not the plain one the layers describe).
@@ -1529,8 +1552,12 @@ impl rf_core_api::CoreSink for FanoutSink<'_> {
     /// debug view of the indexed screens and does not blend).
     fn sub_scanline(&mut self, y: u16, pixels: &[rf_core_api::SubPixel], fixed_color: u16) {
         self.frame.sub_scanline(y, pixels, fixed_color);
-        // Ticket W33-01: the bundle keeps it only while widescreen is on.
-        self.bundle.sub_scanline(y, pixels, fixed_color);
+        // Ticket W33-01: the bundle keeps it only while it captures (widescreen, tile grids, compare).
+        // A hires line's sub-screen (one entry per half-dot, longer than the frame) is not offered:
+        // the bundle keeps 256 dots of a hires line's video, which those entries do not line up with.
+        if pixels.len() <= self.frame.width() {
+            self.bundle.sub_scanline(y, pixels, fixed_color);
+        }
     }
 
     /// Ticket W33-01: the per-line registers go to the bundle when it was asked to capture them
@@ -1659,12 +1686,17 @@ fn core_thread_main(
     // Ticket W3-03a: off until the UI asks, so a closed debug window costs
     // nothing on the frame path (see `CoreCommand::SetLayerExtraction`).
     let mut layers_enabled = false;
+    // Ticket W38-11: the layers are also captured while the presentation margins read the sprite mask.
+    let mut layers_on = false;
+    let mut presentation: Option<crate::presentation::Tracker> = None;
     // Ticket W35-16: see `CoreCommand::SetMarginSprites`.
     let mut margin_sprites = false;
     // Ticket W36-07: see `CoreCommand::SetInterpolation`. `interp_objects` is the recipe's object table
     // (recipe-optional); `interp_oam` the OAM at the end of the previous frame, which drew this picture.
     let mut interp_on = false;
     let mut interp_objects: Option<crate::frame_interp::Objects> = None;
+    // Ticket W39-01: the tick hook of no-latency interpolation (SNES, recipe rows).
+    let mut interp_ticks: Option<crate::frame_interp::Ticks> = None;
     let mut interp_oam = [0xF8u8; 256];
     // Widescreen (W11-03). `None` is off, and off means the core never
     // reaches its widening path at all.
@@ -1675,6 +1707,7 @@ fn core_thread_main(
     let mut studio_capture = false;
     // Ticket W34-01: independent of both, see `CoreCommand::SetTileGridCapture`.
     let mut tile_grid_capture = false;
+    let mut compare_capture = false;
     // Ticket W34-04: the height learner, alive while the capture is on. It
     // keeps what it learned if the capture is switched off and on again.
     let mut live_heights: Option<crate::live_learn::LiveHeights> = None;
@@ -1832,7 +1865,7 @@ fn core_thread_main(
                         step_input,
                         &mut FanoutSink {
                             frame: &mut sink,
-                            layers: layers_enabled.then_some(&mut layers),
+                            layers: layers_on.then_some(&mut layers),
                             bundle: &mut bundle_builder,
                             audio: audio.as_mut(),
                             overlay: overlay_capture.as_mut(),
@@ -1851,7 +1884,7 @@ fn core_thread_main(
                 CoreCommand::StepScanline => {
                     stepper.step_scanline(&mut FanoutSink {
                         frame: &mut sink,
-                        layers: layers_enabled.then_some(&mut layers),
+                        layers: layers_on.then_some(&mut layers),
                         bundle: &mut bundle_builder,
                         audio: audio.as_mut(),
                         overlay: overlay_capture.as_mut(),
@@ -1893,6 +1926,11 @@ fn core_thread_main(
                         .and_then(|s| crate::frame_interp::Objects::from_recipe(&s.recipe));
                     mod_session = session.map(|s| *s);
                     margin_capture = false;
+                }
+                CoreCommand::SetInterpRecipe(recipe) => {
+                    interp_ticks = recipe
+                        .as_deref()
+                        .and_then(crate::frame_interp::Ticks::from_recipe);
                 }
                 CoreCommand::SetLevelProbe(probe) => {
                     level_probe = probe;
@@ -1959,6 +1997,11 @@ fn core_thread_main(
                 }
                 CoreCommand::SetLayerExtraction(enabled) => {
                     layers_enabled = enabled;
+                    layers_on = layers_enabled || presentation.is_some();
+                }
+                CoreCommand::SetPresentation(spec) => {
+                    presentation = spec.map(|s| crate::presentation::Tracker::new(*s));
+                    layers_on = layers_enabled || presentation.is_some();
                 }
                 CoreCommand::SetMarginSprites(on) => {
                     margin_sprites = on;
@@ -1980,7 +2023,15 @@ fn core_thread_main(
                     stepper.set_tile_capture(hd_capture || studio_capture || tile_grid_capture);
                     // The SNES grids follow per-line scroll, which the bundle
                     // keeps only while it captures the wide channels.
-                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
+                }
+                CoreCommand::SetCompareCapture(on) => {
+                    compare_capture = on;
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
                 }
                 CoreCommand::SetOrientationHint(hint) => {
                     orientation_hint = hint;
@@ -2027,7 +2078,9 @@ fn core_thread_main(
                     snes_capture = false;
                     // Ticket W33-01: the bundle keeps the sub-screen and the
                     // per-line registers only while widescreen is on.
-                    bundle_builder.set_capture_wide(widescreen.is_some() || tile_grid_capture);
+                    bundle_builder.set_capture_wide(
+                        widescreen.is_some() || tile_grid_capture || compare_capture,
+                    );
                     if widescreen.is_none() {
                         scout_driver.set(None);
                         stepper.set_widescreen_off();
@@ -2151,7 +2204,7 @@ fn core_thread_main(
                             input.load(),
                             &mut FanoutSink {
                                 frame: &mut sink,
-                                layers: layers_enabled.then_some(&mut layers),
+                                layers: layers_on.then_some(&mut layers),
                                 bundle: &mut bundle_builder,
                                 audio: audio.as_mut(),
                                 overlay: overlay_capture.as_mut(),
@@ -2358,7 +2411,7 @@ fn core_thread_main(
             && overlay_capture.is_none()
             && !hd_capture
             && !studio_capture
-            && !layers_enabled
+            && !layers_on
             && !stepper.is_paused();
         let capture_wanted = margin_wanted || interp_wanted;
         if capture_wanted != margin_capture {
@@ -2392,7 +2445,7 @@ fn core_thread_main(
                 frame_input,
                 &mut FanoutSink {
                     frame: &mut sink,
-                    layers: layers_enabled.then_some(&mut layers),
+                    layers: layers_on.then_some(&mut layers),
                     bundle: &mut bundle_builder,
                     audio: audio.as_mut(),
                     overlay: overlay_capture.as_mut(),
@@ -2407,7 +2460,7 @@ fn core_thread_main(
                         frame_input,
                         &mut FanoutSink {
                             frame: &mut sink,
-                            layers: layers_enabled.then_some(&mut layers),
+                            layers: layers_on.then_some(&mut layers),
                             bundle: &mut bundle_builder,
                             audio: audio.as_mut(),
                             overlay: overlay_capture.as_mut(),
@@ -2861,6 +2914,16 @@ fn core_thread_main(
                     Vec::new()
                 },
                 margin_draw: None,
+                presentation: presentation.as_mut().map(|t| {
+                    Box::new(PresentationFrame {
+                        facts: t.read(&|a| stepper.peek_bus(a)),
+                        sprite: layers
+                            .sprite_rgba()
+                            .chunks_exact(4)
+                            .map(|p| u8::from(p[3] != 0))
+                            .collect(),
+                    })
+                }),
                 interp: None,
                 copies_refused_by_hooks: false,
                 oam: Box::new(*stepper.oam()),
@@ -2938,7 +3001,7 @@ fn core_thread_main(
                 && !watches_armed
                 && loading_unpaced.is_none()
                 && pacer.is_enabled()
-                && !layers_enabled
+                && !layers_on
                 && !margin_sprites
                 && !hooks_block
                 && !audio_capture
@@ -2989,14 +3052,19 @@ fn core_thread_main(
             // Ticket W36-07: the layers of this picture, read from the captures; nothing is written back.
             if interp_wanted && ran && spec_shown.is_none() {
                 msg.interp = if snes_wanted {
-                    crate::frame_interp::capture_snes(
+                    let mut layers = crate::frame_interp::capture_snes(
                         &stepper,
                         sink.layer_codes(),
                         sink.sprite_ids(),
                         sink.line_regs(),
                         msg.width,
                         msg.height,
-                    )
+                    );
+                    // Ticket W39-01: the tick's facts, read here at the end of the frame's logic.
+                    if let (Some(t), Some(l)) = (interp_ticks.as_mut(), layers.as_deref_mut()) {
+                        t.attach(&stepper, l);
+                    }
+                    layers
                 } else {
                     crate::frame_interp::capture(
                         &stepper,
@@ -3285,6 +3353,7 @@ mod tests {
             sprite_rgba: Vec::new(),
             margin_sprites: Vec::new(),
             margin_draw: None,
+            presentation: None,
             interp: None,
             copies_refused_by_hooks: false,
             oam: Box::new([0u8; 256]),

@@ -1,0 +1,19 @@
+# SAMPLE ONLY (bad on purpose). Made-up engine; every row breaks the rule.
+
+[recipe]
+format = 1
+id = "sample-bad"
+engine = "blocksy"
+
+[[function]]
+name = "Frame Tick"
+shape_hash = "123"
+grade = "confirmed"
+source = "from the community RAM map at github.com/example/disasm"
+
+[[ram]]
+addr = 0x0010
+name = "lives"
+bytes = [169, 0, 133, 16, 76, 0, 128, 234, 234]
+grade = "gold"
+source = "a9 00 85 10 4c 00 80 ea ea ea"

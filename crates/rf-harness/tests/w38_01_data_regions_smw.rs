@@ -21,6 +21,8 @@ use rf_harness::data_regions::SnesDriver;
 use rf_harness::movie::{self, Movie};
 use rf_harness::movie_replay::{plan, Plan};
 use rf_input::SnesButton;
+
+mod smw_drive;
 use rf_rebuild::dataregion::{associate, grade_rows, infer, DataFacts};
 use rf_snes::core::SnesCore;
 
@@ -33,7 +35,6 @@ const IN_LEVEL: u8 = 0x14;
 /// `crates/retroforge/tests/w33_07_common/mod.rs`, as `w36_08_atlas_smw`
 /// plays them. `wN` idles N frames, `<buttons>N` holds them
 /// (`A B X Y S E U D L R`).
-const TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
 const PLAY: &str = "L2 w3 B8 w52 B8 w52 B8 w52 B8 w52 R+B14 R22 R+B14 R22 S6 w100 S6 w60 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22 R+B14 R22";
 
 fn rom_path() -> Option<PathBuf> {
@@ -96,8 +97,8 @@ fn frames_of(text: &str) -> Vec<u16> {
 }
 
 /// Menus to the level, then play until the level has seen 1,500 frames.
-fn session() -> Vec<u16> {
-    let mut pad = frames_of(TO_LEVEL);
+fn session(raw: &[u8]) -> Vec<u16> {
+    let mut pad = smw_drive::level_pad(raw);
     let start = pad.len();
     pad.extend(frames_of(PLAY));
     let more = frames_of("R+B14 R22");
@@ -124,7 +125,7 @@ fn baseline(raw: &[u8]) -> CoverageLog {
     let mut core = SnesCore::load(raw).expect("loads");
     core.reset(ResetKind::Hard);
     core.set_coverage_recording(true);
-    for mask in session() {
+    for mask in session(raw) {
         core.system_mut().bus.joypads.ports[0] = mask;
         core.run_frame(&InputFrame::empty(), &mut Null);
     }
@@ -160,7 +161,7 @@ fn smw_probe_yoshis_island_1() {
     };
     let atlas = build_snes_atlas(&raw, &baseline(&raw)).expect("atlas");
     let mut d = SnesDriver::new(&raw, &atlas).expect("loads");
-    let pad = session();
+    let pad = session(&raw);
     let t = Instant::now();
     let runs = observe_levels(&mut d, &pad, 0);
     println!(
@@ -293,7 +294,7 @@ fn smw_level_pointer_tables_are_found_without_hints() {
 
     // 1. The W36-08 menus-and-play script.
     let mut d = SnesDriver::new(&raw, &atlas).expect("loads");
-    runs.extend(observe_levels(&mut d, &session(), 0));
+    runs.extend(observe_levels(&mut d, &session(&raw), 0));
     println!("script: {} level runs in {:?}", runs.len(), t.elapsed());
 
     // 2. The W37-00 movies, as far as they get.

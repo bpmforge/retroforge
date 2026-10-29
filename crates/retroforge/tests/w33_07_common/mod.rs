@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../../../rf-harness/tests/smw_drive/mod.rs"]
+pub mod smw_drive;
+
 use retroforge::stepper::EmuStepper;
 use rf_core_api::{CoreEvent, CoreSink, FrameBundleBuilder, InputFrame, PpuPixel};
 use rf_enhance::canvas::{scrolls_for, CanvasModel, FrameFeed, FrameScrolls, ScrollLag};
@@ -339,6 +342,14 @@ impl Rig {
     /// face, `S` start, `E` select, `U D L R`, joined by `+`.
     pub fn script(&mut self, text: &str) {
         for tok in text.split_whitespace() {
+            if tok == SMW_TO_LEVEL {
+                // W37-00c: closed-loop, waits on the game mode.
+                smw_drive::to_level(&mut |m| {
+                    self.frame(m);
+                    self.st.peek_bus(smw_drive::MODE)
+                });
+                continue;
+            }
             let (mask, n) = if let Some(n) = tok.strip_prefix('w') {
                 (0, n.parse::<u32>().expect("wN"))
             } else {
@@ -410,7 +421,34 @@ pub const MMX: (&str, &str, &str) = (
 /// Boot, menus, the map at Yoshi's House, (W35-05: into the house again, which Mario can walk in,
 /// and out of its right end: a second room played in), left to Yoshi's Island 1, enter, and
 /// wait for the fade-in (`w32_07_scout_smw::reach_yi1` as tokens).
-pub const SMW_TO_LEVEL: &str = "w200 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 S6 w108 A6 w108 w300 A8 w408 A8 w200 R40 w20 L40 w20 R40 w20 L40 w20 R40 w20 L40 w20 R60 w20 R200 w300 L8 w158 A8 w158";
+///
+/// W37-00c: not a frame-timed script any more. The frame counts of the old script
+/// (`w200 S6 w108 A6 ... w158`) were tuned on the pre-W37-00b timing and stranded the
+/// play script a few frames early; this token runs [`smw_drive::to_level`], which waits
+/// on the game mode (`$7E0100` reaching the map, then a level). [`Rig::script`] expands it;
+/// a test that wants the pad as a list uses [`smw_drive::level_pad`].
+pub const SMW_TO_LEVEL: &str = "@smw-to-level";
+/// [`SMW_TO_LEVEL`] as the pad it plays, for a test that replays a list of masks (lockstep,
+/// atlas, a second machine): the drive run once on a scratch machine from power-on. The core is
+/// deterministic, so the same masks from power-on reach the same states again.
+pub fn smw_level_pad() -> Vec<u16> {
+    struct Quiet;
+    impl CoreSink for Quiet {
+        fn video_scanline(&mut self, _y: u16, _p: &[PpuPixel]) {}
+        fn audio(&mut self, _s: &[i16]) {}
+        fn event(&mut self, _e: CoreEvent) {}
+    }
+    let path = rom_file(SMW.0, SMW.1).expect("the SMW ROM");
+    let rom = retroforge::rom_open::load_rom_bytes(&path).expect("rom");
+    let mut st = EmuStepper::open(&rom).expect("opens");
+    smw_drive::to_level(&mut |m| {
+        let mut input = InputFrame::empty();
+        input.ports[0] = m;
+        st.latch_and_advance_frame(input, &mut Quiet);
+        st.peek_bus(smw_drive::MODE)
+    })
+}
+
 pub const MMX_TO_LEVEL: &str = "w300 S6 w114 S6 w114 S6 w114 S6 w114 S6 w400";
 pub const SMB3_TO_LEVEL: &str = "w300 S6 w120 S6 w400 R8 w60 U8 w60 A8 w300";
 pub const MM2_TO_LEVEL: &str = "w400 S6 w120 S6 w300 S6 w300 U8 w20 S6 w800";
