@@ -692,6 +692,50 @@ other region and skips the APU one (`Rig::skip_apu`). Some DSP state the save
 does not carry; the synthetic SNES cartridge never plays a sample and so does
 not show it. Follow-up for rf-snes.
 
+### W37-03b: scout reach past the first pipe (built 2026-10-28)
+
+**Cause, measured.** The W36-06c capture's margins ended about 580 px into SMB 1-1. That is not
+"the walker only walks" alone: a walker that stands still with its margin unfilled sidesteps
+(W35-09), but the margin is measured from where the pass began, and from a start camera of about
+33 the 272 px a 32:9 picture asks for were already covered when the walker reached the first pipe
+(world x 448). So no sidestep ran and the stall rule ended the pass. Reproduced headlessly in
+`w37_03b_scout_reach` (the same entry as `w36_06c_screens`: the live-enemies image, the enemy
+flags held, Start twice, the injury timer run up): 579 px, 67,510 cells. Entered another way
+(`w200 S6 w500`, the plain game) the walker happens to pass the pipe (826 px): where Mario stands
+when the pipe stops him decides it, so the old reach was luck.
+
+**Fix 1, jumping.** `sidestep_pad` has a second stage for a pass along X after the up/down zigzag:
+`JUMPS` = 8 jumps, each the way forward with A held for 32 frames (a side view's jump rises
+while the button is held) and then the way forward alone for 60 (A let go, so every press is an
+edge). A pass along Y has none. A walker along X whose margin is already covered skips the
+zigzag and jumps: the live player walks on past where the scout began, and the scenery out there
+is only seen by a scout that gets over the wall. Once a jump has grown the canvas, later walls in
+that scout are jumped at once (`jumps_first`). A game that never reached the end of the zigzag
+sees no new input; a NES walk-strategy game that stood at a filled-margin wall now spends up to
+736 more frames pressing A before the pass ends. Measured: 1,274 px, 212,765 cells, agreement
+1000 per mille; the Right pass ends when Mario falls into the first pit (SceneChanged). In the
+app (`w36_06c_screens`): 61,237 cells over 2,310 frames before, 206,748 over 3,109 after; the
+capture's right margin carries 14,467 scenery dots (7,490 before), its 256-px picture unchanged.
+
+**Regression set** (the ROM-gated scout tests, old and new binaries side by side, 2026-10-28):
+SMW, SMB3, MM2, MMX, Super Metroid, Castlevania, ALttP and Zelda 1 print the same cell counts,
+widths and agreements before and after (`w32_07`, `w32_09`, `w33_06`, `w33_07`, `w33_08`,
+`w35_02`, `w35_03`, `w35_04`, `w35_17`); only the two SMB captures changed. Three probes fail the
+same way on both (`walk_confidence`, `explore_shaft_table`, Zelda's `explore_trial`).
+
+**Fix 2, the start gate.** The finder named `$01F7 = 175`, a 6502 stack byte (the page is the
+stack, nesdev "CPU memory map"): one value on every level frame of one session, another for the
+next player. `ScoutFinder::set_no_gate` sets offsets aside in both gate loops, and the NES finder
+(the app's `ScoutFind` and the test rig) sets aside `$0100-$01FF`. Not the SNES: the 65816's
+stack is wherever the game puts it and Super Mario World keeps its game mode at `$0100`. The
+finder now names `$0203 = 88` beside the `$0795` rows: sprite 0's X, the HUD-split sprite,
+which stands still in every level. The `retain` workaround in `w36_06c_screens` and
+`w37_06_widescreen` is an assertion now.
+
+**Not done.** Following an imported input movie's route (the ticket's other option): a scout
+starts from the live machine's snapshot, a movie is indexed from power-on, and lining them up is
+a frame-matching problem of its own (W37-00's movies desync anyway). The SMB pit ends the pass.
+
 ## 9. After W36: phases B to E (approved 2026-10-25, ticketed W37..W40)
 
 Brad approved the follow-on path ("ok do this") from the Rebuild Player

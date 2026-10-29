@@ -4959,3 +4959,16 @@ stories, 10 decisions).
   S-DSP voice byte the savestate misses with Rebuild off too: ticketed as
   W37-07b. Workspace: **3726 passing**; `memory_editor_writes_the_machine`
   failed once under load (pre-existing flake) and passes alone 3/3.
+
+2026-10-28 W37-03b done — scout reach past the first SMB pipe. Cause: the walker
+  gave up at the first pipe because its margin (measured from where the pass
+  began) was already filled, so it never sidestepped; and it could not jump.
+  `sidestep_pad` gains a jump stage for passes along X (8 jumps, A held 32
+  frames, fresh press each), taken at once when the margin is filled or a jump
+  has worked before. The NES finder takes no start gate from the stack page
+  (`ScoutFinder::set_no_gate`, $0100-$01FF; it had named $01F7). SMB 1-1 at
+  32:9 in the app: 61,237 to 206,748 scouted cells, right margin 7,490 to
+  14,467 scenery dots; headless `w37_03b_scout_reach` 579 to 1,274 px.
+  Scout regression set (SMW, SMB3, MM2, MMX, Super Metroid, Castlevania,
+  ALttP, Zelda 1) identical before and after. Movie-route scouting not done
+  (docs/design/REBUILD_LAB.md, W37-03b).
