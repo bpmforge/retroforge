@@ -102,11 +102,16 @@ fn smb_1_1_at_32_9_scenery_with_enemies_over_it() {
     .expect("the finder names a scout table for Super Mario Bros.");
     let mut plan = retroforge::scout_discovery::plan_of(&skeleton);
     plan.settle_frames = 30;
-    // The finder also reported a stack byte ($01F7 = 175) as a start condition. It read 175 on every
+    // The finder once reported a stack byte ($01F7 = 175) as a start condition: it read 175 on every
     // level frame of the finder's own session and on none of 2,600 level frames of the "Mario unhurt"
-    // script, so with it the scout would hardly ever start for another player (a finder gate
-    // problem, not this ticket's: noted in docs/design/REBUILD_LAB.md). The level-state rows stay.
-    plan.start_when.retain(|(addr, _)| *addr != 0x01F7);
+    // script. W37-03b: no gate is taken from the stack page.
+    assert!(
+        plan.start_when
+            .iter()
+            .all(|(addr, _)| !retroforge::scout_find::NES_STACK_PAGE.contains(&(*addr as usize))),
+        "a stack byte as a start condition: {:?}",
+        plan.start_when
+    );
     assert!(
         !plan.start_when.is_empty(),
         "the finder named no level-state row"

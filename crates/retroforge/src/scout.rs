@@ -447,14 +447,31 @@ pub const SIDESTEPS: u32 = 8;
 const SIDESTEP_UNIT: u32 = 8;
 /// Frames of forward walking after each sidestep.
 pub const SIDESTEP_FORWARD: u32 = 160;
+/// The frames the whole zigzag takes, `sum(SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)`.
+pub const ZIGZAG_FRAMES: u32 =
+    SIDESTEP_UNIT * SIDESTEPS * (SIDESTEPS + 1) / 2 + SIDESTEP_FORWARD * SIDESTEPS;
+
+/// W37-03b: jumps a walker along X tries once the zigzag is spent. A side view's wall (a pipe, a
+/// step) does not give way to Up or Down; the player has to go over it.
+pub const JUMPS: u32 = 8;
+/// Frames the jump button is held. A side view's jump rises higher the longer the button is held
+/// (Super Mario Bros.: about four tiles for a held button); 32 frames covers the whole rise.
+pub const JUMP_HOLD: u32 = 32;
+/// Frames of forward walking after each jump: the button is let go, so the next jump is a fresh
+/// press (a game starts a jump on the press, not on a held button).
+pub const JUMP_FORWARD: u32 = 60;
+/// The A button's bit in the NES pad byte (nesdev "Standard controller": A is the first bit
+/// read from `$4016`).
+const NES_PAD_A: u8 = 1 << 0;
 
 /// W35-09: the pad bits a blocked walker presses `stuck` frames after it first stood still, or
 /// `None` once the zigzag is spent. A walk that holds only its direction stops at the first
 /// tree, rock or wall of a top-down screen; a game that moves its camera by flips (the Legend of
 /// Zelda) shows nothing beyond until the player gets past. The walker goes sideways (up, then
-/// down, then up further...) and tries the way forward again after each. Only `Up`/`Down` are
-/// pressed: a game that needs another sidestep key gets none. Total frames
-/// `sum(SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)`, bounded: the zigzag is spent after that.
+/// down, then up further...) and tries the way forward again after each. Total frames
+/// [`ZIGZAG_FRAMES`]. W37-03b: a pass along X then jumps ([`JUMPS`] of them: the way forward with
+/// A held for [`JUMP_HOLD`] frames, then the way forward alone for [`JUMP_FORWARD`]), for a side
+/// view whose walker stands at a pipe; a pass along Y has no jump stage. Bounded either way.
 #[must_use]
 pub fn sidestep_pad(stuck: u32, dir: ScoutDir, down_first: bool) -> Option<u8> {
     let mut at = 0;
@@ -481,7 +498,18 @@ pub fn sidestep_pad(stuck: u32, dir: ScoutDir, down_first: bool) -> Option<u8> {
         }
         at += SIDESTEP_FORWARD;
     }
-    None
+    if dir.axis() != ScoutAxis::X {
+        return None;
+    }
+    let into = stuck - ZIGZAG_FRAMES;
+    if into / (JUMP_HOLD + JUMP_FORWARD) >= JUMPS {
+        return None;
+    }
+    Some(if into % (JUMP_HOLD + JUMP_FORWARD) < JUMP_HOLD {
+        dir.nes_pad_bit() | NES_PAD_A
+    } else {
+        dir.nes_pad_bit()
+    })
 }
 
 /// The stop rules, as a small state machine over per-frame facts.
@@ -688,6 +716,11 @@ pub struct Scout {
     /// W35-17: an X pass ends once the canvas reaches `plan.reach_px` past where it began
     /// (the sweeps along a depth; the first passes run to their stall).
     limit_reach: bool,
+    /// W37-03b: this frame's pad is the jump stage of a sidestep.
+    jumping: bool,
+    /// W37-03b: a jump got a walker past a wall in this game, so a later wall is jumped at once
+    /// (the zigzag before it is skipped: in a side view it only spends the pass's budget).
+    jumps_first: bool,
     /// The snapshot and seed the scout started with (`snapshot`/`seed` move to a branch).
     home: Option<(MachineSnapshot, CanvasModel)>,
 }
@@ -819,6 +852,8 @@ impl Scout {
             sweep_carry: (0, 0),
             down_first: false,
             limit_reach: false,
+            jumping: false,
+            jumps_first: false,
             home: None,
             plan,
         }
@@ -1095,20 +1130,25 @@ impl Scout {
     }
 
     /// W35-09: the pad bits of a sidestep this frame, if the walker is stuck with a margin to
-    /// fill and the zigzag is not spent.
-    fn sidestep(&self, dir: ScoutDir) -> Option<u8> {
-        if self.plan.reach_px == 0
-            || self.rule.still() + 1 < self.plan.stall_frames
-            || self.margin_covered(dir)
-        {
+    /// fill and the zigzag is not spent, and whether they are the jump stage. W37-03b: a walker
+    /// along X whose margin is already filled still jumps (the zigzag is skipped): the margin is
+    /// measured from where the pass began, and a side view's player walks on past it, to the
+    /// scenery a stopped scout never saw (Super Mario Bros.: the first pipe, about 580 px in).
+    fn sidestep(&self, dir: ScoutDir) -> Option<(u8, bool)> {
+        if self.plan.reach_px == 0 || self.rule.still() + 1 < self.plan.stall_frames {
+            return None;
+        }
+        let along_x = dir.axis() == ScoutAxis::X;
+        let covered = self.margin_covered(dir);
+        if covered && !along_x {
             return None;
         }
         // `+ 1`: this frame's own stall count, which the stop rule reads right after it.
-        sidestep_pad(
-            self.rule.still() + 1 - self.plan.stall_frames,
-            dir,
-            self.down_first,
-        )
+        let mut stuck = self.rule.still() + 1 - self.plan.stall_frames;
+        if along_x && (self.jumps_first || covered) {
+            stuck = stuck.saturating_add(ZIGZAG_FRAMES);
+        }
+        sidestep_pad(stuck, dir, self.down_first).map(|pad| (pad, stuck >= ZIGZAG_FRAMES))
     }
 
     /// W35-17: leave a [`Branch`] on the camera's way (see [`Self::set_branching`]) and say whether
@@ -1334,11 +1374,13 @@ impl Scout {
         // player who walks.
         let mut input = InputFrame::empty();
         let mut sidestepping = false;
+        self.jumping = false;
         if self.bands && self.plan.strategy == ScoutStrategy::Walk {
             let mut pad = dir.nes_pad_bit();
-            if let Some(side) = self.sidestep(dir) {
+            if let Some((side, jumping)) = self.sidestep(dir) {
                 pad = side;
                 sidestepping = true;
+                self.jumping = jumping;
             }
             input.ports[0] = u16::from(pad);
         }
@@ -1433,7 +1475,14 @@ impl Scout {
             .is_some_and(|p| (camera - p).abs() <= i64::from(self.pace()).max(2));
         self.calm_frames = if calm { self.calm_frames + 1 } else { 0 };
         self.prev_camera = Some(camera);
-        if let Some(why) = self.rule.observe(&self.plan, camera, extent) {
+        let ended = self.rule.observe(&self.plan, camera, extent);
+        // W37-03b: the canvas grew while the walker was jumping: jumps are how this game's walls
+        // are passed.
+        if self.jumping && self.rule.still() == 0 {
+            self.jumps_first = true;
+        }
+        self.jumping = false;
+        if let Some(why) = ended {
             self.end_pass(why);
         } else if (self.branching && axis == ScoutAxis::Y && self.branch_on_the_way(camera))
             || self.reach_done(dir)
@@ -2711,12 +2760,54 @@ mod tests {
         let total: u32 = (0..SIDESTEPS)
             .map(|k| SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)
             .sum();
+        assert_eq!(total, ZIGZAG_FRAMES);
         assert_eq!(
             sidestep_pad(total - 1, ScoutDir::Left, false),
             Some(ScoutDir::Left.nes_pad_bit())
         );
-        assert_eq!(sidestep_pad(total, ScoutDir::Left, false), None);
+        // A pass along Y has nothing after the zigzag.
+        assert_eq!(sidestep_pad(total, ScoutDir::Down, false), None);
         assert_eq!(sidestep_pad(u32::MAX, ScoutDir::Left, false), None);
+    }
+
+    #[test]
+    fn after_the_zigzag_a_walker_along_x_jumps_with_a_fresh_press_each_time_and_then_stops() {
+        let right = ScoutDir::Right.nes_pad_bit();
+        let jump = right | NES_PAD_A;
+        let z = ZIGZAG_FRAMES;
+        // Jump 0: A held with the way forward, then the way forward alone (A let go).
+        assert_eq!(sidestep_pad(z, ScoutDir::Right, false), Some(jump));
+        assert_eq!(
+            sidestep_pad(z + JUMP_HOLD - 1, ScoutDir::Right, false),
+            Some(jump)
+        );
+        assert_eq!(
+            sidestep_pad(z + JUMP_HOLD, ScoutDir::Right, false),
+            Some(right)
+        );
+        // Every jump starts after at least a frame with A up: the press is an edge.
+        let period = JUMP_HOLD + JUMP_FORWARD;
+        for k in 1..JUMPS {
+            assert_eq!(
+                sidestep_pad(z + k * period - 1, ScoutDir::Right, false),
+                Some(right)
+            );
+            assert_eq!(
+                sidestep_pad(z + k * period, ScoutDir::Right, false),
+                Some(jump)
+            );
+        }
+        // Spent after JUMPS of them (law 8: bounded).
+        assert!(sidestep_pad(z + JUMPS * period - 1, ScoutDir::Right, false).is_some());
+        assert_eq!(
+            sidestep_pad(z + JUMPS * period, ScoutDir::Right, false),
+            None
+        );
+        // Leftwards the same, with Left held.
+        assert_eq!(
+            sidestep_pad(z, ScoutDir::Left, true),
+            Some(ScoutDir::Left.nes_pad_bit() | NES_PAD_A)
+        );
     }
 
     #[test]
@@ -3737,8 +3828,14 @@ mod tests {
         let total: u32 = (0..SIDESTEPS)
             .map(|k| SIDESTEP_UNIT * (k + 1) + SIDESTEP_FORWARD)
             .sum();
-        assert_eq!(sidestep_pad(total, ScoutDir::Right, true), None);
-        assert!(sidestep_pad(total - 1, ScoutDir::Right, true).is_some());
+        assert_eq!(
+            sidestep_pad(total - 1, ScoutDir::Right, true),
+            sidestep_pad(total - 1, ScoutDir::Right, false)
+        );
+        assert_eq!(
+            sidestep_pad(total, ScoutDir::Right, true),
+            sidestep_pad(total, ScoutDir::Right, false)
+        );
     }
 
     #[test]

@@ -65,8 +65,14 @@ fn smb_1_1_at_32_9_with_smoother_motion() {
     .expect("the finder names a scout table for Super Mario Bros.");
     let mut plan = retroforge::scout_discovery::plan_of(&skeleton);
     plan.settle_frames = 30;
-    // See W36-06c: the stack byte the finder also reported is not a start condition for another player.
-    plan.start_when.retain(|(addr, _)| *addr != 0x01F7);
+    // W37-03b: the finder takes no gate from the stack page (it once named $01F7, see W36-06c).
+    assert!(
+        plan.start_when
+            .iter()
+            .all(|(addr, _)| !retroforge::scout_find::NES_STACK_PAGE.contains(&(*addr as usize))),
+        "a stack byte as a start condition: {:?}",
+        plan.start_when
+    );
     assert!(!plan.start_when.is_empty(), "no level-state row");
     plan.scene_key = rf_profiles::load_file(&Path::new(env!("CARGO_MANIFEST_DIR")).join(PROFILE))
         .expect("profile")
