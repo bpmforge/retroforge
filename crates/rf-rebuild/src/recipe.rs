@@ -190,6 +190,42 @@ pub struct RamMeaning {
     pub grade: Grade,
 }
 
+/// Source prefixes the recipe hub accepts (RECIPE_HUB.md "Moderation rule" 1;
+/// D-031).
+const HUB_SOURCE_PREFIXES: [&str; 4] = ["observed:", "rule:", "finder:", "ai:"];
+
+/// Words that mark a source as a community map or a disassembly project;
+/// the hub refuses them whatever else the source says (D-021, D-031).
+const HUB_BANNED_SOURCE_WORDS: [&str; 7] = [
+    "community",
+    "wiki",
+    "forum",
+    "disassembl",
+    "decompil",
+    "imported",
+    "retroachievements",
+];
+
+/// Whether a row's `source` note is one the hub may take (D-031): it starts
+/// with an allowed prefix and names no banned provenance. Imported rows
+/// ("imported: user cheat", "imported: RetroAchievements") fail both tests.
+#[must_use]
+pub fn source_is_hub_eligible(source: &str) -> bool {
+    let s = source.trim().to_ascii_lowercase();
+    HUB_SOURCE_PREFIXES.iter().any(|p| s.starts_with(p))
+        && !HUB_BANNED_SOURCE_WORDS.iter().any(|w| s.contains(w))
+}
+
+impl RamMeaning {
+    /// Whether this row may be submitted to or promoted on the recipe hub.
+    /// Only the source decides: an imported row stays local however its grade
+    /// is edited (D-031).
+    #[must_use]
+    pub fn is_hub_eligible(&self) -> bool {
+        source_is_hub_eligible(&self.source)
+    }
+}
+
 /// A table of game objects in RAM (ticket W38-00): `slots` entries, field
 /// `f` of slot `i` at `base + f.offset + i * stride`. That covers both a
 /// record per slot (stride = record size, small offsets) and a column per
@@ -759,4 +795,25 @@ pub fn classify_unmatched(
     } else {
         UnmatchedReason::Removed
     })
+}
+
+#[cfg(test)]
+mod hub_tests {
+    use super::*;
+
+    #[test]
+    fn hub_eligibility_follows_provenance() {
+        let row = |src: &str| RamMeaning {
+            source: src.into(),
+            grade: Grade::Candidate,
+            ..RamMeaning::default()
+        };
+        assert!(row("observed: cheat search").is_hub_eligible());
+        assert!(row("finder: camera").is_hub_eligible());
+        assert!(!row("imported: user cheat").is_hub_eligible());
+        assert!(!row("imported: RetroAchievements").is_hub_eligible());
+        assert!(!row("observed: from a community map").is_hub_eligible());
+        assert!(!row("").is_hub_eligible());
+        assert!(!row("test").is_hub_eligible());
+    }
 }

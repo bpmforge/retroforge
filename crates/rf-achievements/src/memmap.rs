@@ -128,6 +128,59 @@ pub fn translate_with(console: Console, ra_addr: u32, cart: CartMap) -> Option<u
     }
 }
 
+/// The inverse of [`translate_with`]: the RA address that reads the byte at
+/// CPU-bus address `bus_addr`, or `None` when RA has no address for it.
+///
+/// Mirrors fold onto the one RA address, so `translate_with(ra_address(a))`
+/// is `a` only for canonical `a` (NES `$0000-$07FF`; SNES `$7E0000-$7FFFFF`
+/// and cartridge RAM at its [`CartMap`] home). Folded: NES `$0800-$1FFF` to
+/// `$0000-$07FF`; SNES `$00-$3F`/`$80-$BF:0000-1FFF` to WRAM `$7E:0000-1FFF`.
+pub fn ra_address(console: Console, bus_addr: u32, cart: CartMap) -> Option<u32> {
+    match console {
+        Console::Nes => match bus_addr {
+            0x0000..=0x1FFF => Some(bus_addr & 0x07FF),
+            0x2000..=0xFFFF => Some(bus_addr),
+            _ => None,
+        },
+        Console::Snes => {
+            let (bank, off) = (bus_addr >> 16, bus_addr & 0xFFFF);
+            if bank > 0xFF {
+                return None;
+            }
+            match bank {
+                0x7E | 0x7F => return Some(bus_addr - 0x7E_0000),
+                0x00..=0x3F | 0x80..=0xBF if off < 0x2000 => return Some(off),
+                _ => {}
+            }
+            let lo = bank & 0x7F;
+            let cart_off = match cart {
+                CartMap::LoRom { ram } if (0x70..=0x7D).contains(&bank) && off < 0x8000 => {
+                    Some(((bank - 0x70) << 15 | off, ram))
+                }
+                CartMap::HiRom { ram }
+                    if (0x20..=0x3F).contains(&lo) && (0x6000..0x8000).contains(&off) =>
+                {
+                    Some((((lo - 0x20) << 13) | (off - 0x6000), ram))
+                }
+                CartMap::Sa1 { bwram } if (0x40..=0x43).contains(&bank) => {
+                    Some((((bank - 0x40) << 16) | off, bwram))
+                }
+                _ => None,
+            };
+            if let Some((o, size)) = cart_off {
+                return (o < size && o <= SNES_CART_RAM_END - SNES_CART_RAM)
+                    .then_some(SNES_CART_RAM + o);
+            }
+            match cart {
+                CartMap::Sa1 { .. } if bank < 0x40 && (0x3000..0x3000 + 0x800).contains(&off) => {
+                    Some(SNES_IRAM + (off - 0x3000))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +234,67 @@ mod tests {
         assert_eq!(translate_with(Console::Snes, 0xA_07FF, c), Some(0x37FF));
         assert_eq!(translate_with(Console::Snes, 0xA_0800, c), None);
         assert_eq!(translate_with(Console::Snes, 0xA_0000, CartMap::None), None);
+    }
+
+    #[test]
+    fn ra_address_inverts_translate() {
+        let carts = [
+            CartMap::None,
+            CartMap::LoRom { ram: 0x8000 * 3 },
+            CartMap::HiRom { ram: 0x2000 * 5 },
+            CartMap::Sa1 { bwram: 0x1_8000 },
+        ];
+        for console in [Console::Nes, Console::Snes] {
+            for cart in carts {
+                for ra in (0..0xB_0000u32)
+                    .step_by(7)
+                    .chain([0, 0x7FF, 0x1_FFFF, 0x2_0000, 0x9_FFFF, 0xA_0000, 0xA_07FF])
+                {
+                    if let Some(bus) = translate_with(console, ra, cart) {
+                        let back = ra_address(console, bus, cart);
+                        // NES mirrors fold to the canonical RA address.
+                        let want = if console == Console::Nes && ra < 0x2000 {
+                            ra & 0x7FF
+                        } else {
+                            ra
+                        };
+                        assert_eq!(
+                            back,
+                            Some(want),
+                            "{console:?} {cart:?} ra {ra:#X} bus {bus:#X}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ra_address_folds_mirrors_and_refuses_unmapped() {
+        assert_eq!(ra_address(Console::Nes, 0x0810, CartMap::None), Some(0x10));
+        assert_eq!(ra_address(Console::Nes, 0x1_0000, CartMap::None), None);
+        assert_eq!(
+            ra_address(Console::Snes, 0x00_0123, CartMap::None),
+            Some(0x123)
+        );
+        assert_eq!(
+            ra_address(Console::Snes, 0xBF_1FFF, CartMap::None),
+            Some(0x1FFF)
+        );
+        assert_eq!(
+            ra_address(Console::Snes, 0x7E_0010, CartMap::None),
+            Some(0x10)
+        );
+        assert_eq!(
+            ra_address(Console::Snes, 0x7F_FFFF, CartMap::None),
+            Some(0x1_FFFF)
+        );
+        // Cartridge RAM without a layout, or past its size, has no RA address.
+        assert_eq!(ra_address(Console::Snes, 0x70_0000, CartMap::None), None);
+        assert_eq!(
+            ra_address(Console::Snes, 0x70_0000, CartMap::LoRom { ram: 0 }),
+            None
+        );
+        assert_eq!(ra_address(Console::Snes, 0x3000, CartMap::None), None);
     }
 }

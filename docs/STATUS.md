@@ -5372,3 +5372,16 @@ stories, 10 decisions).
   write path copies the marker block back. Checked: running the write path
   against the ROM leaves `recipe.toml` byte-identical. `w36_10_smw_recipe`
   and `w38_01_data_regions_smw` pass. Workspace: **3951 passing**, gate green.
+- **W38-10 — Recipe RAM maps to and from cheats and RetroAchievements**
+  (2026-10-29). New `rf_debugger::ram_exchange`: recipe RAM rows export to raw
+  RAM cheat codes (re-parsed by `rf_cheats::parse`) and to RA memory refs
+  (`0xH/0x/0xW/0xX`, via the new `rf_achievements::ra_address`, the inverse of
+  `translate_with`), and import back; round trips are lossless for address,
+  width, value and name on NES and SNES (WRAM $7E/$7F, LoROM/HiROM/SA-1 cart
+  RAM). Imported rows are always candidates with `imported:` provenance, and
+  `RamMeaning::is_hub_eligible()` keeps them off the hub (D-031). New
+  `rf_debugger::cheat_search`: RAM search by snapshot and filter, hits become
+  `observed: cheat search` candidate rows. Library and tests only; no
+  debugger panel yet. Documented losses: cheat compare bytes, mirrored
+  addresses fold, non-plain RA refs refused. Workspace: **4059 passing**,
+  gate green.

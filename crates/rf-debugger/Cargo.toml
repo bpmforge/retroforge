@@ -39,6 +39,15 @@ serde = { version = "1", features = ["derive"] }
 # no new licence surface; recorded in docs/TECH_STACK.md §2 all the same.
 serde_json = "1"
 
+# rf-rebuild / rf-cheats / rf-achievements (ticket W38-10): the recipe's
+# `RamMeaning` row, the rf-cheats raw-code parser and RA's address map. All
+# three are plain-data crates (no console core, no UI), so validate-arch.sh
+# rule 3 is untouched; `ram_exchange` converts between them without learning
+# a console.
+rf-rebuild = { path = "../rf-rebuild" }
+rf-cheats = { path = "../rf-cheats" }
+rf-achievements = { path = "../rf-achievements" }
+
 [dev-dependencies]
 # rf-profiles: dev-only, for `crate::profile_export`'s own test suite to
 # round-trip its output through the REAL validator (`rf_profiles::
