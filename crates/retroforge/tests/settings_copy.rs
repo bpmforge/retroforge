@@ -59,17 +59,17 @@ fn no_settings_tab_shows_a_ticket_id_or_module_path() {
 
     let mut seen = 0;
     let index = retroforge::app::settings_index_for_test();
-    for tab in ["Video", "Audio", "Paths", "Accessibility"] {
+    for tab in ["Video", "Audio", "Paths", "Online", "Accessibility"] {
         harness.get_by_label(tab).click();
         harness.run_steps(3);
         let all = texts(&harness);
         seen += all.len();
         // Ticket W21-06: every setting the search can jump to is on its
         // tab ("Apply to" only exists with a game open; MetalFX only in a
-        // metalfx build).
+        // metalfx build; "Hardcore mode" only once RetroAchievements is on).
         for (label, _) in index
             .iter()
-            .filter(|(l, t)| *t == tab && !matches!(*l, "Apply to" | "MetalFX"))
+            .filter(|(l, t)| *t == tab && !matches!(*l, "Apply to" | "MetalFX" | "Hardcore mode"))
         {
             assert!(
                 all.iter()

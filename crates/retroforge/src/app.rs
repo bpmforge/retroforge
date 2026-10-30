@@ -313,6 +313,9 @@ pub(crate) enum SettingsTab {
     Video,
     Audio,
     Paths,
+    /// Ticket W42-03: the features that talk to the internet — achievements,
+    /// box art and AI naming — together, off by default.
+    Online,
     /// Ticket W10-01. `crate::accessibility` shipped in W8-04 with a UI
     /// scale and a high-contrast palette and no way for a user to reach
     /// either. This tab is that way.
@@ -322,11 +325,12 @@ pub(crate) enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [
+    const ALL: [SettingsTab; 6] = [
         SettingsTab::Video,
         SettingsTab::Audio,
         SettingsTab::Controls,
         SettingsTab::Paths,
+        SettingsTab::Online,
         SettingsTab::Accessibility,
     ];
 
@@ -335,6 +339,7 @@ impl SettingsTab {
             SettingsTab::Video => "Video",
             SettingsTab::Audio => "Audio",
             SettingsTab::Paths => "Paths",
+            SettingsTab::Online => "Online",
             SettingsTab::Accessibility => "Accessibility",
             SettingsTab::Controls => "Controls",
         }
@@ -409,13 +414,23 @@ const SETTINGS_INDEX: &[(&str, SettingsTab, &str)] = &[
     ("Art folder", SettingsTab::Paths, "box art covers"),
     (
         "Fetch box art from the internet",
-        SettingsTab::Paths,
+        SettingsTab::Online,
         "download covers thumbnails",
     ),
     (
         "Allow AI naming of functions",
-        SettingsTab::Paths,
+        SettingsTab::Online,
         "claude anthropic rebuild names api key model cloud",
+    ),
+    (
+        "RetroAchievements (needs an account)",
+        SettingsTab::Online,
+        "retroachievements cheevos trophies account login sign in",
+    ),
+    (
+        "Hardcore mode",
+        SettingsTab::Online,
+        "hardcore no save states rewind",
     ),
     (
         "UI scale",
@@ -4888,6 +4903,76 @@ impl RetroForgeApp {
         self.send_command(CoreCommand::RaEnable { hardcore });
     }
 
+    /// Ticket W42-03: the RetroAchievements switch, privacy note, hardcore
+    /// switch and sign-in form. Drawn by Settings' Online tab and by the
+    /// Quick Menu's Achievements page, so the same controls are in both.
+    /// Returns whether a setting changed (the caller saves).
+    fn ra_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        // Ticket W41-05: the only setting that can make the app talk
+        // to retroachievements.org. Off by default (NON_GOALS 6).
+        let ra_was_enabled = self.settings.achievements.enabled;
+        if ui
+            .checkbox(
+                &mut self.settings.achievements.enabled,
+                "RetroAchievements (needs an account)",
+            )
+            .changed()
+        {
+            changed = true;
+            self.apply_ra_settings(ra_was_enabled);
+        }
+        ui.small(
+            "Off by default; nothing is sent until you turn it on and \
+                                     sign in. Only your user name and the token RetroAchievements \
+                                     gives back are kept (a private file in your config folder); \
+                                     your password is never stored.",
+        );
+        if self.settings.achievements.enabled {
+            if ui
+                .checkbox(&mut self.settings.achievements.hardcore, "Hardcore mode")
+                .changed()
+            {
+                changed = true;
+                self.apply_ra_settings(true);
+            }
+            ui.small(
+                "Hardcore turns off cheats, rewind, loading states, \
+                                         run-ahead, frame advance, slow motion, recipe mods and \
+                                         memory editing, and restarts the game when you turn it \
+                                         on. RetroAchievements counts hardcore unlocks only from \
+                                         emulators it has approved, so for now unlocks here are \
+                                         softcore.",
+            );
+            if let Some(user) = self.ra_user.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Signed in as {user}"));
+                    if ui.button("Sign out").clicked() {
+                        self.ra_sign_out();
+                    }
+                });
+            } else if self.core.is_none() {
+                ui.small("Open a game to sign in.");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("User");
+                    ui.text_edit_singleline(&mut self.ra_form_user);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Password");
+                    ui.add(egui::TextEdit::singleline(&mut self.ra_form_password).password(true));
+                });
+                if ui.button("Sign in").clicked() {
+                    self.ra_sign_in();
+                }
+            }
+            if !self.ra_status.is_empty() {
+                ui.small(self.ra_status.clone());
+            }
+        }
+        changed
+    }
+
     /// Ticket W41-05: Settings changed the RetroAchievements switches.
     fn apply_ra_settings(&mut self, was_enabled: bool) {
         if self.core.is_none() {
@@ -9097,8 +9182,8 @@ impl RetroForgeApp {
                                     "Empty = no user art folder; the library falls back to \
                                      save-state screenshots and first-frame captures only.",
                                 );
-
-                                ui.separator();
+                            }
+SettingsTab::Online => {
                                 // Ticket W15-09, ruling D-011: opt-in,
                                 // off by default (NON_GOALS #6) — this
                                 // is the ONLY place the toggle lives, and
@@ -9190,77 +9275,11 @@ impl RetroForgeApp {
                                     );
                                 }
 
-                                ui.separator();
-                                // Ticket W41-05: the only setting that can make the app talk
-                                // to retroachievements.org. Off by default (NON_GOALS 6).
-                                let ra_was_enabled = self.settings.achievements.enabled;
-                                if ui
-                                    .checkbox(
-                                        &mut self.settings.achievements.enabled,
-                                        "RetroAchievements (needs an account)",
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                    self.apply_ra_settings(ra_was_enabled);
-                                }
-                                ui.small(
-                                    "Off by default; nothing is sent until you turn it on and \
-                                     sign in. Only your user name and the token RetroAchievements \
-                                     gives back are kept (a private file in your config folder); \
-                                     your password is never stored.",
-                                );
-                                if self.settings.achievements.enabled {
-                                    if ui
-                                        .checkbox(
-                                            &mut self.settings.achievements.hardcore,
-                                            "Hardcore mode",
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                        self.apply_ra_settings(true);
-                                    }
-                                    ui.small(
-                                        "Hardcore turns off cheats, rewind, loading states, \
-                                         run-ahead, frame advance, slow motion, recipe mods and \
-                                         memory editing, and restarts the game when you turn it \
-                                         on. RetroAchievements counts hardcore unlocks only from \
-                                         emulators it has approved, so for now unlocks here are \
-                                         softcore.",
-                                    );
-                                    if let Some(user) = self.ra_user.clone() {
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!("Signed in as {user}"));
-                                            if ui.button("Sign out").clicked() {
-                                                self.ra_sign_out();
-                                            }
-                                        });
-                                    } else if self.core.is_none() {
-                                        ui.small("Open a game to sign in.");
-                                    } else {
-                                        ui.horizontal(|ui| {
-                                            ui.label("User");
-                                            ui.text_edit_singleline(&mut self.ra_form_user);
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Password");
-                                            ui.add(
-                                                egui::TextEdit::singleline(
-                                                    &mut self.ra_form_password,
-                                                )
-                                                .password(true),
-                                            );
-                                        });
-                                        if ui.button("Sign in").clicked() {
-                                            self.ra_sign_in();
-                                        }
-                                    }
-                                    if !self.ra_status.is_empty() {
-                                        ui.small(self.ra_status.clone());
-                                    }
-                                }
-                            }
+ui.separator();
+if self.ra_controls(ui) {
+changed = true;
+}
+}
                         }
                     });
 
@@ -10551,20 +10570,35 @@ impl RetroForgeApp {
             }
             Section::Achievements => {
                 let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-                crate::ra_panel::show(
-                    ui,
-                    &tokens,
-                    &crate::ra_panel::RaView {
-                        enabled: self.settings.achievements.enabled,
-                        user: self.ra_user.as_deref(),
-                        game: self.ra_game_title.as_deref(),
-                        loaded: self.ra_game_loaded,
-                        load_failed: self.ra_load_failed,
-                        hardcore: self.ra_hardcore_on,
-                        offline: self.ra_offline,
-                        items: &self.ra_list,
-                    },
-                );
+                // W42-03: with RetroAchievements off or signed out, the page
+                // carries the switch and the sign-in form itself.
+                if !self.settings.achievements.enabled || self.ra_user.is_none() {
+                    let why = if self.settings.achievements.enabled {
+                        "Sign in with your RetroAchievements account to earn achievements here."
+                    } else {
+                        "Turn on RetroAchievements to earn achievements in supported games."
+                    };
+                    ui.label(egui::RichText::new(why).color(tokens.muted));
+                    ui.add_space(6.0);
+                    if self.ra_controls(ui) {
+                        self.save_settings();
+                    }
+                } else {
+                    crate::ra_panel::show(
+                        ui,
+                        &tokens,
+                        &crate::ra_panel::RaView {
+                            enabled: self.settings.achievements.enabled,
+                            user: self.ra_user.as_deref(),
+                            game: self.ra_game_title.as_deref(),
+                            loaded: self.ra_game_loaded,
+                            load_failed: self.ra_load_failed,
+                            hardcore: self.ra_hardcore_on,
+                            offline: self.ra_offline,
+                            items: &self.ra_list,
+                        },
+                    );
+                }
             }
             Section::Settings => {
                 // W42-01: the sheet opens OVER the menu, which stays up

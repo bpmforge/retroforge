@@ -30,9 +30,9 @@ pub struct RaView<'a> {
 #[must_use]
 pub fn empty_state(v: &RaView<'_>) -> Option<&'static str> {
     if !v.enabled {
-        Some("Turn on RetroAchievements in Settings")
+        Some("Turn on RetroAchievements to earn achievements in supported games.")
     } else if v.user.is_none() {
-        Some("Sign in to RetroAchievements in Settings")
+        Some("Sign in with your RetroAchievements account.")
     } else if v.load_failed {
         Some("RetroAchievements does not recognise this game, or it has no achievements")
     } else if !v.loaded {
@@ -181,7 +181,7 @@ mod tests {
         v.enabled = false;
         assert_eq!(
             empty_state(&v),
-            Some("Turn on RetroAchievements in Settings")
+            Some("Turn on RetroAchievements to earn achievements in supported games.")
         );
     }
 

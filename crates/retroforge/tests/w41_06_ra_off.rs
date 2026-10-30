@@ -31,7 +31,7 @@ fn off_shows_the_empty_state() {
         .open_quick_menu_for_test(Section::Achievements);
     h.run_steps(3);
     assert!(h
-        .query_by_label("Turn on RetroAchievements in Settings")
+        .query_by_label("Turn on RetroAchievements to earn achievements in supported games.")
         .is_some());
     assert!(h.query_by_label_contains("unlocked,").is_none());
     let _ = std::fs::remove_dir_all(&dir);
