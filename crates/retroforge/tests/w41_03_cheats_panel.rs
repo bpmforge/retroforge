@@ -1,4 +1,4 @@
-//! **W41-03: the Cheats panel** in the Game settings window. Paste a valid NES Game Genie code and
+//! **W41-03: the Cheats panel** on the Quick Menu's Cheats page (W42-02). Paste a valid NES Game Genie code and
 //! an invalid line: one entry (switched off) and one inline error; switch it on and the badge says
 //! "Cheats: 1"; it persists with the game's settings.
 //!
@@ -61,14 +61,15 @@ fn paste_a_code_and_a_bad_line_switch_it_on_and_the_badge_says_so() {
         h.state().status_badge()
     );
 
-    h.state_mut().open_game_settings_for_test();
+    h.state_mut()
+        .open_quick_menu_for_test(retroforge::quick_menu::Section::Cheats);
     h.run_steps(3);
     h.get_by_label("Cheat codes").click();
     h.run_steps(2);
     h.get_by_label("Cheat codes")
         .type_text("SXIOPO\nnot a code");
     h.run_steps(2);
-    // The section sits below the fold of the Game settings window: scroll first, then a real click.
+    // The page can scroll on a short window: bring the button into view, then a real click.
     h.get_by_label("Add codes").scroll_to_me();
     h.run_steps(3);
     h.get_by_label("Add codes").click();
@@ -79,7 +80,7 @@ fn paste_a_code_and_a_bad_line_switch_it_on_and_the_badge_says_so() {
     assert_eq!(cheats[0].code, "SXIOPO");
     assert!(!cheats[0].enabled, "added switched off");
     assert!(
-        h.query_by_label_contains("line 2").is_some(),
+        h.query_by_label_contains("Line 2").is_some(),
         "the bad line is explained inline"
     );
     assert!(

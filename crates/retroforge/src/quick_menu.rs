@@ -25,6 +25,7 @@ pub enum Section {
     Rewind,
     Display,
     Enhancements,
+    Cheats,
     GameInfo,
     Controls,
     Achievements,
@@ -35,13 +36,14 @@ pub enum Section {
 
 impl Section {
     /// Rail order.
-    pub const ALL: [Section; 12] = [
+    pub const ALL: [Section; 13] = [
         Section::Resume,
         Section::Save,
         Section::Load,
         Section::Rewind,
         Section::Display,
         Section::Enhancements,
+        Section::Cheats,
         Section::GameInfo,
         Section::Controls,
         Section::Achievements,
@@ -59,6 +61,7 @@ impl Section {
             Section::Rewind => "Rewind",
             Section::Display => "Display",
             Section::Enhancements => "Enhancements",
+            Section::Cheats => "Cheats",
             Section::GameInfo => "Game info",
             Section::Controls => "Controls",
             Section::Achievements => "Achievements",
@@ -77,6 +80,7 @@ impl Section {
             Section::Rewind => ph::CLOCK_COUNTER_CLOCKWISE,
             Section::Display => ph::MONITOR,
             Section::Enhancements => ph::SPARKLE,
+            Section::Cheats => ph::MAGIC_WAND,
             Section::GameInfo => ph::LIST_CHECKS,
             Section::Controls => ph::GAME_CONTROLLER,
             Section::Achievements => ph::TROPHY,

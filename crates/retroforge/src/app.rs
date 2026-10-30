@@ -9731,9 +9731,6 @@ impl RetroForgeApp {
                             if self.mods_section(ui) {
                                 changed = true;
                             }
-                            if self.cheats_section(ui) {
-                                changed = true;
-                            }
                             if changed {
                                 // No Apply button anywhere in this app's settings —
                                 // see `save_current_game_settings`'s own doc.
@@ -9783,16 +9780,15 @@ impl RetroForgeApp {
     /// Ticket W41-03: the Cheats panel -- paste codes, switch each on or off,
     /// remove them. Per game, off by default (a cheat is a mod: NON_GOALS 13),
     /// applied to the running game at once. Returns whether the list changed.
+    /// W42-02: it is the Quick Menu's Cheats page (the page draws its own
+    /// heading); with no game, or a console without cheats, it says so.
     fn cheats_section(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(console) = crate::cheats::console_of(self.console_label) else {
+        let console = crate::cheats::console_of(self.console_label);
+        let (Some(console), true) = (console, self.core.is_some()) else {
+            ui.label("Open a game to add cheats.");
             return false;
         };
-        if self.core.is_none() {
-            return false;
-        }
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-        ui.separator();
-        ui.strong("Cheats");
         ui.label(
             "Game Genie, Pro Action Replay and raw codes. A cheat changes what the game \
              computes: it is off until you switch it on, it is not the original cartridge, and \
@@ -10499,6 +10495,13 @@ impl RetroForgeApp {
                 });
                 ui.add_space(8.0);
                 self.enhancements_panel(ui);
+            }
+            Section::Cheats => {
+                // W42-02: cheats are a page of their own, not a panel inside
+                // the research Game settings window.
+                if self.cheats_section(ui) {
+                    self.save_current_game_settings();
+                }
             }
             Section::GameInfo => {
                 if self.game_info_panel(ui) {

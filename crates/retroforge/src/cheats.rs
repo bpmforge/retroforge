@@ -87,6 +87,36 @@ pub struct Pasted {
     pub errors: Vec<String>,
 }
 
+/// W42-02: one rejected line in a player's words: "Line N", what is wrong, the text. The parser's
+/// own reasons name fields and bit layouts; a player only needs to know which formats work here.
+fn player_error(
+    console: Console,
+    error: &rf_cheats::CheatError,
+    line: usize,
+    part: &str,
+) -> String {
+    use rf_cheats::CheatError;
+    let shown: String = part.chars().take(24).collect();
+    let shown = if shown.chars().count() < part.chars().count() {
+        format!("{shown}\u{2026}")
+    } else {
+        shown
+    };
+    match error {
+        CheatError::TooLong { .. } => format!("Line {line} is too long to be a code: {shown}"),
+        CheatError::AddressOutOfRange { .. } => {
+            format!("Line {line} changes memory a cheat can't reach: {shown}")
+        }
+        _ => {
+            let formats = match console {
+                Console::Nes => "6 or 8 letters, 6 hex digits, or AAAA:VV",
+                Console::Snes => "XXXX-XXXX, 8 hex digits, or AAAAAA:VV",
+            };
+            format!("Line {line} isn't a code ({formats}): {shown}")
+        }
+    }
+}
+
 /// Parse pasted text (`rf_cheats::parse_list`'s rules: one code per line, `+` joins codes,
 /// blank lines and `#` comments skipped). Only valid codes the game does not already have are
 /// added, always switched off: the player turns each on.
@@ -106,7 +136,8 @@ pub fn paste(console: Console, existing: &[CheatEntry], text: &str) -> Pasted {
     let mut out = Pasted::default();
     for ((line, part), result) in parts.into_iter().zip(results) {
         if let Err(e) = result {
-            out.errors.push(format!("{e}: {part}"));
+            out.errors
+                .push(player_error(console, &e.error, e.line, part));
             continue;
         }
         let id = normalise(part);
@@ -116,10 +147,11 @@ pub fn paste(console: Console, existing: &[CheatEntry], text: &str) -> Pasted {
             .any(|e| normalise(&e.code) == id);
         if known {
             out.errors
-                .push(format!("line {line}: already in the list: {part}"));
+                .push(format!("Line {line} is already in the list: {part}"));
         } else if existing.len() + out.added.len() >= MAX_ENTRIES {
-            out.errors
-                .push(format!("line {line}: at most {MAX_ENTRIES} codes per game"));
+            out.errors.push(format!(
+                "Line {line} can't be added: a game holds at most {MAX_ENTRIES} codes"
+            ));
         } else {
             out.added.push(CheatEntry {
                 code: part.to_string(),
@@ -406,7 +438,16 @@ mod tests {
         assert!(p.added.iter().all(|e| !e.enabled), "nothing starts on");
         assert_eq!(p.errors.len(), 2, "{:?}", p.errors);
         assert!(p.errors[0].contains("already"), "{:?}", p.errors);
-        assert!(p.errors[1].starts_with("line 4: "), "{:?}", p.errors);
+        assert!(
+            p.errors[0].starts_with("Line 3 is already"),
+            "{:?}",
+            p.errors
+        );
+        assert_eq!(
+            p.errors[1], "Line 4 isn't a code (6 or 8 letters, 6 hex digits, or AAAA:VV): ZZZ",
+            "{:?}",
+            p.errors
+        );
     }
 
     #[test]
