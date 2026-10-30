@@ -8650,8 +8650,14 @@ impl RetroForgeApp {
             egui::pos2(area.right() - sheet_w, area.top()),
             area.right_bottom(),
         );
+        // W42-01: over the Quick Menu (a Foreground area) when it is up.
+        let scrim_order = if self.show_overlay_menu {
+            egui::Order::Foreground
+        } else {
+            egui::Order::Middle
+        };
         let scrim = egui::Area::new(egui::Id::new("settings-scrim"))
-            .order(egui::Order::Middle)
+            .order(scrim_order)
             .fixed_pos(area.min)
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(area.size(), egui::Sense::click());
@@ -9938,6 +9944,27 @@ impl RetroForgeApp {
         }
     }
 
+    /// W42-01: close the topmost framed player window for an Esc press;
+    /// `true` if one was open. The windows are not stacked by recency, so
+    /// the order is fixed and deterministic: Game settings, then States,
+    /// then Controls. A pending key rebind owns its own Esc
+    /// (`finish_key_rebind`), so the Controls window is left alone then.
+    /// The profile-builder panel is not a window (it hides while the menu
+    /// is up and Esc there ends nothing), so it is not part of this stack.
+    fn esc_closes_top_window(&mut self) -> bool {
+        if self.show_game_settings {
+            self.show_game_settings = false;
+            self.game_settings_target = None;
+        } else if self.show_states {
+            self.show_states = false;
+        } else if self.show_controls && self.controls_waiting.is_none() {
+            self.show_controls = false;
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Ticket W22-06: open the Quick Menu on `section`.
     fn open_quick_menu_at(&mut self, section: crate::quick_menu::Section) {
         self.set_overlay_menu(true);
@@ -10052,7 +10079,14 @@ impl RetroForgeApp {
     fn overlay_menu(&mut self, ctx: &egui::Context) {
         // W21-13: an Esc that closes the Settings sheet is not also a
         // Quick Menu toggle.
-        if !self.show_settings && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // W42-01 (principle 14): Esc pops exactly one layer. The Settings
+        // sheet consumed its Esc already (it is drawn earlier); a framed
+        // player window takes the next one; only with none open does Esc
+        // toggle the menu.
+        if !self.show_settings
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && !self.esc_closes_top_window()
+        {
             self.set_overlay_menu(!self.show_overlay_menu);
         }
         // Ticket W21-02: tracked every frame, open or not, so opening
@@ -10267,6 +10301,16 @@ impl RetroForgeApp {
                 );
             });
         self.quick_rail_ids = rail_ids;
+        // W42-01: keep the Settings sheet (and its scrim) above the menu
+        // whatever the click history did to the layer order.
+        if self.show_settings {
+            for name in ["settings-scrim", "settings-sheet"] {
+                ctx.move_to_top(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new(name),
+                ));
+            }
+        }
         if leave_paused {
             self.leave_overlay_menu_paused();
         } else if close {
@@ -10520,9 +10564,10 @@ impl RetroForgeApp {
                 );
             }
             Section::Settings => {
+                // W42-01: the sheet opens OVER the menu, which stays up
+                // (and the game stays paused) underneath it.
                 if ui.button("Open Settings\u{2026}").clicked() {
                     self.show_settings = true;
-                    leave_paused = true;
                 }
             }
             Section::Reset => {
@@ -17283,6 +17328,20 @@ impl RetroForgeApp {
     #[doc(hidden)]
     pub fn show_debug_panels_for_test(&mut self, show: bool) {
         self.debug_panels.visible = show;
+    }
+
+    /// W42-01 test hook: whether the Quick Menu is open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn quick_menu_open_for_test(&self) -> bool {
+        self.show_overlay_menu
+    }
+
+    /// W42-01 test hook: whether the Settings sheet is open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn settings_open_for_test(&self) -> bool {
+        self.show_settings
     }
 
     /// Open the Settings window without the menu (screenshot tour).

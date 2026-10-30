@@ -62,8 +62,8 @@ fn one_esc_closes_settings_and_leaves_the_menu_shut() {
     );
 
     // Settings reached from the Quick Menu (rail › Settings › "Open
-    // Settings…"): the menu hands over to the sheet, and the Esc that
-    // closes the sheet does not bring the menu back.
+    // Settings…"): W42-01 — the sheet opens over the menu, and the Esc
+    // that closes it leaves the menu up underneath.
     h.query_all_by_label_contains("Settings")
         .last()
         .expect("the Quick Menu's Settings section")
@@ -76,8 +76,8 @@ fn one_esc_closes_settings_and_leaves_the_menu_shut() {
         "self-test: Settings is open from the Quick Menu"
     );
     assert!(
-        !h.state().running_and_menu_for_test().1,
-        "self-test: the menu handed over"
+        h.state().running_and_menu_for_test().1,
+        "self-test: the menu stays up under the sheet (W42-01)"
     );
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
@@ -86,8 +86,14 @@ fn one_esc_closes_settings_and_leaves_the_menu_shut() {
         "Esc closed Settings"
     );
     assert!(
+        h.state().running_and_menu_for_test().1,
+        "the Esc that closed the sheet returns to the Quick Menu"
+    );
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(
         !h.state().running_and_menu_for_test().1,
-        "the Esc that closed Settings must not reopen the Quick Menu"
+        "a second Esc closes the menu"
     );
 
     // Settings with its search box focused: the text field's own Esc
