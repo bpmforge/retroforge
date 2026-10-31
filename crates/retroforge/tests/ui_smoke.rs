@@ -57,7 +57,7 @@ use retroforge::app::RetroForgeApp;
 /// size may rest on a test in this file.
 const HARNESS_SIZE: (f32, f32) = (1600.0, 1000.0);
 
-/// The four toggles in the **View menu**, each with the title of the
+/// The three toggles in the **View menu**, each with the title of the
 /// window it opens. `R-A1`'s "open/close each core dockable panel".
 ///
 /// They lived in the bottom bar until W10-01, where three of them
@@ -68,7 +68,9 @@ const HARNESS_SIZE: (f32, f32) = (1600.0, 1000.0);
 /// [`open_view_menu`] now precedes each click.
 const PANELS: &[(&str, &str)] = &[
     ("Layers (debug)", "Layers (debug)"),
-    ("Controls\u{2026}", "Controls"),
+    // W42-04 removed the Controls row: the Controls window is gone and
+    // View > Controls... is now a button that opens Settings > Controls
+    // (covered by tests/w42_04_no_duplicate_windows.rs).
     // Ticket W10-03 removed the Library row DELIBERATELY, not because it
     // went red: the library is the home screen now, so there is no
     // floating Library window left to toggle and no menu item that would
