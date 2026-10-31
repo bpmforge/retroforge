@@ -355,7 +355,7 @@ fn photograph_every_major_surface() {
     // Quick Menu's Save page; the States window is gone).
     harness.state_mut().open_save_page_for_test();
     harness.run_steps(4);
-    shot(&mut harness, "25-states-window");
+    shot(&mut harness, "25-save-page");
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
@@ -407,6 +407,10 @@ fn photograph_every_major_surface() {
             .type_text("sound");
         harness.run_steps(3);
         shot(&mut harness, "26-settings-search");
+        // Clear the query so later shots of the sheet are not filtered.
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.key_press(egui::Key::Backspace);
+        harness.run_steps(2);
     }
     // W23-02: the Controls tab, each device and console.
     if let Some(tab) = harness.query_by_label("Controls") {
@@ -428,6 +432,9 @@ fn photograph_every_major_surface() {
     harness.run_steps(3);
     shot(&mut harness, "06-controls");
     harness.state_mut().show_settings_for_test(false);
+
+    // ---- Wave 42: the surfaces this wave added or moved -------------
+    wave42_menu_shots(&mut harness);
 
     // ---- the ultrawide camera, over a stitched canvas ---------------
     //
@@ -572,5 +579,202 @@ fn photograph_every_major_surface() {
         shot(&mut harness, "45-game-info-chips");
     }
 
+    // W42-06 needs a signed-in core (stored token at construction) with a
+    // scripted RA server, so it runs in a second app on its own config dir.
+    wave42_unlock_and_hd2d_shots(&rom);
+
+    // 99: the library grid with a game that has no art. 01-library-home
+    // and 22-library-continue already show it (the RF-Scroller tile is the
+    // console-tile placeholder); this shot just re-takes it on the grid.
+    harness.state_mut().close_rom_for_test();
+    harness
+        .state_mut()
+        .set_library_roots_for_test(vec![games_dir.clone()]);
+    harness
+        .state_mut()
+        .set_library_view_for_test(retroforge::library::LibraryView::Grid);
+    // A dump nobody has played, so it has no screenshot art: console tile.
+    let mut noart = std::fs::read(&fixture).expect("fixture");
+    let n = noart.len();
+    noart[n - 2] ^= 0xFF;
+    std::fs::write(games_dir.join("RF-NoArt.nes"), &noart).expect("write noart");
+    harness
+        .state_mut()
+        .set_library_roots_for_test(vec![games_dir.clone()]);
+    harness.run_steps(6);
+    shot(&mut harness, "99-library-placeholder");
+
     println!("TOUR COMPLETE -> {}", out_dir().display());
+}
+
+const RA_SWITCH: &str = "RetroAchievements (needs an account)";
+
+/// 90-96: Resume, Cheats, Achievements sign-in, Settings Online, and the
+/// Esc stack. Needs a running game and no RA token.
+fn wave42_menu_shots(harness: &mut Harness<'_, RetroForgeApp>) {
+    use retroforge::quick_menu::Section;
+    harness
+        .state_mut()
+        .open_quick_menu_for_test(Section::Resume);
+    harness.run_steps(4);
+    shot(harness, "90-quick-menu-resume");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+
+    harness
+        .state_mut()
+        .open_quick_menu_for_test(Section::Cheats);
+    harness.run_steps(4);
+    harness.get_by_label("Cheat codes").click();
+    harness.run_steps(2);
+    harness
+        .get_by_label("Cheat codes")
+        .type_text("SXIOPO\nnot a code");
+    harness.run_steps(2);
+    harness.get_by_label("Add codes").click();
+    harness.run_steps(4);
+    shot(harness, "91-quick-menu-cheats");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+
+    harness
+        .state_mut()
+        .open_quick_menu_for_test(Section::Achievements);
+    harness.run_steps(4);
+    shot(harness, "92-achievements-signin");
+    harness.get_by_label(RA_SWITCH).click();
+    harness.run_steps(4);
+    shot(harness, "93-achievements-signin-form");
+    harness.state_mut().set_ra_for_test(false, false);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+
+    harness.state_mut().show_settings_for_test(true);
+    harness.run_steps(3);
+    harness.get_by_label("Online").click();
+    harness.run_steps(4);
+    shot(harness, "94-settings-online");
+    harness.state_mut().show_settings_for_test(false);
+    harness.run_steps(2);
+
+    harness
+        .state_mut()
+        .open_quick_menu_for_test(Section::Settings);
+    harness.run_steps(3);
+    harness.get_by_label("Open Settings\u{2026}").click();
+    harness.run_steps(4);
+    shot(harness, "95-settings-over-menu");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(4);
+    shot(harness, "96-esc-back-to-menu");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+}
+
+fn ra_answer(which: &str) -> Vec<u8> {
+    match which {
+        "login2" => br#"{"Success":true,"User":"Bob","Token":"tok123","Score":100,"SoftcoreScore":5,"Messages":0}"#.to_vec(),
+        "achievementsets" => br#"{"Success":true,"GameId":1234,"Title":"Test Game","ConsoleId":7,
+"ImageIconUrl":"https://media.retroachievements.org/Images/000001.png","RichPresencePatch":"",
+"Sets":[{"AchievementSetId":9,"GameId":1234,"Title":"Test Game","Type":"core",
+"ImageIconUrl":"https://media.retroachievements.org/Images/000001.png",
+"Achievements":[{"ID":101,"Title":"Five Alive","Description":"Make the counter reach 5","Flags":3,"Points":5,
+"MemAddr":"0xH0600=5","Author":"t","BadgeName":"00001","Created":1700000000,"Modified":1700000000,"Type":""}],
+"Leaderboards":[]}]}"#.to_vec(),
+        "startsession" => br#"{"Success":true,"Unlocks":[],"HardcoreUnlocks":[],"ServerNow":1700000000}"#.to_vec(),
+        "awardachievement" => br#"{"Success":true,"Score":105,"SoftcoreScore":5,"AchievementID":101,"AchievementsRemaining":0}"#.to_vec(),
+        _ => br#"{"Success":true}"#.to_vec(),
+    }
+}
+
+fn ra_param<'a>(r: &'a retroforge::ra::OutboundRequest, key: &str) -> Option<&'a str> {
+    r.post_data
+        .as_deref()?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// 97-98: the unlock OSD card over play, and the HD-2D card's mode-fix
+/// button in Original mode. Mirrors tests/w42_06_resume_and_unlock.rs.
+fn wave42_unlock_and_hd2d_shots(rom: &Path) {
+    use retroforge::cheats::{mod_id, CheatSet, RamCheat};
+    use retroforge::core_thread::CoreCommand;
+    use retroforge::ra::{StoredLogin, TokenStore};
+
+    let dir = std::env::temp_dir().join(format!("retroforge_tour_ra_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("ra scratch");
+    TokenStore::save(
+        &dir,
+        &StoredLogin {
+            username: "Bob".into(),
+            token: "tok123".into(),
+        },
+    )
+    .expect("token");
+    // SAFETY: the tour is the only test in this binary and single-threaded
+    // at this point (the first app only reads the variable at construction).
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RETROFORGE_CONFIG_DIR", &dir);
+    }
+    let (tx, wire) = std::sync::mpsc::channel();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(WINDOW_SIZE[0], WINDOW_SIZE[1]))
+        .renderer(egui_kittest::wgpu::WgpuTestRenderer::default())
+        .build_eframe(|cc| RetroForgeApp::new(cc));
+    h.run();
+    h.state_mut().use_ra_transport_for_test(tx);
+    h.state_mut().launch_rom(rom);
+    h.state_mut().set_ra_for_test(true, false);
+
+    let pump = |h: &mut Harness<'_, RetroForgeApp>, done: &dyn Fn(&RetroForgeApp) -> bool| {
+        let start = Instant::now();
+        while !done(h.state()) && start.elapsed() < Duration::from_secs(30) {
+            while let Ok(r) = wire.try_recv() {
+                h.state()
+                    .ra_respond_for_test(r.id, ra_answer(ra_param(&r, "r").unwrap_or("")));
+            }
+            h.run_steps(1);
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    };
+    pump(&mut h, &|a| a.ra_list_for_test().len() == 1);
+
+    let id = mod_id("0600:05");
+    let five = CheatSet {
+        ram: vec![RamCheat {
+            id_index: 0,
+            write: rf_core_api::RamWrite {
+                addr: 0x0600,
+                value: 5,
+                compare: None,
+            },
+        }],
+        ram_ids: vec![id.clone()],
+        ids: vec![id],
+        ..CheatSet::default()
+    };
+    h.state()
+        .core_command_for_test(CoreCommand::SetCheats(Box::new(five)));
+    pump(&mut h, &|a| !a.achievement_cards_for_test().is_empty());
+    // The card fades in over a couple of steps and is on screen only for a
+    // few seconds of egui time, so settle briefly and shoot.
+    h.run_steps(3);
+    shot(&mut h, "97-unlock-card");
+
+    // Let the card expire, then the Enhancements page in Original mode.
+    for _ in 0..40 {
+        h.run_steps(1);
+    }
+    h.state_mut()
+        .set_mode_for_test(retroforge::game_settings::Mode::Accuracy);
+    h.state_mut()
+        .open_quick_menu_for_test(retroforge::quick_menu::Section::Enhancements);
+    h.run_steps(4);
+    if h.query_by_label("Switch to Enhanced and turn on").is_some() {
+        shot(&mut h, "98-hd2d-original");
+    } else {
+        println!("98-hd2d-original skipped: fixture does not show the HD-2D card");
+    }
 }
