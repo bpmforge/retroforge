@@ -8459,31 +8459,36 @@ impl RetroForgeApp {
                     let group =
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 12.0;
-                            match self.fps {
-                                Some(fps) => ui.add(readout(
-                                    egui::RichText::new(format!("{fps:5.1} fps")).monospace(),
-                                )),
-                                // A dash, not a hidden widget: the bar must not
-                                // change width when a reading arrives, or every
-                                // item left of it jumps a second after boot.
-                                None => {
-                                    ui.add(readout(egui::RichText::new("  --- fps").monospace()))
+                            // Ticket W42-07: fps, A/V and the profile chip describe a
+                            // running game; on the library they are noise.
+                            if self.core.is_some() {
+                                match self.fps {
+                                    Some(fps) => ui.add(readout(
+                                        egui::RichText::new(format!("{fps:5.1} fps")).monospace(),
+                                    )),
+                                    // A dash, not a hidden widget: the bar must not
+                                    // change width when a reading arrives, or every
+                                    // item left of it jumps a second after boot.
+                                    None => ui
+                                        .add(readout(egui::RichText::new("  --- fps").monospace())),
+                                };
+                                self.av_sync_indicator(ui);
+                                self.profile_chip(ui);
+                                // FM-13 criterion 3: "view too large for GPU,
+                                // reduced" — surfaced plainly, never swallowed
+                                // (`Self::refresh_ultrawide_render`'s doc). The one
+                                // readout allowed to interrupt, so it keeps its
+                                // warning colour.
+                                if let Some(msg) = &self.fm13_message {
+                                    ui.add(readout(
+                                        egui::RichText::new(msg)
+                                            .color(egui::Color32::from_rgb(230, 180, 40)),
+                                    ));
                                 }
-                            };
-                            self.av_sync_indicator(ui);
-                            self.profile_chip(ui);
-                            // FM-13 criterion 3: "view too large for GPU,
-                            // reduced" — surfaced plainly, never swallowed
-                            // (`Self::refresh_ultrawide_render`'s doc). The one
-                            // readout allowed to interrupt, so it keeps its
-                            // warning colour.
-                            if let Some(msg) = &self.fm13_message {
-                                ui.add(readout(
-                                    egui::RichText::new(msg)
-                                        .color(egui::Color32::from_rgb(230, 180, 40)),
-                                ));
                             }
-                            ui.separator();
+                            if self.core.is_some() {
+                                ui.separator();
+                            }
                             // `truncate`, not a character budget: `self.status`
                             // is `format!("Loaded {}", path.display())` on every
                             // ROM open, so its width is the user's directory
@@ -9614,6 +9619,7 @@ changed = true;
         };
         egui::Window::new(title)
             .id(egui::Id::new("game_settings_window"))
+            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
             .collapsible(true)
             .resizable(true)
             .default_width(420.0)
@@ -12658,24 +12664,20 @@ changed = true;
                                             );
                                         }
                                         None => {
-                                            // Acceptance 4: a generic,
-                                            // console-tinted placeholder —
+                                            // Acceptance 4 / W42-07: a
+                                            // console-coloured tile with
+                                            // the console's name and the
+                                            // title wrapped inside it —
                                             // never a picture implying an
                                             // image exists when it does
-                                            // not. The title is drawn
-                                            // below the box either way, so
-                                            // the placeholder itself
-                                            // carries no text of its own
-                                            // that could be mistaken for
-                                            // box art.
-                                            ui.painter().rect_filled(
+                                            // not.
+                                            crate::theme::paint_placeholder_tile(
+                                                ui.painter(),
                                                 thumb_rect,
-                                                2.0,
-                                                crate::theme::console_tint(
-                                                    tokens,
-                                                    high_contrast,
-                                                    &entry.identity,
-                                                ),
+                                                tokens,
+                                                high_contrast,
+                                                &entry.identity,
+                                                &entry.title,
                                             );
                                         }
                                     }

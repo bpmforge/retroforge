@@ -133,7 +133,9 @@ pub fn show_frame(
     let rect = play_rect(area, grid, par, mode);
     match surround {
         Surround::Black => {}
-        Surround::Glow(edges) => paint_ambient_glow(ui.painter(), area, rect, edges),
+        Surround::Glow(edges) => {
+            paint_ambient_glow(ui.painter(), area, rect, edges, ui.visuals().panel_fill)
+        }
         Surround::Bezel(accent) => paint_bezel(ui.painter(), area, rect, accent),
     }
     // `maintain_aspect_ratio(false)`: egui's `Image` keeps the TEXTURE's
@@ -343,40 +345,89 @@ pub fn paint_bezel(
     }
 }
 
+/// How strong the glow is right beside the picture: the edge colour at
+/// this alpha, fading to nothing at the outer edge of the letterbox.
+pub const GLOW_ALPHA: f32 = 0.5;
+
+/// Ticket W42-07: the ambient glow as a mesh. egui has no blur, so each
+/// side of the letterbox is one quad whose picture-side vertices carry the
+/// edge colour at [`GLOW_ALPHA`] and whose outer vertices carry `bg` (the
+/// letterbox's own fill); the GPU interpolates between them, which reads as
+/// a soft light spilling from the picture. `edges` is one colour per side
+/// (left, right, top, bottom), so each side is a single-colour fade.
+#[must_use]
+pub fn glow_mesh(
+    area: egui::Rect,
+    picture: egui::Rect,
+    edges: [egui::Color32; 4],
+    bg: egui::Color32,
+) -> egui::Mesh {
+    let [left, right, top, bottom] = edges;
+    let inner = |c: egui::Color32| c.gamma_multiply(GLOW_ALPHA);
+    let mut mesh = egui::Mesh::default();
+    // `corners` are (inner_a, inner_b, outer_b, outer_a), wound consistently.
+    let mut quad = |corners: [egui::Pos2; 4], edge: egui::Color32| {
+        let (w, h) = (
+            (corners[0].x - corners[2].x).abs(),
+            (corners[0].y - corners[2].y).abs(),
+        );
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let base = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+        for (i, pos) in corners.into_iter().enumerate() {
+            mesh.colored_vertex(pos, if i < 2 { inner(edge) } else { bg });
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    };
+    quad(
+        [
+            egui::pos2(picture.left(), area.top()),
+            egui::pos2(picture.left(), area.bottom()),
+            egui::pos2(area.left(), area.bottom()),
+            egui::pos2(area.left(), area.top()),
+        ],
+        left,
+    );
+    quad(
+        [
+            egui::pos2(picture.right(), area.top()),
+            egui::pos2(picture.right(), area.bottom()),
+            egui::pos2(area.right(), area.bottom()),
+            egui::pos2(area.right(), area.top()),
+        ],
+        right,
+    );
+    quad(
+        [
+            egui::pos2(picture.left(), picture.top()),
+            egui::pos2(picture.right(), picture.top()),
+            egui::pos2(picture.right(), area.top()),
+            egui::pos2(picture.left(), area.top()),
+        ],
+        top,
+    );
+    quad(
+        [
+            egui::pos2(picture.left(), picture.bottom()),
+            egui::pos2(picture.right(), picture.bottom()),
+            egui::pos2(picture.right(), area.bottom()),
+            egui::pos2(picture.left(), area.bottom()),
+        ],
+        bottom,
+    );
+    mesh
+}
+
 pub fn paint_ambient_glow(
     painter: &egui::Painter,
     area: egui::Rect,
     picture: egui::Rect,
     edges: [egui::Color32; 4],
+    bg: egui::Color32,
 ) {
-    let dim = |c: egui::Color32| c.gamma_multiply(0.45);
-    let [left, right, top, bottom] = edges;
-    painter.rect_filled(
-        egui::Rect::from_min_max(area.left_top(), egui::pos2(picture.left(), area.bottom())),
-        0.0,
-        dim(left),
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(egui::pos2(picture.right(), area.top()), area.right_bottom()),
-        0.0,
-        dim(right),
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(picture.left(), area.top()),
-            egui::pos2(picture.right(), picture.top()),
-        ),
-        0.0,
-        dim(top),
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(picture.left(), picture.bottom()),
-            egui::pos2(picture.right(), area.bottom()),
-        ),
-        0.0,
-        dim(bottom),
-    );
+    painter.add(egui::Shape::mesh(glow_mesh(area, picture, edges, bg)));
 }
 
 #[cfg(test)]
@@ -403,6 +454,39 @@ mod tests {
             assert_eq!(integer_multiple(r, NES), Some(k as u32));
             assert_eq!(r.center(), area(2000.0, h).center());
         }
+    }
+
+    #[test]
+    fn glow_mesh_is_edge_coloured_at_the_picture_and_background_at_the_rim() {
+        let area = area(1000.0, 600.0);
+        let picture = egui::Rect::from_center_size(area.center(), egui::vec2(600.0, 500.0));
+        let edges = [
+            egui::Color32::from_rgb(200, 10, 10),
+            egui::Color32::from_rgb(10, 200, 10),
+            egui::Color32::from_rgb(10, 10, 200),
+            egui::Color32::from_rgb(200, 200, 10),
+        ];
+        let bg = egui::Color32::from_rgb(20, 22, 25);
+        let mesh = glow_mesh(area, picture, edges, bg);
+        assert_eq!(mesh.vertices.len(), 16, "four quads");
+        let dim = |c: egui::Color32| c.gamma_multiply(GLOW_ALPHA);
+        // One quad per side (left, right, top, bottom): the two
+        // picture-side vertices carry that side's edge colour, the two
+        // rim vertices the background.
+        for (side, quad) in mesh.vertices.chunks(4).enumerate() {
+            for v in &quad[..2] {
+                assert_eq!(v.color, dim(edges[side]), "side {side} inner {:?}", v.pos);
+            }
+            for v in &quad[2..] {
+                assert_eq!(v.color, bg, "side {side} outer {:?}", v.pos);
+            }
+        }
+        assert!((mesh.vertices[0].pos.x - picture.left()).abs() < 1e-3);
+        assert!((mesh.vertices[2].pos.x - area.left()).abs() < 1e-3);
+        assert!(mesh
+            .indices
+            .iter()
+            .all(|i| (*i as usize) < mesh.vertices.len()));
     }
 
     #[test]

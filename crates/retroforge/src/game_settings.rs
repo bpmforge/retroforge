@@ -117,7 +117,7 @@ impl Mode {
     #[must_use]
     pub const fn player_blurb(self) -> &'static str {
         match self {
-            Mode::Accuracy => "Exactly what the console drew. Nothing added.",
+            Mode::Accuracy => "Exactly what the console drew.",
             Mode::Enhanced => "Fixes that work on any game, like sprite dropout and flicker.",
             Mode::GameAware => {
                 "Uses a profile of this game to widen it, map it and build it in 3D."

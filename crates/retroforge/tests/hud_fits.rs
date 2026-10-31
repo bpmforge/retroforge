@@ -336,6 +336,8 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     // window fits and this failure does not occur at all.
     let mut small_win = app_at(WINDOW_SIZE);
     small_win.state_mut().show_enhance_for_test(true);
+    // W42-07: Game settings got a default position below the menu bar.
+    small_win.state_mut().open_game_settings_for_test();
     small_win.run_steps(3);
     let menu_bottom = small_win
         .get_by_role_and_label(Role::Button, "View")
@@ -372,8 +374,11 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     // labelled nodes at all — the exact trap `ui_smoke.rs`'s module doc
     // records — every assertion here would pass on a blank window.
     let narrow = [WINDOW_SIZE[0] / 4.0, WINDOW_SIZE[1]];
-    let harness = app_at(narrow);
-    let (clipped, _) = clipped_nodes(&harness, narrow[0]);
+    let mut harness = app_at(narrow);
+    // W42-07: the play readouts exist only while a game runs, so the
+    // instrument is probed with one open.
+    harness.state_mut().open_rom_path(&deep_rom);
+    harness.run_steps(3);
     let (rect, left_edge) = harness
         .state()
         .status_readouts_for_test()
@@ -384,6 +389,10 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
          instrument is measuring nothing, so section 2's claim proves nothing",
         narrow[0],
     );
+    // The clip detector is probed on the library (its toolbar is what a
+    // 192 px window squeezes), not on the running game.
+    let library = app_at(narrow);
+    let (clipped, _) = clipped_nodes(&library, narrow[0]);
     assert!(
         !clipped.is_empty(),
         "at {}px nothing was reported clipped — the detector is measuring nothing, so \

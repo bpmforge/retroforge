@@ -461,6 +461,67 @@ pub fn console_tint(
     }
 }
 
+/// Ticket W42-07: the library's art-less card. A console-coloured tile
+/// ([`console_tint`], flat `surface` in high contrast) with the console's
+/// name across the top and the game's title wrapped beneath it, so the
+/// card reads as "this game" rather than as a missing image. Returns the
+/// text drawn (console line, then title) so a test can check it; painted
+/// text is not in the accessibility tree, and the card's own title label
+/// stays the click target.
+pub fn paint_placeholder_tile(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    tokens: &Tokens,
+    high_contrast: bool,
+    identity: &crate::library::EntryIdentity,
+    title: &str,
+) -> String {
+    painter.rect_filled(rect, 2.0, console_tint(tokens, high_contrast, identity));
+    if high_contrast {
+        painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0, tokens.line),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let console = if is_console(identity, crate::library::Console::Nes) {
+        "NES"
+    } else if is_console(identity, crate::library::Console::Snes) {
+        "SNES"
+    } else {
+        "ROM"
+    };
+    let inner = rect.shrink(8.0);
+    let clip = painter.with_clip_rect(rect);
+    let head = painter.layout_no_wrap(
+        console.to_owned(),
+        egui::FontId::proportional(13.0),
+        tokens.ink,
+    );
+    let head_h = head.size().y;
+    clip.galley(
+        egui::pos2(inner.center().x - head.size().x / 2.0, inner.top()),
+        head,
+        tokens.ink,
+    );
+    let mut job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::proportional(11.5),
+        tokens.ink,
+        inner.width(),
+    );
+    job.wrap.max_rows = 4;
+    job.halign = egui::Align::Center;
+    let galley = painter.layout_job(job);
+    clip.galley(
+        egui::pos2(inner.center().x, inner.top() + head_h + 4.0),
+        galley,
+        tokens.ink,
+    );
+    format!("{console}\n{title}")
+}
+
 /// Ticket W21-04: a console's identity colour by name ("NES", "SNES"),
 /// for the bezel light; `None` for anything else.
 #[must_use]
