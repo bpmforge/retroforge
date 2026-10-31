@@ -293,6 +293,142 @@ impl ToastStack {
     }
 }
 
+/// How long an achievement card stays fully visible, seconds of `Context::time`.
+pub const ACHIEVEMENT_DURATION: f64 = 4.0;
+
+struct AchievementCard {
+    title: String,
+    /// `None` for the "game mastered" card.
+    points: Option<u32>,
+    description: String,
+    created_at: f64,
+}
+
+/// Ticket W42-06: achievement unlocks get their own card, top centre of the
+/// play area (not a file toast): trophy, title, points, and the description
+/// smaller. No window frame (principle 13): a rounded panel on the surface
+/// token. Same `Context::time` clock and fade as [`ToastStack`].
+#[derive(Default)]
+pub struct AchievementCards {
+    cards: Vec<AchievementCard>,
+}
+
+impl AchievementCards {
+    /// Queue an unlock card.
+    pub fn push_unlock(
+        &mut self,
+        title: &str,
+        points: u32,
+        description: &str,
+        ctx: &egui::Context,
+    ) {
+        self.cards.push(AchievementCard {
+            title: title.to_owned(),
+            points: Some(points),
+            description: description.to_owned(),
+            created_at: ctx.time(),
+        });
+    }
+
+    /// Queue the "game mastered" card, in the same style.
+    pub fn push_mastered(&mut self, text: &str, ctx: &egui::Context) {
+        self.cards.push(AchievementCard {
+            title: text.to_owned(),
+            points: None,
+            description: String::new(),
+            created_at: ctx.time(),
+        });
+    }
+
+    /// The live cards as "title, N pts" lines, oldest first (tests).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn texts(&self) -> Vec<String> {
+        self.cards
+            .iter()
+            .map(|c| match c.points {
+                Some(p) => format!("{} ({p} pts)", c.title),
+                None => c.title.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether no card is live.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cards.is_empty()
+    }
+
+    /// Draw the live cards centred under `top_centre`, dropping expired ones.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        tokens: &crate::theme::Tokens,
+        top_centre: egui::Pos2,
+    ) {
+        let now = ctx.time();
+        self.cards
+            .retain(|c| now - c.created_at < ACHIEVEMENT_DURATION + FADE_SECS);
+        if self.cards.is_empty() {
+            return;
+        }
+        ctx.request_repaint();
+        egui::Area::new(egui::Id::new("rf_achievement_cards"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(top_centre)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    for card in &self.cards {
+                        let remaining = ACHIEVEMENT_DURATION + FADE_SECS - (now - card.created_at);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let alpha = (remaining / FADE_SECS).clamp(0.0, 1.0) as f32;
+                        egui::Frame::new()
+                            .fill(tokens.surface.gamma_multiply(alpha))
+                            .stroke(egui::Stroke::new(1.0, tokens.accent.gamma_multiply(alpha)))
+                            .corner_radius(egui::CornerRadius::same(12))
+                            .inner_margin(egui::Margin::symmetric(16, 10))
+                            .show(ui, |ui| {
+                                ui.set_max_width(360.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(egui_phosphor::regular::TROPHY)
+                                            .size(28.0)
+                                            .color(tokens.accent.gamma_multiply(alpha)),
+                                    );
+                                    ui.vertical(|ui| {
+                                        let head = match card.points {
+                                            Some(p) => format!("{} \u{b7} {p} pts", card.title),
+                                            None => card.title.clone(),
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(head)
+                                                .font(egui::FontId::proportional(
+                                                    crate::theme::type_scale::BODY,
+                                                ))
+                                                .strong()
+                                                .color(tokens.ink.gamma_multiply(alpha)),
+                                        );
+                                        if !card.description.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new(&card.description)
+                                                    .font(egui::FontId::proportional(
+                                                        crate::theme::type_scale::CAPTION,
+                                                    ))
+                                                    .color(tokens.muted.gamma_multiply(alpha)),
+                                            );
+                                        }
+                                    });
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

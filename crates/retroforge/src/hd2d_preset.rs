@@ -95,6 +95,26 @@ pub fn unavailable_reason(settings: &GameSettings, facts: &GameFacts) -> Option<
     }
 }
 
+/// Ticket W42-06: the mode that would clear the preset's only blocker, when
+/// the mode is the only thing in the way (`Needs Enhanced mode.`).
+#[must_use]
+pub fn mode_fix(settings: &GameSettings, facts: &GameFacts) -> Option<crate::game_settings::Mode> {
+    let row = feature_rows(settings, facts)
+        .into_iter()
+        .find(|r| r.id == "diorama")?;
+    match row.availability {
+        Availability::NeedsMode("Enhanced") => Some(crate::game_settings::Mode::Enhanced),
+        Availability::NeedsMode("Game-Aware") => Some(crate::game_settings::Mode::GameAware),
+        _ => None,
+    }
+}
+
+/// Ticket W42-06: the button that switches to `mode` and turns the preset on.
+#[must_use]
+pub fn mode_fix_label(mode: crate::game_settings::Mode) -> String {
+    format!("Switch to {} and turn on", mode.player_name())
+}
+
 /// Whether every setting the preset owns is at its value: what decides the
 /// button reads "Turn off".
 #[must_use]
@@ -177,6 +197,20 @@ mod tests {
     }
 
     /// Gating: the preset is exactly as available as Diorama, which needs
+    /// Ticket W42-06: Original mode offers the switch; the label names the mode.
+    #[test]
+    fn original_mode_offers_the_mode_switch() {
+        let none = GameFacts::new(false, false, false);
+        let fix = mode_fix(&settings(Mode::Accuracy), &none).expect("fix");
+        assert_eq!(fix, Mode::Enhanced);
+        assert_eq!(mode_fix_label(fix), "Switch to Enhanced and turn on");
+        assert_eq!(
+            mode_fix_label(Mode::GameAware),
+            "Switch to Game-Aware and turn on"
+        );
+        assert_eq!(mode_fix(&settings(Mode::Enhanced), &none), None);
+    }
+
     /// Enhanced (or Game-Aware) and no profile or painted table (D-023).
     #[test]
     fn the_preset_is_available_wherever_diorama_is_and_names_the_mode_otherwise() {

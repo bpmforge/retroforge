@@ -132,11 +132,12 @@ fn the_panel_lists_a_locked_achievement_then_toasts_and_shows_it_unlocked() {
         a.ra_state_for_test().2 >= 1 && a.ra_list_for_test().iter().all(|i| i.unlocked_softcore)
     });
     assert!(
-        h.state().toast_texts_for_test().iter().any(|t| t
-            .starts_with("Achievement unlocked: Five Alive (5 pts)")
-            && t.contains("Make the counter reach 5")),
+        h.state()
+            .achievement_cards_for_test()
+            .iter()
+            .any(|t| t == "Five Alive (5 pts)"),
         "{:?}",
-        h.state().toast_texts_for_test()
+        h.state().achievement_cards_for_test()
     );
 
     h.state_mut()

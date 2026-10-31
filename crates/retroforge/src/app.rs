@@ -1044,6 +1044,11 @@ pub struct RetroForgeApp {
     /// §5) — ROM folder added, library rescanned, state saved, script
     /// error. Drawn once per frame from `impl eframe::App::ui`.
     toasts: crate::toast::ToastStack,
+    /// Ticket W42-06: achievement unlock cards (top centre of the play area).
+    achievement_cards: crate::toast::AchievementCards,
+    /// Ticket W42-06: the paused frame on the Resume card, taken once per
+    /// opening of the Quick Menu.
+    resume_thumb: Option<egui::TextureHandle>,
     /// Set by the toolbar's "Rescan" button so `poll_library_scan` knows
     /// the scan it is about to adopt was USER-requested and should toast
     /// with a count — the automatic first scan on boot
@@ -2104,6 +2109,8 @@ impl RetroForgeApp {
             script_status: None,
             script_error_toast_pending: None,
             toasts: crate::toast::ToastStack::default(),
+            achievement_cards: crate::toast::AchievementCards::default(),
+            resume_thumb: None,
             library_rescan_toast_pending: false,
             pending_overwrite: None,
             slot_undo: None,
@@ -5061,16 +5068,12 @@ impl RetroForgeApp {
                         ..
                     } => {
                         self.ra_unlocks += 1;
-                        self.toasts.push(
-                            crate::toast::ToastKind::Success,
-                            crate::ra::unlock_toast(&title, points, &description),
-                            ctx,
-                        );
+                        self.achievement_cards
+                            .push_unlock(&title, points, &description, ctx);
                     }
                     Ev::GameCompleted => {
                         let text = crate::ra::mastered_toast(self.ra_game_title.as_deref());
-                        self.toasts
-                            .push(crate::toast::ToastKind::Success, text, ctx);
+                        self.achievement_cards.push_mastered(&text, ctx);
                     }
                     Ev::Disconnected => {
                         self.ra_offline = true;
@@ -5124,6 +5127,13 @@ impl RetroForgeApp {
     #[must_use]
     pub fn toast_texts_for_test(&self) -> Vec<String> {
         self.toasts.texts()
+    }
+
+    /// Ticket W42-06 test hook: the achievement cards live now ("Title (5 pts)").
+    #[doc(hidden)]
+    #[must_use]
+    pub fn achievement_cards_for_test(&self) -> Vec<String> {
+        self.achievement_cards.texts()
     }
 
     /// Ticket W41-06 test hook: the achievement list the panel is drawing.
@@ -9920,6 +9930,7 @@ changed = true;
             return;
         }
         self.show_overlay_menu = open;
+        self.resume_thumb = None;
         if open {
             self.quick_section = crate::quick_menu::Section::Resume;
             self.quick_focus_pending = true;
@@ -10361,6 +10372,128 @@ changed = true;
         Some(ctx.load_texture("quick-menu-backdrop", image, egui::TextureOptions::LINEAR))
     }
 
+    /// Ticket W42-06: the Resume page's summary card — the paused frame, the
+    /// game, its mode, when it was last saved, what is switched on, and the
+    /// primary Resume button. Returns whether Resume was pressed.
+    fn resume_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
+        self.refresh_state_slots_if_stale();
+        if self.resume_thumb.is_none() {
+            self.resume_thumb = self.frame_thumb(ui.ctx());
+        }
+        let title = self
+            .current_rom_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned());
+        let mode = self.current_game_settings.mode;
+        let enhancements = if mode.enhancement_active() {
+            crate::enhance_ui::feature_rows(&self.current_game_settings, &self.game_facts())
+                .iter()
+                .filter(|r| r.effective())
+                .count()
+        } else {
+            0
+        };
+        let cheats = self.active_cheat_count();
+        let last_saved = self
+            .state_slots
+            .iter()
+            .filter_map(|i| i.saved.as_ref().map(|s| s.timestamp))
+            .max();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let saved_line = match last_saved {
+            Some(t) => format!(
+                "Last saved {}",
+                crate::slot_cards::relative_age(t, now, || Self::format_timestamp(t))
+            ),
+            None => "Not saved yet".to_owned(),
+        };
+        let mut parts = Vec::new();
+        if enhancements > 0 {
+            parts.push(format!(
+                "{enhancements} enhancement{} on",
+                if enhancements == 1 { "" } else { "s" }
+            ));
+        }
+        if cheats > 0 {
+            parts.push(format!(
+                "{cheats} cheat{} on",
+                if cheats == 1 { "" } else { "s" }
+            ));
+        }
+        let on_line = if parts.is_empty() {
+            "Nothing extra turned on".to_owned()
+        } else {
+            parts.join(" \u{b7} ")
+        };
+        let mut resume = false;
+        crate::theme::Elevation::Raised
+            .frame(&tokens)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_top(|ui| {
+                    if let Some(tex) = &self.resume_thumb {
+                        let [w, h] = tex.size();
+                        #[allow(clippy::cast_precision_loss)]
+                        let width = 120.0 * w as f32 / h.max(1) as f32;
+                        ui.add(
+                            egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(width, 120.0))
+                                .corner_radius(egui::CornerRadius::same(6)),
+                        );
+                    }
+                    ui.vertical(|ui| {
+                        if let Some(title) = &title {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .font(crate::theme::condensed(crate::theme::type_scale::TITLE))
+                                    .color(tokens.ink),
+                            );
+                        }
+                        egui::Frame::new()
+                            .fill(tokens.accent_soft)
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(mode.player_name())
+                                        .font(egui::FontId::proportional(
+                                            crate::theme::type_scale::CAPTION,
+                                        ))
+                                        .strong()
+                                        .color(tokens.accent_strong),
+                                );
+                            });
+                        for line in [&saved_line, &on_line] {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .font(egui::FontId::proportional(
+                                        crate::theme::type_scale::BODY,
+                                    ))
+                                    .color(tokens.muted),
+                            );
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+                let button = egui::Button::new(
+                    egui::RichText::new("Resume")
+                        .font(egui::FontId::proportional(
+                            crate::theme::type_scale::SUBHEAD,
+                        ))
+                        .strong()
+                        .color(tokens.bg),
+                )
+                .fill(tokens.accent)
+                .min_size(egui::vec2(160.0, 38.0));
+                resume = ui.add(button).clicked();
+            });
+        resume
+    }
+
     /// One Quick Menu section's content. Returns `(close, leave_paused)`:
     /// close the menu (resuming a game it paused), or leave it for another
     /// window with the game still paused.
@@ -10384,8 +10517,7 @@ changed = true;
         }
         match self.quick_section {
             Section::Resume => {
-                ui.label("Back to the game.");
-                if ui.button(egui::RichText::new("Resume").strong()).clicked() {
+                if self.resume_card(ui) {
                     // Explicit, like the old menu: Resume runs the game
                     // even if it was paused before the menu opened.
                     leave_paused = true;
@@ -14534,7 +14666,10 @@ changed = true;
         let why_not =
             crate::hd2d_preset::unavailable_reason(&self.current_game_settings, &self.game_facts());
         let applied = crate::hd2d_preset::is_applied(&self.current_game_settings);
+        let mode_fix =
+            crate::hd2d_preset::mode_fix(&self.current_game_settings, &self.game_facts());
         let mut toggle = false;
+        let mut switch_mode = None;
         crate::theme::Elevation::Raised.frame(tokens).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -14568,9 +14703,26 @@ changed = true;
                         .font(egui::FontId::proportional(crate::theme::type_scale::CAPTION))
                         .color(tokens.warn),
                 );
+                // Ticket W42-06: when the mode is the only blocker, fix it here.
+                if let Some(mode) = mode_fix {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(crate::hd2d_preset::mode_fix_label(mode))
+                                .strong()
+                                .color(tokens.bg),
+                        )
+                        .fill(tokens.accent))
+                        .clicked()
+                    {
+                        switch_mode = Some(mode);
+                    }
+                }
             }
         });
-        if toggle {
+        if let Some(mode) = switch_mode {
+            self.set_game_mode(mode);
+            self.toggle_hd2d_preset(actions);
+        } else if toggle {
             self.toggle_hd2d_preset(actions);
         }
     }
@@ -20005,6 +20157,12 @@ impl eframe::App for RetroForgeApp {
         } else {
             self.osd.prune(&ctx);
         }
+        let card_top = self
+            .last_play_rect
+            .map_or(egui::pos2(ctx.content_rect().center().x, 56.0), |r| {
+                egui::pos2(r.center().x, r.min.y + 12.0)
+            });
+        self.achievement_cards.show(&ctx, &tokens, card_top);
         self.toasts.show(&ctx, &tokens);
     }
 
