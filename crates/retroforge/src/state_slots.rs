@@ -153,8 +153,8 @@ impl ModeAtSave {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            ModeAtSave::Accuracy => "Accuracy",
-            ModeAtSave::Enhanced => "Enhanced",
+            ModeAtSave::Accuracy => crate::game_settings::Mode::Accuracy.player_name(),
+            ModeAtSave::Enhanced => crate::game_settings::Mode::Enhanced.player_name(),
         }
     }
 }

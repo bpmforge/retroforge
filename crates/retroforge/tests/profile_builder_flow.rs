@@ -2,7 +2,7 @@
 //! design https://claude.ai/artifact/6a89VhM41WY7Ryqaw5pt7k). A copy of
 //! the RF-Scroller fixture with one changed byte has no profile; the
 //! player makes one, the builder opens, and the finder narrows the work
-//! RAM by "It went up" until a few candidates are left — the fixture's
+//! RAM by "It moved right" until a few candidates are left — the fixture's
 //! frame counters climb every frame — and "Use this" writes the camera.
 
 use std::path::Path;
@@ -83,7 +83,7 @@ fn make_a_profile_then_find_and_use_an_address() {
             break; // "Use this" is showing.
         }
         frames(&mut h, 5);
-        h.get_by_label("It went up").click();
+        h.get_by_label("It moved right").click();
         h.run_steps(1);
         frames(&mut h, 3);
     }

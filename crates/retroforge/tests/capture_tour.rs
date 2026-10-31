@@ -492,7 +492,7 @@ fn photograph_every_major_surface() {
                 {
                     break;
                 }
-                harness.get_by_label("It went up").click();
+                harness.get_by_label("It moved right").click();
                 harness.run_steps(1);
             }
             let from = harness.state().frame_count_for_test();

@@ -23,17 +23,42 @@ fn texts(harness: &Harness<'_, RetroForgeApp>) -> Vec<String> {
 
 fn looks_internal(text: &str) -> bool {
     let bytes = text.as_bytes();
+    let boundary = |i: usize| i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+    let digits_at = |mut j: usize| {
+        let start = j;
+        while bytes.get(j).is_some_and(u8::is_ascii_digit) {
+            j += 1;
+        }
+        (j, j - start)
+    };
     // W<digits>-<digits>: a ticket id.
     let ticket = (0..bytes.len()).any(|i| {
-        bytes[i] == b'W' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) && {
-            let mut j = i + 1;
-            while bytes.get(j).is_some_and(u8::is_ascii_digit) {
-                j += 1;
-            }
-            bytes.get(j) == Some(&b'-') && bytes.get(j + 1).is_some_and(u8::is_ascii_digit)
+        bytes[i] == b'W' && boundary(i) && {
+            let (j, n) = digits_at(i + 1);
+            n > 0 && bytes.get(j) == Some(&b'-') && digits_at(j + 1).1 > 0
         }
     });
-    ticket || text.contains("crate::") || text.contains("rf_")
+    // D-<3 digits>: a decision id.
+    let decision = (0..bytes.len()).any(|i| {
+        bytes[i] == b'D'
+            && boundary(i)
+            && bytes.get(i + 1) == Some(&b'-')
+            && digits_at(i + 2).1 >= 3
+    });
+    // $ followed by 4+ hex digits: a RAM address.
+    let address = (0..bytes.len()).any(|i| {
+        bytes[i] == b'$'
+            && bytes[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .count()
+                >= 4
+    });
+    // The code mode name; players see "Original".
+    let accuracy = text
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == "Accuracy");
+    ticket || decision || address || accuracy || text.contains("crate::") || text.contains("rf_")
 }
 
 #[test]
@@ -41,6 +66,10 @@ fn no_settings_tab_shows_a_ticket_id_or_module_path() {
     assert!(looks_internal("arrive with W3-02a"), "the check must bite");
     assert!(looks_internal("see crate::accessibility"));
     assert!(!looks_internal("Wide 4:3"));
+    assert!(looks_internal("Trust ladder (D-004)"));
+    assert!(looks_internal("camera ($7E0004)"));
+    assert!(looks_internal("Accuracy mode"));
+    assert!(!looks_internal("D-pad and $5 bills"));
 
     let dir = std::env::temp_dir().join(format!("retroforge_settings_copy_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

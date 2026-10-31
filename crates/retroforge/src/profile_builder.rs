@@ -112,8 +112,8 @@ impl Step {
     pub const fn instructions(self) -> &'static str {
         match self {
             Step::CameraX => {
-                "Take the first look. Walk right until the screen scrolls, then press It went up. \
-                 Walk left until it scrolls back, then It went down. Stand still: It didn't change. \
+                "Take the first look. Walk right until the screen scrolls, then press It moved right. \
+                 Walk left until it scrolls back, then It moved left. Stand still: It didn't move. \
                  Repeat until a few are left."
             }
             Step::CameraY => {
@@ -121,13 +121,23 @@ impl Step {
                  it went each time. Skip this in a game that only scrolls sideways."
             }
             Step::PlayerX => {
-                "Take the first look. Walk right a little (It went up), left a little (It went \
-                 down), stand still (It didn't change)."
+                "Take the first look. Walk right a little (It moved right), left a little (It moved \
+                 left), stand still (It didn't move)."
             }
             Step::Lives => {
                 "Take the first look. Lose a life (It went down) or gain one (It went up); while \
                  playing normally, It didn't change."
             }
+        }
+    }
+
+    /// The two directional answers, in the words that fit the axis (W42-05):
+    /// a horizontal quantity moved right or left, a vertical one went up or down.
+    #[must_use]
+    pub const fn change_labels(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Step::CameraX | Step::PlayerX => ("It moved right", "It moved left", "It didn't move"),
+            Step::CameraY | Step::Lives => ("It went up", "It went down", "It didn't change"),
         }
     }
 

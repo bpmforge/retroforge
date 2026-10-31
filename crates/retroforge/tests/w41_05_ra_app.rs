@@ -96,13 +96,13 @@ fn off_by_default_silent_then_softcore_hardcore_and_off_again() {
         a.frame_count_for_test() >= from + 60
     });
     assert!(seen.is_empty(), "RA off: nothing on the wire, saw {seen:?}");
-    assert!(!h.state().status_badge().contains("RA:"));
+    assert!(!h.state().status_badge().contains("Achievements"));
 
     // Turn it on: sign in with the stored token, load the game, badge says softcore.
     h.state_mut().set_ra_for_test(true, false);
     step_until(&mut h, &wire, &mut seen, |a| a.ra_state_for_test().0);
     assert!(
-        h.state().status_badge().ends_with(" \u{b7} RA: softcore"),
+        h.state().status_badge().ends_with(" \u{b7} Achievements"),
         "{}",
         h.state().status_badge()
     );
@@ -115,7 +115,9 @@ fn off_by_default_silent_then_softcore_hardcore_and_off_again() {
     h.state_mut().set_ra_for_test(true, true);
     step_until(&mut h, &wire, &mut seen, |a| a.ra_state_for_test().1);
     assert!(
-        h.state().status_badge().ends_with(" \u{b7} RA: hardcore"),
+        h.state()
+            .status_badge()
+            .ends_with(" \u{b7} Achievements \u{b7} Hardcore"),
         "{}",
         h.state().status_badge()
     );

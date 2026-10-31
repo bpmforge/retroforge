@@ -579,9 +579,9 @@ pub fn deliver(d: Drained, evt_tx: &Sender<CoreEvent>) -> bool {
 #[must_use]
 pub fn badge_suffix(game_loaded: bool, hardcore: bool) -> Option<&'static str> {
     game_loaded.then_some(if hardcore {
-        " \u{b7} RA: hardcore"
+        " \u{b7} Achievements \u{b7} Hardcore"
     } else {
-        " \u{b7} RA: softcore"
+        " \u{b7} Achievements"
     })
 }
 
@@ -935,8 +935,11 @@ mod tests {
     #[test]
     fn badge_names_the_mode_only_with_a_game_loaded() {
         assert_eq!(badge_suffix(false, true), None);
-        assert_eq!(badge_suffix(true, false), Some(" \u{b7} RA: softcore"));
-        assert_eq!(badge_suffix(true, true), Some(" \u{b7} RA: hardcore"));
+        assert_eq!(badge_suffix(true, false), Some(" \u{b7} Achievements"));
+        assert_eq!(
+            badge_suffix(true, true),
+            Some(" \u{b7} Achievements \u{b7} Hardcore")
+        );
     }
     fn info(points: u32, soft: bool, hard: bool) -> rf_achievements::AchievementInfo {
         rf_achievements::AchievementInfo {

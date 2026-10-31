@@ -1846,7 +1846,7 @@ impl RetroForgeApp {
                 let (bindings, outcome) = crate::bindings_store::load(root);
                 let status = match outcome {
                     crate::bindings_store::LoadOutcome::Defaulted => {
-                        "Using default bindings (no config file yet).".to_string()
+                        "Controls are on their defaults.".to_string()
                     }
                     crate::bindings_store::LoadOutcome::Loaded(warnings) if warnings.is_empty() => {
                         format!(
@@ -8287,7 +8287,7 @@ impl RetroForgeApp {
         ui: &mut egui::Ui,
         settings: &mut crate::game_settings::GameSettings,
     ) -> bool {
-        ui.label("Trust ladder (D-004) — fresh install is all-shadow");
+        ui.label("Trust ladder — fresh install is all-shadow");
         ui.separator();
         let mut changed = false;
         for heuristic in HEURISTICS {
@@ -8565,9 +8565,8 @@ impl RetroForgeApp {
         // `low` / `ok` / `high` is unambiguous, always renders, and
         // leaves the colour doing what colour is good at — carrying the
         // same message a second time, faster.
+        // W42-05: silent while fine. Only a problem is worth a word in the bar.
         let Some(fill) = self.audio_fill else {
-            ui.add(readout(egui::RichText::new("a/v \u{2014}").weak()))
-                .on_hover_text("No audio device open, so there is no buffer to report on.");
             return;
         };
         // Thresholds are about the buffer's job, not aesthetics: near
@@ -8575,25 +8574,21 @@ impl RetroForgeApp {
         // core is outrunning the device and will be throttled.
         let (word, colour, tip) = if fill < 0.15 {
             (
-                "a/v low",
+                "Sound running behind",
                 egui::Color32::from_rgb(220, 90, 80),
-                "audio buffer nearly empty \u{2014} emulation is behind the audio clock",
+                "The sound buffer is nearly empty \u{2014} the game is running slower than the audio.",
             )
         } else if fill > 0.95 {
             (
-                "a/v high",
+                "Sound running ahead",
                 egui::Color32::from_rgb(230, 180, 40),
-                "audio buffer nearly full \u{2014} the core is ahead and being throttled",
+                "The sound buffer is nearly full \u{2014} the game is being held back to match the audio.",
             )
         } else {
-            (
-                "a/v ok",
-                egui::Color32::from_rgb(110, 190, 120),
-                "audio buffer healthy \u{2014} a/v in sync",
-            )
+            return;
         };
         ui.add(readout(egui::RichText::new(word).color(colour)))
-            .on_hover_text(format!("{tip}\nbuffer fill: {:.0}%", fill * 100.0));
+            .on_hover_text(format!("{tip}\nBuffer fill: {:.0}%", fill * 100.0));
     }
 
     /// Ticket W15-04: an `egui::Modal` (built into egui since 0.31,
@@ -11049,24 +11044,23 @@ changed = true;
                         return;
                     }
                 }
-                let (fill, ink) = if available {
-                    (tokens.ok_soft, tokens.ok)
-                } else {
-                    (tokens.warn_soft, tokens.warn)
-                };
-                egui::Frame::new()
-                    .fill(fill)
-                    .corner_radius(egui::CornerRadius::same(3))
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(crate::enhance_panel::requirement(
-                                &row.availability,
-                            ))
-                            .font(egui::FontId::proportional(10.0))
-                            .color(ink),
-                        );
-                    });
+                // W42-05: a chip only for a state that needs attention.
+                if !available {
+                    let (fill, ink) = (tokens.warn_soft, tokens.warn);
+                    egui::Frame::new()
+                        .fill(fill)
+                        .corner_radius(egui::CornerRadius::same(3))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(crate::enhance_panel::requirement(
+                                    &row.availability,
+                                ))
+                                .font(egui::FontId::proportional(10.0))
+                                .color(ink),
+                            );
+                        });
+                }
                 if let Some(h) = row.heuristic {
                     let state = self.current_game_settings.trust.state(h);
                     ui.horizontal(|ui| {
@@ -11133,7 +11127,9 @@ changed = true;
                     });
             }
         });
-        for line in &card.lines {
+        // W42-05: one summary line (the verification state); the research figures
+        // (coverage, map size, tier mix, shadow check) sit behind "Details".
+        let paint_line = |ui: &mut egui::Ui, line: &str| {
             let warn = card.diverged && line.starts_with("Verification:");
             ui.label(
                 egui::RichText::new(line)
@@ -11142,7 +11138,29 @@ changed = true;
                     ))
                     .color(if warn { tokens.warn } else { tokens.muted }),
             );
+        };
+        if card.lines.len() <= 2 {
+            for line in &card.lines {
+                paint_line(ui, line);
+            }
+            return;
         }
+        let summary = card
+            .lines
+            .iter()
+            .position(|l| l.starts_with("Verification:"))
+            .unwrap_or(0);
+        paint_line(ui, &card.lines[summary]);
+        egui::CollapsingHeader::new("Details")
+            .id_salt("rebuild_details")
+            .default_open(false)
+            .show(ui, |ui| {
+                for (i, line) in card.lines.iter().enumerate() {
+                    if i != summary {
+                        paint_line(ui, line);
+                    }
+                }
+            });
     }
 
     /// Ticket W22-01: three mode cards — Original, Enhanced, Game-Aware —
@@ -13624,7 +13642,6 @@ changed = true;
             return;
         };
         let tokens = crate::theme::Tokens::from_accessibility(&self.settings.accessibility);
-        let snes = self.console_label == "SNES";
         let mut use_it = false;
         let mut not_now = false;
         egui::Area::new(egui::Id::new("camera_found_card"))
@@ -13644,8 +13661,7 @@ changed = true;
                         );
                         ui.label(
                             egui::RichText::new(format!(
-                                "RetroForge watched the screen scroll and found where the game keeps its camera ({}, matched {:.0}% of {} moving frames). Save it to unlock widescreen and level maps.",
-                                crate::profile_builder::show_address(snes, found.x),
+                                "RetroForge watched the screen scroll and found where the game keeps its camera (matched {:.0}% of {} moving frames). Save it to unlock widescreen and level maps.",
                                 found.ratio * 100.0,
                                 found.moving
                             ))
@@ -13965,11 +13981,13 @@ changed = true;
                                 }
                             }
                             Some(f) => {
+                                let (up_label, down_label, same_label) =
+                                    self.builder_step.change_labels();
                                 ui.horizontal(|ui| {
                                     for (label, change) in [
-                                        ("It went up", Change::Up),
-                                        ("It went down", Change::Down),
-                                        ("It didn't change", Change::Same),
+                                        (up_label, Change::Up),
+                                        (down_label, Change::Down),
+                                        (same_label, Change::Same),
                                     ] {
                                         if ui
                                             .add_enabled(!waiting, egui::Button::new(label))
@@ -14598,11 +14616,7 @@ changed = true;
                     return;
                 }
                 self.apply_profile_match();
-                self.builder_note = Some(format!(
-                    "{} saved as {}.",
-                    self.builder_step.label(),
-                    crate::profile_builder::show_address(snes, addr)
-                ));
+                self.builder_note = Some(format!("{} saved.", self.builder_step.label()));
                 self.builder_step = self.builder_step.next();
                 self.finder = None;
             }

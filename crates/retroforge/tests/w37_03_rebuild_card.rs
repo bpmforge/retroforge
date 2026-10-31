@@ -143,11 +143,19 @@ fn the_switch_starts_the_generic_tier_and_the_card_is_honest() {
     harness.run_steps(3);
     // The card: coverage, map, tier mix, verification, together.
     let all = texts(&harness);
-    let has = |p: &str| all.iter().any(|t| t.starts_with(p));
-    assert!(has("Coverage: "), "{all:?}");
-    assert!(has("Map: "), "{all:?}");
-    assert!(has("Tier mix: "), "{all:?}");
-    assert!(has("Verification: "), "{all:?}");
+    // W42-05: one summary line (verification); the research figures sit behind "Details".
+    let has = |all: &[String], p: &str| all.iter().any(|t| t.starts_with(p));
+    assert!(has(&all, "Verification: "), "{all:?}");
+    assert!(!has(&all, "Coverage: "), "collapsed by default: {all:?}");
+    harness.get_by_label("Details").scroll_to_me();
+    harness.run_steps(3);
+    harness.get_by_label("Details").click();
+    harness.run_steps(5);
+    let all = texts(&harness);
+    assert!(has(&all, "Coverage: "), "{all:?}");
+    assert!(has(&all, "Map: "), "{all:?}");
+    assert!(has(&all, "Tier mix: "), "{all:?}");
+    assert!(has(&all, "Verification: "), "{all:?}");
     assert!(
         !all.iter().any(|t| t == "Proven"),
         "a game nobody has checked is not proven: {all:?}"
