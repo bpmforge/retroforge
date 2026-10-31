@@ -461,6 +461,16 @@ pub fn console_tint(
     }
 }
 
+/// W42-09: the outline a resting (inactive) widget gets. Checkbox boxes,
+/// slider rails and button edges drew in `surface` on a `bg` panel, so an
+/// unchecked box was nearly invisible; `muted` (the text-grade secondary ink; the hairline `line`
+/// measures only ~1.6:1) is held to a WCAG 1.4.11 3:1 against both `bg` and `surface` by a
+/// test.
+#[must_use]
+pub fn inactive_stroke(tokens: &Tokens) -> egui::Stroke {
+    egui::Stroke::new(1.0, tokens.muted)
+}
+
 /// Ticket W42-07: the library's art-less card. A console-coloured tile
 /// ([`console_tint`], flat `surface` in high contrast) with the console's
 /// name across the top and the game's title wrapped beneath it, so the
@@ -500,11 +510,6 @@ pub fn paint_placeholder_tile(
         tokens.ink,
     );
     let head_h = head.size().y;
-    clip.galley(
-        egui::pos2(inner.center().x - head.size().x / 2.0, inner.top()),
-        head,
-        tokens.ink,
-    );
     let mut job = egui::text::LayoutJob::simple(
         title.to_owned(),
         egui::FontId::proportional(11.5),
@@ -514,8 +519,17 @@ pub fn paint_placeholder_tile(
     job.wrap.max_rows = 4;
     job.halign = egui::Align::Center;
     let galley = painter.layout_job(job);
+    // W42-09: the console label + title pair is centred vertically in the
+    // tile (never above the padded top edge).
+    let block_h = head_h + 4.0 + galley.size().y;
+    let top = (rect.center().y - block_h / 2.0).max(inner.top());
     clip.galley(
-        egui::pos2(inner.center().x, inner.top() + head_h + 4.0),
+        egui::pos2(inner.center().x - head.size().x / 2.0, top),
+        head,
+        tokens.ink,
+    );
+    clip.galley(
+        egui::pos2(inner.center().x, top + head_h + 4.0),
         galley,
         tokens.ink,
     );
@@ -654,6 +668,26 @@ pub fn install_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W42-09: a resting widget's outline is visible against the panel
+    /// (`bg`) and the sheet (`surface`) in every theme. Threshold: WCAG
+    /// 1.4.11 non-text contrast, 3:1 (the luminance ratio).
+    #[test]
+    fn inactive_stroke_contrasts_with_panel_and_sheet() {
+        use crate::accessibility::contrast_ratio;
+        let rgb = |c: egui::Color32| [c.r(), c.g(), c.b()];
+        for (name, t) in [
+            ("light", Tokens::light()),
+            ("dark", Tokens::dark()),
+            ("high contrast", Tokens::high_contrast()),
+        ] {
+            let stroke = inactive_stroke(&t).color;
+            for (what, under) in [("bg", t.bg), ("surface", t.surface)] {
+                let r = contrast_ratio(rgb(stroke), rgb(under));
+                assert!(r >= 3.0, "{name}: inactive stroke vs {what} is {r:.2}:1");
+            }
+        }
+    }
     use crate::accessibility::{contrast_ratio, WCAG_AA};
 
     /// `derive` is a pure function of its two arguments: same inputs, same

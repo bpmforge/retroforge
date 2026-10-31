@@ -7855,9 +7855,11 @@ impl RetroForgeApp {
 
         // `inactive` is a resting control: it sits on `raised`, which is
         // what says "this is a thing, and you may press it".
-        v.widgets.inactive.bg_fill = raised;
+        // W42-09: `bg_fill` is the slider rail / scrollbar track (buttons use
+        // `weak_bg_fill`); `raised` on `bg` made rails invisible.
+        v.widgets.inactive.bg_fill = raised.lerp_to_gamma(muted, 0.3);
         v.widgets.inactive.weak_bg_fill = raised;
-        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        v.widgets.inactive.bg_stroke = crate::theme::inactive_stroke(&tokens);
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
 
         v.widgets.hovered.bg_fill = raised.lerp_to_gamma(accent, 0.18);
@@ -17981,10 +17983,11 @@ changed = true;
                     .entries()
                     .iter()
                     .find(|(p, x)| *x == n && !crate::controls_panel::is_stick(*p))
-                    .map(|(p, _)| p.name()),
-                (Device::Controller, Button::Snes(n)) => {
-                    self.snes_bindings.pad_for(n).map(rf_input::PadButton::name)
-                }
+                    .map(|(p, _)| crate::controls_panel::pad_label(*p)),
+                (Device::Controller, Button::Snes(n)) => self
+                    .snes_bindings
+                    .pad_for(n)
+                    .map(crate::controls_panel::pad_label),
             };
             name.unwrap_or("\u{2014}").to_owned()
         };

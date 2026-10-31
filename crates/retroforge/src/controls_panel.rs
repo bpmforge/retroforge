@@ -51,25 +51,25 @@ pub fn layout(console: Console) -> Vec<(Button, egui::Pos2, egui::Vec2, Shape)> 
         vec![
             (
                 up,
-                egui::pos2(0.20, 0.38),
+                egui::pos2(0.22, 0.38),
                 egui::vec2(0.045, 0.075),
                 Shape::Square,
             ),
             (
                 down,
-                egui::pos2(0.20, 0.72),
+                egui::pos2(0.22, 0.72),
                 egui::vec2(0.045, 0.075),
                 Shape::Square,
             ),
             (
                 left,
-                egui::pos2(0.13, 0.55),
+                egui::pos2(0.15, 0.55),
                 egui::vec2(0.045, 0.075),
                 Shape::Square,
             ),
             (
                 right,
-                egui::pos2(0.27, 0.55),
+                egui::pos2(0.29, 0.55),
                 egui::vec2(0.045, 0.075),
                 Shape::Square,
             ),
@@ -87,13 +87,13 @@ pub fn layout(console: Console) -> Vec<(Button, egui::Pos2, egui::Vec2, Shape)> 
             v.extend([
                 (
                     Button::Nes(N::Select),
-                    egui::pos2(0.44, 0.62),
+                    egui::pos2(0.49, 0.62),
                     egui::vec2(0.05, 0.035),
                     Shape::Pill,
                 ),
                 (
                     Button::Nes(N::Start),
-                    egui::pos2(0.56, 0.62),
+                    egui::pos2(0.61, 0.62),
                     egui::vec2(0.05, 0.035),
                     Shape::Pill,
                 ),
@@ -123,7 +123,7 @@ pub fn layout(console: Console) -> Vec<(Button, egui::Pos2, egui::Vec2, Shape)> 
             v.extend([
                 (
                     Button::Snes(S::L),
-                    egui::pos2(0.20, 0.10),
+                    egui::pos2(0.22, 0.10),
                     egui::vec2(0.12, 0.05),
                     Shape::Pill,
                 ),
@@ -135,13 +135,13 @@ pub fn layout(console: Console) -> Vec<(Button, egui::Pos2, egui::Vec2, Shape)> 
                 ),
                 (
                     Button::Snes(S::Select),
-                    egui::pos2(0.43, 0.60),
+                    egui::pos2(0.48, 0.60),
                     egui::vec2(0.05, 0.035),
                     Shape::Pill,
                 ),
                 (
                     Button::Snes(S::Start),
-                    egui::pos2(0.55, 0.60),
+                    egui::pos2(0.60, 0.60),
                     egui::vec2(0.05, 0.035),
                     Shape::Pill,
                 ),
@@ -196,10 +196,74 @@ fn face_colour(b: Button) -> Option<egui::Color32> {
     }
 }
 
+/// What [`draw_laid_out`] put on screen, for tests: the pad's whole area,
+/// each button's rect and each binding label's rect.
+pub struct Drawn {
+    pub clicked: Option<Button>,
+    pub area: egui::Rect,
+    pub buttons: Vec<(Button, egui::Rect)>,
+    pub labels: Vec<(Button, egui::Rect)>,
+}
+
+/// A controller button as a player says it (W42-09): "Up", "L", "South",
+/// not the saved config name ("DpadUp", "LeftShoulder"). The saved name
+/// (`PadButton::name`) is unchanged.
+#[must_use]
+pub fn pad_label(p: rf_input::PadButton) -> &'static str {
+    use rf_input::PadButton as P;
+    match p {
+        P::DpadUp => "Up",
+        P::DpadDown => "Down",
+        P::DpadLeft => "Left",
+        P::DpadRight => "Right",
+        P::LeftShoulder => "L",
+        P::RightShoulder => "R",
+        P::LeftStickUp => "Stick Up",
+        P::LeftStickDown => "Stick Down",
+        P::LeftStickLeft => "Stick Left",
+        P::LeftStickRight => "Stick Right",
+        other => other.name(),
+    }
+}
+
+/// Where a button's binding label is anchored, relative to its rect `r`.
+/// D-pad labels sit outward from the cross, shoulder labels inward along
+/// the top edge, everything else underneath.
+fn label_anchor(button: Button, r: egui::Rect) -> (egui::Pos2, egui::Align2) {
+    match short_name(button) {
+        x if x == egui_phosphor::regular::CARET_UP => (
+            egui::pos2(r.center().x, r.top() - 3.0),
+            egui::Align2::CENTER_BOTTOM,
+        ),
+        x if x == egui_phosphor::regular::CARET_LEFT => (
+            egui::pos2(r.left() - 5.0, r.center().y),
+            egui::Align2::RIGHT_CENTER,
+        ),
+        x if x == egui_phosphor::regular::CARET_RIGHT => (
+            egui::pos2(r.right() + 5.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+        ),
+        _ if button == Button::Snes(SnesButton::L) => (
+            egui::pos2(r.right() + 6.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+        ),
+        _ if button == Button::Snes(SnesButton::R) => (
+            egui::pos2(r.left() - 6.0, r.center().y),
+            egui::Align2::RIGHT_CENTER,
+        ),
+        _ => (
+            egui::pos2(r.center().x, r.bottom() + 3.0),
+            egui::Align2::CENTER_TOP,
+        ),
+    }
+}
+
 /// Draw the pad for `console`. `binding` names what each button is bound
 /// to on the chosen device ("Z", "South", or "—"); `waiting` is the button
 /// waiting for a key or pad press. Returns the button clicked, if any.
 /// Each button is a Button to accessibility, named "<button>: <binding>".
+/// The diagram is sized to the available width and every label is kept
+/// inside it.
 pub fn draw(
     ui: &mut egui::Ui,
     tokens: &crate::theme::Tokens,
@@ -207,6 +271,17 @@ pub fn draw(
     binding: &dyn Fn(Button) -> String,
     waiting: Option<Button>,
 ) -> Option<Button> {
+    draw_laid_out(ui, tokens, console, binding, waiting).clicked
+}
+
+/// [`draw`], also reporting where everything landed.
+pub fn draw_laid_out(
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::Tokens,
+    console: Console,
+    binding: &dyn Fn(Button) -> String,
+    waiting: Option<Button>,
+) -> Drawn {
     let w = ui.available_width().min(520.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, w * 0.46), egui::Sense::hover());
     let body = rect.shrink2(egui::vec2(4.0, rect.height() * 0.16));
@@ -218,11 +293,17 @@ pub fn draw(
         egui::Stroke::new(1.0, tokens.line),
         egui::StrokeKind::Inside,
     );
-    let mut clicked = None;
+    let mut drawn = Drawn {
+        clicked: None,
+        area: rect,
+        buttons: Vec::new(),
+        labels: Vec::new(),
+    };
     for (button, c, half, shape) in layout(console) {
         let centre = rect.min + egui::vec2(c.x * rect.width(), c.y * rect.height());
         let size = egui::vec2(half.x * rect.width() * 2.0, half.y * rect.height() * 2.0);
         let r = egui::Rect::from_center_size(centre, size);
+        drawn.buttons.push((button, r));
         let id = ui.id().with(("ctl", button.name()));
         let response = ui.interact(r, id, egui::Sense::click());
         let bound = binding(button);
@@ -263,7 +344,7 @@ pub fn draw(
                 egui::StrokeKind::Outside,
             );
         }
-        // The button's own name inside, its binding underneath.
+        // The button's own name inside, its binding next to it.
         painter.text(
             r.center(),
             egui::Align2::CENTER_CENTER,
@@ -276,50 +357,27 @@ pub fn draw(
         } else {
             bound
         };
-        // D-pad labels sit outward from the cross so they never collide.
-        let (at, align) = match short_name(button) {
-            x if x == egui_phosphor::regular::CARET_UP => (
-                egui::pos2(r.center().x, r.top() - 3.0),
-                egui::Align2::CENTER_BOTTOM,
-            ),
-            x if x == egui_phosphor::regular::CARET_LEFT => (
-                egui::pos2(r.left() - 5.0, r.center().y),
-                egui::Align2::RIGHT_CENTER,
-            ),
-            x if x == egui_phosphor::regular::CARET_RIGHT => (
-                egui::pos2(r.right() + 5.0, r.center().y),
-                egui::Align2::LEFT_CENTER,
-            ),
-            // Shoulders: beside, outward, clear of the D-pad's label.
-            _ if button == Button::Snes(SnesButton::L) => (
-                egui::pos2(r.left() - 6.0, r.center().y),
-                egui::Align2::RIGHT_CENTER,
-            ),
-            _ if button == Button::Snes(SnesButton::R) => (
-                egui::pos2(r.right() + 6.0, r.center().y),
-                egui::Align2::LEFT_CENTER,
-            ),
-            _ => (
-                egui::pos2(r.center().x, r.bottom() + 3.0),
-                egui::Align2::CENTER_TOP,
-            ),
+        let colour = if is_waiting {
+            tokens.accent
+        } else {
+            tokens.ink
         };
-        painter.text(
-            at,
-            align,
-            label,
-            crate::theme::numeric(12.0),
-            if is_waiting {
-                tokens.accent
-            } else {
-                tokens.ink
-            },
-        );
+        let galley = painter.layout_no_wrap(label, crate::theme::numeric(12.0), colour);
+        let (at, align) = label_anchor(button, r);
+        let mut lr = align.anchor_size(at, galley.size());
+        // Keep the label inside the diagram, whatever its length.
+        let bounds = rect.shrink(2.0);
+        lr = lr.translate(egui::vec2(
+            (bounds.left() - lr.left()).max(0.0) + (bounds.right() - lr.right()).min(0.0),
+            (bounds.top() - lr.top()).max(0.0) + (bounds.bottom() - lr.bottom()).min(0.0),
+        ));
+        painter.galley(lr.min, galley, colour);
+        drawn.labels.push((button, lr));
         if response.clicked() {
-            clicked = Some(button);
+            drawn.clicked = Some(button);
         }
     }
-    clicked
+    drawn
 }
 
 /// A key as the Controls screen shows it: arrows as arrows, the long
@@ -392,6 +450,41 @@ mod tests {
         assert_eq!(snes.len(), SnesButton::ALL.len());
         for b in SnesButton::ALL {
             assert!(snes.contains(&Button::Snes(b)), "{b:?}");
+        }
+    }
+
+    /// W42-09: at any sheet width the labels stay inside the diagram and
+    /// never sit on another control or label (worst-case label text).
+    #[test]
+    fn labels_stay_inside_and_clear_of_controls() {
+        let tokens = crate::theme::Tokens::dark();
+        for console in [Console::Nes, Console::Snes] {
+            for width in [380.0_f32, 420.0, 520.0] {
+                let ctx = egui::Context::default();
+                let mut drawn = None;
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    ui.set_max_width(width);
+                    let longest = |_b: Button| "Right".to_owned();
+                    drawn = Some(draw_laid_out(ui, &tokens, console, &longest, None));
+                });
+                let d = drawn.expect("drawn");
+                assert!(d.area.width() <= width + 0.5);
+                for (b, l) in &d.labels {
+                    assert!(d.area.contains_rect(*l), "{console:?}@{width} {b:?} {l:?}");
+                    for (ob, r) in &d.buttons {
+                        assert!(
+                            !l.intersects(*r),
+                            "{console:?}@{width} label {b:?} on {ob:?}"
+                        );
+                    }
+                    for (ob, o) in &d.labels {
+                        assert!(
+                            ob == b || !l.intersects(*o),
+                            "{console:?}@{width} {b:?}/{ob:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
