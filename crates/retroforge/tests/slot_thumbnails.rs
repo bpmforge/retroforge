@@ -49,7 +49,7 @@ fn a_saved_slot_shows_its_screenshot_and_an_empty_slot_does_not() {
     loop {
         harness.run_steps(1);
         std::thread::sleep(Duration::from_millis(10));
-        harness.state_mut().open_states_modal();
+        harness.state_mut().open_save_page_for_test();
         harness.run_steps(2);
         if harness.query_by_label("Slot 1 screenshot").is_some()
             || start.elapsed() > Duration::from_secs(10)

@@ -351,11 +351,12 @@ fn photograph_every_major_surface() {
         .set_surround(retroforge::settings::Surround::Black);
     harness.run_steps(2);
 
-    // W20-06: the save-state window with its slot screenshot.
-    harness.state_mut().open_states_modal();
+    // W20-06: the save-state page with its slot screenshot (W42-04: the
+    // Quick Menu's Save page; the States window is gone).
+    harness.state_mut().open_save_page_for_test();
     harness.run_steps(4);
     shot(&mut harness, "25-states-window");
-    harness.state_mut().close_states_for_test();
+    harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
     // And back, so the rest of the tour has its menus.
@@ -423,10 +424,10 @@ fn photograph_every_major_surface() {
     }
     harness.state_mut().show_settings_for_test(false);
 
-    harness.state_mut().show_controls_for_test(true);
+    harness.state_mut().open_controls_settings();
     harness.run_steps(3);
     shot(&mut harness, "06-controls");
-    harness.state_mut().show_controls_for_test(false);
+    harness.state_mut().show_settings_for_test(false);
 
     // ---- the ultrawide camera, over a stitched canvas ---------------
     //

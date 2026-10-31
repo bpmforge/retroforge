@@ -213,7 +213,19 @@ fn the_modal_lists_every_slot_and_shows_a_saved_slots_mode_and_flags() {
         .build_eframe(|cc| RetroForgeApp::new(cc));
     harness.run();
 
-    harness.state_mut().open_states_modal();
+    // W42-04: the Quick Menu's Save page lists the slots, and it needs a
+    // game open (File > Save states is disabled without one).
+    let rom_path = dir.join("slots.nes");
+    let mut rom = vec![0u8; 16 + 0x4000 + 0x2000];
+    rom[0..4].copy_from_slice(b"NES\x1a");
+    rom[4] = 1;
+    rom[5] = 1;
+    rom[16 + 0x3FFC] = 0x00;
+    rom[16 + 0x3FFD] = 0x80;
+    std::fs::write(&rom_path, &rom).unwrap();
+    harness.state_mut().open_rom_path(&rom_path);
+    harness.run_steps(3);
+    harness.state_mut().open_save_page_for_test();
     harness.run_steps(3);
 
     // Every slot has a row.
@@ -234,7 +246,7 @@ fn the_modal_lists_every_slot_and_shows_a_saved_slots_mode_and_flags() {
     let (bytes, _) = real_container(true);
     state_slots::save(&states, SlotId::Numbered(1), &bytes, None).unwrap();
     harness.state_mut().set_game_hash_for_test(Some(hash));
-    harness.state_mut().open_states_modal();
+    harness.state_mut().open_save_page_for_test();
     harness.run_steps(3);
 
     // `label()` OR `value()`: ticket W20-06 draws the mode, date and
@@ -261,6 +273,10 @@ fn the_modal_lists_every_slot_and_shows_a_saved_slots_mode_and_flags() {
         labels.iter().any(|l| l.contains("2023-11-14")),
         "the timestamp is missing from: {labels:?}"
     );
+    harness
+        .state_mut()
+        .open_quick_menu_for_test(retroforge::quick_menu::Section::Load);
+    harness.run_steps(3);
     assert!(
         harness
             .query_by_role_and_label(Role::Button, "Load Slot 1")

@@ -1150,8 +1150,6 @@ pub struct RetroForgeApp {
     /// let us open it.
     #[cfg(feature = "gamepad")]
     pad_backend: Option<rf_input::GilrsBackend>,
-    /// Whether the Controls (remap) window is open.
-    show_controls: bool,
     /// Whether the app-wide Settings window is open (ticket W2-08).
     show_settings: bool,
     /// Which Settings tab is showing.
@@ -1647,14 +1645,12 @@ pub struct RetroForgeApp {
     trace_drain: Option<crate::trace_capture::TraceDrain>,
     /// The background lz4 writer, present only while writing to file.
     trace_writer: Option<crate::trace_capture::TraceFileWriter>,
-    /// Ticket W4-11: the save-state manager modal's open flag and the
-    /// slot listing it draws. The listing is refreshed when the modal
-    /// opens and after every save/load, not per frame — it is a directory
-    /// scan, and a modal that stat()ed thirteen files at 60 Hz would be
-    /// paying for a picture that changes when the user presses a button.
-    show_states: bool,
+    /// Ticket W4-11: the slot listing the Quick Menu's Save and Load pages
+    /// draw (W42-04: the States window that first owned it is gone). The
+    /// listing is refreshed when a page opens and after every save/load,
+    /// not per frame — it is a directory scan.
     state_slots: Vec<crate::state_slots::SlotInfo>,
-    /// Warnings from the most recent load, shown in the modal and
+    /// Warnings from the most recent load, shown on the Save and Load pages and
     /// summarised in the status line (FRONTEND_UI §3.2's last clause).
     state_warnings: Vec<String>,
     /// Ticket W5-06: the author workspace (FRONTEND_UI §3.5). `None`
@@ -2138,7 +2134,6 @@ impl RetroForgeApp {
             last_nav_tick: None,
             #[cfg(feature = "gamepad")]
             pad_backend: pad_backend_or_none(),
-            show_controls: false,
             show_settings: false,
             settings_tab: SettingsTab::Video,
             settings_query: String::new(),
@@ -2264,7 +2259,6 @@ impl RetroForgeApp {
             compare_capture_active: false,
             trace_drain: None,
             trace_writer: None,
-            show_states: false,
             state_slots: Vec::new(),
             state_warnings: Vec::new(),
             author_watch: None,
@@ -3486,16 +3480,38 @@ impl RetroForgeApp {
         }
     }
 
-    /// Refresh the slot listing and open the manager (ticket W4-11).
-    /// Close the States window (screenshot tour).
-    #[doc(hidden)]
-    pub fn close_states_for_test(&mut self) {
-        self.show_states = false;
+    /// W42-04: the save-state manager is the Quick Menu's Save page — open
+    /// it there. Nothing to manage without a game, so then this does
+    /// nothing (the File menu item is disabled to match).
+    pub fn open_save_states(&mut self) {
+        if self.core.is_none() {
+            return;
+        }
+        self.refresh_state_slots();
+        self.open_quick_menu_at(crate::quick_menu::Section::Save);
     }
 
-    pub fn open_states_modal(&mut self) {
+    /// W42-04: like [`Self::open_save_states`] but without the game check,
+    /// so tests can look at the page with no game open.
+    #[doc(hidden)]
+    pub fn open_save_page_for_test(&mut self) {
         self.refresh_state_slots();
-        self.show_states = true;
+        self.open_quick_menu_at(crate::quick_menu::Section::Save);
+    }
+
+    /// W42-04: ask to confirm an overwrite of `slot`, as a Save click on an
+    /// occupied slot did in the retired States window (tests).
+    #[doc(hidden)]
+    pub fn request_overwrite_for_test(&mut self, slot: crate::state_slots::SlotId) {
+        self.pending_overwrite = Some(slot);
+        self.active_slot = Some(slot);
+    }
+
+    /// W42-04: the Controls entry points open Settings on its Controls tab
+    /// (the standalone Controls window is gone).
+    pub fn open_controls_settings(&mut self) {
+        self.settings_tab = SettingsTab::Controls;
+        self.show_settings = true;
     }
 
     /// Re-read this game's slot directory into `state_slots`.
@@ -3891,65 +3907,19 @@ impl RetroForgeApp {
         picked
     }
 
-    fn states_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_states {
-            return;
-        }
-        let mut open = true;
-        let mut action: Option<(crate::state_slots::SlotId, bool)> = None;
-        // Ticket W20-06: never wider than the window it sits in — the card
-        // grid sizes it, and a grid wider than the viewport put the last
-        // column off-screen at the default 768 px window (tour photo).
-        let max_width = (ctx.viewport_rect().width() - 32.0).max(240.0);
-        egui::Window::new("Save states")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(max_width.min(820.0))
-            .max_width(max_width)
-            .show(ctx, |ui| {
-                // Ticket W10-04: ten slots plus auto-slots, each with a
-                // screenshot, a timestamp and a mode — taller than a
-                // window bounded to a 720px viewport.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if self.states_dir().is_none() {
-                            ui.label("No ROM open — save states are per game.");
-                        }
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let columns = ((ui.available_width() + 10.0) / (SLOT_CARD_WIDTH + 26.0))
-                            .floor()
-                            .max(1.0) as usize;
-                        if let Some(chosen) =
-                            self.slot_card_grid(ui, true, true, Some(columns), false)
-                        {
-                            action = Some(chosen);
-                        }
-                        if !self.state_warnings.is_empty() {
-                            ui.separator();
-                            for line in &self.state_warnings {
-                                ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), line);
-                            }
-                        }
-                    });
-            });
-        if let Some((slot, is_save)) = action {
-            // Ticket W15-06: whichever slot the modal was just used on
-            // becomes the App hotkeys' "active slot" (§6: save/load act
-            // on the active slot, defaulting to Slot 1 if none was ever
-            // chosen).
-            self.active_slot = Some(slot);
-            if is_save {
-                self.save_to_slot(slot, ctx);
-            } else {
-                self.load_from_slot(slot);
+    /// W42-04: the last load's warnings, under the Save and Load pages'
+    /// slot cards (they used to sit at the foot of the States window).
+    fn state_warning_lines(&self, ui: &mut egui::Ui) {
+        if !self.state_warnings.is_empty() {
+            ui.separator();
+            for line in &self.state_warnings {
+                ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), line);
             }
         }
-        self.show_states = open;
     }
 
     /// Ticket W15-04: the overwrite-confirmation `egui::Modal` for a Save
-    /// click on a slot that already holds a state. `states_modal`
+    /// click on a slot that already holds a state. the Save page
     /// defers into `self.pending_overwrite` rather than saving directly
     /// so a mis-click cannot silently discard a state — the whole point
     /// of the acceptance criterion.
@@ -7789,14 +7759,6 @@ impl RetroForgeApp {
     /// Counts frames that actually *reached the screen*, not repaints:
     /// egui repaints for a mouse move, and an FPS number that rose when
     /// you wiggled the pointer would be measuring the wrong machine.
-    /// Open or close the Controls window without going through the menu
-    /// (ticket W10-01), so `tests/hud_fits.rs` can assert where a
-    /// floating window lands without also depending on menu behaviour.
-    #[doc(hidden)]
-    pub fn show_controls_for_test(&mut self, show: bool) {
-        self.show_controls = show;
-    }
-
     fn note_frame(&mut self) {
         // Ticket W20-15: the frame-time history the performance overlay
         // draws — wall-clock between frames reaching the UI, which is what
@@ -8075,6 +8037,18 @@ impl RetroForgeApp {
                             self.open_rom();
                             ui.close();
                         }
+                        // W42-04: the save-state manager is the Quick
+                        // Menu's Save page; nothing to manage without a game.
+                        if ui
+                            .add_enabled(
+                                self.core.is_some(),
+                                egui::Button::new("Save states\u{2026}"),
+                            )
+                            .clicked()
+                        {
+                            self.open_save_states();
+                            ui.close();
+                        }
                         ui.separator();
                         // Ticket W11-04 (FR-PLUG-001). Until W11-04 there
                         // was no way to load a script at all: the SDK,
@@ -8189,10 +8163,9 @@ impl RetroForgeApp {
                         // bindings are sampled on this thread too
                         // (`poll_input`), so a remap takes effect on the very
                         // next frame with no round trip to the core thread.
-                        if ui
-                            .checkbox(&mut self.show_controls, "Controls\u{2026}")
-                            .changed()
-                        {
+                        // W42-04: opens Settings on its Controls tab.
+                        if ui.button("Controls\u{2026}").clicked() {
+                            self.open_controls_settings();
                             ui.close();
                         }
                         ui.separator();
@@ -8752,8 +8725,14 @@ impl RetroForgeApp {
             });
         // W21-13: consumed, so the Quick Menu (drawn later) does not see
         // the same press and open.
+        // W42-04: a pending rebind (game or app key) owns its Esc — it
+        // cancels the capture, not the sheet.
+        let rebinding = self.controls_waiting.is_some()
+            || self.awaiting_key.is_some()
+            || self.awaiting_app_key.is_some();
         if scrim.inner.clicked()
-            || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            || (!rebinding
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
         {
             open = false;
         }
@@ -8833,6 +8812,7 @@ impl RetroForgeApp {
                         match self.settings_tab {
                             SettingsTab::Controls => {
                                 self.controls_panel(ui);
+                                self.controls_more(ui);
                             }
                             SettingsTab::Accessibility => {
                                 let a = &mut self.settings.accessibility;
@@ -9961,19 +9941,15 @@ changed = true;
 
     /// W42-01: close the topmost framed player window for an Esc press;
     /// `true` if one was open. The windows are not stacked by recency, so
-    /// the order is fixed and deterministic: Game settings, then States,
-    /// then Controls. A pending key rebind owns its own Esc
-    /// (`finish_key_rebind`), so the Controls window is left alone then.
+    /// the order is fixed and deterministic. Only Game settings is left
+    /// since W42-04 retired the States and Controls windows (the Settings
+    /// sheet takes its own Esc, and a pending key rebind owns its Esc).
     /// The profile-builder panel is not a window (it hides while the menu
     /// is up and Esc there ends nothing), so it is not part of this stack.
     fn esc_closes_top_window(&mut self) -> bool {
         if self.show_game_settings {
             self.show_game_settings = false;
             self.game_settings_target = None;
-        } else if self.show_states {
-            self.show_states = false;
-        } else if self.show_controls && self.controls_waiting.is_none() {
-            self.show_controls = false;
         } else {
             return false;
         }
@@ -10435,6 +10411,7 @@ changed = true;
                     let ctx = ui.ctx().clone();
                     self.save_to_slot(slot, &ctx);
                 }
+                self.state_warning_lines(ui);
             }
             Section::Load => {
                 self.refresh_state_slots_if_stale();
@@ -10447,6 +10424,7 @@ changed = true;
                     self.load_from_slot(slot);
                     close = true;
                 }
+                self.state_warning_lines(ui);
             }
             Section::Rewind => {
                 if self.rewind_controls(ui) {
@@ -10564,8 +10542,9 @@ changed = true;
                     .button("All controls (player 2, shortcuts)\u{2026}")
                     .clicked()
                 {
-                    self.show_controls = true;
-                    leave_paused = true;
+                    // W42-04: the sheet draws over the menu (W42-01);
+                    // Esc returns here, so the game stays paused.
+                    self.open_controls_settings();
                 }
             }
             Section::Achievements => {
@@ -17374,6 +17353,13 @@ changed = true;
         self.show_overlay_menu
     }
 
+    /// W42-04 test hook: whether Settings is showing its Controls tab.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn settings_on_controls_for_test(&self) -> bool {
+        self.settings_tab == SettingsTab::Controls
+    }
+
     /// W42-01 test hook: whether the Settings sheet is open.
     #[doc(hidden)]
     #[must_use]
@@ -17629,231 +17615,126 @@ changed = true;
         }
     }
 
-    /// The remap window (ticket W2-06): one row per NES button per port,
-    /// showing what is bound and offering to rebind it.
-    ///
-    /// **Capture, not a dropdown.** Rebinding waits for the user to press
-    /// the key they want — a list of 60-odd key names is unusable, and the
-    /// press is unambiguous in a way "pick `Semicolon` from a list" is not.
-    /// `awaiting_key` is that state; the capture happens in `poll_input`,
-    /// which is the only place that sees raw key events.
-    ///
-    /// Every change saves immediately. There is no Apply button, because an
-    /// unsaved remap that a crash discards is exactly the kind of small
-    /// betrayal that makes people stop trusting a settings screen.
-    fn controls_window(&mut self, ctx: &egui::Context) {
-        if !self.show_controls {
-            return;
-        }
+    /// W42-04: what the retired Controls window held beyond the drawn pad —
+    /// the app shortcuts and the second player's keys — now the lower half
+    /// of Settings › Controls (and so of Quick Menu › Controls' "All
+    /// controls"). Rebinds capture in `poll_input` / `poll_app_hotkeys`;
+    /// every change saves at once, there is no Apply button.
+    fn controls_more(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         let mut app_changed = false;
-        let mut open = self.show_controls;
-        egui::Window::new("Controls")
-            .default_pos(egui::pos2(PANEL_WINDOW_ORIGIN[0], PANEL_WINDOW_ORIGIN[1]))
-            .open(&mut open)
-            .collapsible(true)
-            .resizable(true)
-            // Ticket W10-01. Two players x every NES button, each with a
-            // Clear, is 1105 px of content — TALLER THAN THE WHOLE APP
-            // WINDOW, which `main.rs` opens at 720. egui cannot honour a
-            // position for a window that does not fit, so it pinned this
-            // one to y=0, on top of the menu bar, and the File/View/
-            // Enhance menus became unclickable while it was open. Bound
-            // it to the viewport and scroll the overflow.
-            // `viewport_rect`, not `screen_rect`: egui 0.35 renamed it
-            // (verified in egui-0.35.0 context.rs:2819 — project law 2,
-            // this crate pins versions newer than most training data).
-            .max_height(ctx.viewport_rect().height() - PANEL_WINDOW_ORIGIN[1] - 24.0)
-            .show(ctx, |ui| {
-                ui.label(&self.bindings_status);
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Ticket W15-06 (`docs/design/UX_WAVE_15.md` §6): the
-                    // App section, namespaced apart from the per-port game
-                    // bindings below — a separate `AppAction` enum and
-                    // store section (`crate::app_bindings`), so the two
-                    // tables cannot collide by construction. What DOES
-                    // need a runtime check is one App action and one game
-                    // button both claiming the same physical key/pad
-                    // button, which is what `binding_conflict` reports
-                    // inline, the same way a rejected remap is reported
-                    // anywhere else in this window.
-                    ui.heading("App");
-                    if let Some(conflict) = &self.binding_conflict {
-                        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), conflict);
+        ui.separator();
+        ui.heading("App shortcuts");
+        if let Some(conflict) = &self.binding_conflict {
+            ui.colored_label(egui::Color32::from_rgb(0xE0, 0x80, 0x30), conflict);
+        }
+        egui::Grid::new("controls-app")
+            .num_columns(4)
+            .striped(true)
+            .show(ui, |ui| {
+                for action in crate::app_bindings::AppAction::ALL {
+                    ui.label(action.label());
+
+                    let bound_key = self.app_bindings.key_for(action);
+                    let label = match self.awaiting_app_key {
+                        Some(a) if a == action => "press a key\u{2026}".to_string(),
+                        _ => bound_key
+                            .map_or_else(|| "\u{2014}".to_string(), |k| k.name().to_string()),
+                    };
+                    if ui.button(label).clicked() {
+                        self.awaiting_app_key = Some(action);
                     }
-                    egui::Grid::new("controls-app")
-                        .num_columns(4)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for action in crate::app_bindings::AppAction::ALL {
-                                ui.label(action.label());
-
-                                let bound_key = self.app_bindings.key_for(action);
-                                let label = match self.awaiting_app_key {
-                                    Some(a) if a == action => "press a key\u{2026}".to_string(),
-                                    _ => bound_key.map_or_else(
-                                        || "\u{2014}".to_string(),
-                                        |k| k.name().to_string(),
-                                    ),
-                                };
-                                if ui.button(label).clicked() {
-                                    self.awaiting_app_key = Some(action);
-                                }
-                                if ui.small_button("Clear").clicked() {
-                                    self.app_bindings.unbind_key_for(action);
-                                    app_changed = true;
-                                }
-
-                                let current_pad = self.app_bindings.pad_for(action);
-                                let pad_label =
-                                    current_pad.map_or("\u{2014}", rf_input::PadButton::name);
-                                egui::ComboBox::from_id_salt(("controls-app-pad", action))
-                                    .selected_text(pad_label)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(current_pad.is_none(), "\u{2014}")
-                                            .clicked()
-                                        {
-                                            self.app_bindings.unbind_pad_for(action);
-                                            app_changed = true;
-                                        }
-                                        for button in rf_input::PadButton::ALL {
-                                            if ui
-                                                .selectable_label(
-                                                    current_pad == Some(button),
-                                                    button.name(),
-                                                )
-                                                .clicked()
-                                            {
-                                                if let Some(conflict) =
-                                                    crate::app_bindings::pad_conflicts_with_game(
-                                                        &self.bindings,
-                                                        button,
-                                                    )
-                                                {
-                                                    self.binding_conflict = Some(conflict);
-                                                } else {
-                                                    self.app_bindings.bind_pad(button, action);
-                                                    app_changed = true;
-                                                    self.binding_conflict = None;
-                                                }
-                                            }
-                                        }
-                                    });
-                                ui.end_row();
-                            }
-                        });
-                    if ui.button("Restore App defaults").clicked() {
-                        self.app_bindings = crate::app_bindings::AppBindings::default();
+                    if ui.small_button("Clear").clicked() {
+                        self.app_bindings.unbind_key_for(action);
                         app_changed = true;
                     }
-                    ui.separator();
 
-                    for port in 0..2usize {
-                        ui.heading(format!("Player {}", port + 1));
-                        egui::Grid::new(format!("controls-port-{port}"))
-                            .num_columns(3)
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for button in rf_input::NesButton::ALL {
-                                    ui.label(button.name());
-
-                                    let bound = self
-                                        .bindings
-                                        .keys
-                                        .entries()
-                                        .iter()
-                                        .find(|(_, p, b)| *p == port && *b == button)
-                                        .map(|(key, _, _)| key.name());
-                                    let label = match (self.awaiting_key, bound) {
-                                        (Some((p, b)), _) if p == port && b == button => {
-                                            "press a key\u{2026}".to_string()
-                                        }
-                                        (_, Some(name)) => name.to_string(),
-                                        (_, None) => "\u{2014}".to_string(),
-                                    };
-                                    if ui.button(label).clicked() {
-                                        self.awaiting_key = Some((port, button));
+                    let current_pad = self.app_bindings.pad_for(action);
+                    let pad_label = current_pad.map_or("\u{2014}", rf_input::PadButton::name);
+                    egui::ComboBox::from_id_salt(("controls-app-pad", action))
+                        .selected_text(pad_label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current_pad.is_none(), "\u{2014}")
+                                .clicked()
+                            {
+                                self.app_bindings.unbind_pad_for(action);
+                                app_changed = true;
+                            }
+                            for button in rf_input::PadButton::ALL {
+                                if ui
+                                    .selectable_label(current_pad == Some(button), button.name())
+                                    .clicked()
+                                {
+                                    if let Some(conflict) =
+                                        crate::app_bindings::pad_conflicts_with_game(
+                                            &self.bindings,
+                                            button,
+                                        )
+                                    {
+                                        self.binding_conflict = Some(conflict);
+                                    } else {
+                                        self.app_bindings.bind_pad(button, action);
+                                        app_changed = true;
+                                        self.binding_conflict = None;
                                     }
-
-                                    if ui.small_button("Clear").clicked() {
-                                        let bound_key = self
-                                            .bindings
-                                            .keys
-                                            .entries()
-                                            .iter()
-                                            .find(|(_, p, b)| *p == port && *b == button)
-                                            .map(|(key, _, _)| *key);
-                                        if let Some(key) = bound_key {
-                                            self.bindings.keys.unbind(key);
-                                            changed = true;
-                                        }
-                                    }
-                                    ui.end_row();
                                 }
-                            });
-                        ui.separator();
-                    }
-
-                    ui.heading("Gamepad");
-                    ui.label(format!(
-                        "{} pad(s) connected",
-                        self.pad_router.connected_count()
-                    ));
-                    egui::Grid::new("controls-pad")
-                        .num_columns(2)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for pad_button in rf_input::PadButton::ALL {
-                                ui.label(pad_button.name());
-                                let current = self.bindings.pads.lookup(pad_button);
-                                let label = current.map_or("\u{2014}", rf_input::NesButton::name);
-                                egui::ComboBox::from_id_salt(pad_button.name())
-                                    .selected_text(label)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(current.is_none(), "\u{2014}")
-                                            .clicked()
-                                        {
-                                            self.bindings.pads.unbind(pad_button);
-                                            changed = true;
-                                        }
-                                        for nes in rf_input::NesButton::ALL {
-                                            if ui
-                                                .selectable_label(current == Some(nes), nes.name())
-                                                .clicked()
-                                            {
-                                                // Ticket W15-06 criterion 2's "vice versa" for
-                                                // pads: a game binding can never claim a pad
-                                                // button the App namespace already uses.
-                                                if let Some(conflict) =
-                                                    crate::app_bindings::game_pad_conflicts_with_app(
-                                                        &self.app_bindings,
-                                                        pad_button,
-                                                    )
-                                                {
-                                                    self.binding_conflict = Some(conflict);
-                                                } else {
-                                                    self.bindings.pads.bind(pad_button, nes);
-                                                    changed = true;
-                                                    self.binding_conflict = None;
-                                                }
-                                            }
-                                        }
-                                    });
-                                ui.end_row();
                             }
                         });
+                    ui.end_row();
+                }
+            });
+        if ui.button("Restore App defaults").clicked() {
+            self.app_bindings = crate::app_bindings::AppBindings::default();
+            app_changed = true;
+        }
+        ui.separator();
 
-                    ui.separator();
-                    if ui.button("Restore defaults").clicked() {
-                        self.bindings = rf_input::Bindings::default();
-                        changed = true;
+        for port in 1..2usize {
+            ui.heading(format!("Player {}", port + 1));
+            egui::Grid::new(format!("controls-port-{port}"))
+                .num_columns(3)
+                .striped(true)
+                .show(ui, |ui| {
+                    for button in rf_input::NesButton::ALL {
+                        ui.label(button.name());
+
+                        let bound = self
+                            .bindings
+                            .keys
+                            .entries()
+                            .iter()
+                            .find(|(_, p, b)| *p == port && *b == button)
+                            .map(|(key, _, _)| key.name());
+                        let label = match (self.awaiting_key, bound) {
+                            (Some((p, b)), _) if p == port && b == button => {
+                                "press a key\u{2026}".to_string()
+                            }
+                            (_, Some(name)) => name.to_string(),
+                            (_, None) => "\u{2014}".to_string(),
+                        };
+                        if ui.button(label).clicked() {
+                            self.awaiting_key = Some((port, button));
+                        }
+
+                        if ui.small_button("Clear").clicked() {
+                            let bound_key = self
+                                .bindings
+                                .keys
+                                .entries()
+                                .iter()
+                                .find(|(_, p, b)| *p == port && *b == button)
+                                .map(|(key, _, _)| *key);
+                            if let Some(key) = bound_key {
+                                self.bindings.keys.unbind(key);
+                                changed = true;
+                            }
+                        }
+                        ui.end_row();
                     }
                 });
-            });
-        self.show_controls = open;
+            ui.separator();
+        }
         if changed {
             self.save_bindings();
         }
@@ -18063,6 +17944,14 @@ changed = true;
     #[doc(hidden)]
     pub fn quick_section_for_test(&self) -> crate::quick_menu::Section {
         self.quick_section
+    }
+
+    /// W42-04: start a keyboard rebind on the NES A button (tests).
+    #[doc(hidden)]
+    pub fn begin_rebind_for_test(&mut self) {
+        self.controls_device = crate::controls_panel::Device::Keyboard;
+        self.controls_console = crate::controls_panel::Console::Nes;
+        self.controls_waiting = Some(crate::controls_panel::Button::Nes(rf_input::NesButton::A));
     }
 
     /// Ticket W23-02: drive the Controls screen (tests).
@@ -19649,8 +19538,6 @@ changed = true;
     /// bars never hide while one is (it was opened from them).
     fn any_window_open(&self) -> bool {
         self.show_settings
-            || self.show_controls
-            || self.show_states
             || self.show_enhance
             || self.show_game_settings
             || self.show_upscale_studio
@@ -20063,7 +19950,6 @@ impl eframe::App for RetroForgeApp {
         self.crash_dialog(&ctx);
         self.layers_debug_window(&ctx);
         self.enhance_window(&ctx);
-        self.controls_window(&ctx);
         self.settings_window(&ctx);
         self.game_settings_window(&ctx);
         self.upscale_studio_window(&ctx);
@@ -20075,7 +19961,6 @@ impl eframe::App for RetroForgeApp {
         self.camera_found_card(&ctx);
         self.scout_found_card(&ctx);
         self.enhance_tip(&ctx);
-        self.states_modal(&ctx);
         // Ticket W20-10: drawn whenever a Save asked for it — from the
         // States window OR the Quick Menu — not only inside the former.
         self.overwrite_confirm_modal(&ctx);

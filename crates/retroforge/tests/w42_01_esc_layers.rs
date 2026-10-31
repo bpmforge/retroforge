@@ -113,31 +113,28 @@ fn esc_pops_one_layer_at_a_time() {
     esc(&mut h);
     assert!(!h.state().quick_menu_open_for_test());
 
-    // (c) States window.
-    h.state_mut().open_states_modal();
+    // (c) W42-04: Quick Menu > Controls > "All controls...": Settings opens on its
+    // Controls tab OVER the menu; Esc returns to the menu.
+    h.state_mut().open_quick_menu_for_test(Section::Controls);
     h.run_steps(3);
-    esc(&mut h);
-    h.run_steps(2);
-    assert!(
-        !h.state().quick_menu_open_for_test(),
-        "States: menu not opened"
-    );
-    esc(&mut h);
-    assert!(
-        h.state().quick_menu_open_for_test(),
-        "States gone: Esc opens menu"
-    );
-    esc(&mut h);
-
-    // Controls window.
-    h.state_mut().show_controls_for_test(true);
+    h.get_by_label("All controls (player 2, shortcuts)\u{2026}")
+        .click();
     h.run_steps(3);
-    esc(&mut h);
+    assert!(h.state().settings_open_for_test(), "Settings opened");
     assert!(
-        !h.state().quick_menu_open_for_test(),
-        "Controls: menu not opened"
+        h.state().settings_on_controls_for_test(),
+        "on the Controls tab"
+    );
+    assert!(h.state().quick_menu_open_for_test(), "the menu stays up");
+    assert!(
+        !h.state().running_and_menu_for_test().0,
+        "game stays paused"
     );
     esc(&mut h);
-    assert!(h.state().quick_menu_open_for_test());
+    assert!(!h.state().settings_open_for_test(), "Esc closed the sheet");
+    assert!(h.state().quick_menu_open_for_test(), "back on the menu");
+    assert_eq!(h.state().quick_section_for_test(), Section::Controls);
+    esc(&mut h);
+    assert!(!h.state().quick_menu_open_for_test());
     let _ = std::fs::remove_dir_all(&dir);
 }

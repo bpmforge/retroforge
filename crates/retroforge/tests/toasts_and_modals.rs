@@ -116,7 +116,7 @@ fn overwrite_modal_blocks_the_app_behind_it_and_a_toast_expires_without_pausing_
     // Put a real state in slot 1 BEFORE the modal ever opens, so its very
     // first render already shows an occupied slot — this is what makes
     // the next "Save Slot 1" click go through `pending_overwrite` instead
-    // of saving immediately (`states_modal`'s own branch on
+    // of saving immediately (the Save page's own branch on
     // `info.saved.is_some()`).
     let states_dir = state_slots::slots_dir(&dir, &hash);
     state_slots::save(
@@ -127,31 +127,45 @@ fn overwrite_modal_blocks_the_app_behind_it_and_a_toast_expires_without_pausing_
     )
     .expect("pre-seed slot 1");
 
-    harness.state_mut().open_states_modal();
+    harness.state_mut().open_save_page_for_test();
     harness.run_steps(2);
 
+    // W42-04: the Quick Menu's Save page overwrites at once (with an undo),
+    // so the confirmation modal is raised directly here.
     harness
-        .get_by_role_and_label(Role::Button, "Save Slot 1")
-        .click();
-    harness.run_steps(1);
+        .state_mut()
+        .request_overwrite_for_test(SlotId::Numbered(1));
+    harness.run_steps(2);
     assert!(
         harness.state().pending_overwrite_for_test(),
-        "a Save click on an OCCUPIED slot must open the overwrite-confirmation modal, not save \
-         immediately"
+        "the overwrite-confirmation modal must be up"
     );
 
     // The modal's backdrop sits at `Order::Foreground`, above the plain
-    // `states_modal` window underneath it (`egui::Modal`'s own doc:
+    // the Save page window underneath it (`egui::Modal`'s own doc:
     // "blocks input to the rest of the UI"). Clicking exactly where
-    // "Load Slot 1" is drawn should therefore hit the BACKDROP, not the
+    // the corner should therefore hit the BACKDROP, not the
     // button — proving the click was blocked from reaching the app
     // behind the modal, and (since a backdrop click is
     // `ModalResponse::should_close`'s outside-click case) dismissing the
     // modal in the same motion.
     let status_before = harness.state().status().to_string();
+    // W42-04: a click in the window's corner, well outside the modal's
+    // frame, over the Quick Menu's rail.
+    let corner = egui::pos2(12.0, 12.0);
     harness
-        .get_by_role_and_label(Role::Button, "Load Slot 1")
-        .click();
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(corner));
+    for pressed in [true, false] {
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: corner,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(1);
+    }
     harness.run_steps(1);
     assert!(
         !harness.state().pending_overwrite_for_test(),
@@ -160,8 +174,8 @@ fn overwrite_modal_blocks_the_app_behind_it_and_a_toast_expires_without_pausing_
     assert_eq!(
         harness.state().status(),
         status_before,
-        "the click must have been consumed by the backdrop, not reached \"Load Slot 1\" \
-         underneath it — a status change here would mean the load actually ran"
+        "the click must have been consumed by the backdrop, not reached \
+         the menu underneath it — a status change here would mean something ran"
     );
 
     // ---- scenario 2: a toast appears and expires without pausing the --
@@ -183,6 +197,10 @@ fn overwrite_modal_blocks_the_app_behind_it_and_a_toast_expires_without_pausing_
         "saving a state must raise a toast"
     );
 
+    // W42-04: the Quick Menu the Save click was made in pauses the game
+    // by design; close it so only the toast is under test.
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
     let frame_before = harness.state().frame_count_for_test();
 
     // Advance the HARNESS's own clock (`egui::Context::time`, which

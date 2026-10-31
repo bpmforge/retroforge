@@ -320,7 +320,9 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
 
     // ---- 3c. a panel window must not cover the menu bar ------------
     //
-    // The Controls window is two players x every NES button, each with a
+    // (W42-04: the Controls window this was found on is gone; Enhance
+    // is a bounded panel window left.) It was two players x every NES
+    // button, each with a
     // Clear: **1105 px of content in a 720 px window**. egui cannot
     // honour a position for a window that does not fit, so it pinned the
     // window to y=0 — on top of File / View / Enhance — and the menus
@@ -333,7 +335,7 @@ fn the_hud_fits_the_window_the_app_actually_opens() {
     // window overflows; at `ui_smoke.rs`'s 1000 px harness the Controls
     // window fits and this failure does not occur at all.
     let mut small_win = app_at(WINDOW_SIZE);
-    small_win.state_mut().show_controls_for_test(true);
+    small_win.state_mut().show_enhance_for_test(true);
     small_win.run_steps(3);
     let menu_bottom = small_win
         .get_by_role_and_label(Role::Button, "View")

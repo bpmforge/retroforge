@@ -25,7 +25,7 @@
 //! "Cannot collide" is therefore a runtime check both remap flows run,
 //! not a structural guarantee the type system gives for free:
 //! [`key_conflicts_with_game`]/[`pad_conflicts_with_game`] guard the App
-//! remap flow (`crate::app::RetroForgeApp::controls_window`'s App
+//! remap flow (`crate::app::RetroForgeApp::controls_more`'s App
 //! section), and [`game_key_conflicts_with_app`]/
 //! [`game_pad_conflicts_with_app`] guard the reverse direction
 //! (`crate::app::RetroForgeApp::poll_input`'s existing capture flow,
