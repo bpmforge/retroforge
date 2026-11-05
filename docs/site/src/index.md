@@ -1,8 +1,13 @@
 # RetroForge
 
 RetroForge is an NES and SNES emulator that runs your own games exactly as
-the console did, and can then add to them: no sprite flicker, widescreen,
-whole-level maps, 3D, and live game info such as lives and health.
+the console did, and can then add to them: no sprite flicker, widescreen up
+to 32:9, whole-level maps, an HD-2D look, sharper Mode 7 and Super FX 3D,
+cheats, RetroAchievements, and live game info such as lives and health.
+Everything added is off until you switch it on.
+
+This guide matches **RetroForge 0.10.0**. What changed in that release is in
+its [release notes](https://github.com/bpmforge/retroforge/releases/tag/v0.10.0).
 
 **Playing?** Start with [Getting started](getting-started.md), or look
 around first in the [screenshot tour](tour.md).

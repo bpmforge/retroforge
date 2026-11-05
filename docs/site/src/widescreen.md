@@ -50,7 +50,7 @@ app's config directory, then switch it on in the game's settings. A `.bso`
 beside the ROM (the bsnes-hd convention) tells RetroForge the width the patch
 draws; widescreen then turns on at that width automatically and is labelled
 "(patch)". The session shows a "Patched" badge, has its own save states, and
-is not Accuracy Mode.
+is not the original cartridge.
 
 ![Super Mario World drawing 352 pixels wide with a widescreen patch](tour/53-widesnes-352.png)
 

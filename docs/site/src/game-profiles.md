@@ -53,6 +53,7 @@ and lives.
 |---|---|
 | ![Narrowing the search](tour/41-profile-builder-finding.png) | ![Saved](tour/42-profile-builder-saved.png) |
 
-Profiles you make are saved in your own folder,
-`~/Library/Application Support/retroforge/profiles`, and are used straight
-away. For the file format, see [Profiles](profiles.md).
+Profiles you make are saved in the `profiles` folder inside your config
+folder (`~/Library/Application Support/retroforge/profiles` on macOS; see
+[Getting started](getting-started.md#settings) for Windows and Linux), and are
+used straight away. For the file format, see [Profiles](profiles.md).

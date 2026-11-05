@@ -132,7 +132,7 @@ never changes code.
 ## Limits
 
 * Speed is not the point: the rebuilt path runs at the same speed as the
-  emulator. A faster compiled tier (Cranelift) is being measured next.
+  emulator. A faster compiled tier (Cranelift) is planned but not part of 0.10.0.
 * Coprocessor games (Super FX, SA-1 and similar) rebuild only the main CPU.
 * Coverage depends on what was played. Unplayed paths run on the emulator.
 * The live shadow check does not hash the picture and sound; it compares the

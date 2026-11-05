@@ -12,6 +12,7 @@
 - [Rebuild mode](rebuild.md)
 - [Game profiles](game-profiles.md)
 - [Game info](game-info.md)
+- [Cheats and achievements](cheats.md)
 - [Screenshot tour](tour.md)
 
 # Building with RetroForge
