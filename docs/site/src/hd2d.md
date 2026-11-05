@@ -5,7 +5,7 @@ blocks you walk on rise out of the screen, characters stand in front of them
 as cut-outs, and the camera can tilt, turn and follow the player. The
 **HD-2D look** adds a sun that moves through the day, soft shadows, glow and a
 miniature-model focus on top. Your controls and the game stay exactly 2D, and
-Accuracy Mode never turns any of it on.
+Original mode never turns any of it on.
 
 | Flat | HD-2D, morning | HD-2D, dusk |
 |---|---|---|

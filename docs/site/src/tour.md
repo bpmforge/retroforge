@@ -15,9 +15,17 @@ is, not a mock-up.
 
 | | |
 |---|---|
-| ![Quick Menu](tour/12-quick-menu.png) Esc opens it | ![Save state](tour/13-quick-menu-save.png) Save states with pictures |
+| ![Quick Menu](tour/90-quick-menu-resume.png) Esc opens it | ![Save state](tour/13-quick-menu-save.png) Save states with pictures |
 | ![Display](tour/14-quick-menu-display.png) Display | ![Enhancements](tour/15-quick-menu-enhancements.png) Modes and enhancements |
 | ![Controls](tour/16-quick-menu-controls.png) Controls | ![Game info](tour/44-game-info-menu.png) Game info |
+
+## Cheats, achievements and online settings
+
+| | |
+|---|---|
+| ![Cheats](tour/91-quick-menu-cheats.png) Cheats, with a code it could not read | ![Achievements](tour/92-achievements-signin.png) Turning on RetroAchievements |
+| ![Sign in](tour/93-achievements-signin-form.png) Signing in | ![Unlock](tour/97-unlock-card.png) An achievement unlocking (a test set on a test game) |
+| ![Online](tour/94-settings-online.png) Everything online, off by default | ![Settings over the menu](tour/95-settings-over-menu.png) Settings opens over the Quick Menu |
 
 ## Settings, states and rewind
 
